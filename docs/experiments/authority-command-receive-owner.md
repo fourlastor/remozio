@@ -111,8 +111,8 @@ Two long-sleep regressions failed before the signal fix because cleanup waited f
 
 ## Remaining product integration
 
-The Root executable does not activate this factory yet. This change does not dispatch approved commands, select an elevation policy, or install a protected Mach service.
+The Root executable does not activate this factory yet. It does not dispatch approved commands or install a protected Mach service.
 
-Section 8 of the approved plan requires a user choice between proven native sudoers integration and an explicitly administered Remozio elevation policy. That choice remains pending. A successful `sudo` list check alone does not prove execution-policy equivalence.
+The user selected an explicitly administered [Remozio elevation policy](../macos-command-elevation-policy.md) on 11 October 2026. Setup must disclose its independence from sudoers and configure account-specific target grants. Protected setup and dispatch integration remain pending.
 
 Installed job registration, hardware signer restoration, account provisioning, real terminal behavior, and phone validation remain in [issue 286](https://github.com/rock3r/remozio/issues/286). These tests do not replace that evidence.

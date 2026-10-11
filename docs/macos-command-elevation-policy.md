@@ -62,3 +62,30 @@ Tests cover scope and account isolation, target removal, disabled grants, captur
 Journal fixtures also cover policy rejection before capture, actual OS credential capture, revocation during draft construction and read failures at each admission check. They verify that failed admission creates no request reservation or audit event. Receiver fixtures also cover grant revocation between requests, stream-metadata failure, typed replies and a healthy queue after denial.
 These fixtures use internal identity seams; they do not prove installed Root execution.
 No privileged service was installed or launched for these checks.
+
+## Protected command startup record
+
+`AuthorityCommandStartupConfiguration` composes the existing request, wake and presence configuration.
+It derives the Mac ID, account ID and caller UID from that record.
+The command service has a distinct name. Its protected policy must match the same scope.
+An empty target set is valid and disables command elevation.
+
+The version 1 record uses canonical CBOR. Unknown fields, unsupported versions and noncanonical encodings fail.
+It advertises the implemented mapped terminal and pipe profiles, with current-job controls and capture schema 3.
+It does not advertise legacy profiles.
+
+The record bounds admission sizes, sessions, reply waits, ancestry and the minimal environment.
+An ancestry limit of zero disables ancestry capture.
+The approval lifetime is configurable. It does not limit command runtime.
+Descriptions redact the paths and environment.
+The production loader requires a Root-private file with protected ancestors.
+
+Decoding this record does not prove installation or grant execution authority.
+It does not register a service or start a receiver.
+Protected registration and dispatch integration remain pending.
+The native target-group experiment remains an activation gate.
+
+Nine tests cover canonical decoding, protocol declarations, scope, bounds, redaction and ordinary-account loading refusal.
+Startup also sizes pipe and terminal records with the actual codecs, including its configured environment and the request wrapper.
+This rejects permanently unusable budgets. Larger command records remain subject to the configured limits.
+The sizing examples carry no OS provenance or execution authority.
