@@ -1,0 +1,85 @@
+{
+  "baseCommit": "89a9135294447d3186d6a7b2ff8b0bb1a8f4e5a8",
+  "host": {
+    "architecture": "arm64",
+    "build": "26A434",
+    "deploymentMinimum": "26.0",
+    "macOS": "27.0.1",
+    "sdk": "27.0"
+  },
+  "limits": [
+    "synthetic worker only",
+    "one-second hold observation",
+    "no protected installation",
+    "no Developer ID or notarization",
+    "no product activation or durable generation commit",
+    "not macOS 26 runtime validation"
+  ],
+  "recordedAt": "2026-10-11T21:21:24.225857+00:00",
+  "records": [
+    {
+      "activeBundleUnchanged": null,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": false,
+      "control": "held-release",
+      "heldObservationSeconds": 1,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "held-release",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    },
+    {
+      "activeBundleUnchanged": null,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": true,
+      "control": "host-exit",
+      "heldObservationSeconds": null,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "host-exit",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    },
+    {
+      "activeBundleUnchanged": true,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": true,
+      "control": "staging",
+      "heldObservationSeconds": null,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "staging",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    }
+  ],
+  "signatureMode": "disposable ad-hoc applications and fresh in-memory Ed25519 keys",
+  "sourceSHA256": {
+    "experiments/sparkle-boundary/Package.resolved": "16ce2c0628f79af5564f90058e4e085e14f132febe69492c00f66fcbaffe6611",
+    "experiments/sparkle-boundary/Package.swift": "e2a730b99f0e31b7541d303eac948e4e4f704faa1f8374efc59899b4583be873",
+    "experiments/sparkle-boundary/Sources/SparkleBoundaryProbe/main.swift": "94285a7077463251a28aca94ebac413fce0456fca05e9856067b05ee03172b3c",
+    "scripts/check-sparkle-boundary-guards.py": "df5ffcbdd7b2dedd84c81c67236bbb0e50a4d286cc4b6896c055ed1d0d7ef6bc",
+    "scripts/run-sparkle-boundary-experiment.py": "60f83246d608e35678003e0bfd08d108b0ead515fbfcec8a68d7792423fababd",
+    "tests/test_sparkle_boundary_experiment.py": "015fc0e0fd2168edf1ab7c2a30a75a6a2e24f5c3bc4e270f4f05b1cef7ffd2c3"
+  },
+  "sparkleVersion": "2.10.0"
+}

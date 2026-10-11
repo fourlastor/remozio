@@ -14,6 +14,8 @@ if [ "$(uname -s)" = Darwin ]; then
     python3 scripts/run-macos-release-signing-experiment.py
     swift build --package-path experiments/sparkle-probe --disable-keychain --disable-netrc
     python3 scripts/run-sparkle-feed-experiment.py
+    swift build --package-path experiments/sparkle-boundary --disable-keychain --disable-netrc
+    python3 scripts/check-sparkle-boundary-guards.py
     python3 scripts/build-approval-flow.py
     python3 scripts/run-macos-execution-experiment.py
     python3 scripts/run-macos-self-code-experiment.py
