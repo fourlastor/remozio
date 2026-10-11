@@ -9,7 +9,7 @@ The form reports invalid durations and contradictory backoff values.
 These preferences apply to new CLI invocations and carry no authority pins or installation identity.
 CLI integration is still in progress. These settings do not activate a command service or change approval expiry.
 
-The app shows an explicit unconfigured state. It has no pairing, routing controls, network listeners, or approval actions yet. It does not load the experiment's service manifests, register services, request permissions, or start persistent background services. Privileged services still need the protected installation and identity gates before integration.
+The app shows an explicit unconfigured state until protected metadata is available. It has no pairing, phone listeners, or approval actions yet. It does not load the experiment's service manifests, request permissions, or start privileged background services. Login registration applies only to the main app. Privileged services still need the protected installation and identity gates before integration.
 
 ## Build checks
 
@@ -210,4 +210,12 @@ The bundle check verifies both build configurations, signatures, security genera
 Unit tests use disposable files, keys, clocks, and provider fixtures. They do not install accounts or contact Google.
 Native signed IPC, protected provisioning, launchd registration, restart behavior, and provider delivery remain activation gates.
 The restricted transport submission endpoint and its credential are still pending. Root control does not replace that endpoint.
-The app still shows its unconfigured state. This change does not activate push or register services.
+The gateway target does not activate push or register its service.
+
+## Open at login
+
+Settings now controls `SMAppService.mainApp`. Turning on **Open Remozio at login** registers the current app for future logins. Turning it off unregisters the main app and leaves the current app running. No separate login helper is required.
+
+The form reads macOS status when it appears, when its scene becomes active, after a change, and on explicit refresh. It distinguishes registration awaiting approval from an eligible login item. Pending approval exposes an explicit **Open Login Items settings** button. Registration does not automatically reopen settings or override revoked consent. Errors retain the measured system status; UserDefaults supplies no successful-registration claim.
+
+This setting controls the GUI app only. Protected daemon installation and authenticated authority readiness remain separate. The eight controller tests use fake drivers. Builds and tests perform no actual login registration. Actual registration, Login Items approval/revocation, logout/restart and native accessibility remain interactive checks. See [controller ownership](../core/mac-login-item-controls.md).

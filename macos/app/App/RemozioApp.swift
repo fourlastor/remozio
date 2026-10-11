@@ -5,6 +5,7 @@ import SwiftUI
 @main
 struct RemozioApp: App {
     @State private var presence = PresenceControls()
+    @State private var login = MacLoginItemControls()
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
     var body: some Scene {
@@ -27,6 +28,7 @@ struct RemozioApp: App {
                     Text("You can always open Remozio from the Dock or Applications.")
                         .foregroundStyle(.secondary)
                 }
+                LoginItemSettingsSection(controls: login)
                 PresenceSettingsSection(controls: presence)
                 CommandCallerSettingsForm()
             }
@@ -101,7 +103,7 @@ private struct SetupOverview: View {
                         Label(presence.status != nil ? "This Mac’s authority is connected" : presence.configured ? "This Mac’s authority is unavailable" : "This Mac is not configured", systemImage: "macbook.and.iphone")
                             .font(.headline)
                         Text("This early build cannot pair devices, send requests, or approve actions.")
-                        Text("No background services are installed or started by this app.")
+                        Text("Mac service setup is still being built.")
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -147,5 +149,43 @@ private struct RemozioMenu: View {
         Divider()
         Button("Quit Remozio") { NSApplication.shared.terminate(nil) }
             .keyboardShortcut("q")
+    }
+}
+
+private struct LoginItemSettingsSection: View {
+    @Environment(\.scenePhase) private var scenePhase
+    let controls: MacLoginItemControls
+    var body: some View {
+        Section("Start at login") {
+            Toggle("Open Remozio at login", isOn: Binding(
+                get: { controls.state.registered },
+                set: { enabled in Task { await controls.setEnabled(enabled) } }))
+                .disabled(controls.changing)
+            statusText.foregroundStyle(.secondary)
+            if controls.changing { ProgressView("Updating login setting…") }
+            if controls.state == .requiresApproval {
+                Button("Open Login Items settings") { controls.openSettings() }
+                    .disabled(controls.changing)
+            }
+            if controls.notice != nil {
+                Label("Could not change the login setting. Review its current status and try again.", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.red)
+            }
+            Button("Refresh login status") { controls.refresh() }
+                .disabled(controls.changing)
+        }
+        .task { controls.refresh() }
+        .onChange(of: scenePhase) { _, next in
+            if next == .active { controls.refresh() }
+        }
+    }
+    private var statusText: Text {
+        switch controls.state {
+        case .notRegistered: Text("Remozio will not open automatically at login.")
+        case .enabled: Text("macOS allows Remozio to open at login.")
+        case .requiresApproval: Text("Waiting for your approval in Login Items settings.")
+        case .notFound: Text("macOS could not find the login item.")
+        case .unknown: Text("Login status is unavailable. Refresh to try again.")
+        }
     }
 }

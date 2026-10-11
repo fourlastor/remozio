@@ -7,7 +7,7 @@
 "Approvals from your Macs, on your Android devices." = "Approvals from your Macs, on your Android devices.";
 "This Mac is not configured" = "This Mac is not configured";
 "This early build cannot pair devices, send requests, or approve actions." = "This early build cannot pair devices, send requests, or approve actions.";
-"No background services are installed or started by this app." = "No background services are installed or started by this app.";
+"Mac service setup is still being built." = "Mac service setup is still being built.";
 "Development build" = "Development build";
 "Not configured" = "Not configured";
 "Open Remozio" = "Open Remozio";
@@ -63,3 +63,14 @@
 "Automatic and Present can only be set on this Mac." = "Automatic and Present can only be set on this Mac.";
 "This Mac’s authority is connected" = "This Mac’s authority is connected";
 "This Mac’s authority is unavailable" = "This Mac’s authority is unavailable";
+"Start at login" = "Start at login";
+"Open Remozio at login" = "Open Remozio at login";
+"Updating login setting…" = "Updating login setting…";
+"Open Login Items settings" = "Open Login Items settings";
+"Could not change the login setting. Review its current status and try again." = "Could not change the login setting. Review its current status and try again.";
+"Refresh login status" = "Refresh login status";
+"Remozio will not open automatically at login." = "Remozio will not open automatically at login.";
+"macOS allows Remozio to open at login." = "macOS allows Remozio to open at login.";
+"Waiting for your approval in Login Items settings." = "Waiting for your approval in Login Items settings.";
+"macOS could not find the login item." = "macOS could not find the login item.";
+"Login status is unavailable. Refresh to try again." = "Login status is unavailable. Refresh to try again.";
