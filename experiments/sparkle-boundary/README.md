@@ -44,3 +44,27 @@ These controls use a synthetic busy worker. They do not prove production admissi
 The one-second hold establishes a bounded observation. It does not guarantee that a held callback blocks every replacement path. The host-exit control demonstrates why that claim would be incorrect.
 
 See [the recorded local result](../../docs/experiments/sparkle-replacement-boundary.md). The separate [release identity inspection](../../docs/macos-release-manifest.md) remains an independent requirement.
+
+## Signed arm64 controls
+
+The opt-in signer thins all five SDK executables to arm64. It signs each nested component before signing the framework and application. It verifies the exact identifier, trusted Team, Developer ID certificate purpose, hardened runtime, and expected entitlements. It never selects a Keychain identity implicitly.
+
+Supply the public certificate fingerprint and trusted Team explicitly:
+
+```sh
+python3 scripts/run-sparkle-signed-boundary-experiment.py --identity YOUR_CERTIFICATE_SHA1 --team YOUR_TEAM_ID
+```
+
+Replace both placeholders. The fingerprint contains 40 uppercase hexadecimal characters. The Team contains 10 uppercase letters or digits. Do not provide a private key, password, or vault reference.
+
+The runner signs only its owned disposable copies. It verifies that the original built SDK stays unchanged. These controls use no secure timestamp or notarization. They do not establish acceptance by Remozio's release reader; schema 1 does not declare SDK dependencies.
+
+To measure the helper's identity entitlements without starting an installer:
+
+```sh
+python3 scripts/run-sparkle-signed-boundary-experiment.py --identity YOUR_CERTIFICATE_SHA1 --team YOUR_TEAM_ID --entitlement-controls
+```
+
+This mode signs four owned helper copies and invokes them without arguments. The pinned helper exits before creating an installer in that path. The runner records whether each copy reaches the argument guard or receives SIGKILL. It supplies no provisioning profile and changes no system policy.
+
+See [the signed fixture evidence](../../docs/experiments/sparkle-signed-arm64.md). Routine CI runs ownership and configuration tests without requesting a signing identity.

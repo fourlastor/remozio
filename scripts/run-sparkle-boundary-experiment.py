@@ -189,7 +189,8 @@ def wait_version(app, version, seconds=30):
     raise TimeoutError('Actual bundle replacement not observed')
 
 
-def control(products, mode):
+def control(products, mode, bundle_factory=None):
+    make_bundle = bundle if bundle_factory is None else bundle_factory
     identity = PREFIX + uuid.uuid4().hex
     cache = Path.home() / 'Library/Caches' / identity
     preferences = Path.home() / 'Library/Preferences' / (identity + '.plist')
@@ -213,13 +214,13 @@ def control(products, mode):
         server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
         try:
-            bootstrap = bundle(root, 'Signer', products, identity, 1, base64.b64encode(bytes(32)).decode(), server.server_port)
+            bootstrap = make_bundle(root, 'Signer', products, identity, 1, base64.b64encode(bytes(32)).decode(), server.server_port)
             signer = Child([bootstrap/'Contents/MacOS/SparkleBoundaryProbe', 'signer', root, f'http://127.0.0.1:{server.server_port}/update.zip'])
             children.append(signer)
             public_key = signer.expect('public-key')['key']
             assert len(base64.b64decode(public_key, validate=True)) == 32
-            app = bundle(root, 'Host', products, identity, 1, public_key, server.server_port)
-            candidate = bundle(root, 'Candidate', products, identity, 2, public_key, server.server_port)
+            app = make_bundle(root, 'Host', products, identity, 1, public_key, server.server_port)
+            candidate = make_bundle(root, 'Candidate', products, identity, 2, public_key, server.server_port)
             active = None
             if mode == 'staging':
                 active = root / 'Active/Fixture.app'; active.parent.mkdir()

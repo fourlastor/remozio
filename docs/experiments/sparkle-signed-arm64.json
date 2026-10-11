@@ -1,0 +1,155 @@
+{
+  "baseCommit": "7b50fcae4759c8c912f9d85ffb2fc1996c02a585",
+  "entitlementControls": [
+    {
+      "architecture": "arm64",
+      "control": "none",
+      "developerIDTeamVerified": true,
+      "expectedArgumentGuardReached": true,
+      "installerOrJobStarted": false,
+      "noArgumentExit": 1,
+      "profileProvided": false,
+      "strictSignatureValid": true
+    },
+    {
+      "architecture": "arm64",
+      "control": "teamOnly",
+      "developerIDTeamVerified": true,
+      "expectedArgumentGuardReached": false,
+      "installerOrJobStarted": false,
+      "noArgumentExit": -9,
+      "profileProvided": false,
+      "strictSignatureValid": true
+    },
+    {
+      "architecture": "arm64",
+      "control": "applicationOnly",
+      "developerIDTeamVerified": true,
+      "expectedArgumentGuardReached": true,
+      "installerOrJobStarted": false,
+      "noArgumentExit": 1,
+      "profileProvided": false,
+      "strictSignatureValid": true
+    },
+    {
+      "architecture": "arm64",
+      "control": "both",
+      "developerIDTeamVerified": true,
+      "expectedArgumentGuardReached": false,
+      "installerOrJobStarted": false,
+      "noArgumentExit": -9,
+      "profileProvided": false,
+      "strictSignatureValid": true
+    },
+    {
+      "allCodeArm64": true,
+      "controls": 4,
+      "entitlementControlsOnly": true,
+      "event": "signed-arm64-controls-passed",
+      "fixtureEntitlementsVerified": true,
+      "hardenedRuntimeVerified": true,
+      "notarizationTested": false,
+      "originalSDKPreserved": true,
+      "protectedInstallationTested": false,
+      "strictDeveloperIDRequirementsVerified": true
+    }
+  ],
+  "host": {
+    "architecture": "arm64",
+    "deploymentMinimum": "26.0",
+    "macOS": "27.0.1",
+    "sdk": "27.0"
+  },
+  "limits": [
+    "Exact kernel reason for SIGKILL remains unverified",
+    "No protected installation or product activation",
+    "No notarization",
+    "No release reader acceptance of SDK dependencies",
+    "No macOS 26 runtime validation"
+  ],
+  "provisioningProfileProvided": false,
+  "recordedAt": "2026-10-11T22:02:01.169860+00:00",
+  "replacementControls": [
+    {
+      "activeBundleUnchanged": null,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": false,
+      "control": "held-release",
+      "heldObservationSeconds": 1,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "held-release",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    },
+    {
+      "activeBundleUnchanged": null,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": true,
+      "control": "host-exit",
+      "heldObservationSeconds": null,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "host-exit",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    },
+    {
+      "activeBundleUnchanged": true,
+      "actualReplacement": true,
+      "busyRoleAliveAtReplacement": true,
+      "control": "staging",
+      "heldObservationSeconds": null,
+      "installedCandidateBytesMatch": true,
+      "signedFeedAndArchiveRequests": [
+        "/feed.xml",
+        "/update.zip"
+      ]
+    },
+    {
+      "control": "staging",
+      "fixtureCacheRemoved": true,
+      "fixtureJobsRemoved": true,
+      "temporaryUserJobTargets": 2
+    },
+    {
+      "allCodeArm64": true,
+      "controls": 3,
+      "entitlementControlsOnly": false,
+      "event": "signed-arm64-controls-passed",
+      "fixtureEntitlementsVerified": true,
+      "hardenedRuntimeVerified": true,
+      "notarizationTested": false,
+      "originalSDKPreserved": true,
+      "protectedInstallationTested": false,
+      "strictDeveloperIDRequirementsVerified": true
+    }
+  ],
+  "secureTimestampUsed": false,
+  "signingConfig": "Explicit public certificate fingerprint and trusted Team supplied through options; no key export",
+  "sourceSHA256": {
+    "scripts/run-sparkle-boundary-experiment.py": "a7b74cada145f85bed26b8e54273cd15ad1c5413c557c6fd190aaeb5a3866f54",
+    "scripts/run-sparkle-signed-boundary-experiment.py": "1f5548d12cc8301af419900f6cfd474b10cca92ed95cb464f75d873988e867da",
+    "scripts/sparkle_sdk_fixture.py": "48da8b441b7bb5713f0b810b05fd9f3ec2260077da425a0abac576a0d8fce56d",
+    "tests/test_sparkle_sdk_fixture.py": "08752457ce32f98ddfbfced8364fa9b1c193092fe64a76cbaa807871bf12e1b1"
+  },
+  "sparkleVersion": "2.10.0",
+  "unitGuardValidation": {
+    "SDKTestsWithSimulatedRootRunner": 9,
+    "combinedFixtureAndGuardTests": 15,
+    "realRootFixtureRun": false,
+    "recordedAt": "2026-10-11T22:16:34.768603+00:00"
+  }
+}
