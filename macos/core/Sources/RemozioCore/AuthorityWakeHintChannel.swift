@@ -83,7 +83,8 @@ public actor AuthorityWakeHintChannel {
         guard pending == nil else { throw AuthorityWakeHintChannelError.busy }
         do {
             guard case .hints(let bytes) = try await perform(.hints), let bytes else { throw AuthorityWakeHintChannelError.invalidMessage }
-            return try AuthorityWakeHints.decode(bytes, expectedBinding: binding)
+            do { return try AuthorityWakeHints.decode(bytes, expectedBinding: binding) }
+            catch { throw AuthorityWakeHintChannelError.invalidMessage }
         } catch { close(); throw error }
     }
     public func close() {

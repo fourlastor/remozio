@@ -39,29 +39,27 @@ struct TransportMain {
 
     private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?) async throws {
         try Task.checkCancellation()
-        let runtime: TransportWakeRuntime?
+        let recovery: TransportWakeRunner?
         if let wake {
-            do { runtime = try wake.makeRuntime() }
+            do { recovery = try TransportWakeRunner(configuration: wake, report: reportWake) }
             catch {
                 log("Wake delivery is unavailable. Direct approvals remain available.")
-                runtime = nil
+                recovery = nil
             }
-        } else { runtime = nil }
+        } else { recovery = nil }
         let identity = try ApprovalTransportIdentity.load(configuration: configuration)
         let service = try DirectApprovalTransportService(macID: configuration.macID, accountID: configuration.accountID,
             identity: identity, authorityServiceName: configuration.authorityServiceName, authorityPolicy: configuration.authorityPolicy,
             maximumConnections: configuration.maximumConnections, timeoutMilliseconds: configuration.timeoutMilliseconds,
             refreshMilliseconds: configuration.refreshMilliseconds, requestDeliveryTimeoutMilliseconds: configuration.timeoutMilliseconds,
             requestRefreshMilliseconds: configuration.refreshMilliseconds)
-        var wakeTask: Task<Void, Never>?
         do {
             try await service.start()
-            if let runtime, let wake {
-                wakeTask = Task {
-                    do { try await runtime.run(intervalMilliseconds: wake.pollMilliseconds) }
-                    catch {
-                        if !Task.isCancelled { log("Wake delivery stopped. Direct approvals remain available.") }
-                    }
+            if let recovery {
+                do { try await recovery.start() }
+                catch {
+                    await recovery.close()
+                    log("Wake delivery is unavailable. Direct approvals remain available.")
                 }
             }
             var previous: DirectHostState?
@@ -76,12 +74,19 @@ struct TransportMain {
                 try await Task.sleep(for: .milliseconds(250))
             }
         } catch {
-            wakeTask?.cancel()
-            await runtime?.close()
-            await wakeTask?.value
+            await recovery?.close()
             await service.close()
             if Task.isCancelled { throw CancellationError() }
             throw error
+        }
+    }
+    private static func reportWake(_ status: TransportWakeRunner.Status) {
+        switch status {
+        case .waiting(let milliseconds):
+            log("Wake delivery is unavailable. Retrying in \(milliseconds) milliseconds. Direct approvals remain available.")
+        case .failed:
+            log("Wake delivery stopped. Direct approvals remain available.")
+        default: break
         }
     }
     private static func report(_ state: DirectHostState) {

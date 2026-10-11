@@ -65,11 +65,11 @@ The transport executable accepts `--wake-configuration PATH`. The wrapper contai
 
 Invalid metadata or an account mismatch prevents startup. Failure to restore the optional wake runtime leaves direct approvals available. It never creates a replacement key or changes custody.
 
-The existing `--configuration PATH` mode remains supported. Wake worker failure does not close the direct TLS service.
+The existing `--configuration PATH` mode remains supported. The [transport recovery runner](transport-wake-recovery.md) creates fresh authenticated hint and gateway connections after recoverable failures. Wake worker failure does not close the direct TLS service.
 
 ## Component evidence
 
-The final focused local gate passed 21 tests on 2026-10-11:
+The earlier focused local gate passed 21 tests on 2026-10-11:
 
 - Ten publisher tests cover retries, cancellation, revocation, expiry, presence, lease loss, storage failure, endpoint composition, and owned shutdown.
 - Seven hint tests cover canonical scope validation, compatibility, invocation ordering, typed signing, and transport retries.
@@ -88,7 +88,7 @@ Four additional request-owner tests cover independent frame retrieval, retained 
 
 ## Remaining integration and platform gates
 
-The Root executable still uses its existing trust service mode. The new Root factory requires real presence input; installation and executable selection remain separate integration work.
+The Root executable now offers the [presence and wake mode](authority-runtime-entrypoint.md) through protected configuration. The transport adds owned wake recovery. Protected installation and actual presence detectors remain separate integration work.
 
 These fixtures do not prove installed Mach service behavior, kernel audit-token validation, live provider delivery, or Secure Enclave restoration under installed service accounts.
 

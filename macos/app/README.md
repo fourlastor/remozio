@@ -122,7 +122,8 @@ Setup provisioning, CLI path installation, Developer ID signing, and real-device
 
 `RemozioTransport` is embedded at `Contents/Library/LaunchServices/RemozioTransport`.
 Debug and Release have separate signing identifiers and retain security generation 1.
-It accepts only `--configuration /absolute/protected/transport.cbor`.
+It accepts `--configuration /absolute/protected/transport.cbor` for direct approvals.
+It also accepts `--wake-configuration /absolute/protected/wake.cbor` for the optional [wake recovery runner](../../docs/experiments/transport-wake-recovery.md).
 The process loads Root-owned public metadata and requires the configured service UID as both its real and effective UID.
 It rejects Root and the recorded interactive owner account.
 Provisioning must create the dedicated account and protect its key custody; different UID values alone do not prove that setup.
@@ -147,6 +148,10 @@ It uses the existing discovery and request-exchange handler; decisions remain Ro
 Signal cancellation closes the service. Authority loss or listener failure closes this incarnation and returns a temporary failure.
 A subsequent launch reloads configuration and performs a fresh authority handshake.
 Launchd registration and restart policy are not installed by this change.
+
+The optional wake worker restores the configured signer and creates fresh authenticated channels after recoverable failures.
+Identity and configuration failures stop wake delivery. They do not stop the direct service.
+Shutdown waits for the wake worker before closing the direct service.
 
 The bundle check exercises syntax and missing-provisioning refusal only, with unread stdin and no command stdout.
 Unit tests cover configuration bounds, account separation, exact lookup, blocked authentication and wrong item types.
