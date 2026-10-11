@@ -59,25 +59,28 @@ public actor AuthorityWakeService {
     public static func open(configuration: AuthorityWakeStartupConfiguration,
                             routing: @escaping @Sendable () throws -> PresenceRouting,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil) throws -> AuthorityWakeService {
+                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         let clock = try AuthorityClock()
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: nil, appEndpoint: nil,
-            routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory)
+            routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
     }
     public static func open(configuration: AuthorityPresenceStartupConfiguration,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil) throws -> AuthorityWakeService {
+                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         try open(configuration: configuration.wake, accountPresence: configuration.presence,
-            appEndpoint: configuration.endpoint, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory)
+            appEndpoint: configuration.endpoint, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
     }
     /// Enable the durable mode ledger and share one Root epoch with observations, signing and wake publication.
     /// The owning authenticated GUI endpoint supplies observations; unavailable observations keep their explicit unknown state.
     public static func open(configuration: AuthorityWakeStartupConfiguration, accountPresence: AuthorityAccountPresenceConfiguration,
                             appEndpoint: AuthorityPresenceEndpointConfiguration,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil) throws -> AuthorityWakeService {
+                            commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         guard accountPresence.macID == configuration.request.service.macID,
               accountPresence.accountID == configuration.request.service.accountID,
@@ -93,12 +96,13 @@ public actor AuthorityWakeService {
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy)
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint,
-            routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory)
+            routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
     }
     private static func compose(configuration: AuthorityWakeStartupConfiguration, journal: AuthorityJournal, clock: AuthorityClock,
                                 presence: AuthorityPresenceRuntime?, appEndpoint: AuthorityPresenceEndpointConfiguration?, routing: @escaping @Sendable () throws -> PresenceRouting,
                                 reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                                commandReceiverFactory: AuthorityCommandReceiveFactory?) throws -> AuthorityWakeService {
+                                commandReceiverFactory: AuthorityCommandReceiveFactory?,
+                                onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
         do {
             let signer = try EnclaveAuthorityRequestSigner.load(path: configuration.request.keyRecordPath,
                 configuration: configuration.request.service, expectedPublicKey: configuration.request.authorityPublicKey, journal: journal)
@@ -121,7 +125,7 @@ public actor AuthorityWakeService {
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
                 wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
-                onMaintenanceFailure: { retired.value.withLock { $0 = true } })
+                onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: onCommandAuthorized)
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock)

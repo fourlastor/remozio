@@ -9,11 +9,12 @@ extension AuthorityWakeService {
         takingRegisteredReceiveRight: @escaping @Sendable () throws -> mach_port_t,
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
-        reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in }) throws -> AuthorityWakeService {
+        reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         let factory = try configuration.receiverFactory(takingRegisteredReceiveRight: takingRegisteredReceiveRight,
             onAdmission: onAdmission, report: reportReceiver)
         return try open(configuration: configuration.presence, reconcileExpired: reconcileExpired,
-            commandReceiverFactory: factory)
+            commandReceiverFactory: factory, onCommandAuthorized: onCommandAuthorized)
     }
 }
 
@@ -23,13 +24,14 @@ extension AuthorityRuntimeRunner {
         takingRegisteredReceiveRight: @escaping @Sendable () throws -> mach_port_t,
         initialRetryMilliseconds: Int = 1000, maximumRetryMilliseconds: Int = 30_000,
         monitorMilliseconds: Int = 250,
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in },
         report: @escaping @Sendable (Status) -> Void) throws {
         try self.init(initialRetryMilliseconds: initialRetryMilliseconds,
             maximumRetryMilliseconds: maximumRetryMilliseconds, monitorMilliseconds: monitorMilliseconds, open: {
                 let configuration = try AuthorityCommandStartupConfiguration.load(path: commandConfigurationPath)
                 let service = try AuthorityWakeService.open(configuration: configuration,
                     takingRegisteredReceiveRight: takingRegisteredReceiveRight,
-                    reconcileExpired: Self.reconcileCoordinatorExpiration)
+                    reconcileExpired: Self.reconcileCoordinatorExpiration, onCommandAuthorized: onCommandAuthorized)
                 return AuthorityRuntimeInstance(start: { try await service.start() }, close: { try await service.close() },
                     retired: { await service.isRetired })
             }, report: report)

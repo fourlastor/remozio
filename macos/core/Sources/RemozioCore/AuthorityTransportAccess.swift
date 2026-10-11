@@ -75,11 +75,13 @@ final class AuthorityTransportAccess: Sendable {
     }
 
     func exchangeRequest(binding: AuthorityPeerBinding, requestID: Data, decisionFrame: Data?,
-                         handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?) throws -> Data? {
-        try journal.withValidatedRequests(validate: { transaction in
-            try self.requireCurrent(transaction)
-            try transaction.requireDirectApprovalBinding(binding)
-        }, body: { try handler($0, binding, requestID, decisionFrame) })
+                         handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?,
+                         onCommandAuthorized: @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> Data? {
+        try journal.withValidatedCommandExchange(requestID: requestID, decisionSupplied: decisionFrame != nil,
+            validate: { transaction in
+                try self.requireCurrent(transaction)
+                try transaction.requireDirectApprovalBinding(binding)
+            }, body: { try handler($0, binding, requestID, decisionFrame) }, onCommandAuthorized: onCommandAuthorized)
     }
 
     private func requireCurrent(_ transaction: JournalTransaction) throws {

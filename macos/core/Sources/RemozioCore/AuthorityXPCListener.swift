@@ -134,7 +134,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                             requestFrame: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding) throws -> [Data])? = nil,
                             exchangeRequest: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
-                            wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
+                            wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
             maximumPayloadBytes: maximumPayloadBytes, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions)
         let frameHandler: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
@@ -148,7 +149,8 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         let exchangeHandler: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
         if let exchangeRequest {
             exchangeHandler = { binding, id, decision in
-                try access.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, handler: exchangeRequest)
+                try access.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, handler: exchangeRequest,
+                    onCommandAuthorized: onCommandAuthorized)
             }
         } else { exchangeHandler = nil }
         try self.init(serviceName: serviceName, peerPolicy: peerPolicy, macID: macID, accountID: accountID,

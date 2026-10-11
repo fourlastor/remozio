@@ -8247,3 +8247,113 @@ extension MachCommandCallerReceiverTests {
         }
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    private func noticeDecision(_ request: IssuedRequestPayload, fixture: CommandRequestFixture,
+                                decline: Bool = false) throws -> (Data, Data) {
+        let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: request.requestID,
+            requestDigest: request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits), challenge: request.challenge,
+            phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: decline ? 7 : 6, count: 16),
+            action: .init(choice: decline ? .decline : .execute, scope: .currentRequest)).encode(limits: fixture.limits)
+        let input = try SigningInput.make(wireVersion: 1, messageType: .decision,
+            purpose: decline ? .cancellation : .biometricAuthorization, canonicalPayload: body,
+            payloadLimits: fixture.limits, inputLimits: fixture.limits)
+        return (body, try (decline ? fixture.decision : fixture.biometric).signature(for: input).rawRepresentation)
+    }
+
+    func testCommandNoticeRunsAfterLockOnNewDurableApproval() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), (_, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture), time = fixture.now(120)
+            if checkpointed {
+                let presented = fixture.now(115)
+                _ = try journal.withRequests { try $0.markPresented(requestID: request.requestID, now: presented, receiptTimeMs: nil) }
+            }
+            let (body, signature) = try noticeDecision(request, fixture: fixture)
+            let notices = Mutex<[AuthorityCommandAuthorizationNotice]>([])
+            let result = try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                validate: { _ in }, body: { owner in
+                    _ = try owner.consume(canonicalDecision: body, signature: signature,
+                        authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                        now: time, receiptTimeMs: nil)
+                    return 42
+                }, onCommandAuthorized: { notice in
+                    let done = DispatchSemaphore(value: 0), read = Mutex<RequestPhase?>(nil)
+                    DispatchQueue.global().async {
+                        defer { done.signal() }
+                        do { let phase = try journal.withRequests { try $0.state(requestID: notice.requestID).phase }; read.withLock { $0 = phase } }
+                        catch { XCTFail("Callback journal read failed: \(error)") }
+                    }
+                    XCTAssertEqual(done.wait(timeout: .now() + 2), .success, "Notification must run after the journal lock is released")
+                    XCTAssertEqual(read.withLock { $0 }, .authorized)
+                    notices.withLock { $0.append(notice) }
+                })
+            XCTAssertEqual(result, 42)
+            let received = notices.withLock { $0 }
+            XCTAssertEqual(received.count, 1); XCTAssertEqual(received.first?.requestID, request.requestID)
+            XCTAssertEqual(received.first?.requestDigest, try request.requestDigest(bodyLimits: fixture.limits, signingLimits: fixture.limits))
+            XCTAssertEqual(received.first?.challenge, request.challenge)
+            try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: false,
+                validate: { _ in }, body: { _ in () }, onCommandAuthorized: { _ in XCTFail("Status query repeated notification") })
+            XCTAssertThrowsError(try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                validate: { _ in }, body: { owner in
+                    try owner.consume(canonicalDecision: body, signature: signature,
+                        authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                        now: time, receiptTimeMs: nil)
+                }, onCommandAuthorized: { _ in XCTFail("Repeated decision repeated notification") }))
+        }
+    }
+
+    func testCommandNoticeSurvivesPostConsumptionHandlerFailureWithoutDuplicate() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), (_, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture), time = fixture.now(120)
+            let (body, signature) = try noticeDecision(request, fixture: fixture), notices = Mutex<[AuthorityCommandAuthorizationNotice]>([])
+            XCTAssertThrowsError(try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                validate: { _ in }, body: { owner -> Void in
+                    _ = try owner.consume(canonicalDecision: body, signature: signature,
+                        authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                        now: time, receiptTimeMs: nil)
+                    throw ApprovalCoordinatorError.unavailable
+                }, onCommandAuthorized: { notice in notices.withLock { $0.append(notice) } })) {
+                    XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable)
+                }
+            XCTAssertEqual(notices.withLock { $0.count }, 1)
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .authorized)
+            try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                validate: { _ in }, body: { _ in () }, onCommandAuthorized: { _ in XCTFail("Lost-reply reconciliation repeated notification") })
+        }
+    }
+
+    func testCommandNoticeIgnoresDeclineExpiryAndBadSignature() throws {
+        for scenario in [0, 1, 2] {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+            let journal = try XCTUnwrap(fixture.authority), (_, command) = try requestCommand()
+            let request = try admitOwnedCommand(command, fixture: fixture), time = fixture.now(scenario == 1 ? 200 : 120)
+            let (body, goodSignature) = try noticeDecision(request, fixture: fixture, decline: scenario == 0)
+            let signature = scenario == 2 ? Data(repeating: 0, count: 64) : goodSignature
+            let operation = {
+                try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                    validate: { _ in }, body: { owner in
+                        try owner.consume(canonicalDecision: body, signature: signature,
+                            authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                            now: time, receiptTimeMs: nil)
+                    }, onCommandAuthorized: { _ in XCTFail("Rejected or declined decision notified the executor") })
+            }
+            if scenario == 0 { _ = try operation() } else { XCTAssertThrowsError(try operation()) }
+            let phase = try journal.withRequests { try $0.state(requestID: request.requestID).phase }
+            XCTAssertEqual(phase, scenario == 0 ? .declined : scenario == 1 ? .expired : .queued)
+        }
+    }
+
+    func testCommandNoticeDoesNotInvokeBodyWhenAuthenticationFails() throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), journal = try XCTUnwrap(fixture.authority)
+        XCTAssertThrowsError(try journal.withValidatedCommandExchange(requestID: Data(repeating: 8, count: 16), decisionSupplied: true,
+            validate: { _ in throw AuthorityTransportAccessError.policyMismatch }, body: { _ in XCTFail("Rejected authentication invoked exchange"); return 0 },
+            onCommandAuthorized: { _ in XCTFail("Rejected authentication notified executor") })) {
+                XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch)
+            }
+    }
+}

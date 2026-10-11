@@ -38,13 +38,14 @@ public final class AuthorityService: @unchecked Sendable {
     public convenience init(requestStartup: AuthorityRequestStartupConfiguration,
                             routing: @escaping @Sendable () throws -> PresenceRouting,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                            onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
+                            onMaintenanceFailure: @escaping @Sendable () -> Void = {},
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(requestStartup: requestStartup,
             openJournal: { try Self.openJournal(configuration: requestStartup.service) },
             loadSigner: { journal in
                 try EnclaveAuthorityRequestSigner.load(path: requestStartup.keyRecordPath,
                     configuration: requestStartup.service, expectedPublicKey: requestStartup.authorityPublicKey, journal: journal)
-            }, routing: routing, reconcileExpired: reconcileExpired, onMaintenanceFailure: onMaintenanceFailure)
+            }, routing: routing, reconcileExpired: reconcileExpired, onMaintenanceFailure: onMaintenanceFailure, onCommandAuthorized: onCommandAuthorized)
     }
 
     /// Fixture storage/key-loading seam. It preserves hardware-only signing and production service self-validation.
@@ -53,14 +54,15 @@ public final class AuthorityService: @unchecked Sendable {
                      loadSigner: (AuthorityJournal) throws -> EnclaveAuthorityRequestSigner,
                      routing: @escaping @Sendable () throws -> PresenceRouting,
                      reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                     onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
+                     onMaintenanceFailure: @escaping @Sendable () -> Void = {},
+                     onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         let journal = try openJournal()
         do {
             let signer = try loadSigner(journal)
             let providers = try AuthorityRequestProviders(configuration: requestStartup.service, signer: signer, routing: routing)
             try self.init(configuration: requestStartup.service, journal: journal, requestProviders: providers,
                 maintenanceIntervalMilliseconds: requestStartup.maintenanceIntervalMilliseconds, reconcileExpired: reconcileExpired,
-                onMaintenanceFailure: onMaintenanceFailure)
+                onMaintenanceFailure: onMaintenanceFailure, onCommandAuthorized: onCommandAuthorized)
         } catch {
             try? journal.close()
             throw error
@@ -93,9 +95,11 @@ public final class AuthorityService: @unchecked Sendable {
                             maintain: (@Sendable () throws -> Void)? = nil,
                             requestFrame: AuthorityRequestFrameProvider? = nil,
                             pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
-                            exchangeRequest: AuthorityRequestExchangeProvider? = nil) throws {
+                            exchangeRequest: AuthorityRequestExchangeProvider? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
-            maintain: maintain, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest)
+            maintain: maintain, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest,
+            onCommandAuthorized: onCommandAuthorized)
     }
 
     /// Installs discovery, signed request delivery, decision/status exchange, and periodic expiry with the same service clock.
@@ -103,10 +107,11 @@ public final class AuthorityService: @unchecked Sendable {
     public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
                             requestProviders: AuthorityRequestProviders, maintenanceIntervalMilliseconds: Int = 1000,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
-                            onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
+                            onMaintenanceFailure: @escaping @Sendable () -> Void = {},
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
             validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired,
-            onMaintenanceFailure: onMaintenanceFailure)
+            onMaintenanceFailure: onMaintenanceFailure, onCommandAuthorized: onCommandAuthorized)
     }
 
     /// Internal lifecycle fixture. Public constructors always validate the running authority against retained policy.
@@ -121,7 +126,8 @@ public final class AuthorityService: @unchecked Sendable {
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
-         onMaintenanceFailure: @escaping @Sendable () -> Void = {}) throws {
+         onMaintenanceFailure: @escaping @Sendable () -> Void = {},
+         onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         self.journal = journal
         self.onMaintenanceFailure = onMaintenanceFailure
         do {
@@ -167,7 +173,7 @@ public final class AuthorityService: @unchecked Sendable {
                 maximumConnections: configuration.maximumConnections,
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
-                exchangeRequest: exchangeHandler, wakeHints: hintHandler)
+                exchangeRequest: exchangeHandler, wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let requestProviders, let reconcileExpired {
@@ -197,10 +203,12 @@ public final class AuthorityService: @unchecked Sendable {
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             requestFrame: AuthorityRequestFrameProvider? = nil,
                             pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
-                            exchangeRequest: AuthorityRequestExchangeProvider? = nil) throws {
+                            exchangeRequest: AuthorityRequestExchangeProvider? = nil,
+                            onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(configuration: configuration, journal: journal,
             maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds, expiryClock: expiryClock,
-            receiptTime: receiptTime, reconcileExpired: reconcileExpired, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest)
+            receiptTime: receiptTime, reconcileExpired: reconcileExpired, validateSelf: AuthoritySelfValidation.validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest,
+            onCommandAuthorized: onCommandAuthorized)
     }
 
     /// Fixture seam for the same expiry path used by public construction.
@@ -212,14 +220,16 @@ public final class AuthorityService: @unchecked Sendable {
                      validateSelf: @Sendable (AuthorityJournal) throws -> Void,
                      requestFrame: AuthorityRequestFrameProvider? = nil,
          pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
-         exchangeRequest: AuthorityRequestExchangeProvider? = nil) throws {
+         exchangeRequest: AuthorityRequestExchangeProvider? = nil,
+         onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(configuration: configuration, journal: journal,
             maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds, maintain: {
                 try journal.withRequests { requests in
                     let states = try requests.expirePending(now: expiryClock(), receiptTimeMs: receiptTime())
                     try reconcileExpired(states)
                 }
-            }, validateSelf: validateSelf, requestClock: expiryClock, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest)
+            }, validateSelf: validateSelf, requestClock: expiryClock, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs, exchangeRequest: exchangeRequest,
+            onCommandAuthorized: onCommandAuthorized)
     }
 
     deinit { maintenance?.close(); listener.close(); try? journal.close() }

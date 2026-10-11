@@ -23,8 +23,11 @@ flowchart TD
     D --> V[Recheck current grants and publish retained request]
     V --> J
     J --> N[Existing signed request and status delivery]
-    N --> B[Phone decision consumption]
-    B -. separate executor integration: pending .-> E[Final policy and capture checks before execution]
+    N --> B[Phone decision]
+    B --> H[Authenticated decision exchange under the shared journal lock]
+    H --> J
+    H --> U[First durable command approval: notify after lock release]
+    U -. separate executor integration: pending .-> E[Final policy and capture checks before execution]
 ```
 
 The production factory requires real and effective Root identity before reading policy or calling the registration provider.
@@ -62,3 +65,27 @@ The application does not select this startup mode yet.
 The APIs do not install accounts, register a service or execute approved targets.
 Installed IPC validation in [issue 286](https://github.com/rock3r/remozio/issues/286) and full target-group semantics in [issue 298](https://github.com/rock3r/remozio/issues/298) remain activation gates.
 Hardware signer restoration, setup provisioning, real terminal behavior and phone approval need their own installed evidence.
+
+## Command authorization notifications
+
+The configured runtime can supply a trusted scheduling callback.
+The transport, listener, request service and wake owner pass it through one exchange path.
+Existing callers use a no-op callback.
+
+The exchange validates current transport policy and phone enrollment under the shared journal lock.
+Only a first queued or presented command transition to authorized produces a notice.
+The notice binds the retained request ID, digest and challenge to accepted durable consumption.
+It runs after the journal lock is released, even when status signing fails after consumption.
+Status queries, repeated decisions, declines, expiry and rejected decisions produce no new notice.
+1Password and Little Snitch decisions never notify the command executor.
+
+The callback must enqueue promptly.
+The notice grants no permission to execute.
+The executor must recheck current enrollment, policy, original capture, caller, deadline and streams before release.
+It must reject duplicate release and never replay uncertain execution after restart.
+Executor construction and target release remain pending.
+
+Seven focused tests cover native command consumption, cross-thread journal access after notification, actual signed exchange, signer failure and access gates.
+The non-command tests include 1Password access and unlock, persistent Little Snitch rules, and allow-once with the decision key.
+These fixtures use an ordinary account and software keys.
+They do not start installed IPC, execute targets or operate either application's UI.

@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Synchronization
 import LocalAuthentication
 import Security
 import RemozioProtocol
@@ -1748,5 +1749,138 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         let bundle = try providers(providerConfiguration(fixture), environment)
         XCTAssertNoThrow(try bundle.requireConfiguration(providerConfiguration(fixture)))
         XCTAssertThrowsError(try bundle.requireConfiguration(providerConfiguration(fixture, maximum: 8192)))
+    }
+}
+
+extension ApprovalRequestCoordinatorTests {
+    private func noticeAccess(_ journal: AuthorityJournal) throws -> (AuthorityTransportAccess, AuthorityPeerBinding) {
+        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: true)
+        _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
+        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+            approvedCodeDirectoryHashes: [id(3, 20)], expectedUserID: 501)
+        let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peer, macID: id(1), accountID: id(2),
+            maximumPayloadBytes: 4096, minimumEnvelopeVersion: 1, auditVersions: [])
+        let trust = try access.snapshot()
+        return (access, AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first), revision: trust.revision))
+    }
+
+    func testCommandNoticeFollowsRealExchangeAndStatusSignerFailure() throws {
+        for signingFailure in [false, true] {
+            let fixture = try Fixture(), authorityKey = key
+            let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+                identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
+                    EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                    EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+            let journal = try journalOwner(fixture, enrollment: enrollment); defer { try? journal.close() }
+            let (access, binding) = try noticeAccess(journal), draft = try draft(), observed = now(), moment = now(120)
+            let request = try journal.withRequests { try $0.admitFixture(draft, now: observed, receiptTimeMs: nil) }
+            let decision = try exchangeDecision(request), notices = Mutex<[AuthorityCommandAuthorizationNotice]>([])
+            let execute = {
+                try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: decision,
+                    handler: { owner, authenticated, id, frame in
+                        try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+                            authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
+                            now: { moment }, receiptTimeMs: nil, signer: {
+                                if signingFailure { throw Failure.fixture }
+                                return try authorityKey.signature(for: $0).rawRepresentation
+                            })
+                    }, onCommandAuthorized: { notice in notices.withLock { $0.append(notice) } })
+            }
+            if signingFailure { XCTAssertThrowsError(try execute()) } else {
+                XCTAssertEqual(try exchangeStatus(execute()).phase, .authorized)
+            }
+            XCTAssertEqual(notices.withLock { $0.count }, 1)
+            XCTAssertEqual(notices.withLock { $0.first?.requestID }, request.requestID)
+            XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .authorized)
+            for frame: Data? in [nil, decision] {
+                let response = try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: frame,
+                    handler: { owner, authenticated, id, frame in
+                        try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+                            authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
+                            now: { moment }, receiptTimeMs: nil, signer: { try authorityKey.signature(for: $0).rawRepresentation })
+                    }, onCommandAuthorized: { _ in XCTFail("Status or repeated decision scheduled a second execution") })
+                XCTAssertEqual(try exchangeStatus(response).phase, .authorized)
+            }
+        }
+    }
+
+    func testCommandNoticeKeepsTransportAndEnrollmentGatesBeforeExchange() throws {
+        let fixture = try Fixture()
+        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities,
+                keys: [EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                       EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+        let journal = try journalOwner(fixture, enrollment: enrollment); defer { try? journal.close() }
+        let (access, binding) = try noticeAccess(journal)
+        let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
+        XCTAssertThrowsError(try access.exchangeRequest(binding: stale, requestID: id(20), decisionFrame: Data([1]),
+            handler: { _, _, _, _ in XCTFail("Stale enrollment reached exchange"); return nil },
+            onCommandAuthorized: { _ in XCTFail("Stale enrollment notified executor") })) {
+                XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+            }
+        let policy = try journal.read { try XCTUnwrap($0.codePolicy()) }
+        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
+        _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: policy.revision) }
+        XCTAssertThrowsError(try access.exchangeRequest(binding: binding, requestID: id(20), decisionFrame: Data([1]),
+            handler: { _, _, _, _ in XCTFail("Retired transport reached exchange"); return nil },
+            onCommandAuthorized: { _ in XCTFail("Retired transport notified executor") })) {
+                XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch)
+            }
+    }
+    private func noticeUIJournal(_ fixture: Fixture, contract: RequestContract) throws -> AuthorityJournal {
+        let limits = try limits, scopeClock = clock, anchor = fixture.root.path
+        let capabilities = ContractCapabilities(contracts: [contract: []])
+        let epochDescriptor = try descriptor(3), eventID = id(30)
+        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+        let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "store", owner: getuid()),
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+            recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+            maximumConsumptions: 30, busyMilliseconds: 100, initialize: true)
+        let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+        let writer = try db.write { try $0.createEpoch(epochDescriptor) }
+        _ = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+            eventID: eventID, receiptTimeMs: nil, writer: writer, expectedAuditHead: 0) }
+        let coordinator = try ApprovalRequestCoordinator(database: db, writer: writer, clockEpoch: scopeClock,
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        return AuthorityJournal(requests: coordinator)
+    }
+
+    func testCommandNoticeIgnoresRealNonCommandAuthorizations() throws {
+        let cases: [(RequestKind, CapturedAction, Bool)] = [
+            (.onePasswordAccess, .init(choice: .approveAccess, scope: .currentRequest), false),
+            (.onePasswordUnlock, .init(choice: .unlockVault, scope: .currentRequest), false),
+            (.littleSnitch, .init(choice: .allowRule, scope: .forever), false),
+            (.littleSnitch, .init(choice: .allowOnce, scope: .currentRequest), true)
+        ]
+        for (kind, action, decisionOnly) in cases {
+            let fixture = try Fixture(), authorityKey = key
+            let contract = try RequestContract(requestKind: kind, wireVersion: 1, schemaVersion: 1)
+            let journal = try noticeUIJournal(fixture, contract: contract)
+            defer { try? journal.close() }
+            let observed = now(), moment = now(120)
+            let draft = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]),
+                actions: [action, .init(choice: .decline, scope: .currentRequest)], firstObservedAt: now(100),
+                deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+            let request = try journal.withRequests { try $0.admit(draft, now: observed, receiptTimeMs: nil) }
+            let (access, binding) = try noticeAccess(journal)
+            let decision = try exchangeDecision(request, keyID: decisionOnly ? 7 : 6,
+                purpose: decisionOnly ? .oneTimeUI : .biometricAuthorization, signer: decisionOnly ? decisionKey : key)
+            let response = try access.exchangeRequest(binding: binding, requestID: request.requestID, decisionFrame: decision,
+                handler: { owner, authenticated, id, frame in
+                    try owner.exchangeRequest(binding: authenticated, requestID: id, decisionFrame: frame,
+                        authorityPublicKey: authorityKey.publicKey.x963Representation, maximumBodyBytes: 3968,
+                        now: { moment }, receiptTimeMs: nil, signer: { try authorityKey.signature(for: $0).rawRepresentation })
+                }, onCommandAuthorized: { _ in XCTFail("UI authorization notified the command executor") })
+            XCTAssertEqual(try exchangeStatus(response).phase, .authorized)
+        }
     }
 }
