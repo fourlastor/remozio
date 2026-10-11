@@ -74,7 +74,7 @@ sequenceDiagram
 ## Reproduce
 
 Run `python3 scripts/run-macos-job-control-experiment.py` without elevation on an Apple Silicon Mac.
-The runner compiles disposable fixtures, creates private terminals, verifies 50 observations, and prints sanitized JSON.
+The runner compiles disposable fixtures, creates private terminals, verifies 60 observations, and prints sanitized JSON.
 `./scripts/check.sh` includes this runner on macOS. The sources remain under `experiments/command-job-control`; packaging does not embed them.
 
 The runner rejects changed observations. It records source hashes and host versions. Its temporary paths and target arguments stay out of evidence.
@@ -94,6 +94,26 @@ After release, the target verifies that its group equals its PID before exec.
 The monitor still selects the foreground group before reporting the target to the external supervisor.
 All signal, kernel-event, output and wait assertions remain required. No deadline or cleanup rule changed.
 This removes the observed redundant-call failure path. It does not prove the cause of every earlier intermittent failure.
+
+## Exec-error completion race
+
+The prototype could read an empty exec-error pipe, then reap a target that wrote its error between those observations.
+It could publish terminal status and close the unread pipe without reporting `ENOENT`.
+The [issue 309 diagnosis](https://github.com/rock3r/remozio/issues/309#issuecomment-6111675126) reproduced that ordering in temporary fixtures.
+
+After reaping, the prototype now reconciles the private error pipe before reporting terminal status.
+It reports a late error first, preserves an already reported error, and accepts normal EOF.
+The same reader checks errors before waiting and after reaping. A partial record in either path blocks the terminal report.
+Interrupted reads retry without changing a fixture deadline.
+
+The completion probe holds its child at a private gate while the first nonblocking error read proves the pipe is empty.
+It then releases and reaps the child before calling the prototype's actual completion function.
+Ten trials check late error ordering, no duplicate error, normal EOF, and partial-record rejection in both paths.
+For the pre-wait case, a child acknowledgement proves its partial record is readable before the first wait.
+A compiled legacy terminal-only control must fail the first case. No timing delay creates this regression.
+
+This repair changes only the disposable prototype. It adds no experiment retry and changes no product monitor, service, or execution policy.
+The historical 50-trial evidence remains evidence for its recorded source revision.
 
 ## Required integration
 

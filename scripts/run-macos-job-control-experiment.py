@@ -16,6 +16,13 @@ NATIVE = ROOT / "macos/core/Sources/RemozioMach"
 LAUNCHER = ROOT / "macos/core/Tests/RemozioCoreTests/Fixtures/command-process/child.c"
 TRIALS = 10
 EXPECTED = {
+    "completion": {
+        "lateExecErrorBeforeTerminal": True,
+        "observedExecErrorNotRepeated": True,
+        "normalEOFReportsWait": True,
+        "partialFinalErrorBlocksTerminal": True,
+        "partialPreWaitErrorBlocksTerminal": True,
+    },
     "native_leader": {
         "foregroundSIGTSTPStoppedLeader": False,
         "foregroundSIGSTOPStoppedLeader": True,
@@ -67,10 +74,10 @@ def run(arguments, *, context="native fixture"):
         ) from error
 
 
-def compile_fixture(directory, name, sources):
+def compile_fixture(directory, name, sources, *, defines=()):
     binary = directory / name
     run(["xcrun", "clang", "-arch", "arm64", "-mmacosx-version-min=26.0",
-         "-Wall", "-Wextra", "-Werror", "-I" + str(NATIVE / "include"),
+         "-Wall", "-Wextra", "-Werror", *("-D" + value for value in defines), "-I" + str(NATIVE / "include"),
          *(str(source) for source in sources), "-o", str(binary)])
     return binary
 
@@ -104,10 +111,17 @@ def measure():
         monitor = compile_fixture(directory, "monitor", [FIXTURES / "monitor.c"])
         monitor_target = compile_fixture(directory, "monitor-target", [FIXTURES / "monitor-target.c"])
         monitor_probe = compile_fixture(directory, "monitor-probe", [FIXTURES / "monitor-probe.c", NATIVE / "CommandPTY.c"])
+        completion = compile_fixture(directory, "completion-probe", [FIXTURES / "completion-probe.c"])
+        legacy_completion = compile_fixture(directory, "legacy-completion-probe",
+            [FIXTURES / "completion-probe.c"], defines=("REMOZIO_COMPLETION_LEGACY",))
+        legacy = subprocess.run([str(legacy_completion)], capture_output=True, text=True, timeout=30)
+        if legacy.returncode != 1 or legacy.stdout or legacy.stderr.strip() != "completion case 0 failed":
+            raise RuntimeError("The legacy completion control did not reject the deterministic race")
         frame = directory / "frame.bin"
         frame.write_bytes(launch_frame(native_target))
         for case, expected in EXPECTED.items():
-            command = ([str(native_probe), str(launcher), str(frame)] if case == "native_leader"
+            command = ([str(completion)] if case == "completion" else
+                       [str(native_probe), str(launcher), str(frame)] if case == "native_leader"
                        else [str(monitor_probe), str(monitor),
                              str(directory / "missing-target" if case == "failure" else monitor_target), case])
             for trial in range(TRIALS):
@@ -126,6 +140,7 @@ def measure():
         "sources": {str(source.relative_to(ROOT)): hashlib.sha256(source.read_bytes()).hexdigest()
                     for source in sources},
         "cases": observations,
+        "negativeControls": {"legacyTerminalOnlyCompletionRejected": True},
         "limits": ["Disposable unprivileged children and terminals; no installed service or user terminal",
                    "Native leader uses the current C owner and synthetic launcher; not production elevation",
                    "Monitor prototype owns target waitpid; external kernel observation grants no target ownership",
