@@ -81,6 +81,8 @@ It rechecks the enclosing signature and declaration before returning candidate e
 This evidence is a candidate snapshot. It is not an execution permit or durable activation record.
 The protected installer must copy and revalidate the components, enforce retained identity and generation floors, verify notarization, and check compatibility.
 The installer must also preserve enrollment and unresolved outcomes, and require the update activation conditions.
+The [retained generation preflight](macos-release-generation-preflight.md) compares candidate evidence with retained identities and generations.
+It does not perform installation or commit floors.
 This change enables no installation, service registration, automatic update, or privileged execution.
 
 ## Verification and limits
