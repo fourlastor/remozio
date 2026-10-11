@@ -7,7 +7,7 @@ public enum AuthorityCommandStartupError: Error, Equatable { case invalidConfigu
 
 /// Machine-specific command startup inputs. Decoding does not establish installation or grant execution authority.
 public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    public static let supportedVersions: Set<UInt64> = [1]
+    public static let supportedVersions: Set<UInt64> = [1, 2]
     public static let captureSchemaVersion: UInt64 = 3
     static let permittedCommandActions: [CapturedAction] = [
         .init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)
@@ -23,6 +23,7 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
     public let replyTimeoutMilliseconds: UInt32
     public let maximumAncestryEntries: Int
     public let approvalLifetimeMilliseconds: UInt64
+    public let execution: AuthorityCommandExecutionConfiguration?
     public let canonicalBytes: Data
     public var description: String { "AuthorityCommandStartupConfiguration(redacted)" }
     public var debugDescription: String { description }
@@ -42,7 +43,7 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
                 environment: [CapturedEnvironmentEntry], submissionLimits: CBORLimits, captureLimits: CBORLimits,
                 maximumSessions: Int = 32, receiveWaitMilliseconds: UInt32 = 250,
                 replyTimeoutMilliseconds: UInt32 = 5000, maximumAncestryEntries: Int = 16,
-                approvalLifetimeMilliseconds: UInt64 = 60_000) throws {
+                approvalLifetimeMilliseconds: UInt64 = 60_000, execution: AuthorityCommandExecutionConfiguration? = nil) throws {
         let service = presence.wake.request.service
         let parts = policyPath.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         guard GatewayWakeEndpointConfiguration.validServiceName(serviceName),
@@ -78,14 +79,17 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
         self.submissionLimits = submissionLimits; self.captureLimits = captureLimits; self.maximumSessions = maximumSessions
         self.receiveWaitMilliseconds = receiveWaitMilliseconds; self.replyTimeoutMilliseconds = replyTimeoutMilliseconds
         self.maximumAncestryEntries = maximumAncestryEntries; self.approvalLifetimeMilliseconds = approvalLifetimeMilliseconds
-        canonicalBytes = try DeterministicCBOR.encode(.map([
-            0: .unsigned(1), 1: .bytes(presence.canonicalBytes), 2: .text(serviceName), 3: .text(policyPath),
+        self.execution = execution
+        var fields: [UInt64: CBORValue] = [
+            0: .unsigned(execution == nil ? 1 : 2), 1: .bytes(presence.canonicalBytes), 2: .text(serviceName), 3: .text(policyPath),
             4: .array(environment.map { .map([0: .bytes($0.name), 1: .bytes($0.value)]) }),
             5: Self.encodeLimits(submissionLimits), 6: Self.encodeLimits(captureLimits),
             7: .unsigned(UInt64(maximumSessions)), 8: .unsigned(UInt64(receiveWaitMilliseconds)),
             9: .unsigned(UInt64(replyTimeoutMilliseconds)), 10: .unsigned(UInt64(maximumAncestryEntries)),
             11: .unsigned(approvalLifetimeMilliseconds), 12: .unsigned(Self.captureSchemaVersion)
-        ]), limits: Self.limits)
+        ]
+        if let execution { fields[13] = .bytes(execution.canonicalBytes) }
+        canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
 
     /// The production loader reads only a Root-private file under protected local ancestors.
@@ -104,7 +108,8 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
 
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
-              Set(fields.keys) == Set(UInt64(0)...12), case .unsigned(let version) = fields[0], supportedVersions.contains(version),
+              case .unsigned(let version) = fields[0], supportedVersions.contains(version),
+              Set(fields.keys) == Set(UInt64(0)...(version == 1 ? 12 : 13)),
               case .bytes(let presence) = fields[1], case .text(let service) = fields[2], case .text(let path) = fields[3],
               case .array(let rawEnvironment) = fields[4], rawEnvironment.count <= 64,
               fields[12] == .unsigned(captureSchemaVersion) else { throw AuthorityCommandStartupError.invalidConfiguration }
@@ -122,10 +127,15 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
                   case .bytes(let value) = values[1] else { throw AuthorityCommandStartupError.invalidConfiguration }
             return .init(name: name, value: value, source: .minimal)
         }
+        let execution: AuthorityCommandExecutionConfiguration?
+        if version == 2 {
+            guard case .bytes(let bytes) = fields[13] else { throw AuthorityCommandStartupError.invalidConfiguration }
+            execution = try .decode(bytes)
+        } else { execution = nil }
         let result = try Self(presence: .decode(presence), serviceName: service, policyPath: path, environment: environment,
             submissionLimits: decodeLimits(fields[5]), captureLimits: decodeLimits(fields[6]), maximumSessions: integer(7),
             receiveWaitMilliseconds: duration(8), replyTimeoutMilliseconds: duration(9), maximumAncestryEntries: integer(10),
-            approvalLifetimeMilliseconds: number(11))
+            approvalLifetimeMilliseconds: number(11), execution: execution)
         guard result.canonicalBytes == bytes else { throw AuthorityCommandStartupError.invalidConfiguration }; return result
     }
     /// Size checks use the real codecs for both advertised profiles, including the configured environment.

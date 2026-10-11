@@ -18,8 +18,8 @@ int main(int argc,char **argv){
  pid_t target=fork();if(target<0)return 72;
  if(target==0){
   close(gate[1]);close(failure[0]);close(5);close(6);
-  if(setpgid(0,0))_exit(73);
   unsigned char byte;if(read(gate[0],&byte,1)!=1||byte!=1)_exit(74);close(gate[0]);
+  if(getpgrp()!=getpid())_exit(73);
   signal(SIGTTOU,SIG_DFL);signal(SIGPIPE,SIG_DFL);
   char *args[]={argv[1],NULL};char *environment[]={NULL};execve(argv[1],args,environment);
   int error=errno;(void)write(failure[1],&error,sizeof error);_exit(127);

@@ -10,16 +10,19 @@ public actor AuthorityWakeService {
     public nonisolated let presence: AuthorityPresenceRuntime?
     public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), closed }
     private let commandReceiver: AuthorityCommandReceiveWorker?
+    private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
     private let hints: AuthorityWakeHintSource
     private let requestsRetired: @Sendable () -> Bool
     private let startRequests: @Sendable () throws -> Void
     private let closeRequests: @Sendable () throws -> Void
+    private let stopRequestProducers: @Sendable () async -> Void
     private let interval: UInt64
     private let initialRetry: UInt64
     private let maximumRetry: UInt64
     private var task: Task<Void, Never>?
     private var receiverObserver: Task<Void, Never>?
+    private var executionObserver: Task<Void, Never>?
     private var publisher: AuthorityWakePublisher?
     private var closing: Task<Void, any Error>?
     private var cleanupComplete = false
@@ -27,26 +30,32 @@ public actor AuthorityWakeService {
     private var closed = false
     private var retired = false
     public private(set) var wakeStatus = WakeStatus.idle
-    public var isRetired: Bool { retired || commandReceiver?.isRetired == true }
+    public var isRetired: Bool { retired || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     init(makePublisher: @escaping @Sendable () throws -> AuthorityWakePublisher, hints: AuthorityWakeHintSource,
          interval: UInt64, initialRetryMilliseconds: UInt64 = 1000, maximumRetryMilliseconds: UInt64 = 30_000,
          startRequests: @escaping @Sendable () throws -> Void, closeRequests: @escaping @Sendable () throws -> Void,
          requestsRetired: @escaping @Sendable () -> Bool = { false }, presence: AuthorityPresenceRuntime? = nil,
-         commandReceiver: AuthorityCommandReceiveWorker? = nil) throws {
+         commandReceiver: AuthorityCommandReceiveWorker? = nil,
+         commandExecutionWorker: AuthorityCommandExecutionWorker? = nil,
+         stopRequestProducers: @escaping @Sendable () async -> Void = {}) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
-        self.startRequests = startRequests; self.closeRequests = closeRequests; self.commandReceiver = commandReceiver
-        self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true }
+        self.stopRequestProducers = stopRequestProducers
+        self.startRequests = startRequests; self.closeRequests = closeRequests; self.commandReceiver = commandReceiver; self.commandExecutionWorker = commandExecutionWorker
+        self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     }
     deinit {
-        task?.cancel(); receiverObserver?.cancel(); commandReceiver?.requestStop(); presence?.close(); hints.close()
-        let worker = task, observer = receiverObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, commandReceiver = commandReceiver
+        task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
+        let worker = task, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
+                await stopRequestProducers()
+                await commandExecutionWorker?.close()
                 await observer?.value
+                await executionObserver?.value
                 if let pending {
                     do { try await pending.value } catch { try? closeRequests() }
                 } else {
@@ -60,19 +69,21 @@ public actor AuthorityWakeService {
                             routing: @escaping @Sendable () throws -> PresenceRouting,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         let clock = try AuthorityClock()
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: nil, appEndpoint: nil,
-            routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
+            routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     public static func open(configuration: AuthorityPresenceStartupConfiguration,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         try open(configuration: configuration.wake, accountPresence: configuration.presence,
-            appEndpoint: configuration.endpoint, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
+            appEndpoint: configuration.endpoint, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     /// Enable the durable mode ledger and share one Root epoch with observations, signing and wake publication.
     /// The owning authenticated GUI endpoint supplies observations; unavailable observations keep their explicit unknown state.
@@ -80,6 +91,7 @@ public actor AuthorityWakeService {
                             appEndpoint: AuthorityPresenceEndpointConfiguration,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
+                            commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         guard accountPresence.macID == configuration.request.service.macID,
@@ -96,12 +108,13 @@ public actor AuthorityWakeService {
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy)
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint,
-            routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, onCommandAuthorized: onCommandAuthorized)
+            routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     private static func compose(configuration: AuthorityWakeStartupConfiguration, journal: AuthorityJournal, clock: AuthorityClock,
                                 presence: AuthorityPresenceRuntime?, appEndpoint: AuthorityPresenceEndpointConfiguration?, routing: @escaping @Sendable () throws -> PresenceRouting,
                                 reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                                 commandReceiverFactory: AuthorityCommandReceiveFactory?,
+                                commandExecutionFactory: AuthorityCommandExecutionFactory?,
                                 onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
         do {
             let signer = try EnclaveAuthorityRequestSigner.load(path: configuration.request.keyRecordPath,
@@ -121,11 +134,15 @@ public actor AuthorityWakeService {
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
                     ownerRouting: ownerRouting)
             }
+            let executionWorker = try commandExecutionFactory?(journal, clock)
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
                 wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
-                onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: onCommandAuthorized)
+                onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
+                    _ = executionWorker?.enqueue(notice)
+                    onCommandAuthorized(notice)
+                })
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock)
@@ -134,7 +151,8 @@ public actor AuthorityWakeService {
             return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
                 startRequests: { try service.start(); try presenceListener?.start() },
                 closeRequests: { presenceListener?.close(); try service.close() },
-                requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver)
+                requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
+                stopRequestProducers: { await journal.stopCommandExchanges() })
         } catch { presence?.close(); try? journal.close(); throw error }
     }
     /// Start direct request listeners before attempting the optional gateway connection.
@@ -143,6 +161,16 @@ public actor AuthorityWakeService {
         started = true
         do {
             try Task.checkCancellation()
+            try commandExecutionWorker?.start()
+            if let commandExecutionWorker {
+                executionObserver = Task { [weak self, commandExecutionWorker] in
+                    for await _ in commandExecutionWorker.retirement {
+                        guard !Task.isCancelled else { return }
+                        await self?.commandExecutionDidRetire()
+                        return
+                    }
+                }
+            }
             try startRequests()
             if let commandReceiver {
                 receiverObserver = Task { [weak self, commandReceiver] in
@@ -170,15 +198,19 @@ public actor AuthorityWakeService {
         closed = true; wakeStatus = .closed
         guard !cleanupComplete else { return }
         if let closing { try await closing.value; return }
-        let previous = task; task = nil; previous?.cancel(); commandReceiver?.requestStop()
+        let previous = task; task = nil; previous?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop()
         let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
+        let executionObserver = executionObserver; self.executionObserver = nil; executionObserver?.cancel()
         hints.close(); presence?.close()
-        let publisher = publisher, closeRequests = closeRequests, commandReceiver = commandReceiver
+        let publisher = publisher, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         let work = Task {
             await commandReceiver?.close()
+            await stopRequestProducers()
+            await commandExecutionWorker?.close()
             await publisher?.close()
             await previous?.value
             await observer?.value
+            await executionObserver?.value
             try closeRequests()
         }
         closing = work
@@ -194,6 +226,12 @@ public actor AuthorityWakeService {
         guard !closed else { return }
         retired = true
         receiverObserver = nil // This callback belongs to the observer that is now terminating.
+        try? await close()
+    }
+    private func commandExecutionDidRetire() async {
+        guard !closed else { return }
+        retired = true
+        executionObserver = nil // This callback belongs to the observer that is now terminating.
         try? await close()
     }
     private func publisherDidStop() async {

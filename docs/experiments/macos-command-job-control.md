@@ -85,6 +85,16 @@ Partial timeout output is decoded safely. These diagnostics add no retry and cha
 The native PTY backpressure test also reports its progress counters when a transfer operation throws.
 It performs no extra journal read while reporting the failure. The earlier intermittent causes remain unproven.
 
+## Fixture group setup
+
+Failure-only diagnostics for [issue 309](https://github.com/rock3r/remozio/issues/309) captured a target `setpgid()` failure with `EPERM` before exec.
+Both the monitor and target previously configured the target group concurrently.
+The monitor now owns group selection while the target waits at its private exec gate.
+After release, the target verifies that its group equals its PID before exec.
+The monitor still selects the foreground group before reporting the target to the external supervisor.
+All signal, kernel-event, output and wait assertions remain required. No deadline or cleanup rule changed.
+This removes the observed redundant-call failure path. It does not prove the cause of every earlier intermittent failure.
+
 ## Required integration
 
 This result supports a monitor design. It does not establish production job control.

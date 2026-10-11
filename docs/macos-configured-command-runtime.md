@@ -1,8 +1,9 @@
-# Configured command admission runtime
+# Configured command runtime
 
 The command startup record now composes with the existing Root runtime.
 The factory uses one request journal, one clock and the existing presence and wake owners.
-It does not create a second authority or dispatch a target.
+Version 2 also attaches an owned scheduler to the existing native executor.
+It creates no second authority. Installed activation remains gated.
 
 ```mermaid
 flowchart TD
@@ -27,7 +28,11 @@ flowchart TD
     B --> H[Authenticated decision exchange under the shared journal lock]
     H --> J
     H --> U[First durable command approval: notify after lock release]
-    U -. separate executor integration: pending .-> E[Final policy and capture checks before execution]
+    U --> Q[Owned serial execution queue]
+    Q --> E[Original approval, current grants, code and capture checks]
+    E --> D[Durable beginDispatch]
+    D --> R[One native release]
+    R --> N[Owned native cleanup and verified result]
 ```
 
 The production factory requires real and effective Root identity before reading policy or calling the registration provider.
@@ -62,7 +67,8 @@ It uses an anonymous receive right, software fixture keys and an ordinary-accoun
 The terminal profile uses redirected disposable streams. It does not prove a real controlling terminal.
 
 The application does not select this startup mode yet.
-The APIs do not install accounts, register a service or execute approved targets.
+The APIs do not install accounts or register a service.
+Configured version 2 execution still requires the installed activation gates below.
 Installed IPC validation in [issue 286](https://github.com/rock3r/remozio/issues/286) and full target-group semantics in [issue 298](https://github.com/rock3r/remozio/issues/298) remain activation gates.
 Hardware signer restoration, setup provisioning, real terminal behavior and phone approval need their own installed evidence.
 
@@ -70,7 +76,8 @@ Hardware signer restoration, setup provisioning, real terminal behavior and phon
 
 The configured runtime can supply a trusted scheduling callback.
 The transport, listener, request service and wake owner pass it through one exchange path.
-Existing callers use a no-op callback.
+Legacy and request-only hosts may use a no-op observer callback.
+Version 2 always queues the notice with its owned scheduler before calling that observer.
 
 The exchange validates current transport policy and phone enrollment under the shared journal lock.
 Only a first queued or presented command transition to authorized produces a notice.
@@ -83,9 +90,41 @@ The callback must enqueue promptly.
 The notice grants no permission to execute.
 The executor must recheck current enrollment, policy, original capture, caller, deadline and streams before release.
 It must reject duplicate release and never replay uncertain execution after restart.
-Executor construction and target release remain pending.
+Version 2 now constructs the scheduler and uses the existing native execution owner. Installed activation remains pending.
 
 Seven focused tests cover native command consumption, cross-thread journal access after notification, actual signed exchange, signer failure and access gates.
 The non-command tests include 1Password access and unlock, persistent Little Snitch rules, and allow-once with the decision key.
 These fixtures use an ordinary account and software keys.
 They do not start installed IPC, execute targets or operate either application's UI.
+
+
+## Configured execution owner
+
+Version 2 requires a versioned execution record with monitor and child paths, a preparation bound, a file creation mask, and resource limits.
+The preparation bound applies before target release. It does not impose a command runtime limit.
+Version 1 retains its exact bytes and admission-only behavior. Missing or unknown version 2 fields fail; startup never falls back to version 1.
+
+The scheduler shares the request journal and clock. It starts before request listeners and reports its failure to the enclosing runtime.
+Shutdown stops new decision exchanges and joins their post-lock authorization callbacks before draining the execution worker.
+It prevents further attempts and joins queued work before closing the journal. Native resource disposal remains with the existing execution owner.
+Each runtime retry builds a fresh scheduler. It never scans historical approvals to repeat a command.
+
+A scheduling notice is not an execution grant. The scheduler checks its original request ID, digest and challenge.
+The existing executor then rechecks enrollment, code generations, current grants, retained descriptors, content, caller identity and deadline.
+It commits dispatch before a single native release. Status delivery, reconnect and duplicate notices cannot repeat that release.
+
+A thrown start can already own a monitor. The rejection operation first proves that this journal holds no native execution owner for the request.
+It cancels only the exact original authorized request. It commits the no-dispatch result and sends the original frontend its terminal reply.
+A native owner keeps its resources, cleanup and actual outcome. An exception is never treated as proof that no child exists.
+
+A notice refused during saturation or shutdown receives the same exact-request rejection before enqueue returns.
+Shutdown joins in-flight rejection work. A rejection storage failure retires the runtime and reports failure without claiming cancellation.
+Saturation retires the enclosing runtime after rejection instead of silently dropping an approval.
+The execution queue and active command limits remain explicit host settings. Installed Root behavior and complete target groups remain gates in issues 286 and 298.
+The app entry point and installer do not activate command mode as part of this integration change.
+
+Twenty-three focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
+The native cases execute disposable ordinary-account targets through both current mapped profiles.
+They preserve one effect after a handler failure and a duplicate notice. They also retain a monitor after a failed start attempt.
+Late-callback fixtures cover both explicit shutdown and deinitialization with a real signed approval and original frontend reply.
+A frozen public-only version 1 fixture checks exact byte compatibility. These results do not prove installed Root execution or complete target-group semantics.

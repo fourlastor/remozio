@@ -692,3 +692,85 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
     }
 
 }
+
+extension AuthorityWakePublisherTests {
+    private func schedulingNotice(_ fixture: Fixture, replacementID: Data? = nil) throws -> AuthorityCommandAuthorizationNotice {
+        let original = try fixture.journal.withRequests { try $0.state(requestID: fixture.request.requestID) }
+        return .init(state: .init(requestKind: .command, macID: original.macID, accountID: original.accountID,
+            requestDigest: original.requestDigest, challenge: original.challenge, reason: .none, terminalAt: nil,
+            decisionPhoneID: nil, requestID: replacementID ?? original.requestID, phase: original.phase,
+            revision: original.revision, firstObservedAt: original.firstObservedAt, deadlineMilliseconds: original.deadlineMilliseconds))
+    }
+
+    func testServiceStartsExecutorBeforeRequestsAndJoinsQueuedWorkBeforeJournalClose() async throws {
+        let fixture = try Fixture(deadline: 5000), journal = fixture.journal, notice = try schedulingNotice(fixture)
+        let gate = DispatchSemaphore(value: 0), entered = Mutex(false), rejections = Mutex(0), closes = Mutex(0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, check in
+            entered.withLock { $0 = true }
+            guard gate.wait(timeout: .now() + 5) == .success else { throw AuthorityCommandExecutionWorkerError.closed }
+            XCTAssertEqual(try journal.read { _ in 17 }, 17)
+            try check()
+        }, rejectUnowned: { _ in
+            XCTAssertEqual(try journal.read { _ in 19 }, 19); rejections.withLock { $0 += 1 }
+        })
+        let service = try AuthorityWakeService(makePublisher: { try fixture.publisher(Driver()) },
+            hints: AuthorityWakeHintSource(registration: fixture.registration), interval: 100,
+            startRequests: { XCTAssertEqual(worker.enqueue(notice), .queued) }, closeRequests: {
+                XCTAssertEqual(worker.enqueue(notice), .closed)
+                XCTAssertEqual(rejections.withLock { $0 }, 2); closes.withLock { $0 += 1 }; try journal.close()
+            }, commandExecutionWorker: worker)
+        defer { gate.signal(); worker.requestStop() }
+        try await service.start(); try await waitUntil { entered.withLock { $0 } }
+        let close = Task { try await service.close() }
+        try await waitUntil { await service.wakeStatus == .closed }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        gate.signal(); try await close.value
+        XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+
+    func testExecutorSaturationRetiresItsEnclosingServiceWithoutAbandoningQueuedCleanup() async throws {
+        let fixture = try Fixture(deadline: 5000), notice = try schedulingNotice(fixture)
+        let overflow = try schedulingNotice(fixture, replacementID: Data(repeating: 0xff, count: 16))
+        let gate = DispatchSemaphore(value: 0), entered = Mutex(false), closes = Mutex(0), rejected = Mutex(0)
+        let worker = try AuthorityCommandExecutionWorker(maximumPending: 1, begin: { _, check in
+            entered.withLock { $0 = true }
+            guard gate.wait(timeout: .now() + 5) == .success else { throw AuthorityCommandExecutionWorkerError.closed }
+            try check()
+        }, rejectUnowned: { _ in rejected.withLock { $0 += 1 } })
+        let service = try AuthorityWakeService(makePublisher: { try fixture.publisher(Driver()) },
+            hints: AuthorityWakeHintSource(registration: fixture.registration), interval: 100, startRequests: {}, closeRequests: {
+                XCTAssertEqual(rejected.withLock { $0 }, 2); closes.withLock { $0 += 1 }; try fixture.journal.close()
+            }, commandExecutionWorker: worker)
+        defer { gate.signal(); worker.requestStop() }
+        try await service.start(); XCTAssertEqual(worker.enqueue(notice), .queued)
+        try await waitUntil { entered.withLock { $0 } }
+        XCTAssertEqual(worker.enqueue(overflow), .capacity)
+        try await waitUntil { await service.isRetired }
+        try await waitUntil { await service.wakeStatus == .closed }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        gate.signal(); try await service.close()
+        XCTAssertEqual(closes.withLock { $0 }, 1)
+    }
+
+    func testServiceDeinitJoinsExecutorBeforeClosingTheSharedJournal() async throws {
+        let fixture = try Fixture(deadline: 5000), notice = try schedulingNotice(fixture)
+        let gate = DispatchSemaphore(value: 0), entered = Mutex(false), closes = Mutex(0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, check in
+            entered.withLock { $0 = true }
+            guard gate.wait(timeout: .now() + 5) == .success else { throw AuthorityCommandExecutionWorkerError.closed }
+            try check()
+        }, rejectUnowned: { _ in XCTAssertEqual(try fixture.journal.read { _ in 23 }, 23) })
+        var service: AuthorityWakeService? = try AuthorityWakeService(makePublisher: { try fixture.publisher(Driver()) },
+            hints: AuthorityWakeHintSource(registration: fixture.registration), interval: 100, startRequests: {}, closeRequests: {
+                XCTAssertEqual(worker.enqueue(notice), .closed); closes.withLock { $0 += 1 }; try fixture.journal.close()
+            }, commandExecutionWorker: worker)
+        defer { gate.signal(); worker.requestStop() }
+        weak var released = service
+        try await service?.start(); XCTAssertEqual(worker.enqueue(notice), .queued)
+        try await waitUntil { entered.withLock { $0 } }
+        service = nil
+        try await waitUntil { released == nil }
+        XCTAssertEqual(closes.withLock { $0 }, 0)
+        gate.signal(); try await waitUntil { closes.withLock { $0 } == 1 }
+    }
+}

@@ -2,6 +2,29 @@ import Foundation
 import RemozioProtocol
 import Synchronization
 
+/// Counts exchanges through their post-lock notification. Stop prevents later entries before drain.
+final class AuthorityCommandExchangeOwnership: Sendable {
+    private struct State { var stopped = false; var active = 0 }
+    private let state = Mutex(State())
+    private let completion = DispatchGroup()
+    func begin() throws {
+        try state.withLock {
+            guard !$0.stopped else { throw ApprovalCoordinatorError.unavailable }
+            $0.active += 1; completion.enter()
+        }
+    }
+    func end() { state.withLock { $0.active -= 1; completion.leave() } }
+    var hasActive: Bool { state.withLock { $0.active > 0 } }
+    func stop() { state.withLock { $0.stopped = true } }
+    func stopAndDrain() async {
+        stop()
+        await withCheckedContinuation { continuation in
+            completion.notify(queue: .global(qos: .utility)) { continuation.resume() }
+        }
+    }
+}
+
+
 /// A trusted scheduling hint after durable consumption. It never grants execution permission.
 public struct AuthorityCommandAuthorizationNotice: Equatable, Sendable {
     public let requestID: Data
@@ -19,6 +42,8 @@ extension AuthorityJournal {
         validate: @Sendable (JournalTransaction) throws -> Void,
         body: @Sendable (ApprovalRequestCoordinator) throws -> Value,
         onCommandAuthorized: @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> Value {
+        try beginCommandExchange()
+        defer { endCommandExchange() }
         let notice = Mutex<AuthorityCommandAuthorizationNotice?>(nil)
         defer { if let value = notice.withLock({ $0 }) { onCommandAuthorized(value) } }
         return try withValidatedRequests(validate: validate, body: { owner in

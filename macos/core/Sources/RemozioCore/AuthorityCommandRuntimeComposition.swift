@@ -10,11 +10,13 @@ extension AuthorityWakeService {
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
         reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
-        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in },
+        reportExecution: @escaping @Sendable (AuthorityCommandAuthorizationNotice, Result<Void, any Error>) -> Void = { _, _ in }) throws -> AuthorityWakeService {
         let factory = try configuration.receiverFactory(takingRegisteredReceiveRight: takingRegisteredReceiveRight,
             onAdmission: onAdmission, report: reportReceiver)
+        let executionFactory = try configuration.executionFactory(report: reportExecution)
         return try open(configuration: configuration.presence, reconcileExpired: reconcileExpired,
-            commandReceiverFactory: factory, onCommandAuthorized: onCommandAuthorized)
+            commandReceiverFactory: factory, commandExecutionFactory: executionFactory, onCommandAuthorized: onCommandAuthorized)
     }
 }
 

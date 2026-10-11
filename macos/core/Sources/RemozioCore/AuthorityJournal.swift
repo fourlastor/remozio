@@ -13,6 +13,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
+    private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var commandCleanupTimer: DispatchSourceTimer?
     private var commandPollIntervalMilliseconds: Int?
@@ -390,9 +391,16 @@ public final class AuthorityJournal: @unchecked Sendable {
             return try withStorageFailureCleanup { try database.write(body) }
         }
     }
+    /// Stop the authorization producer and await its post-lock callbacks before draining execution.
+    func stopCommandExchanges() async { await commandExchanges.stopAndDrain() }
+    func beginCommandExchange() throws { try lock.withLock { try commandExchanges.begin() } }
+    func endCommandExchange() { commandExchanges.end() }
+
     public func close() throws {
         try lock.withLock {
             try requireNoRequestOperation()
+            guard !commandExchanges.hasActive else { throw JournalDatabaseError.transactionActive }
+            commandExchanges.stop()
             try database.close()
             storage?.continuity.close()
             retireRequests()
@@ -450,6 +458,36 @@ private struct CommandAdmissionCallbackFailure: Error { let underlying: Error }
 extension AuthorityJournal {
     /// Counts retained command owners, including unreaped children and pending result commits.
     public var activeCommandCount: Int { lock.withLock { commandExecutions.count } }
+
+    /// Reject only the exact original approval that has no native execution owner.
+    /// A failed start can already own resources, so its thrown error alone cannot prove no dispatch.
+    func cancelUnownedCommandExecution(_ notice: AuthorityCommandAuthorizationNotice, now: AuthorityMoment,
+                                       receiptTimeMs: UInt64?) throws -> Bool {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard commandExecutions[notice.requestID] == nil else { return false }
+            return try withRequests { owner in
+                let state: ApprovalRequestState
+                do { state = try owner.state(requestID: notice.requestID) }
+                catch ApprovalCoordinatorError.unknownRequest { return false }
+                guard state.requestKind == .command, state.phase == .authorized,
+                      state.requestDigest == notice.requestDigest, state.challenge == notice.challenge else { return false }
+                _ = try owner.authorizedCommandApproval(requestID: notice.requestID, now: now)
+                _ = try owner.recordOutcome(requestID: notice.requestID, expectedRevision: 0, event: .proveNoDispatch,
+                    now: now, receiptTimeMs: receiptTimeMs)
+                return true
+            }
+        }
+    }
+
+    /// Check original notice bindings before a start attempt. Existing execution gates remain mandatory.
+    func validateCommandAuthorizationNotice(_ notice: AuthorityCommandAuthorizationNotice, now: AuthorityMoment) throws {
+        try withRequests { owner in
+            let approval = try owner.authorizedCommandApproval(requestID: notice.requestID, now: now)
+            guard approval.receipt.decision.requestDigest == notice.requestDigest,
+                  approval.retained.payload.challenge == notice.challenge else { throw CommandExecutionError.policyChanged }
+        }
+    }
 
     /// Protected host integration. The elevation callback must enforce the selected administrator policy without reentry.
     /// Pipe and PTY execution stay inactive until the host installs the protected command endpoint.

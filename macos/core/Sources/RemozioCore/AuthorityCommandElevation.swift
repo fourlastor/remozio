@@ -66,7 +66,9 @@ extension AuthorityJournal {
                                       maximumActiveCommands: Int = 32, pollIntervalMilliseconds: Int = 20,
                                       elevationPolicy: CurrentCommandElevationPolicy,
                                       clock: @escaping @Sendable () throws -> AuthorityMoment,
-                                      receiptTime: @escaping @Sendable () -> UInt64? = { nil }) throws {
+                                      receiptTime: @escaping @Sendable () -> UInt64? = { nil },
+                                      checkCancellation: @escaping @Sendable () throws -> Void = {}) throws {
+        try checkCancellation()
         try read { transaction in
             let trust = try transaction.approvalTrustSnapshot()
             guard trust.macID == elevationPolicy.macID, trust.accountID == elevationPolicy.accountID else {
@@ -76,7 +78,9 @@ extension AuthorityJournal {
         try beginCommandExecution(requestID: requestID, monitorPath: monitorPath, childPath: childPath,
             preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask,
             maximumActiveCommands: maximumActiveCommands, pollIntervalMilliseconds: pollIntervalMilliseconds,
-            validateElevation: { try elevationPolicy.validate(capture: $0) }, clock: clock, receiptTime: receiptTime)
+            validateElevation: { capture in
+                try checkCancellation(); try elevationPolicy.validate(capture: capture); try checkCancellation()
+            }, clock: clock, receiptTime: receiptTime)
     }
 }
 
