@@ -28,6 +28,7 @@ Capture validation rejects changed groups, GID or account name, and fails if the
 flowchart TD
     S[Setup disclosure and account selection: pending] --> P[Root-owned account policy]
     P --> A[Check exact scope, caller and requested target]
+    Q[Serial receiver: original authenticated attempt] --> A
     A --> C[Capture exact command and OS target]
     C --> B[Phone approval and durable consumption]
     B --> R[Reload policy and recheck captured caller and target]
@@ -50,10 +51,14 @@ The journal admission overload uses the original authenticated handshake scope a
 
 The execution overload checks the policy scope against the current journal before creating a controller. It supplies the fresh validator to the existing pre-spawn and pre-release checks. The callback reads the protected policy without journal reentry.
 
+The serial receiver worker has a current-policy constructor. It passes the original authenticated attempt to the journal operation. It retains one receive queue and the shared journal, clock and epoch.
+The trusted stream-metadata factory runs after grant checks, inside admission. A factory failure returns typed uncertainty before filesystem capture. Imported resources close; borrowed caller descriptors remain open. An ordinary account cannot construct the production worker.
+
 Before activating execution, complete protected service registration and the native target-group experiment in [issue 298](https://github.com/rock3r/remozio/issues/298). Preserve the full OS group identity; do not truncate groups or silently reject Root targets.
 The existing enrollment, signature, capture, caller-lifetime, durable-consumption and execution checks remain required.
 The 1Password and Little Snitch adapter contracts remain unchanged.
 
 Tests cover scope and account isolation, target removal, disabled grants, captured caller changes, rejected encodings and unprivileged protected-file loading.
-Journal fixtures also cover policy rejection before capture, actual OS credential capture, revocation during draft construction and read failures at each admission check. They verify that failed admission creates no request reservation or audit event. These fixtures use internal identity seams; they do not prove installed Root execution.
+Journal fixtures also cover policy rejection before capture, actual OS credential capture, revocation during draft construction and read failures at each admission check. They verify that failed admission creates no request reservation or audit event. Receiver fixtures also cover grant revocation between requests, stream-metadata failure, typed replies and a healthy queue after denial.
+These fixtures use internal identity seams; they do not prove installed Root execution.
 No privileged service was installed or launched for these checks.

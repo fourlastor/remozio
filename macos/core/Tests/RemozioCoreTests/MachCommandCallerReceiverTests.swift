@@ -8048,3 +8048,110 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(box.state.withLock { $0.reads }, 0); XCTAssertEqual(try fixture.auditRecordCount, before)
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    private func elevationWorker(_ fixture: CommandRequestFixture, port: WorkerPort,
+                                 policy: CurrentCommandElevationPolicy,
+                                 streamBinding: @escaping @Sendable () throws -> Data,
+                                 onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void) throws -> AuthorityCommandReceiveWorker {
+        let journal = try XCTUnwrap(fixture.authority), epoch = fixture.clock, expression = try selfExpression()
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let limits = fixture.limits, environment = assemblyEnvironment, contract = fixture.contract
+        return try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits,
+            makeHost: { try Self.workerHost(port: port, context: context, policyRead: {}) },
+            admit: { attempt, time, stop in
+                try journal.admitCommandAttempt(attempt, expression: expression, elevationPolicy: policy,
+                    captureSchemaVersion: 1, minimalEnvironment: environment, streamBinding: streamBinding,
+                    captureLimits: limits, maximumAncestryEntries: 1, draft: {
+                        .init(contract: contract, requiredFeatures: [], capture: $0.canonicalBytes,
+                            actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+                            firstObservedAt: .init(epoch: epoch, milliseconds: 100), deadlineMilliseconds: 200,
+                            createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+                    }, now: { .init(epoch: epoch, milliseconds: 110) }, receiptTimeMs: time,
+                    checkCancellation: { try stop.check() })
+            }, receiptTime: { 777 }, onAdmission: onAdmission)
+    }
+
+    private func workerElevationProfile(_ destination: mach_port_t) throws -> CommandHandshakeProfile {
+        let reply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: destination, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        return try CommandHandshakeReply.decode(response.payload, offer: offer,
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+    }
+    private func workerElevationSubmission(_ destination: mach_port_t, reply: Endpoint, profile: CommandHandshakeProfile,
+                                          descriptor: Int32, id: UInt8, executable: String = "/usr/bin/true") throws -> CommandSubmission {
+        let submission = try commandSubmission(executablePath: executable,
+            binding: .init(id: Data(repeating: id, count: 16), nonce: Data(repeating: id, count: 32), callerBinding: profile.callerBinding))
+        try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: descriptor, destination: destination,
+            replyPort: reply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        return submission
+    }
+
+    @MainActor func testReceiveWorkerElevationReloadsGrantAndRetainsHealthyQueueAfterDenial() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), box = ElevationGrantBox()
+        let bindings = Mutex(0), outcomes = Mutex(0), policy = try currentElevation(box)
+        let worker = try elevationWorker(fixture, port: port, policy: policy, streamBinding: {
+            bindings.withLock { $0 += 1 }; return Data(repeating: 0xe4, count: 16)
+        }, onAdmission: { _ in outcomes.withLock { $0 += 1 } })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        let profile = try workerElevationProfile(destination), first = try Endpoint(), second = try Endpoint()
+        let allowed = try workerElevationSubmission(destination, reply: first, profile: profile, descriptor: descriptor, id: 0xb2)
+        try await waitForReceiveWorker { outcomes.withLock { $0 == 1 } }
+        guard case .admitted = try typedOutcome(first, submission: allowed, profile: profile) else {
+            await worker.close(); return XCTFail("The original authenticated attempt must reach current policy admission")
+        }
+        let before = try fixture.auditRecordCount
+        box.state.withLock { $0.targets = [] }
+        let denied = try workerElevationSubmission(destination, reply: second, profile: profile,
+            descriptor: descriptor, id: 0xb4, executable: "/missing-before-policy")
+        try await waitForReceiveWorker { outcomes.withLock { $0 == 2 } }
+        XCTAssertEqual(try typedOutcome(second, submission: denied, profile: profile), .notAdmitted(.policyRejected, .never))
+        XCTAssertNil(try fixture.reservation(denied.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+        XCTAssertEqual(box.state.withLock { $0.reads }, 4); XCTAssertEqual(bindings.withLock { $0 }, 1)
+        XCTAssertFalse(worker.isRetired); XCTAssertEqual(worker.status, .running)
+        XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0)
+        await worker.close()
+    }
+
+    @MainActor func testReceiveWorkerElevationBindingFailureReturnsTypedUncertaintyWithoutCaptureOrReservation() async throws {
+        let fixture = try CommandRequestFixture(owned: true), port = WorkerPort(), box = ElevationGrantBox()
+        let completed = Mutex(false), policy = try currentElevation(box)
+        let worker = try elevationWorker(fixture, port: port, policy: policy, streamBinding: {
+            throw ElevationReadFailure.unavailable
+        }, onAdmission: { result in
+            guard case .failure(let error) = result else { return XCTFail("A failed binding must prevent admission") }
+            XCTAssertTrue(error is ElevationReadFailure); completed.withLock { $0 = true }
+        })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        let profile = try workerElevationProfile(destination), reply = try Endpoint(), before = try fixture.auditRecordCount
+        let submission = try workerElevationSubmission(destination, reply: reply, profile: profile,
+            descriptor: descriptor, id: 0xb2, executable: "/missing-before-binding")
+        try await waitForReceiveWorker { completed.withLock { $0 } }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+        XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+        XCTAssertEqual(box.state.withLock { $0.reads }, 1); XCTAssertFalse(worker.isRetired)
+        XCTAssertEqual(try sendReferences(reply.port), 1); XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0)
+        await worker.close()
+    }
+
+    func testReceiveWorkerCurrentElevationPublicConstructionRefusesOrdinaryAccountBeforeFactories() throws {
+        guard getuid() != 0 || geteuid() != 0 else { throw XCTSkip("Ordinary-account gate") }
+        let fixture = try CommandRequestFixture(owned: true), box = ElevationGrantBox(), factories = Mutex(0)
+        let epoch = fixture.clock
+        XCTAssertThrowsError(try AuthorityCommandReceiveWorker(journal: XCTUnwrap(fixture.authority), submissionLimits: assemblyLimits,
+            makeHost: { factories.withLock { $0 += 1 }; throw CommandReceiveHostError.invalidConfiguration },
+            elevationPolicy: currentElevation(box), captureSchemaVersion: 1, minimalEnvironment: assemblyEnvironment,
+            captureLimits: assemblyLimits, streamBinding: { factories.withLock { $0 += 1 }; return Data(count: 16) },
+            draft: { _ in throw ApprovalCoordinatorError.invalidDraft }, clock: { .init(epoch: epoch, milliseconds: 110) })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(factories.withLock { $0 }, 0); XCTAssertEqual(box.state.withLock { $0.reads }, 0)
+    }
+}

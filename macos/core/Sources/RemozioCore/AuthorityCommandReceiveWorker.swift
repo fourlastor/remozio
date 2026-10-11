@@ -103,11 +103,8 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     private let ownership: CommandReceiveWorkerOwnership
     private let queue = DispatchQueue(label: "dev.remozio.authority.command-receive", qos: .utility)
     private let makeHost: @Sendable () throws -> CommandReceiveHost
-    private let journal: AuthorityJournal
     private let limits: CBORLimits
-    private let resolve: @Sendable (CommandSubmission) throws -> CommandAdmissionResolution
-    private let draft: @Sendable (CommandCapture) throws -> ApprovalRequestDraft
-    private let clock: @Sendable () throws -> AuthorityMoment
+    private let admit: @Sendable (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload
     private let receiptTime: @Sendable () -> UInt64?
     private let onAdmission: @Sendable (Result<IssuedRequestPayload, any Error>) -> Void
     public var status: Status { ownership.status }
@@ -130,7 +127,7 @@ public final class AuthorityCommandReceiveWorker: Sendable {
             resolve: resolve, draft: draft, clock: clock, receiptTime: receiptTime, onAdmission: onAdmission, report: report)
     }
     /// Fixture account seam. Queue ownership, policy checks, and admission use the same worker path.
-    init(ownedJournal: AuthorityJournal, submissionLimits: CBORLimits,
+    convenience init(ownedJournal: AuthorityJournal, submissionLimits: CBORLimits,
          makeHost: @escaping @Sendable () throws -> CommandReceiveHost,
          resolve: @escaping @Sendable (CommandSubmission) throws -> CommandAdmissionResolution,
          draft: @escaping @Sendable (CommandCapture) throws -> ApprovalRequestDraft,
@@ -138,9 +135,42 @@ public final class AuthorityCommandReceiveWorker: Sendable {
          receiptTime: @escaping @Sendable () -> UInt64? = { nil },
          onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
          report: @escaping @Sendable (Status) -> Void = { _ in }) throws {
+        try self.init(submissionLimits: submissionLimits, makeHost: makeHost, admit: { attempt, time, stop in
+            try ownedJournal.admitCommandAttempt(attempt, resolve: resolve, draft: draft, now: clock,
+                receiptTimeMs: time, checkCancellation: { try stop.check() })
+        }, receiptTime: receiptTime, onAdmission: onAdmission, report: report)
+    }
+
+    /// Reads current grants for each original attempt. The binding factory supplies fresh host-owned stream metadata.
+    public convenience init(journal: AuthorityJournal, submissionLimits: CBORLimits,
+                            makeHost: @escaping @Sendable () throws -> CommandReceiveHost,
+                            elevationPolicy: CurrentCommandElevationPolicy, captureSchemaVersion: UInt64,
+                            minimalEnvironment: [CapturedEnvironmentEntry], captureLimits: CBORLimits,
+                            maximumAncestryEntries: Int = 16,
+                            streamBinding: @escaping @Sendable () throws -> Data,
+                            draft: @escaping @Sendable (CommandCapture) throws -> ApprovalRequestDraft,
+                            clock: @escaping @Sendable () throws -> AuthorityMoment,
+                            receiptTime: @escaping @Sendable () -> UInt64? = { nil },
+                            onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
+                            report: @escaping @Sendable (Status) -> Void = { _ in }) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try self.init(submissionLimits: submissionLimits, makeHost: makeHost, admit: { attempt, time, stop in
+            try journal.admitCommandAttempt(attempt, elevationPolicy: elevationPolicy,
+                captureSchemaVersion: captureSchemaVersion, minimalEnvironment: minimalEnvironment,
+                streamBinding: streamBinding, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
+                draft: draft, now: clock, receiptTimeMs: time, checkCancellation: { try stop.check() })
+        }, receiptTime: receiptTime, onAdmission: onAdmission, report: report)
+    }
+
+    /// Fixture admission seam. Product construction uses a Root-validated journal operation.
+    init(submissionLimits: CBORLimits, makeHost: @escaping @Sendable () throws -> CommandReceiveHost,
+         admit: @escaping @Sendable (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload,
+         receiptTime: @escaping @Sendable () -> UInt64? = { nil },
+         onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
+         report: @escaping @Sendable (Status) -> Void = { _ in }) throws {
         guard submissionLimits.maxBytes <= 16_777_216 else { throw CommandReceiveHostError.invalidConfiguration }
-        ownership = CommandReceiveWorkerOwnership(report: report); journal = ownedJournal; limits = submissionLimits
-        self.makeHost = makeHost; self.resolve = resolve; self.draft = draft; self.clock = clock
+        ownership = CommandReceiveWorkerOwnership(report: report); limits = submissionLimits
+        self.makeHost = makeHost; self.admit = admit
         self.receiptTime = receiptTime; self.onAdmission = onAdmission
     }
     deinit { ownership.requestStop() }
@@ -148,8 +178,8 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     /// Ready means that the fresh host passed its current policy read. It does not authorize a command.
     public func start() async throws {
         try Task.checkCancellation()
-        let ownership = ownership, queue = queue, makeHost = makeHost, journal = journal, limits = limits
-        let resolve = resolve, draft = draft, clock = clock, receiptTime = receiptTime, onAdmission = onAdmission
+        let ownership = ownership, queue = queue, makeHost = makeHost, limits = limits
+        let admit = admit, receiptTime = receiptTime, onAdmission = onAdmission
         do {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -166,9 +196,8 @@ public final class AuthorityCommandReceiveWorker: Sendable {
                             guard ownership.ready() else { throw CommandReceiveHostError.stopped }
                             ready = true; continuation.resume()
                             while !ownership.stopping {
-                                _ = try host.pollAdmission(journal: journal, submissionLimits: limits,
-                                    resolve: resolve, draft: draft, now: clock, receiptTime: receiptTime,
-                                    checkCancellation: { try ownership.check() }, onResult: onAdmission)
+                                _ = try host.pollAdmission(submissionLimits: limits, receiptTime: receiptTime,
+                                    admit: admit, onResult: onAdmission)
                             }
                         } catch {
                             ownership.fail()

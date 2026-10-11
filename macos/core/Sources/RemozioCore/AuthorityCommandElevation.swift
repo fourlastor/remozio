@@ -10,6 +10,20 @@ extension AuthorityJournal {
                                     draft: (CommandCapture) throws -> ApprovalRequestDraft,
                                     now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
                                     checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try admitCommandAttempt(attempt, elevationPolicy: elevationPolicy,
+            captureSchemaVersion: captureSchemaVersion, minimalEnvironment: minimalEnvironment,
+            streamBinding: { streamBinding }, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
+            draft: draft, now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+    }
+
+    /// Creates stream metadata after grants pass, under the journal lock. The factory must not reenter the journal.
+    public func admitCommandAttempt(_ attempt: sending RetainedCommandAdmissionAttempt,
+                                    elevationPolicy: CurrentCommandElevationPolicy, captureSchemaVersion: UInt64,
+                                    minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: @escaping @Sendable () throws -> Data,
+                                    captureLimits: CBORLimits, maximumAncestryEntries: Int = 16,
+                                    draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                                    now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                                    checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
         let check = CommandElevationAdmissionCheck(profile: attempt.profile, callerUID: attempt.userID, policy: elevationPolicy,
             schemaVersion: captureSchemaVersion, environment: minimalEnvironment, streamBinding: streamBinding,
             limits: captureLimits, maximumAncestryEntries: maximumAncestryEntries)
@@ -21,6 +35,19 @@ extension AuthorityJournal {
     func admitCommandAttempt(_ attempt: RetainedCommandAdmissionAttempt, expression: String,
                              elevationPolicy: CurrentCommandElevationPolicy, captureSchemaVersion: UInt64,
                              minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: Data,
+                             captureLimits: CBORLimits, maximumAncestryEntries: Int = 16,
+                             draft: (CommandCapture) throws -> ApprovalRequestDraft,
+                             now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
+                             checkCancellation: @escaping @Sendable () throws -> Void = {}) throws -> IssuedRequestPayload {
+        try admitCommandAttempt(attempt, expression: expression, elevationPolicy: elevationPolicy,
+            captureSchemaVersion: captureSchemaVersion, minimalEnvironment: minimalEnvironment,
+            streamBinding: { streamBinding }, captureLimits: captureLimits, maximumAncestryEntries: maximumAncestryEntries,
+            draft: draft, now: now, receiptTimeMs: receiptTimeMs, checkCancellation: checkCancellation)
+    }
+
+    func admitCommandAttempt(_ attempt: RetainedCommandAdmissionAttempt, expression: String,
+                             elevationPolicy: CurrentCommandElevationPolicy, captureSchemaVersion: UInt64,
+                             minimalEnvironment: [CapturedEnvironmentEntry], streamBinding: @escaping @Sendable () throws -> Data,
                              captureLimits: CBORLimits, maximumAncestryEntries: Int = 16,
                              draft: (CommandCapture) throws -> ApprovalRequestDraft,
                              now: () throws -> AuthorityMoment, receiptTimeMs: UInt64?,
@@ -57,13 +84,13 @@ private struct CommandElevationAdmissionCheck: Sendable {
     let profile: CommandHandshakeProfile
     let callerUID: UInt32
     let policy: CurrentCommandElevationPolicy
-    let context: @Sendable (CommandTarget) -> CommandAdmissionCaptureContext
+    let context: @Sendable (CommandTarget) throws -> CommandAdmissionCaptureContext
 
     init(profile: CommandHandshakeProfile, callerUID: UInt32, policy: CurrentCommandElevationPolicy, schemaVersion: UInt64,
-         environment: [CapturedEnvironmentEntry], streamBinding: Data, limits: CBORLimits, maximumAncestryEntries: Int) {
+         environment: [CapturedEnvironmentEntry], streamBinding: @escaping @Sendable () throws -> Data, limits: CBORLimits, maximumAncestryEntries: Int) {
         self.profile = profile; self.callerUID = callerUID; self.policy = policy
         context = { .init(schemaVersion: schemaVersion, target: $0, minimalEnvironment: environment,
-            streamBinding: streamBinding, limits: limits, maximumAncestryEntries: maximumAncestryEntries) }
+            streamBinding: try streamBinding(), limits: limits, maximumAncestryEntries: maximumAncestryEntries) }
     }
 
     func resolve(_ submission: CommandSubmission) throws -> CommandAdmissionResolution {
@@ -72,7 +99,7 @@ private struct CommandElevationAdmissionCheck: Sendable {
             target = try policy.resolveTarget(macID: profile.macID, accountID: profile.accountID,
                 callerUID: callerUID, requestedTargetUID: submission.requestedTargetUID)
         } catch CommandElevationPolicyError.policyRejected { return .refuse(.policyRejected) }
-        return .capture(context(target))
+        return .capture(try context(target))
     }
 
     func draft(_ capture: CommandCapture, build: (CommandCapture) throws -> ApprovalRequestDraft) throws -> ApprovalRequestDraft {

@@ -19,7 +19,7 @@ public struct CommandReceiveStop: Sendable {
     fileprivate let state = OSAllocatedUnfairLock(initialState: false)
     public func requestStop() { state.withLock { $0 = true } }
     fileprivate var requested: Bool { state.withLock { $0 } }
-    fileprivate func check() throws { if requested { throw CommandReceiveHostError.stopped } }
+    func check() throws { if requested { throw CommandReceiveHostError.stopped } }
 }
 
 /// Owns one receive right and serial command session lifetime. No service is registered by this owner.
@@ -161,15 +161,24 @@ public final class CommandReceiveHost {
                        now: () throws -> AuthorityMoment, receiptTime: () -> UInt64?,
                        checkCancellation: @escaping @Sendable () throws -> Void = {},
                        onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
+        try pollAdmission(submissionLimits: submissionLimits, receiptTime: receiptTime, admit: { attempt, time, stop in
+            try journal.admitCommandAttempt(attempt, resolve: resolve, draft: draft, now: now,
+                receiptTimeMs: time, checkCancellation: {
+                    try stop.check(); try checkCancellation(); try stop.check()
+                })
+        }, onResult: onResult)
+    }
+
+    /// Trusted worker operation. It receives the original attempt; the journal still owns all admission checks.
+    func pollAdmission(submissionLimits: CBORLimits, receiptTime: () -> UInt64?,
+                       admit: (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload,
+                       onResult: (Result<IssuedRequestPayload, Error>) throws -> Void) throws -> CommandReceiveEvent {
         try poll { received in
             let receiptTimeMs = receiptTime()
             let result: Result<IssuedRequestPayload, Error>
             do {
                 let attempt = try prepareAdmission(received: received, submissionLimits: submissionLimits)
-                result = .success(try journal.admitCommandAttempt(attempt, resolve: resolve, draft: draft, now: now,
-                    receiptTimeMs: receiptTimeMs, checkCancellation: { [stop] in
-                        try stop.check(); try checkCancellation(); try stop.check()
-                    }))
+                result = .success(try admit(attempt, receiptTimeMs, stop))
             } catch { result = .failure(error) }
             try onResult(result)
         }
