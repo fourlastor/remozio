@@ -7936,3 +7936,115 @@ extension MachCommandCallerReceiverTests {
     }
 
 }
+
+extension MachCommandCallerReceiverTests {
+    private struct ElevationGrantState: Sendable { var targets: Set<UInt32> = [geteuid()]; var reads = 0; var failAtRead: Int? }
+    private final class ElevationGrantBox: Sendable { let state = Mutex(ElevationGrantState()) }
+    private enum ElevationReadFailure: Error { case unavailable }
+
+    private func currentElevation(_ box: ElevationGrantBox, macID: Data = Data(repeating: 1, count: 16),
+                                  callerUID: UInt32 = geteuid()) throws -> CurrentCommandElevationPolicy {
+        let accountID = Data(repeating: 2, count: 16)
+        return try .init(macID: macID, accountID: accountID, callerUID: callerUID, load: {
+            try box.state.withLock {
+                $0.reads += 1
+                if $0.reads == $0.failAtRead { throw ElevationReadFailure.unavailable }
+                return try CommandElevationPolicy(macID: macID, accountID: accountID, callerUID: callerUID,
+                    allowedTargetUIDs: $0.targets, independentPolicyDisclosureAccepted: true)
+            }
+        })
+    }
+    private func admitWithElevation(_ attempt: RetainedCommandAdmissionAttempt, fixture: CommandRequestFixture,
+                                    policy: CurrentCommandElevationPolicy,
+                                    build: ((CommandCapture) throws -> ApprovalRequestDraft)? = nil) throws -> IssuedRequestPayload {
+        try XCTUnwrap(fixture.authority).admitCommandAttempt(attempt, expression: selfExpression(), elevationPolicy: policy,
+            captureSchemaVersion: 1, minimalEnvironment: assemblyEnvironment, streamBinding: Data(repeating: 0xe4, count: 16),
+            captureLimits: assemblyLimits, maximumAncestryEntries: 1,
+            draft: build ?? { self.admissionDraft($0, fixture: fixture) }, now: { fixture.now() }, receiptTimeMs: nil)
+    }
+
+    func testCurrentElevationAdmissionRejectsDeniedScopeBeforeFilesystemCapture() throws {
+        for checkpointed in [false, true] {
+            for mismatch in 0..<3 {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+                let box = ElevationGrantBox()
+                if mismatch == 0 { box.state.withLock { $0.targets = [] } }
+                let policy = try currentElevation(box, macID: Data(repeating: mismatch == 1 ? 3 : 1, count: 16),
+                    callerUID: mismatch == 2 ? geteuid() + 1 : geteuid())
+                let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: "/missing-before-policy")
+                let before = try fixture.auditRecordCount
+                XCTAssertThrowsError(try admitWithElevation(attempt, fixture: fixture, policy: policy)) {
+                    XCTAssertEqual($0 as? CommandAdmissionControllerError, .refused(.policyRejected))
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.policyRejected, .never))
+                XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertEqual(box.state.withLock { $0.reads }, mismatch == 0 ? 1 : 0)
+                XCTAssertEqual(try sendReferences(reply.port), 1)
+            }
+        }
+    }
+
+    func testCurrentElevationAdmissionCapturesActualCredentialsAndRechecksBeforePublication() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let box = ElevationGrantBox(), policy = try currentElevation(box)
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            let expected = try CommandTargetResolver.resolve(uid: geteuid())
+            let request = try admitWithElevation(attempt, fixture: fixture, policy: policy, build: {
+                XCTAssertEqual($0.target, expected); XCTAssertEqual($0.requester.realUID, geteuid())
+                XCTAssertEqual($0.requester.effectiveUID, geteuid())
+                return self.admissionDraft($0, fixture: fixture)
+            })
+            guard case .admitted(let identity) = try typedOutcome(reply, submission: submission, profile: profile) else {
+                return XCTFail("Current grants must admit the authenticated capture")
+            }
+            XCTAssertEqual(identity.requestID, request.requestID); XCTAssertEqual(box.state.withLock { $0.reads }, 3)
+            XCTAssertNotNil(try fixture.reservation(submission.binding.id))
+        }
+    }
+
+    func testCurrentElevationRevocationDuringDraftNeverPublishesRequest() throws {
+        for checkpointed in [false, true] {
+            let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+            let box = ElevationGrantBox(), policy = try currentElevation(box)
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply)
+            let before = try fixture.auditRecordCount
+            XCTAssertThrowsError(try admitWithElevation(attempt, fixture: fixture, policy: policy, build: {
+                box.state.withLock { $0.targets = [] }
+                return self.admissionDraft($0, fixture: fixture)
+            })) { XCTAssertEqual($0 as? CommandElevationPolicyError, .policyRejected) }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+            XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+            XCTAssertEqual(box.state.withLock { $0.reads }, 3); XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
+    func testCurrentElevationReadFailureHasNoCachedAdmissionFallback() throws {
+        for checkpointed in [false, true] {
+            for failAt in 1...3 {
+                let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
+                let box = ElevationGrantBox(); box.state.withLock { $0.failAtRead = failAt }
+                let policy = try currentElevation(box), (attempt, submission, profile) = try admissionAttempt(reply: reply)
+                let before = try fixture.auditRecordCount
+                XCTAssertThrowsError(try admitWithElevation(attempt, fixture: fixture, policy: policy)) {
+                    XCTAssertTrue($0 is ElevationReadFailure)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .uncertain(.admissionRejected))
+                XCTAssertNil(try fixture.reservation(submission.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
+                XCTAssertEqual(box.state.withLock { $0.reads }, failAt); XCTAssertEqual(try sendReferences(reply.port), 1)
+            }
+        }
+    }
+
+    func testCurrentElevationExecutionRejectsAnotherJournalScopeBeforeControllerCreation() throws {
+        let fixture = try CommandRequestFixture(owned: true), box = ElevationGrantBox()
+        let policy = try currentElevation(box, macID: Data(repeating: 3, count: 16))
+        let authority = try XCTUnwrap(fixture.authority), before = try fixture.auditRecordCount, moment = fixture.now()
+        XCTAssertThrowsError(try authority.beginCommandExecution(requestID: Data(count: 16), monitorPath: "/missing-monitor",
+            childPath: "/missing-child", preparationMilliseconds: 1000, fileCreationMask: 0o077,
+            elevationPolicy: policy, clock: { moment })) {
+            XCTAssertEqual($0 as? CommandElevationPolicyError, .policyRejected)
+        }
+        XCTAssertEqual(box.state.withLock { $0.reads }, 0); XCTAssertEqual(try fixture.auditRecordCount, before)
+    }
+}

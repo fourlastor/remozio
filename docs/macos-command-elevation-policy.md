@@ -28,13 +28,13 @@ Capture validation rejects changed groups, GID or account name, and fails if the
 flowchart TD
     S[Setup disclosure and account selection: pending] --> P[Root-owned account policy]
     P --> A[Check exact scope, caller and requested target]
-    A --> C[Capture exact command and OS target: integration pending]
+    A --> C[Capture exact command and OS target]
     C --> B[Phone approval and durable consumption]
     B --> R[Reload policy and recheck captured caller and target]
-    R --> E[Existing final identity checks and gated dispatch: integration pending]
+    R --> E[Existing final identity checks and gated dispatch]
 ```
 
-The diagram describes the planned composition. This change implements the policy component; it does not install or activate that composition.
+The diagram shows the component composition. The application does not yet install or activate protected command dispatch.
 The production loader requires existing Root-owned private metadata and protected ancestors.
 Decoding arbitrary bytes does not establish installation provenance or grant execution authority.
 
@@ -44,9 +44,16 @@ Setup must explain that Remozio can allow a command that sudoers would refuse.
 The user must choose the enrolled caller account and allowed target users. Do not infer grants from administrator membership.
 Machine-specific grants are scoped to their Mac and account; importing shared setup configuration does not transfer those grants.
 
-Before activating execution, connect current policy reads to admission and final dispatch, resolve target credentials through the OS, and complete protected service registration.
+`CurrentCommandElevationPolicy` retains only the protected loader and configured Mac, account and caller scope. It reloads grants for each resolution and validation. A failed read has no cached fallback.
+
+The journal admission overload uses the original authenticated handshake scope and caller UID. It checks grants before filesystem capture. It rechecks the capture before and after trusted draft construction, before publishing the request.
+
+The execution overload checks the policy scope against the current journal before creating a controller. It supplies the fresh validator to the existing pre-spawn and pre-release checks. The callback reads the protected policy without journal reentry.
+
+Before activating execution, complete protected service registration and the native target-group experiment in [issue 298](https://github.com/rock3r/remozio/issues/298). Preserve the full OS group identity; do not truncate groups or silently reject Root targets.
 The existing enrollment, signature, capture, caller-lifetime, durable-consumption and execution checks remain required.
 The 1Password and Little Snitch adapter contracts remain unchanged.
 
 Tests cover scope and account isolation, target removal, disabled grants, captured caller changes, rejected encodings and unprivileged protected-file loading.
+Journal fixtures also cover policy rejection before capture, actual OS credential capture, revocation during draft construction and read failures at each admission check. They verify that failed admission creates no request reservation or audit event. These fixtures use internal identity seams; they do not prove installed Root execution.
 No privileged service was installed or launched for these checks.
