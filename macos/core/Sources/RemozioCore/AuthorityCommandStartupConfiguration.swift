@@ -9,6 +9,9 @@ public enum AuthorityCommandStartupError: Error, Equatable { case invalidConfigu
 public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     public static let supportedVersions: Set<UInt64> = [1]
     public static let captureSchemaVersion: UInt64 = 3
+    static let permittedCommandActions: [CapturedAction] = [
+        .init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)
+    ]
     public let presence: AuthorityPresenceStartupConfiguration
     public let serviceName: String
     public let policyPath: String
@@ -160,7 +163,7 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
                 macID: Data(repeating: 7, count: 16), accountID: Data(repeating: 8, count: 16),
                 requestID: Data(repeating: 9, count: 16), challenge: Data(repeating: 10, count: 32),
                 requiredFeatures: [], createdUnixMilliseconds: 1, expiresUnixMilliseconds: 2,
-                canonicalCapture: capture.canonicalBytes, permittedActions: [.init(choice: .execute, scope: .currentRequest)],
+                canonicalCapture: capture.canonicalBytes, permittedActions: permittedCommandActions,
                 bodyLimits: bodyLimits, captureLimits: captureLimits)
         }
     }

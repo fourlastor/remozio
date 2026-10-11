@@ -141,4 +141,80 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
         }
         XCTAssertThrowsError(try config().currentElevationPolicy()) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
     }
+    private func compositionCapture(_ version: Int = 3) throws -> CommandCapture {
+        var root = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { root.deleteLastPathComponent() }
+        let data = try Data(contentsOf: root.appendingPathComponent("protocol/vectors/command-capture-v\(version).json"))
+        let vectors = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        let row = (vectors["valid"] as! [[String: Any]])[0]
+        let hex = row["hex"] as! String
+        var bytes = Data(), cursor = hex.startIndex
+        while cursor < hex.endIndex {
+            let end = hex.index(cursor, offsetBy: 2); bytes.append(UInt8(hex[cursor..<end], radix: 16)!); cursor = end
+        }
+        return try CommandCapture(canonicalBytes: bytes, limits: .init(maxBytes: 65_536, maxDepth: 16, maxItems: 4096),
+            expectedSchemaVersion: UInt64(version))
+    }
+    func testConfiguredDraftUsesSharedMomentAndExactConfiguredLifetime() throws {
+        let configuration = try config(), capture = try compositionCapture(), moment = AuthorityMoment(epoch: UUID(), milliseconds: 500)
+        let draft = try configuration.commandDraft(capture, observed: moment, unixMilliseconds: 1000)
+        XCTAssertEqual(draft.capture, capture.canonicalBytes)
+        XCTAssertEqual(draft.contract.requestKind, .command); XCTAssertEqual(draft.contract.schemaVersion, 3)
+        XCTAssertEqual(draft.firstObservedAt, moment); XCTAssertEqual(draft.deadlineMilliseconds, 60_500)
+        XCTAssertEqual(draft.createdUnixMilliseconds, 1000); XCTAssertEqual(draft.expiresUnixMilliseconds, 61_000)
+        XCTAssertEqual(Set(draft.actions), [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)])
+        XCTAssertNil(draft.observationID); XCTAssertNil(draft.estimatedLifetimeMilliseconds)
+        for action in draft.actions {
+            let policy = try ActionPolicy.requirement(for: action, requestKind: .command, retainedPermittedActions: Set(draft.actions))
+            XCTAssertEqual(policy.keyClass, action.choice == .execute ? .biometric : .decision)
+        }
+    }
+    func testConfiguredDraftChecksBothClockOverflowsAndUsesDaySetting() throws {
+        let configuration = try config(lifetime: 86_400_000), capture = try compositionCapture(), epoch = UUID()
+        let draft = try configuration.commandDraft(capture, observed: .init(epoch: epoch, milliseconds: 1), unixMilliseconds: 2)
+        XCTAssertEqual(draft.deadlineMilliseconds, 86_400_001); XCTAssertEqual(draft.expiresUnixMilliseconds, 86_400_002)
+        for (monotonic, unix): (UInt64, UInt64) in [(UInt64.max, 2), (1, UInt64.max)] {
+            XCTAssertThrowsError(try configuration.commandDraft(capture, observed: .init(epoch: epoch, milliseconds: monotonic), unixMilliseconds: unix)) {
+                XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidClock)
+            }
+        }
+    }
+    func testConfiguredDraftRejectsHistoricalCaptureProfiles() throws {
+        let configuration = try config()
+        for version in [1, 2] {
+            XCTAssertThrowsError(try configuration.commandDraft(compositionCapture(version),
+                observed: .init(epoch: UUID(), milliseconds: 1), unixMilliseconds: 2)) {
+                XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidDraft)
+            }
+        }
+    }
+    func testConfiguredFactoryRefusesOrdinaryAccountBeforeReceiveRightOrPolicyRead() throws {
+        guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Ordinary-account gate") }
+        let configuration = try config()
+        XCTAssertThrowsError(try configuration.receiverFactory(takingRegisteredReceiveRight: { XCTFail("Unexpected registration read"); return mach_port_t(MACH_PORT_NULL) })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+    }
+    func testSharedCommandServiceRefusesOrdinaryAccountBeforeRegistration() throws {
+        guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Ordinary-account gate") }
+        let configuration = try config()
+        XCTAssertThrowsError(try AuthorityWakeService.open(configuration: configuration,
+            takingRegisteredReceiveRight: { XCTFail("Unexpected registration read"); return mach_port_t(MACH_PORT_NULL) },
+            reconcileExpired: { _ in XCTFail("Unexpected expiry reconciliation") })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+    }
+    @MainActor func testConfiguredRuntimeRefusesPrivateMetadataWithoutStartingRegistration() async throws {
+        guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Ordinary-account gate") }
+        let runner = try AuthorityRuntimeRunner(commandConfigurationPath: "/tmp/remozio-no-command-startup.cbor",
+            takingRegisteredReceiveRight: { XCTFail("Unexpected registration read"); return mach_port_t(MACH_PORT_NULL) },
+            monitorMilliseconds: 10, report: { _ in })
+        try await runner.start()
+        for _ in 0..<100 {
+            if case .failed = runner.status { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(runner.status, .failed(.configurationFailure))
+        try await runner.close(); XCTAssertEqual(runner.status, .closed)
+    }
 }

@@ -8155,3 +8155,95 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(factories.withLock { $0 }, 0); XCTAssertEqual(box.state.withLock { $0.reads }, 0)
     }
 }
+
+extension MachCommandCallerReceiverTests {
+    private func configuredCommandPresence() throws -> AuthorityPresenceStartupConfiguration {
+        func id(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
+        let key = P256.Signing.PrivateKey().publicKey.x963Representation
+        let service = try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/Library/Remozio/journal",
+            serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
+            transportHashes: [id(3, 20)], transportUID: 401, maximumPayloadBytes: 262_144, continuityDirectory: "/Library/Remozio/continuity")
+        let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/key.cbor", authorityPublicKey: key)
+        let registration = try GatewayRegistrationIdentity(ownerID: id(3), macID: id(1), accountID: id(2), gatewayID: id(4),
+            lifecycleEpoch: id(5), rootPublicKey: key)
+        let wake = try AuthorityWakeStartupConfiguration(request: request, registration: registration,
+            gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402, teamID: "TEAMID1234",
+            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)])
+        return try .init(wake: wake, ownerUID: geteuid(), appServiceName: "dev.remozio.presence", teamID: "TEAMID1234",
+            appIdentifier: "dev.remozio.mac", appHashes: [id(6, 20)],
+            policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
+    }
+
+    func testConfiguredDraftAdmitsNativeMappedInputWithConfiguredAgeLifetimeAndActions() throws {
+        for wire: UInt64 in [10, 11] {
+            let fixture = try CommandRequestFixture(checkpointed: true, owned: true, commandSchema: 3)
+            let journal = try XCTUnwrap(fixture.authority), box = ElevationGrantBox(), policy = try currentElevation(box)
+            let configuration = try AuthorityCommandStartupConfiguration(presence: configuredCommandPresence(),
+                serviceName: "dev.remozio.command", policyPath: "/Library/Remozio/elevation.cbor", environment: assemblyEnvironment,
+                submissionLimits: assemblyLimits, captureLimits: fixture.limits, maximumAncestryEntries: 0,
+                approvalLifetimeMilliseconds: 9000)
+            var port: mach_port_t = 0
+            XCTAssertEqual(mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &port), KERN_SUCCESS)
+            let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+            let host = try CommandReceiveHost(takingReceiveRight: port, macID: configuration.macID,
+                accountID: configuration.accountID, userID: configuration.callerUID, auditSessionID: nil,
+                maximumSessions: configuration.maximumSessions, maximumPayloadBytes: configuration.submissionLimits.maxBytes,
+                receiveWaitMilliseconds: configuration.receiveWaitMilliseconds,
+                replyTimeoutMilliseconds: configuration.replyTimeoutMilliseconds, capabilities: configuration.capabilities,
+                context: { _ in context })
+            defer { host.close() }
+            XCTAssertEqual(mach_port_insert_right(mach_task_self_, port, port, UInt32(MACH_MSG_TYPE_MAKE_SEND)), KERN_SUCCESS)
+            defer { _ = mach_port_deallocate(mach_task_self_, port) }
+            let helloReply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32),
+                capabilities: .init(wireVersions: [wire], submissionSchemaVersions: [1], inputCarrierVersions: [5]))
+            try MachCommandWire.send(offer.canonicalBytes, destination: port, replyPort: helloReply.port,
+                identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+            _ = try host.poll(handleInput: { _ in XCTFail("Unexpected command during hello") })
+            let response = try receiver(helloReply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+            defer { response.caller.close() }
+            let profile = try CommandHandshakeReply.decode(response.payload, offer: offer,
+                macID: configuration.macID, accountID: configuration.accountID)
+            XCTAssertEqual(profile.wireVersion, wire)
+            let reply = try Endpoint(), terminal = try Endpoint(), null = Darwin.open("/dev/null", O_RDWR | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(null, 0); defer { _ = Darwin.close(null) }
+            let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16),
+                nonce: Data(repeating: 0xb3, count: 32), callerBinding: profile.callerBinding), ioMode: wire == 10 ? .pty : .pipes)
+            try MachCommandIOWire.sendMapped(submission.canonicalBytes, inputDescriptor: null, outputDescriptor: null,
+                errorDescriptor: null, controlTerminalDescriptor: nil, destination: port, admissionReply: reply.port,
+                terminalReply: terminal.port, maximumPayloadBytes: configuration.submissionLimits.maxBytes, timeoutMilliseconds: 1000)
+            let before = try fixture.auditRecordCount
+            var issued: IssuedRequestPayload?
+            _ = try host.pollAdmission(submissionLimits: configuration.submissionLimits, receiptTime: { 777 }, admit: { attempt, time, stop in
+                try journal.admitCommandAttempt(attempt, expression: selfExpression(), elevationPolicy: policy,
+                    captureSchemaVersion: AuthorityCommandStartupConfiguration.captureSchemaVersion,
+                    minimalEnvironment: configuration.environment, streamBinding: Data(repeating: 0xe4, count: 16),
+                    captureLimits: configuration.captureLimits, maximumAncestryEntries: configuration.maximumAncestryEntries,
+                    draft: { try configuration.commandDraft($0, observed: fixture.now(100), unixMilliseconds: 1000) },
+                    now: { fixture.now(110) }, receiptTimeMs: time, checkCancellation: { try stop.check() })
+            }, onResult: { issued = try $0.get() })
+            let request = try XCTUnwrap(issued)
+            guard case .admitted(let admission) = try typedOutcome(reply, submission: submission, profile: profile) else {
+                return XCTFail("Native mapped command was not admitted")
+            }
+            XCTAssertEqual(admission.requestID, request.requestID); XCTAssertEqual(request.contract.schemaVersion, 3)
+            XCTAssertEqual(request.createdUnixMilliseconds, 1000); XCTAssertEqual(request.expiresUnixMilliseconds, 10_000)
+            XCTAssertEqual(Set(request.permittedActions), [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)])
+            let state = try journal.withRequests { try $0.state(requestID: request.requestID) }
+            XCTAssertEqual(state.phase, .queued); XCTAssertEqual(state.firstObservedAt, fixture.now(100))
+            XCTAssertEqual(state.deadlineMilliseconds, 9100); XCTAssertEqual(try fixture.auditRecordCount, before + 1)
+            let capture = try CommandCapture(canonicalBytes: request.canonicalCapture, limits: configuration.captureLimits, expectedSchemaVersion: 3)
+            XCTAssertEqual(capture.arguments, submission.arguments)
+            for entry in configuration.environment where !submission.environmentAdditions.contains(where: { $0.name == entry.name }) {
+                XCTAssertTrue(capture.environment.contains(entry))
+            }
+            for addition in submission.environmentAdditions {
+                XCTAssertTrue(capture.environment.contains(.init(name: addition.name, value: addition.value, source: .requested)))
+            }
+            XCTAssertEqual(capture.target.uid, geteuid()); XCTAssertTrue(capture.ancestry.entries.isEmpty)
+            XCTAssertEqual(box.state.withLock { $0.reads }, 3)
+            XCTAssertGreaterThanOrEqual(fcntl(null, F_GETFD), 0)
+            let cancelledAt = fixture.now(120)
+            _ = try journal.withRequests { try $0.retirePending(requestID: request.requestID, reason: .cancelled, now: cancelledAt, receiptTimeMs: nil) }
+        }
+    }
+}
