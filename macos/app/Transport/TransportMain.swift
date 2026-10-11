@@ -5,21 +5,25 @@ import RemozioCore
 @main
 struct TransportMain {
     static func main() async {
-        guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration"].contains(CommandLine.arguments[1]) else {
-            fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH", code: EX_USAGE)
+        guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration", "--remote-configuration"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH or --remote-configuration PATH", code: EX_USAGE)
         }
         let configuration: ApprovalTransportConfiguration
         let wake: TransportWakeStartupConfiguration?
+        let relayPort: UInt16?
         do {
-            if CommandLine.arguments[1] == "--wake-configuration" {
+            if CommandLine.arguments[1] == "--remote-configuration" {
+                let value = try TransportRemoteStartupConfiguration.load(path: CommandLine.arguments[2])
+                configuration = value.transport; wake = value.wake; relayPort = value.relayPort
+            } else if CommandLine.arguments[1] == "--wake-configuration" {
                 let value = try TransportWakeStartupConfiguration.load(path: CommandLine.arguments[2])
-                configuration = value.transport; wake = value
+                configuration = value.transport; wake = value; relayPort = nil
             } else {
-                configuration = try ApprovalTransportConfiguration.load(path: CommandLine.arguments[2]); wake = nil
+                configuration = try ApprovalTransportConfiguration.load(path: CommandLine.arguments[2]); wake = nil; relayPort = nil
             }
         }
         catch { fail("Transport startup requires protected configuration and the configured service account.", code: EX_CONFIG) }
-        let task = Task { try await run(configuration, wake: wake) }
+        let task = Task { try await run(configuration, wake: wake, relayPort: relayPort) }
         signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -37,7 +41,7 @@ struct TransportMain {
         }
     }
 
-    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?) async throws {
+    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?) async throws {
         try Task.checkCancellation()
         let recovery: TransportWakeRunner?
         if let wake {
@@ -47,6 +51,10 @@ struct TransportMain {
                 recovery = nil
             }
         } else { recovery = nil }
+        let relay = try relayPort.map { port in
+            try ApprovalRelayCoordinator(listenPort: port, maximumConnections: configuration.maximumConnections,
+                timeoutMilliseconds: configuration.timeoutMilliseconds, report: reportRelay)
+        }
         let identity = try ApprovalTransportIdentity.load(configuration: configuration)
         let service = try DirectApprovalTransportService(macID: configuration.macID, accountID: configuration.accountID,
             identity: identity, authorityServiceName: configuration.authorityServiceName, authorityPolicy: configuration.authorityPolicy,
@@ -67,6 +75,7 @@ struct TransportMain {
                 try Task.checkCancellation()
                 let state = await service.state
                 if previous != state { report(state); previous = state }
+                try await relay?.update(state)
                 switch state {
                 case .stopped, .authorityUnavailable, .failed: throw DirectHostError.authorityUnavailable
                 case .noEligiblePhones, .starting, .ready: break
@@ -74,10 +83,18 @@ struct TransportMain {
                 try await Task.sleep(for: .milliseconds(250))
             }
         } catch {
+            await relay?.close()
             await recovery?.close()
             await service.close()
             if Task.isCancelled { throw CancellationError() }
             throw error
+        }
+    }
+    private static func reportRelay(_ status: ApprovalRelayCoordinator.Status) {
+        switch status {
+        case .ready: log("Local approval relay is ready.")
+        case .failed: log("Local approval relay is unavailable. Retrying while direct approvals remain available.")
+        default: break
         }
     }
     private static func reportWake(_ status: TransportWakeRunner.Status) {

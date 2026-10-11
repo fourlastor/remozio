@@ -1,0 +1,36 @@
+{
+  "activeShutdownDrained": true,
+  "androidDeviceTested": false,
+  "cases": [
+    "fragmentedBinary",
+    "pingBinary",
+    "binaryLimit",
+    "wrongProtocol",
+    "textRejected",
+    "oversizeRejected",
+    "fragmentedOversizeRejected",
+    "emptyBinary",
+    "extensionsNotNegotiated",
+    "protocolFallback"
+  ],
+  "clientCertificateVerified": true,
+  "cloudflareTested": false,
+  "connectionLimitVerified": true,
+  "enrolledRemozioExchangeTested": false,
+  "experiment": "native-approval-relay",
+  "hostMacOS": "27.0.1",
+  "loopbackOnly": true,
+  "opaqueRoundTripBytes": 50000,
+  "productionKeysUsed": false,
+  "sameDisposableCertificateForBothRoles": true,
+  "schemaVersion": 1,
+  "serverCertificateVerified": true,
+  "silentUpgradeDeadlineVerified": true,
+  "sourceSHA256": {
+    "experiments/macos/Sources/ApprovalRelayProbe/main.swift": "a7547513146942f5bb59d3d3c4d789421bc7b9f95c56b114a3db0cf2917ac628",
+    "macos/core/Sources/RemozioCore/ApprovalWebSocketRelay.swift": "8604e085f5b011cce36f99f37c20fc2276965b50f07979f4e76b36f40cae584f",
+    "scripts/run-native-approval-relay-experiment.py": "be141dafd50e4731a37a46a6964e2c27ecae10947169700d49d364dcb362ed27"
+  },
+  "status": "passed",
+  "tlsVersion": "TLSv1.3"
+}

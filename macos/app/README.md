@@ -124,6 +124,9 @@ Setup provisioning, CLI path installation, Developer ID signing, and real-device
 Debug and Release have separate signing identifiers and retain security generation 1.
 It accepts `--configuration /absolute/protected/transport.cbor` for direct approvals.
 It also accepts `--wake-configuration /absolute/protected/wake.cbor` for the optional [wake recovery runner](../../docs/experiments/transport-wake-recovery.md).
+The optional `--remote-configuration PATH` adds the [native approval relay](../../docs/experiments/native-approval-relay.md).
+It includes the same transport metadata, an optional wake worker, and a fixed loopback WebSocket port.
+The relay forwards opaque TLS bytes only to the current approval listener. Cloudflare provisioning remains pending.
 The process loads Root-owned public metadata and requires the configured service UID as both its real and effective UID.
 It rejects Root and the recorded interactive owner account.
 Provisioning must create the dedicated account and protect its key custody; different UID values alone do not prove that setup.

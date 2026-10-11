@@ -45,7 +45,8 @@ def check(configuration):
     transport_original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioTransport'
     require(transport.read_bytes() == transport_original.read_bytes(), 'Embedding changed the signed transport')
     for arguments, status in (([], 64), (['--configuration', '/nonexistent/remozio-transport.cbor'], 78),
-                              (['--wake-configuration', '/nonexistent/remozio-wake.cbor'], 78)):
+                              (['--wake-configuration', '/nonexistent/remozio-wake.cbor'], 78),
+                              (['--remote-configuration', '/nonexistent/remozio-remote.cbor'], 78)):
         read_descriptor, write_descriptor = os.pipe()
         try:
             original_input = b'unread transport input\x00\xff'
