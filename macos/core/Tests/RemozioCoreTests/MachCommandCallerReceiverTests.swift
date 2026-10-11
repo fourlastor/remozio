@@ -6019,51 +6019,56 @@ extension MachCommandCallerReceiverTests {
                 } else { queueTimeouts += 1; break }
             }
         }
-        while !ended {
-            guard Date() < deadline else {
-                XCTFail("Bulk transfer stalled: sent=\(sent), output=\(output.count), credit=\(available), sequence=\(outgoing), inputEnd=\(inputEndSent), queueTimeouts=\(queueTimeouts)")
-                throw MachCommandCallerError.timeout
-            }
-            if let control {
-                if sent == 0 {
-                    // The worker holds only the fixture journal. The original frontend keeps its non-Sendable control right.
-                    let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
-                    let paused = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
-                    DispatchQueue.global().async {
-                        defer { done.signal() }
-                        let result = Result {
-                            try authority.read { _ in
-                                entered.signal()
-                                guard resume.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+        do {
+            while !ended {
+                guard Date() < deadline else {
+                    XCTFail("Bulk transfer stalled: sent=\(sent), output=\(output.count), credit=\(available), sequence=\(outgoing), inputEnd=\(inputEndSent), queueTimeouts=\(queueTimeouts)")
+                    throw MachCommandCallerError.timeout
+                }
+                if let control {
+                    if sent == 0 {
+                        // The worker holds only the fixture journal. The original frontend keeps its non-Sendable control right.
+                        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+                        let paused = OSAllocatedUnfairLock(initialState: Result<Void, Error>?.none)
+                        DispatchQueue.global().async {
+                            defer { done.signal() }
+                            let result = Result {
+                                try authority.read { _ in
+                                    entered.signal()
+                                    guard resume.wait(timeout: .now() + 5) == .success else { throw MachCommandCallerError.timeout }
+                                }
                             }
+                            paused.withLock { $0 = result }
                         }
-                        paused.withLock { $0 = result }
+                        defer { resume.signal() }
+                        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+                        try enqueueInput(control)
+                        resume.signal()
+                        XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
+                        try paused.withLock { try XCTUnwrap($0).get() }
+                    } else { try enqueueInput(control) }
+                    if sent == bytes.count, !inputEndSent {
+                        let end = try CommandStreamFrame(sequence: outgoing, body: .inputEnd).encode(binding: binding)
+                        if try MachCommandWire.sendStream(end, destination: control.borrowed(), toAuthority: true) { outgoing += 1; inputEndSent = true }
                     }
-                    defer { resume.signal() }
-                    XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
-                    try enqueueInput(control)
-                    resume.signal()
-                    XCTAssertEqual(done.wait(timeout: .now() + 5), .success)
-                    try paused.withLock { try XCTUnwrap($0).get() }
-                } else { try enqueueInput(control) }
-                if sent == bytes.count, !inputEndSent {
-                    let end = try CommandStreamFrame(sequence: outgoing, body: .inputEnd).encode(binding: binding)
-                    if try MachCommandWire.sendStream(end, destination: control.borrowed(), toAuthority: true) { outgoing += 1; inputEndSent = true }
+                }
+                guard case .stream(let reply, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
+                    return XCTFail("All output must drain before the terminal result")
+                }
+                defer { reply.caller.close(); carried?.close() }
+                let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
+                try incoming.accept(frame)
+                switch frame.body {
+                case .opened: control = try XCTUnwrap(carried).takeControlRight(); available = 32768
+                case .inputCredit(let count): available += Int(count); XCTAssertLessThanOrEqual(available, 32768)
+                case .output(let bytes): output.append(bytes); usleep(3000)
+                case .outputEnd: ended = true
+                default: XCTFail("The stream must preserve its direction")
                 }
             }
-            guard case .stream(let reply, let carried) = try receive.receiveExecutionEvent(timeoutMilliseconds: 2000) else {
-                return XCTFail("All output must drain before the terminal result")
-            }
-            defer { reply.caller.close(); carried?.close() }
-            let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
-            try incoming.accept(frame)
-            switch frame.body {
-            case .opened: control = try XCTUnwrap(carried).takeControlRight(); available = 32768
-            case .inputCredit(let count): available += Int(count); XCTAssertLessThanOrEqual(available, 32768)
-            case .output(let bytes): output.append(bytes); usleep(3000)
-            case .outputEnd: ended = true
-            default: XCTFail("The stream must preserve its direction")
-            }
+        } catch {
+            XCTFail("Bulk transfer failed: error=\(error), sent=\(sent), output=\(output.count), credit=\(available), sequence=\(outgoing), inputEnd=\(inputEndSent), queueTimeouts=\(queueTimeouts)")
+            throw error
         }
         XCTAssertEqual(sent, bytes.count); XCTAssertTrue(inputEndSent); XCTAssertGreaterThan(queueTimeouts, 0)
         let expected = bytes + Data((0..<1048576).map { UInt8(($0 * 17 + 3) % 251) })

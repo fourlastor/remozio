@@ -80,6 +80,11 @@ The runner compiles disposable fixtures, creates private terminals, verifies 50 
 The runner rejects changed observations. It records source hashes and host versions. Its temporary paths and target arguments stay out of evidence.
 Fixture loop deadlines bound experiments only. They define no product execution limit.
 
+Failed subprocesses retain the case, trial, exit status or timeout, and bounded excerpts from both output streams.
+Partial timeout output is decoded safely. These diagnostics add no retry and change no fixture deadline.
+The native PTY backpressure test also reports its progress counters when a transfer operation throws.
+It performs no extra journal read while reporting the failure. The earlier intermittent causes remain unproven.
+
 ## Required integration
 
 This result supports a monitor design. It does not establish production job control.

@@ -51,8 +51,20 @@ EXPECTED = {
 }
 
 
-def run(arguments):
-    return subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=30)
+def run(arguments, *, context="native fixture"):
+    try:
+        return subprocess.run(arguments, check=True, capture_output=True, text=True, timeout=30)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        def excerpt(value):
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            return (value or "")[-8192:]
+        result = f"exit {error.returncode}" if isinstance(error, subprocess.CalledProcessError) else "timeout after 30 seconds"
+        raise RuntimeError(
+            f"{context}: {Path(arguments[0]).name}: {result}\n"
+            f"stdout (last 8192 characters):\n{excerpt(error.stdout)}\n"
+            f"stderr (last 8192 characters):\n{excerpt(error.stderr)}"
+        ) from error
 
 
 def compile_fixture(directory, name, sources):
@@ -99,7 +111,7 @@ def measure():
                        else [str(monitor_probe), str(monitor),
                              str(directory / "missing-target" if case == "failure" else monitor_target), case])
             for trial in range(TRIALS):
-                actual = json.loads(run(command).stdout)
+                actual = json.loads(run(command, context=f"job-control case {case}, trial {trial}").stdout)
                 if actual != expected:
                     raise RuntimeError(f"Job-control observation changed: {case}, trial {trial}, {actual!r}")
             observations[case] = {"trials": TRIALS, "allTrialsMatch": True, "observations": expected}
