@@ -1,0 +1,49 @@
+{
+  "darwinUnlimitedInspection": {
+    "ordinaryAccount": {
+      "currentProcessGroups": 17,
+      "getgroupsInterface": "darwin-unlimited",
+      "kernelReportedLimit": 16,
+      "privilegedControlsRun": false,
+      "rootDirectoryGroups": 24,
+      "schemaVersion": 1,
+      "targetDirectoryGroups": 17
+    },
+    "root": {
+      "currentProcessGroups": 17,
+      "getgroupsInterface": "darwin-unlimited",
+      "kernelReportedLimit": 16,
+      "privilegedControlsRun": false,
+      "rootDirectoryGroups": 24,
+      "schemaVersion": 1,
+      "targetDirectoryGroups": 24
+    }
+  },
+  "hostMacOS": "27.0.1",
+  "invalidUIDRefused": true,
+  "ordinaryAccountInspection": {
+    "currentProcessGroups": 16,
+    "getgroupsInterface": "posix",
+    "kernelReportedLimit": 16,
+    "privilegedControlsRun": false,
+    "rootDirectoryGroups": 24,
+    "schemaVersion": 1,
+    "targetDirectoryGroups": 17
+  },
+  "ordinaryPrivilegedModeRefused": true,
+  "privilegedControlsRun": false,
+  "productionCredentialsChanged": false,
+  "productionExecutionTested": false,
+  "rootInspection": {
+    "currentProcessGroups": 16,
+    "getgroupsInterface": "posix",
+    "kernelReportedLimit": 16,
+    "privilegedControlsRun": false,
+    "rootDirectoryGroups": 24,
+    "schemaVersion": 1,
+    "targetDirectoryGroups": 24
+  },
+  "schemaVersion": 1,
+  "sourceSHA256": "741d950150f01a9fb30761fa96a16b9bd75310f42c65e149c3f8ad2847172836",
+  "status": "inspection-passed"
+}
