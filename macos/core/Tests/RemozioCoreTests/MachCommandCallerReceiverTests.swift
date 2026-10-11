@@ -6,6 +6,7 @@ import RemozioMach
 import RemozioProtocol
 import Security
 import SQLite3
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -7717,4 +7718,221 @@ extension MachCommandCallerReceiverTests {
     func testCurrentJobQueryExpiryReturnsUnknownWithoutCancelingTheOriginalCommand() throws {
         for wire: UInt64 in [10, 11] { try runCurrentJobQuery(wire: wire, mode: "expired") }
     }
+    private final class WorkerPort: Sendable { let value = Mutex<mach_port_t>(0) }
+    private static func workerHost(port: WorkerPort, context: CommandSessionRegistry.Context,
+                                   policyRead: @escaping @Sendable () throws -> Void = {}) throws -> CommandReceiveHost {
+        var receiver: mach_port_t = 0
+        guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &receiver) == KERN_SUCCESS else {
+            throw MachCommandCallerError.configuration
+        }
+        let host = try CommandReceiveHost(takingReceiveRight: receiver, macID: Data(repeating: 1, count: 16),
+            accountID: Data(repeating: 2, count: 16), userID: geteuid(), auditSessionID: nil, maximumSessions: 4,
+            maximumPayloadBytes: 8192, receiveWaitMilliseconds: 10, replyTimeoutMilliseconds: 100,
+            capabilities: .admissionResults, context: { _ in try policyRead(); return context })
+        guard mach_port_insert_right(mach_task_self_, receiver, receiver, UInt32(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS else {
+            host.close(); throw MachCommandCallerError.configuration
+        }
+        port.value.withLock { $0 = receiver }
+        return host
+    }
+    private func receiveWorker(_ fixture: CommandRequestFixture, port: WorkerPort,
+                               makeHost: (@Sendable () throws -> CommandReceiveHost)? = nil,
+                               policyRead: @escaping @Sendable () throws -> Void = {},
+                               receiptTime: @escaping @Sendable () -> UInt64? = { nil },
+                               onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
+                               report: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in }) throws -> AuthorityCommandReceiveWorker {
+        let journal = try XCTUnwrap(fixture.authority), epoch = fixture.clock
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        return try AuthorityCommandReceiveWorker(ownedJournal: journal, submissionLimits: assemblyLimits,
+            makeHost: makeHost ?? { try Self.workerHost(port: port, context: context, policyRead: policyRead) },
+            resolve: { _ in .refuse(.policyRejected) }, draft: { _ in throw ApprovalCoordinatorError.invalidDraft },
+            clock: { .init(epoch: epoch, milliseconds: 110) }, receiptTime: receiptTime, onAdmission: onAdmission, report: report)
+    }
+    private func receiveRightPresent(_ port: mach_port_t) -> Bool {
+        var type: mach_port_type_t = 0
+        return mach_port_type(mach_task_self_, port, &type) == KERN_SUCCESS && (type & (UInt32(1) << (MACH_PORT_RIGHT_RECEIVE + 16))) != 0
+    }
+    @MainActor private func waitForReceiveWorker(_ condition: @Sendable () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        guard condition() else { throw MachCommandCallerError.timeout }
+    }
+    func testReceiveWorkerPublicConstructionRefusesNormalUserBeforeFactory() throws {
+        guard getuid() != 0 || geteuid() != 0 else { throw XCTSkip("Normal-user gate") }
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), factories = Mutex(0)
+        let epoch = fixture.clock
+        XCTAssertThrowsError(try AuthorityCommandReceiveWorker(journal: XCTUnwrap(fixture.authority), submissionLimits: assemblyLimits,
+            makeHost: { factories.withLock { $0 += 1 }; throw CommandReceiveHostError.invalidConfiguration },
+            resolve: { _ in .refuse(.policyRejected) }, draft: { _ in throw ApprovalCoordinatorError.invalidDraft },
+            clock: { .init(epoch: epoch, milliseconds: 110) })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(factories.withLock { $0 }, 0)
+    }
+    @MainActor func testReceiveWorkerSamplesReceiptTimeOnlyAfterActualCommandInput() async throws {
+        guard geteuid() != 0 else { throw XCTSkip("Normal-user fixture") }
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let reads = Mutex(0), sampled = Mutex<[UInt64]>([]), current = Mutex<UInt64>(100), admitted = Mutex(false)
+        let worker = try receiveWorker(fixture, port: port, policyRead: { reads.withLock { $0 += 1 } }, receiptTime: {
+            let now = current.withLock { $0 }; sampled.withLock { $0.append(now) }; return now
+        }, onAdmission: {
+            guard case .failure(let error) = $0 else { return XCTFail("Normal-user fixture admitted a command") }
+            XCTAssertEqual(error as? JournalLeaseError, .rootRequired)
+            admitted.withLock { $0 = true }
+        })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination) }
+        try await waitForReceiveWorker { reads.withLock { $0 >= 3 } }
+        XCTAssertTrue(sampled.withLock { $0.isEmpty })
+        let helloReply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: destination, replyPort: helloReply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        let response = try receiver(helloReply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        let profile = try CommandHandshakeReply.decode(response.payload, offer: offer,
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        XCTAssertTrue(sampled.withLock { $0.isEmpty })
+        current.withLock { $0 = 777 }
+        let inputReply = try Endpoint()
+        let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
+            callerBinding: profile.callerBinding))
+        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+        try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: fd, destination: destination,
+            replyPort: inputReply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+        try await waitForReceiveWorker { admitted.withLock { $0 } }
+        await worker.close()
+        XCTAssertEqual(sampled.withLock { $0 }, [777]); XCTAssertFalse(worker.isRetired)
+    }
+    @MainActor func testReceiveWorkerOwnsNativeHelloAndClosesBeforeSharedJournal() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let worker = try receiveWorker(fixture, port: port)
+        try await worker.start()
+        let destination = port.value.withLock { $0 }
+        defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertEqual(worker.status, .running); XCTAssertTrue(receiveRightPresent(destination))
+        let reply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: destination, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        let response = try receiver(reply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+        defer { response.caller.close() }
+        let profile = try CommandHandshakeReply.decode(response.payload, offer: offer,
+            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+        XCTAssertTrue(profile.supportsAdmissionResults)
+        async let first: Void = worker.close()
+        async let second: Void = worker.close()
+        _ = await (first, second)
+        XCTAssertEqual(worker.status, .closed); XCTAssertFalse(worker.isRetired)
+        XCTAssertFalse(receiveRightPresent(destination))
+        XCTAssertEqual(try XCTUnwrap(fixture.authority).read { _ in 17 }, 17)
+    }
+    @MainActor func testReceiveWorkerInitialPolicyFailureNeverReportsReadyAndReleasesRight() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let states = Mutex<[AuthorityCommandReceiveWorker.Status]>([])
+        let worker = try receiveWorker(fixture, port: port, policyRead: { throw CommandSessionRegistryError.invalidCodePolicy },
+            report: { state in states.withLock { $0.append(state) } })
+        do { try await worker.start(); XCTFail("Invalid policy started a receiver") }
+        catch { XCTAssertEqual(error as? CommandSessionRegistryError, .invalidCodePolicy) }
+        await worker.close()
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertFalse(states.withLock { $0.contains(.running) })
+        XCTAssertFalse(receiveRightPresent(destination)); XCTAssertTrue(worker.isRetired)
+        XCTAssertEqual(worker.status, .closed)
+    }
+    @MainActor func testReceiveWorkerCloseWaitsForLateFactoryAndNeverReadsItsPolicy() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let entered = Mutex(false), finished = Mutex(false), reads = Mutex(0), gate = DispatchSemaphore(value: 0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try receiveWorker(fixture, port: port, makeHost: {
+            entered.withLock { $0 = true }; gate.wait()
+            return try Self.workerHost(port: port, context: context, policyRead: { reads.withLock { $0 += 1 } })
+        })
+        let start = Task { try await worker.start() }
+        defer { start.cancel(); gate.signal() }
+        try await waitForReceiveWorker { entered.withLock { $0 } }
+        let close = Task { await worker.close(); finished.withLock { $0 = true } }
+        try await waitForReceiveWorker { worker.status == .stopping }
+        XCTAssertFalse(finished.withLock { $0 })
+        gate.signal()
+        do { try await start.value; XCTFail("Late factory became ready") }
+        catch { XCTAssertEqual(error as? CommandReceiveHostError, .stopped) }
+        await close.value
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertEqual(reads.withLock { $0 }, 0); XCTAssertFalse(receiveRightPresent(destination))
+        XCTAssertTrue(finished.withLock { $0 }); XCTAssertFalse(worker.isRetired)
+    }
+    @MainActor func testReceiveWorkerCancelledStartupCleansLateHostBeforeCloseReturns() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let entered = Mutex(false), reads = Mutex(0), gate = DispatchSemaphore(value: 0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try receiveWorker(fixture, port: port, makeHost: {
+            entered.withLock { $0 = true }; gate.wait()
+            return try Self.workerHost(port: port, context: context, policyRead: { reads.withLock { $0 += 1 } })
+        })
+        let start = Task { try await worker.start() }
+        defer { start.cancel(); gate.signal() }
+        try await waitForReceiveWorker { entered.withLock { $0 } }
+        start.cancel()
+        try await waitForReceiveWorker { worker.status == .stopping }
+        gate.signal()
+        do { try await start.value; XCTFail("Cancelled startup succeeded") } catch is CancellationError {} catch { throw error }
+        await worker.close()
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertEqual(reads.withLock { $0 }, 0); XCTAssertFalse(receiveRightPresent(destination))
+        XCTAssertFalse(worker.isRetired)
+    }
+    @MainActor func testReceiveWorkerCancellationAtReadinessStopsRetainedWorkerWithoutExplicitClose() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
+        let ready = Mutex(false), gate = DispatchSemaphore(value: 0)
+        let worker = try receiveWorker(fixture, port: port, report: {
+            if $0 == .running { ready.withLock { $0 = true }; gate.wait() }
+        })
+        let start = Task { try await worker.start() }
+        defer { start.cancel(); gate.signal(); worker.requestStop() }
+        try await waitForReceiveWorker { ready.withLock { $0 } }
+        start.cancel(); gate.signal()
+        do { try await start.value; XCTFail("Cancelled startup succeeded") }
+        catch is CancellationError {} catch { throw error }
+        try await waitForReceiveWorker { worker.status == .closed }
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertFalse(receiveRightPresent(destination)); XCTAssertFalse(worker.isRetired)
+        XCTAssertEqual(try XCTUnwrap(fixture.authority).read { _ in 17 }, 17)
+        await worker.close()
+    }
+    @MainActor func testReceiveWorkerIdlePolicyFailureRetiresAfterInitialReady() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), failed = Mutex(false)
+        let worker = try receiveWorker(fixture, port: port, policyRead: {
+            if failed.withLock({ $0 }) { throw CommandSessionRegistryError.invalidCodePolicy }
+        })
+        try await worker.start(); failed.withLock { $0 = true }
+        try await waitForReceiveWorker { worker.isRetired }
+        await worker.close()
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        XCTAssertFalse(receiveRightPresent(destination)); XCTAssertTrue(worker.isRetired)
+    }
+    @MainActor func testReceiveWorkerDeinitStopsQueueWithoutRetainingItself() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), closed = Mutex(false)
+        var worker: AuthorityCommandReceiveWorker? = try receiveWorker(fixture, port: port, report: {
+            if $0 == .closed { closed.withLock { $0 = true } }
+        })
+        weak let reference = worker
+        try await XCTUnwrap(worker).start()
+        let destination = port.value.withLock { $0 }; defer { _ = mach_port_deallocate(mach_task_self_, destination) }
+        worker = nil
+        XCTAssertNil(reference)
+        try await waitForReceiveWorker { closed.withLock { $0 } }
+        XCTAssertFalse(receiveRightPresent(destination))
+    }
+    @MainActor func testReceiveWorkerCloseBeforeStartDoesNotCallFactory() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), factories = Mutex(0)
+        let worker = try receiveWorker(fixture, port: port, makeHost: {
+            factories.withLock { $0 += 1 }; throw CommandReceiveHostError.invalidConfiguration
+        })
+        await worker.close()
+        do { try await worker.start(); XCTFail("Closed worker started") }
+        catch { XCTAssertEqual(error as? CommandReceiveHostError, .stopped) }
+        XCTAssertEqual(factories.withLock { $0 }, 0); XCTAssertEqual(worker.status, .closed)
+    }
+
 }

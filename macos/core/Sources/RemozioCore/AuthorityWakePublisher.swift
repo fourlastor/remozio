@@ -104,6 +104,10 @@ public actor AuthorityWakePublisher {
 
     /// The runtime retains and cancels this task with its service lifetime. A failed channel cannot be reused.
     public func run(intervalMilliseconds: UInt64) async throws {
+        try await run(intervalMilliseconds: intervalMilliseconds, checkAuthority: {})
+    }
+    /// The shared runtime rechecks retirement before each publication turn.
+    func run(intervalMilliseconds: UInt64, checkAuthority: @Sendable () throws -> Void) async throws {
         guard intervalMilliseconds > 0, intervalMilliseconds <= leaseMilliseconds / 2, !loopRunning else {
             throw AuthorityWakePublisherError.invalidConfiguration
         }
@@ -114,6 +118,7 @@ public actor AuthorityWakePublisher {
             else { try requireOpen() }
             while true {
                 try Task.checkCancellation()
+                try checkAuthority()
                 try await reconcile()
                 try await Task.sleep(for: .milliseconds(intervalMilliseconds))
             }
