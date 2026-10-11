@@ -30,6 +30,23 @@ Do not silently relocate executable files, force another interpreter, or restric
 
 The [macOS 26 and 27 experiment](experiments/macos-execution-binding.md) provides the measured evidence. Production execution still needs protected service integration, authorization policy, durable consumption, process I/O and recovery. Acceptance of this contract does not enable an unimplemented executor. The [filesystem capture component](macos-command-filesystem-capture.md) now implements capture and recheck without command dispatch.
 
+## Independent command elevation policy
+
+The user selected a separate Remozio policy on 11 October 2026.
+Setup must disclose this authority and configure explicit caller-account and target-user grants.
+Remozio does not inherit sudoers restrictions or execution settings.
+Administrator membership grants no automatic Remozio access.
+Each command still requires exact phone approval and all execution checks.
+
+Read current protected grants at admission and immediately before dispatch.
+Missing, unreadable or revoked grants prevent execution without a cached-policy or sudo fallback.
+Resolve target credentials through the OS and reject a changed captured identity.
+Shared setup imports do not transfer machine-specific elevation grants.
+
+The [policy component](macos-command-elevation-policy.md) implements canonical configuration, grant checks and native target resolution.
+Setup, protected installation and command-dispatch composition remain pending.
+The 1Password and Little Snitch adapter contracts remain unchanged.
+
 ## Test order and signing
 
 The user made an Android 17 Pixel available through LAN ADB. Prepare and run its app tests first, with the user performing biometric interactions. Do not change biometric enrollment or debugging configuration automatically.
