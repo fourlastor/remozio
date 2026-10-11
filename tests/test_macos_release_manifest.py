@@ -34,6 +34,15 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertNotIn('LaunchDaemons', str(info))
         self.assertNotIn('LaunchAgents', str(info))
 
+    def test_helper_signature_commands_have_explicit_deadlines(self):
+        import subprocess
+        metadata = 'Identifier=dev.remozio.command-child\nCDHash=' + 'a' * 40 + '\nTeamIdentifier=ABCDEFGHIJ\nflags=0x10000(runtime)\n'
+        with patch.object(MANIFEST.subprocess, 'run', side_effect=[
+            subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, '', metadata)]) as run:
+            digest, team = MANIFEST.signed_identity(Path('/unused-fixture'), 'dev.remozio.command-child', '1')
+        self.assertEqual(len(digest), 20); self.assertEqual(team, 'ABCDEFGHIJ')
+        self.assertEqual([call.kwargs['timeout'] for call in run.call_args_list], [20, 20])
+
     def test_different_helper_teams_fail_before_app_signing(self):
         with patch.object(MANIFEST, 'signed_identity', side_effect=[(bytes([7]) * 20, 'ABCDEFGHIJ')] + [(bytes([7]) * 20, None)] * 5):
             with self.assertRaisesRegex(ValueError, 'Team IDs differ'):

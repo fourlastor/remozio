@@ -1,0 +1,65 @@
+{
+  "appLaunched": false,
+  "cases": {
+    "adHocRelease": {
+      "result": "rejected"
+    },
+    "developerIDCompleteBundle": {
+      "absentRoles": [
+        3,
+        7,
+        8,
+        9,
+        10
+      ],
+      "build": "1",
+      "components": 7,
+      "hashes": 7,
+      "release": "0.1.0",
+      "result": "accepted"
+    },
+    "foreignApplicationIdentifierEntitlement": {
+      "result": "rejected"
+    },
+    "signedUndeclaredHelper": {
+      "result": "rejected"
+    },
+    "wrongAppIdentifier": {
+      "result": "rejected"
+    },
+    "wrongTrustedTeam": {
+      "result": "rejected"
+    }
+  },
+  "experiment": "complete-release-signature-inspection",
+  "host": {
+    "architecture": "arm64",
+    "build": "26A434",
+    "deploymentTarget": "26.0",
+    "os": "27.0.1",
+    "sdk": "27.0"
+  },
+  "identityFingerprint": "A3DC2F63C2FAC4525C64F2D1ABF83AE08BCCC421",
+  "limits": [
+    "Candidate signature evidence only; no protected installation or activation",
+    "No password retrieval or authentication UI automation",
+    "No notarization, secure timestamp, revocation or macOS 26 runtime proof"
+  ],
+  "mode": "developer-id",
+  "notarizationTested": false,
+  "originalBundleUnchanged": true,
+  "probeSHA256": "56a2e9d5685388af596f360c6cd8df40687aa066678f9a53aeaf556bfb776045",
+  "recordedAtUTC": "2026-10-11T19:42:20.402196+00:00",
+  "schemaVersion": 1,
+  "servicesInstalled": false,
+  "signingTimestampUsed": false,
+  "sources": {
+    "experiments/release-signing/Package.swift": "dc675dd622ce0f7b8ff74984568c251037fa263d5faf9f01af5a9f7f4f755ee0",
+    "experiments/release-signing/Sources/ReleaseSigningProbe/main.swift": "8f1b2a24aebb0bb0cbdac57a1448c491055fa74d16e62159f883d7a6ff9bcda0",
+    "macos/core/Sources/RemozioCore/SignedReleaseInspection.swift": "36165eeccd35597095669cefb7d78591cbf373d3aa81e6a652df2a36a82a69d9",
+    "scripts/generate-macos-release-manifest.py": "88feb786a02fef587da576ffbdb74f9b8b070f35b3572e62d22d4b490d9ce7bf",
+    "scripts/run-macos-release-signing-experiment.py": "44aa88046b79a55b4518c25cc893b13ca98d420c3e0d0f279d5595f5edbe8fc4"
+  },
+  "temporarySignedCopiesRemoved": true,
+  "trustedTeamID": "PVDFPZ5D64"
+}

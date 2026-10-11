@@ -69,9 +69,9 @@ def encode(value):
 
 def signed_identity(executable, identifier, generation):
     subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R',
-                    f'=identifier "{identifier}" and info[RemozioSecurityGeneration] = "{generation}"', str(executable)], check=True)
+                    f'=identifier "{identifier}" and info[RemozioSecurityGeneration] = "{generation}"', str(executable)], check=True, timeout=20)
     result = subprocess.run(['/usr/bin/codesign', '--display', '--verbose=4', str(executable)],
-                            capture_output=True, text=True, check=True)
+                            capture_output=True, text=True, check=True, timeout=20)
     def field(name):
         match = re.search(rf'^{name}=(.*)$', result.stderr, re.MULTILINE)
         if not match:
