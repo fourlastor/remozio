@@ -143,6 +143,10 @@ def check(configuration):
             if write_descriptor >= 0: os.close(write_descriptor)
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == identity, 'Unexpected bundle identity')
+    require(info.get('RemozioSecurityGeneration') == '1', 'Missing app security generation')
+    declaration = info.get('RemozioReleaseManifest')
+    require(isinstance(declaration, bytes) and 0 < len(declaration) <= 65536, 'Missing bounded release declaration')
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(app))
     require(info['LSMinimumSystemVersion'] == '26.0', 'Unexpected deployment target')
     require(not info.get('LSUIElement', False), 'The app must remain reachable after hiding its menu item')
     strings = app / 'Contents/Resources/en.lproj/Localizable.strings'

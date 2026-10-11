@@ -25,6 +25,14 @@ Build outputs are under `.build/macos-app/DerivedData/Build/Products/`. Debug us
 
 Logs are `.build/macos-app/xcodebuild-debug.log` and `.build/macos-app/xcodebuild-release.log`. The shared Xcode scheme is available at `macos/app/Remozio.xcodeproj`.
 
+## Signed release declaration
+
+The app's signed plist contains a [component release manifest](../../docs/macos-release-manifest.md).
+The build records the actual signed helper hashes before signing the enclosing app.
+The Core reader checks exact version sets and distinguishes absent roles from bundled code.
+Strict inspection requires a trusted Developer ID identity and reads secured signing metadata.
+This declaration does not install services or enable automatic updates.
+
 ## Validation limits
 
 Compilation and bundle checks do not prove window behavior, menu accessibility, localization, VoiceOver, or large-text usability. Those checks remain for the interactive session. The app has not been installed or launched by the build script.

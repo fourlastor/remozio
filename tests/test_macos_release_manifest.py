@@ -1,0 +1,60 @@
+import importlib.util
+from pathlib import Path
+import plistlib
+import unittest
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('release_manifest', ROOT / 'scripts/generate-macos-release-manifest.py')
+MANIFEST = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(MANIFEST)
+
+
+class ReleaseManifestBuildTests(unittest.TestCase):
+    def environment(self, configuration='Debug'):
+        return {'SRCROOT': str(ROOT / 'macos/app'), 'BUILT_PRODUCTS_DIR': '/unused-test-products',
+                'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.remozio.mac' + ('.debug' if configuration == 'Debug' else ''),
+                'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
+
+    def test_cbor_uses_shortest_integers_and_numeric_map_order(self):
+        self.assertEqual(MANIFEST.encode({24: [24, 256], 0: None}), bytes.fromhex('a200f61818821818190100'))
+        self.assertEqual(MANIFEST.encode(b'abc'), b'\x43abc')
+        for value in (-1, True, 1 << 64, {'text-key': 1}):
+            with self.assertRaises(ValueError):
+                MANIFEST.encode(value)
+
+    def test_helpers_are_checked_before_the_unsigned_app_input_is_created(self):
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)) as identity:
+            info = MANIFEST.generate(self.environment())
+        self.assertEqual(identity.call_count, 6)
+        self.assertEqual(info['RemozioSecurityGeneration'], '1')
+        self.assertIsInstance(info['RemozioReleaseManifest'], bytes)
+        self.assertEqual(plistlib.loads(plistlib.dumps(info)), info)
+        self.assertTrue(all(call.args[1].endswith('.debug') for call in identity.call_args_list))
+        self.assertNotIn('LaunchDaemons', str(info))
+        self.assertNotIn('LaunchAgents', str(info))
+
+    def test_different_helper_teams_fail_before_app_signing(self):
+        with patch.object(MANIFEST, 'signed_identity', side_effect=[(bytes([7]) * 20, 'ABCDEFGHIJ')] + [(bytes([7]) * 20, None)] * 5):
+            with self.assertRaisesRegex(ValueError, 'Team IDs differ'):
+                MANIFEST.generate(self.environment())
+
+    def test_helper_verification_failure_is_not_replaced_by_a_stub_declaration(self):
+        with patch.object(MANIFEST, 'signed_identity', side_effect=ValueError('invalid signature')):
+            with self.assertRaisesRegex(ValueError, 'invalid signature'):
+                MANIFEST.generate(self.environment())
+
+    def test_unexpected_baseline_or_identity_is_rejected(self):
+        for key, value in (('PRODUCT_BUNDLE_IDENTIFIER', 'other.app'), ('MACOSX_DEPLOYMENT_TARGET', '25.0')):
+            environment = self.environment(); environment[key] = value
+            with self.assertRaises(ValueError):
+                MANIFEST.generate(environment)
+
+    def test_sets_are_explicit_and_storage_migrations_do_not_claim_activation(self):
+        roles = {component[0] for component in MANIFEST.COMPONENTS}
+        self.assertEqual(roles, {1, 2, 4, 5, 6, 11, 12})
+        declarations = {item[0]: item for item in MANIFEST.declarations(2)}
+        self.assertEqual(declarations['authority.command-config'][1], [1, 2])
+        self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
+        self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
+        self.assertEqual(MANIFEST.declarations(12)[-1][1], [2])
