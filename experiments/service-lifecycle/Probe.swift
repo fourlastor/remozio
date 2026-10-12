@@ -8,6 +8,8 @@ import os
         let role = ServiceProbeContract.Role.session
         #elseif AUTHORITY_PROBE
         let role = ServiceProbeContract.Role.authority
+        #elseif TRANSPORT_PROBE
+        let role = ServiceProbeContract.Role.transport
         #else
         #error("Select a probe role")
         #endif
@@ -20,9 +22,17 @@ import os
         guard args == ["--service-probe"] else { exit(EX_UNAVAILABLE) }
         guard getuid() == geteuid(), role == .authority ? getuid() == 0 : getuid() != 0 else { exit(EX_NOPERM) }
         do {
+            if role == .transport {
+                let account = try ServiceProbeTransportAccount.resolve()
+                guard account.uid == getuid(), account.gid == getgid(), getgid() == getegid() else { throw ServiceProbeError.account }
+            }
             var bytes = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
             guard proc_pidpath(getpid(), &bytes, UInt32(bytes.count)) > 0 else { throw ServiceProbeError.placement }
-            let executable = URL(fileURLWithPath: String(cString: bytes))
+            guard let end = bytes.firstIndex(of: 0),
+                  let path = String(bytes: bytes[..<end].map { UInt8(bitPattern: $0) }, encoding: .utf8) else {
+                throw ServiceProbeError.placement
+            }
+            let executable = URL(fileURLWithPath: path)
             let app = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let placement = try ServiceProbePlacement(app: app)
             try ServiceProbeContract.validateManifests(app)

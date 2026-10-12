@@ -18,7 +18,8 @@ SOURCE = ROOT / 'experiments/service-lifecycle'
 METADATA = ROOT / 'macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift'
 APP_ID = 'dev.remozio.experiments.lifecycle'
 ROLES = {'session': ('LaunchAgents', 'RemozioLifecycleSession'),
-         'authority': ('LaunchDaemons', 'RemozioLifecycleAuthority')}
+         'authority': ('LaunchDaemons', 'RemozioLifecycleAuthority'),
+         'transport': ('LaunchDaemons', 'RemozioLifecycleTransport')}
 
 
 def run(*args, check=True):
@@ -35,7 +36,7 @@ def manifest(role):
     if role == 'session':
         result['LimitLoadToSessionType'] = 'Aqua'
     else:
-        result['UserName'] = 'root'
+        result['UserName'] = 'root' if role == 'authority' else '_remozio_lifecycle_transport'
     return result
 
 
@@ -51,8 +52,8 @@ def build(app, identity):
     require(not app.exists(), 'The output must not exist')
     (app / 'Contents/MacOS').mkdir(parents=True)
     (app / 'Contents/Helpers').mkdir()
-    shared = [str(SOURCE / 'Preflight.swift'), str(METADATA)]
-    common = ['xcrun', 'swiftc', '-swift-version', '6', '-target', 'arm64-apple-macosx26.0', '-parse-as-library']
+    shared = [str(SOURCE / 'Preflight.swift'), str(SOURCE / 'TransportAccount.swift'), str(METADATA)]
+    common = ['xcrun', 'swiftc', '-import-objc-header', str(SOURCE / 'MembershipBridge.h'), '-swift-version', '6', '-target', 'arm64-apple-macosx26.0', '-parse-as-library']
     run(*common, str(SOURCE / 'Controller.swift'), *shared, '-o', str(app / 'Contents/MacOS/RemozioServiceLifecycle'))
     for role, (folder, executable) in ROLES.items():
         directory = app / 'Contents/Library' / folder
@@ -73,6 +74,13 @@ def controls(app, identity):
     controller = app / 'Contents/MacOS/RemozioServiceLifecycle'
     verify_executable(controller, APP_ID)
     checks = []
+    account_controls = app.parent / 'account-controls'
+    run('xcrun', 'swiftc', '-import-objc-header', str(SOURCE / 'MembershipBridge.h'), '-warnings-as-errors', '-swift-version', '6', '-target', 'arm64-apple-macosx26.0',
+        '-parse-as-library', str(SOURCE / 'AccountControls.swift'), str(SOURCE / 'Preflight.swift'),
+        str(SOURCE / 'TransportAccount.swift'), str(METADATA), '-o', str(account_controls))
+    run(str(account_controls))
+    checks.extend(['transport:synthetic-account-controls', 'transport:nested-membership-and-lookup-error-controls',
+                   'transport:native-current-account-membership-queries'])
     for role, (_, executable) in ROLES.items():
         binary = app / 'Contents/Helpers' / executable
         verify_executable(binary, f'{APP_ID}.{role}')
@@ -83,9 +91,15 @@ def controls(app, identity):
     authority = app / 'Contents/Helpers' / ROLES['authority'][1]
     require(run(str(authority), '--service-probe', check=False).returncode == 77, 'Authority accepted ordinary startup')
     checks.append('authority:ordinary-account-refusal')
+    transport = app / 'Contents/Helpers' / ROLES['transport'][1]
+    require(run(str(transport), '--service-probe', check=False).returncode == 78,
+            'Transport accepted temporary unprotected startup')
+    checks.append('transport:temporary-unprotected-startup-refusal')
     status = json.loads(run(str(controller), '--status').stdout)
     require(status['operationsAttempted'] is False, 'Status attempted a service operation')
-    require(status['session'] in {'notRegistered', 'eligibleNotVerifiedRunning', 'requiresSystemApproval', 'notFound', 'unknown'}, 'Unknown status encoding')
+    for role in ROLES:
+        require(status[role] in {'notRegistered', 'eligibleNotVerifiedRunning', 'requiresSystemApproval', 'notFound', 'unknown'},
+                'Unknown status encoding')
     require(json.loads(run(str(controller), '--validate-manifests').stdout)['operationsAttempted'] is False,
             'Manifest inspection attempted a service operation')
     checks.extend(['read-only-status', 'exact-manifests'])
@@ -94,7 +108,8 @@ def controls(app, identity):
     for args in [('--preflight',), ('--register', 'session'), ('--unregister', 'authority'),
                  ('--register', 'unknown', '--confirm-disposable-service-test'),
                  ('--register', 'session', '--confirm-disposable-service-test'),
-                 ('--register', 'authority', '--confirm-disposable-service-test')]:
+                 ('--register', 'authority', '--confirm-disposable-service-test'),
+                 ('--register', 'transport', '--confirm-disposable-service-test')]:
         result = run(str(controller), *args, check=False)
         require(result.returncode == 78 and not result.stdout, 'Unsafe experiment command did not refuse')
         require(str(app) not in result.stderr, 'Refusal disclosed the bundle path')
@@ -119,6 +134,14 @@ def controls(app, identity):
             sign(copy, '-', APP_ID)
             require(run(str(copy / 'Contents/MacOS/RemozioServiceLifecycle'), '--validate-manifests', check=False).returncode == 78,
                     f'Malformed manifest accepted: {key}')
+    with tempfile.TemporaryDirectory(prefix='remozio-transport-mutation-') as temporary:
+        copy = Path(temporary) / app.name
+        shutil.copytree(app, copy)
+        path = copy / f'Contents/Library/LaunchDaemons/{APP_ID}.transport.plist'
+        changed = manifest('transport'); changed['UserName'] = 'root'
+        path.write_bytes(plistlib.dumps(changed)); sign(copy, '-', APP_ID)
+        require(run(str(copy / 'Contents/MacOS/RemozioServiceLifecycle'), '--validate-manifests', check=False).returncode == 78,
+                'Transport accepted Root account selection')
     checks.append('altered-manifest-refusals')
     return checks
 
@@ -141,7 +164,7 @@ def main():
                   'notarizationTested': False, 'bootTested': False, 'updateTested': False,
                   'dedicatedTransportAccountTested': False, 'status': 'passed',
                   'sourceSHA256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-                                   for path in [*sorted(SOURCE.glob('*.swift')), METADATA, Path(__file__).resolve()]}}
+                                   for path in [*sorted(SOURCE.glob('*.swift')), *sorted(SOURCE.glob('*.h')), METADATA, Path(__file__).resolve()]}}
         if args.keep_output:
             require(not args.keep_output.exists() and not args.keep_output.is_symlink(), 'Kept output must be new')
             shutil.copytree(app, args.keep_output)

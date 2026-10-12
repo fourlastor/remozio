@@ -10,15 +10,21 @@ enum ServiceProbeContract {
     static let appID = "dev.remozio.experiments.lifecycle"
     static let teamID = "PVDFPZ5D64"
     enum Role: String, CaseIterable {
-        case session, authority
+        case session, authority, transport
         var label: String { "dev.remozio.experiments.lifecycle.\(rawValue)" }
-        var executable: String { self == .session ? "RemozioLifecycleSession" : "RemozioLifecycleAuthority" }
+        var executable: String {
+            switch self {
+            case .session: "RemozioLifecycleSession"
+            case .authority: "RemozioLifecycleAuthority"
+            case .transport: "RemozioLifecycleTransport"
+            }
+        }
         var folder: String { self == .session ? "LaunchAgents" : "LaunchDaemons" }
         var manifest: [String: Any] {
             var result: [String: Any] = ["Label": label, "BundleProgram": "Contents/Helpers/\(executable)",
                 "ProgramArguments": [executable, "--service-probe"], "RunAtLoad": true]
             if self == .session { result["LimitLoadToSessionType"] = "Aqua" }
-            else { result["UserName"] = "root" }
+            else { result["UserName"] = self == .authority ? "root" : ServiceProbeTransportAccount.name }
             return result
         }
     }

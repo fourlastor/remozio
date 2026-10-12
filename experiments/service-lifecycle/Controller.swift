@@ -21,7 +21,7 @@ import ServiceManagement
             let args = Array(CommandLine.arguments.dropFirst()), app = Bundle.main.bundleURL
             if args == ["--status"] {
                 try emit(["experiment": "service-lifecycle", "operationsAttempted": false,
-                    "session": statusName(service(.session).status), "authority": statusName(service(.authority).status)])
+                    "session": statusName(service(.session).status), "authority": statusName(service(.authority).status), "transport": statusName(service(.transport).status)])
                 return
             }
             if args == ["--validate-manifests"] {
@@ -48,9 +48,11 @@ import ServiceManagement
                   let role = ServiceProbeContract.Role(rawValue: args[1]), ["--register", "--unregister"].contains(args[0]),
                   getuid() != 0, getuid() == geteuid() else { throw ServiceProbeError.arguments }
             if args[0] == "--register" {
+                let transport = role == .transport ? try ServiceProbeTransportAccount.resolve(invokingUID: getuid()) : nil
                 let placement = try validate(app)
                 defer { placement.close() }
                 try placement.validate()
+                try transport?.revalidate(invokingUID: getuid())
                 try service(role).register()
             } else {
                 // Removal remains reachable after the bundle moves. It still requires the approved test publisher.

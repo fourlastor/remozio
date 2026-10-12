@@ -66,7 +66,7 @@ These are not runnable product tests yet. Prepare the relevant implementation an
 
 | Work | Required evidence before relying on it |
 | --- | --- |
-| Protected Mac services | [Lifecycle harness](service-lifecycle.md): Developer ID and notarization, protected placement, actual registration/removal, reboot, lock/logout and replacement. Dedicated transport and pre-login key access remain separate. |
+| Protected Mac services | [Lifecycle harness](service-lifecycle.md): Developer ID and notarization, protected placement, actual registration/removal, reboot, lock/logout and replacement. The dedicated transport probe is prepared; actual account behavior and pre-login key access remain untested. |
 | Authority continuity | Protected local checkpoint, interrupted transitions, partial-state replacement, stale floors and offline recovery |
 | UI adapters and presence | Sanitized authorized dialog captures; local input, CRD, Screen Sharing, dark display, manual Away and offline states |
 | Cloudflare and FCM | Per-Mac configuration, scoped credentials, real delivery, reconnect, offline reconciliation and independent Mac operation |
