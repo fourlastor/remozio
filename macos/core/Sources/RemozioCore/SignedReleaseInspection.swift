@@ -141,7 +141,7 @@ public enum SignedReleaseInspection {
                     throw ReleaseManifestError.unsafePath
                 }
                 aliases.append((relative, target.path == root.path ? "" : String(target.path.dropFirst(prefix.count))))
-                entries.skipDescendants()
+                if values.isDirectory == true { entries.skipDescendants() }
                 continue
             }
             if values.isDirectory == true { continue }

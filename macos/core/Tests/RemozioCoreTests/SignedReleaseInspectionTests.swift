@@ -80,11 +80,22 @@ final class SignedReleaseInspectionTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
-        for relativePath in ["Contents/Helpers/UnlistedHelper", "Contents/Resources/UnlistedHelper", "Contents/Resources/UnlistedScript", "Contents/Helpers/UnlistedAlias", "Contents/Resources/UnlistedDirectoryAlias"] {
+        for relativePath in ["Contents/Helpers/UnlistedHelper", "Contents/Resources/UnlistedHelper", "Contents/Resources/UnlistedScript", "Contents/Helpers/UnlistedAlias", "Contents/Resources/UnlistedDirectoryAlias", "Contents/Resources/UnlistedTree"] {
             let copy = root.appendingPathComponent(UUID().uuidString + ".app")
             try FileManager.default.copyItem(at: original, to: copy)
             let extra = copy.appendingPathComponent(relativePath)
-            if relativePath.hasSuffix("DirectoryAlias") {
+            if relativePath.hasSuffix("Tree") {
+                let version = extra.appendingPathComponent("Versions/B")
+                try FileManager.default.createDirectory(at: version.appendingPathComponent("PrivateHeaders"), withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(at: version.appendingPathComponent("Resources"), withIntermediateDirectories: false)
+                try FileManager.default.copyItem(at: copy.appendingPathComponent("Contents/Helpers/RemozioCommandChild"),
+                    to: version.appendingPathComponent("UnlistedHelper"))
+                for (name, target) in [("PrivateHeaders", "Versions/Current/PrivateHeaders"),
+                                       ("Resources", "Versions/Current/Resources"),
+                                       ("Versions/Current", "B"), ("UnlistedHelper", "Versions/Current/UnlistedHelper")] {
+                    try FileManager.default.createSymbolicLink(atPath: extra.appendingPathComponent(name).path, withDestinationPath: target)
+                }
+            } else if relativePath.hasSuffix("DirectoryAlias") {
                 try FileManager.default.createSymbolicLink(atPath: extra.path, withDestinationPath: "../Helpers")
             } else if relativePath.hasSuffix("Alias") {
                 try FileManager.default.createSymbolicLink(atPath: extra.path, withDestinationPath: "RemozioCommandChild")
@@ -129,6 +140,26 @@ final class SignedReleaseInspectionTests: XCTestCase {
             XCTAssertEqual($0 as? ReleaseManifestError, .unsafePath)
         }
     }
+    func testFrameworkLinksDoNotSkipCanonicalVersionCode() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let framework = root.appendingPathComponent("Contents/Frameworks/Vendor.framework")
+        let version = framework.appendingPathComponent("Versions/B")
+        try FileManager.default.createDirectory(at: version.appendingPathComponent("PrivateHeaders"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: version.appendingPathComponent("Resources"), withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data([0xcf, 0xfa, 0xed, 0xfe]).write(to: version.appendingPathComponent("Vendor"))
+        for (name, target) in [("PrivateHeaders", "Versions/Current/PrivateHeaders"),
+                               ("Resources", "Versions/Current/Resources"),
+                               ("Versions/Current", "B"), ("Vendor", "Versions/Current/Vendor")] {
+            try FileManager.default.createSymbolicLink(atPath: framework.appendingPathComponent(name).path, withDestinationPath: target)
+        }
+        XCTAssertEqual(try SignedReleaseInspection.executableInventory(root), [
+            "Contents/Frameworks/Vendor.framework/Versions/B/Vendor",
+            "Contents/Frameworks/Vendor.framework/Versions/Current/Vendor",
+            "Contents/Frameworks/Vendor.framework/Vendor"
+        ])
+    }
+
     func testSymlinkBundleCannotBecomeInspectionEvidence() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
