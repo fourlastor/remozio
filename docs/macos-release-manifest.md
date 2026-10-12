@@ -1,7 +1,7 @@
 # Signed Mac release declarations
 
 The app contains a canonical CBOR declaration in its signed `Info.plist`.
-The key is `RemozioReleaseManifest` and the schema is 1.
+The key is `RemozioReleaseManifest`. The current build emits schema 1; the reader supports schemas 1 and 2.
 The build generates the plist input after signing the six helpers, before signing the app.
 It does not modify a processed plist or an existing signature.
 
@@ -21,18 +21,19 @@ The root map has these exact keys. Unknown or missing keys fail closed.
 
 | Key | Value |
 | --- | --- |
-| 0 | Schema 1 |
+| 0 | Schema 1 or 2 |
 | 1 | Marketing release |
 | 2 | App build |
 | 3 | `arm64` |
 | 4 | Minimum macOS `26.0` |
 | 5 | Components sorted by stable `AuthorityCodeRole` |
+| 6 | Schema 2 only: dependencies sorted by canonical executable path |
 
 Each component has a role, identifier, generation, relative executable path, build, Team ID, formats, and understood request contracts.
 The helper CDHash is 20 bytes. The app has no embedded self hash; inspection derives it from the validated signature.
 Ad-hoc builds have no Team ID. They are test artifacts.
 Component key 9 is zero: this bundle contains no launchd registration declarations.
-A later schema must describe actual registration artifacts before an installer relies on them.
+An installer needs explicit registration artifacts before it can rely on them. Neither schema supplies these artifacts.
 
 The current bundle contains the app, authority, transport, frontend, gateway, command child, and command monitor.
 `absentRoles` reports the other catalog roles. It does not imply that every optional role must run.
@@ -71,9 +72,10 @@ Inspection compares each helper's actual signed identifier, Team ID, generation,
 A bounded filesystem inventory must match the declared executable paths exactly.
 It detects Mach-O files anywhere in the bundle, including files without an executable mode bit, and executable scripts.
 Unlisted code cannot silently appear as an absent role. Schema 1 requires every code file to have a declared native role.
-Additional dependency layouts need explicit manifest support before updater or bridge integration.
+[Schema 2](macos-release-dependencies.md) declares dependency code and aliases without granting authority roles.
+Product packaging still uses schema 1; updater and bridge activation remain separate.
 The inventory permits aliases to plain internal resources. Aliases exposing code count as executable locations too.
-Schema 1 requires declared code paths without symlinks. Later dependency layouts must declare their code and alias relationships explicitly.
+Schema 1 requires declared code paths without symlinks. Schema 2 binds each declared executable alias to its exact canonical dependency executable.
 The inventory rejects external links and special files, and limits traversal to 8,192 entries and depth 16.
 It rejects symlinks within the declared executable paths and requires thin arm64 executables.
 It rechecks the enclosing signature and declaration before returning candidate evidence.

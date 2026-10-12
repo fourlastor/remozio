@@ -98,15 +98,35 @@ public struct ReleaseManifest: Equatable, Sendable {
     public let release: String
     public let build: String
     public let components: [ReleaseComponent]
+    public let schemaVersion: UInt64
+    public let dependencies: [ReleaseDependency]
     public var absentRoles: Set<AuthorityCodeRole> { Set(AuthorityCodeRole.allCases).subtracting(components.map(\.role)) }
 
-    public init(release: String, build: String, components: [ReleaseComponent]) throws {
+    public init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency] = []) throws {
+        try self.init(release: release, build: build, components: components, dependencies: dependencies,
+                      schemaVersion: dependencies.isEmpty ? 1 : 2)
+    }
+
+    private init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency],
+                 schemaVersion: UInt64) throws {
         guard Self.validToken(release), Self.validToken(build), !components.isEmpty,
               components.count <= AuthorityCodeRole.allCases.count,
               Set(components.map(\.role)).count == components.count,
               Set(components.map(\.identifier)).count == components.count,
               Set(components.map(\.relativePath)).count == components.count,
               components.filter({ $0.role == .app }).count == 1 else { throw ReleaseManifestError.invalidDeclaration }
+        guard schemaVersion == 1 || schemaVersion == 2, schemaVersion == 2 || dependencies.isEmpty,
+              dependencies.count <= 32, Set(dependencies.map(\.executablePath)).count == dependencies.count,
+              dependencies.allSatisfy({ dependency in components.contains(where: { $0.role == dependency.owner }) }) else {
+            throw ReleaseManifestError.invalidDeclaration
+        }
+        let identifiers = components.map(\.identifier) + dependencies.map(\.identifier)
+        let paths = components.map(\.relativePath) + dependencies.flatMap { [$0.executablePath] + $0.executableAliases.sorted() }
+        guard Set(identifiers).count == identifiers.count, paths.count <= 256, Set(paths).count == paths.count else {
+            throw ReleaseManifestError.invalidDeclaration
+        }
+        self.schemaVersion = schemaVersion
+        self.dependencies = dependencies.sorted { $0.executablePath < $1.executablePath }
         self.release = release; self.build = build
         self.components = components.sorted { $0.role.rawValue < $1.role.rawValue }
         _ = try canonicalBytes
@@ -114,8 +134,10 @@ public struct ReleaseManifest: Equatable, Sendable {
 
     public var canonicalBytes: Data {
         get throws {
-            try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(release), 2: .text(build),
-                3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map(\.value))]), limits: Self.limits)
+            var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: .text(release), 2: .text(build),
+                3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map(\.value))]
+            if schemaVersion == 2 { fields[6] = .array(dependencies.map(\.value)) }
+            return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
         }
     }
     static var limits: CBORLimits { get throws { try .init(maxBytes: maximumBytes, maxDepth: 8, maxItems: 8192) } }
@@ -127,8 +149,12 @@ public struct ReleaseManifest: Equatable, Sendable {
 
     public static func decode(_ bytes: Data) throws -> Self {
         do {
-            let fields = try dictionary(DeterministicCBOR.decode(bytes, limits: limits), keys: 0...5)
-            guard fields[0] == .unsigned(1) else { throw ReleaseManifestError.unsupportedSchema }
+            let raw = try DeterministicCBOR.decode(bytes, limits: limits)
+            guard case .map(let header) = raw, case .unsigned(let version) = header[0] else {
+                throw ReleaseManifestError.corruptData
+            }
+            guard version == 1 || version == 2 else { throw ReleaseManifestError.unsupportedSchema }
+            let fields = try dictionary(raw, keys: version == 1 ? 0...5 : 0...6)
             guard fields[3] == .text("arm64"), fields[4] == .text("26.0") else { throw ReleaseManifestError.corruptData }
             let components = try array(fields[5]).map { item -> ReleaseComponent in
                 let fields = try dictionary(item, keys: 0...9)
@@ -158,7 +184,20 @@ public struct ReleaseManifest: Equatable, Sendable {
                     relativePath: text(fields[3]), codeDirectoryHash: hash, build: text(fields[5]), teamID: team,
                     formats: formats, requests: requests)
             }
-            let result = try Self(release: text(fields[1]), build: text(fields[2]), components: components)
+            let dependencies = version == 1 ? [] : try array(fields[6]).map { value -> ReleaseDependency in
+                let item = try dictionary(value, keys: 0...8)
+                guard let owner = AuthorityCodeRole(rawValue: try number(item[0])),
+                      let kind = ReleaseDependencyKind(rawValue: try number(item[1])),
+                      case .bytes(let hash) = item[5] else { throw ReleaseManifestError.corruptData }
+                let aliases = try array(item[8]).map { try text($0) }
+                guard aliases.count <= 16, Set(aliases).count == aliases.count else { throw ReleaseManifestError.corruptData }
+                return try ReleaseDependency(owner: owner, kind: kind, signaturePath: text(item[2]),
+                    executablePath: text(item[3]), identifier: text(item[4]), codeDirectoryHash: hash,
+                    teamID: item[6] == .null ? nil : text(item[6]), build: item[7] == .null ? nil : text(item[7]),
+                    executableAliases: Set(aliases))
+            }
+            let result = try Self(release: text(fields[1]), build: text(fields[2]), components: components,
+                                  dependencies: dependencies, schemaVersion: version)
             guard try result.canonicalBytes == bytes else { throw ReleaseManifestError.corruptData }
             return result
         } catch ReleaseManifestError.unsupportedSchema { throw ReleaseManifestError.unsupportedSchema }

@@ -16,6 +16,15 @@ public enum ReleaseGenerationPreflight {
                         let hash = evidence.codeDirectoryHashes[component.role], hash.count == 20 else { return false }
                   return component.role == .app || component.codeDirectoryHash == hash
               }) else { throw ReleaseGenerationPreflightError.invalidEvidence }
+        let dependencies = evidence.manifest.dependencies
+        guard Set(evidence.dependencyCodeDirectoryHashes.keys) == Set(dependencies.map(\.executablePath)),
+              dependencies.allSatisfy({ dependency in
+                  guard let owner = components.first(where: { $0.role == dependency.owner }),
+                        let team = owner.teamID, dependency.teamID == team,
+                        let hash = evidence.dependencyCodeDirectoryHashes[dependency.executablePath],
+                        hash.count == 20, hash == dependency.codeDirectoryHash else { return false }
+                  return true
+              }) else { throw ReleaseGenerationPreflightError.invalidEvidence }
         for retained in policy.entries {
             guard let candidate = components.first(where: { $0.role == retained.role }) else {
                 if retained.active { throw ReleaseGenerationPreflightError.missingActiveRole(retained.role) }

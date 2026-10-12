@@ -60,3 +60,8 @@ The handoff's [later-session checklist](interactive-handoff.md#later-sessions-fi
 Service registration, lock/logout/reboot behavior, update replacement, authorized prompt fixtures and remote-desktop presence need their implementation and procedures first. The complete bridge must also support Wi-Fi-off operation, reconnect and explicit Stop before its end-to-end tests.
 
 Do not collect passwords, ADB payloads, notification tokens, or provider secrets in committed evidence. Use the handoff's [evidence record](interactive-handoff.md#evidence-record) for results and limitations.
+
+## Declared SDK code
+
+The [signed dependency experiment](release-dependencies.md) checks schema 2 against the pinned Sparkle SDK.
+It verifies nine signed controls and starts no installer. Protected update activation remains pending.

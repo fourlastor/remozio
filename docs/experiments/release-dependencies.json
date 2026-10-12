@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "experiment": "signed-release-dependencies",
+  "status": "passed",
+  "dateUTC": "2026-10-12",
+  "hostMacOS": "27.0.1",
+  "architecture": "arm64",
+  "sdkVersion": "2.10.0",
+  "ordinaryAccountOnly": true,
+  "developerIDIdentitySelectedExplicitly": true,
+  "timestamped": false,
+  "notarizationTested": false,
+  "protectedInstallationTested": false,
+  "activationTested": false,
+  "privateKeysExported": false,
+  "cases": [
+    {
+      "control": "valid-signed-sdk",
+      "result": {
+        "activation": false,
+        "aliases": 10,
+        "dependencies": 5,
+        "dependencyHashes": 5,
+        "preflight": true,
+        "roles": 1,
+        "schema": 2
+      }
+    },
+    {
+      "control": "validly-signed-extra-tool",
+      "rejected": true,
+      "failure": "fixture inspection failed: identityMismatch"
+    },
+    {
+      "control": "wrong-trusted-team",
+      "rejected": true,
+      "failure": "fixture inspection failed: security(-67050)"
+    },
+    {
+      "control": "bad-hash",
+      "rejected": true,
+      "failure": "fixture inspection failed: identityMismatch"
+    },
+    {
+      "control": "bad-alias",
+      "rejected": true,
+      "failure": "fixture inspection failed: unsafePath"
+    },
+    {
+      "control": "bad-kind",
+      "rejected": true,
+      "failure": "fixture inspection failed: identityMismatch"
+    },
+    {
+      "control": "bad-build",
+      "rejected": true,
+      "failure": "fixture inspection failed: identityMismatch"
+    },
+    {
+      "control": "bad-identifier",
+      "rejected": true,
+      "failure": "fixture inspection failed: security(-67050)"
+    },
+    {
+      "control": "bad-team",
+      "rejected": true,
+      "failure": "fixture inspection failed: identityMismatch"
+    },
+    {
+      "event": "owned-fixtures-removed",
+      "originalSDKPreserved": true,
+      "installerStarted": false
+    }
+  ],
+  "sourcesSHA256": {
+    "macos/core/Sources/RemozioCore/ReleaseDependency.swift": "7255489f42984b729c25e3810de42126f847327c8b3ec5457223442128b02c8a",
+    "macos/core/Sources/RemozioCore/ReleaseManifest.swift": "0c85e40ef2ed66f5b54e7e539b4d8604ee406f813493ad08c7887c5840e7cfc7",
+    "macos/core/Sources/RemozioCore/SignedReleaseInspection.swift": "7d50110b4cf1c6f5a9489c4fb7c620ef11e06e12681a82f7f7350b2a6ac483cb",
+    "macos/core/Sources/RemozioCore/ReleaseGenerationPreflight.swift": "22392e1e1394bdf67d1a846ca723b354b5fe6dec535ea81b90e625c7ec076266",
+    "experiments/release-dependencies/Sources/DependencyProbe/main.swift": "b99b8ee277828bf02513223c892c68d57da34bbf2184b06b80a7c316f0088076",
+    "scripts/run-release-dependency-experiment.py": "1303d3bf1b80d50f3c76b2a2a16bb37300559c0a3a43b482e1fd9e0993644d38"
+  }
+}
