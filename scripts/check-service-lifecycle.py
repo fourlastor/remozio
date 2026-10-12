@@ -19,7 +19,8 @@ METADATA = ROOT / 'macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift
 APP_ID = 'dev.remozio.experiments.lifecycle'
 ROLES = {'session': ('LaunchAgents', 'RemozioLifecycleSession'),
          'authority': ('LaunchDaemons', 'RemozioLifecycleAuthority'),
-         'transport': ('LaunchDaemons', 'RemozioLifecycleTransport')}
+         'transport': ('LaunchDaemons', 'RemozioLifecycleTransport'),
+         'enclave': ('LaunchDaemons', 'RemozioLifecycleEnclave')}
 
 
 def run(*args, check=True):
@@ -32,11 +33,11 @@ def run(*args, check=True):
 def manifest(role):
     folder, executable = ROLES[role]
     result = {'Label': f'{APP_ID}.{role}', 'BundleProgram': f'Contents/Helpers/{executable}',
-              'ProgramArguments': [executable, '--service-probe'], 'RunAtLoad': True}
+              'ProgramArguments': [executable, '--service-key-probe' if role == 'enclave' else '--service-probe'], 'RunAtLoad': True}
     if role == 'session':
         result['LimitLoadToSessionType'] = 'Aqua'
     else:
-        result['UserName'] = 'root' if role == 'authority' else '_remozio_lifecycle_transport'
+        result['UserName'] = '_remozio_lifecycle_transport' if role == 'transport' else 'root'
     return result
 
 
@@ -60,7 +61,11 @@ def build(app, identity):
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f'{APP_ID}.{role}.plist').write_bytes(plistlib.dumps(manifest(role)))
         binary = app / 'Contents/Helpers' / executable
-        run(*common, '-D', f'{role.upper()}_PROBE', str(SOURCE / 'Probe.swift'), *shared, '-o', str(binary))
+        if role == 'enclave':
+            run(*common, str(SOURCE / 'EnclaveHelper.swift'), str(SOURCE / 'EnclaveRecord.swift'),
+                str(SOURCE / 'EnclaveNamespace.swift'), *shared, '-o', str(binary))
+        else:
+            run(*common, '-D', f'{role.upper()}_PROBE', str(SOURCE / 'Probe.swift'), *shared, '-o', str(binary))
         sign(binary, identity, f'{APP_ID}.{role}')
     info = {'CFBundleIdentifier': APP_ID, 'CFBundleName': 'Remozio service lifecycle experiment',
             'CFBundleExecutable': 'RemozioServiceLifecycle', 'CFBundlePackageType': 'APPL',
@@ -85,7 +90,7 @@ def controls(app, identity):
         binary = app / 'Contents/Helpers' / executable
         verify_executable(binary, f'{APP_ID}.{role}')
         require(json.loads(run(str(binary), '--describe').stdout) ==
-                {'role': role, 'capability': 'service-lifecycle-only'}, 'Unexpected helper description')
+                {'role': role, 'capability': 'disposable-key-lifecycle-only' if role == 'enclave' else 'service-lifecycle-only'}, 'Unexpected helper description')
         require(run(str(binary), check=False).returncode == 69, 'Default helper did not refuse')
         checks.append(f'{role}:description-and-default-refusal')
     authority = app / 'Contents/Helpers' / ROLES['authority'][1]
@@ -95,6 +100,22 @@ def controls(app, identity):
     require(run(str(transport), '--service-probe', check=False).returncode == 78,
             'Transport accepted temporary unprotected startup')
     checks.append('transport:temporary-unprotected-startup-refusal')
+    enclave = app / 'Contents/Helpers' / ROLES['enclave'][1]
+    for args in [('--create-disposable-key', '--confirm-disposable-key-test'),
+                 ('--restore-disposable-key',), ('--service-key-probe',)]:
+        refused = run(str(enclave), *args, check=False)
+        require(refused.returncode == 77 and not refused.stdout and not refused.stderr,
+                'Enclave helper accepted ordinary-account operation')
+    require(run(str(enclave), '--create-disposable-key', check=False).returncode == 69,
+            'Enclave creation accepted missing confirmation')
+    checks.append('enclave:ordinary-account-and-confirmation-refusals')
+    record_controls = app.parent / 'record-controls'
+    run('xcrun', 'swiftc', '-import-objc-header', str(SOURCE / 'MembershipBridge.h'), '-warnings-as-errors',
+        '-swift-version', '6', '-target', 'arm64-apple-macosx26.0', '-parse-as-library',
+        str(SOURCE / 'RecordControls.swift'), str(SOURCE / 'EnclaveRecord.swift'), str(SOURCE / 'EnclaveNamespace.swift'),
+        str(SOURCE / 'Preflight.swift'), str(SOURCE / 'TransportAccount.swift'), str(METADATA), '-o', str(record_controls))
+    run(str(record_controls))
+    checks.append('enclave:record-and-namespace-controls')
     status = json.loads(run(str(controller), '--status').stdout)
     require(status['operationsAttempted'] is False, 'Status attempted a service operation')
     for role in ROLES:
@@ -109,7 +130,8 @@ def controls(app, identity):
                  ('--register', 'unknown', '--confirm-disposable-service-test'),
                  ('--register', 'session', '--confirm-disposable-service-test'),
                  ('--register', 'authority', '--confirm-disposable-service-test'),
-                 ('--register', 'transport', '--confirm-disposable-service-test')]:
+                 ('--register', 'transport', '--confirm-disposable-service-test'),
+                 ('--register', 'enclave', '--confirm-disposable-service-test')]:
         result = run(str(controller), *args, check=False)
         require(result.returncode == 78 and not result.stdout, 'Unsafe experiment command did not refuse')
         require(str(app) not in result.stderr, 'Refusal disclosed the bundle path')
@@ -162,7 +184,8 @@ def main():
                   'signing': 'developer-id' if args.developer_id else 'ad-hoc', 'checks': checks,
                   'servicesRegistered': False, 'servicesUnregistered': False, 'rootInstalled': False,
                   'notarizationTested': False, 'bootTested': False, 'updateTested': False,
-                  'dedicatedTransportAccountTested': False, 'status': 'passed',
+                  'dedicatedTransportAccountTested': False, 'hardwareKeyCreated': False, 'hardwareKeyRestored': False,
+                  'keyStatePersisted': False, 'keyNamespacePrivilegedPathsTested': False, 'status': 'passed',
                   'sourceSHA256': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                                    for path in [*sorted(SOURCE.glob('*.swift')), *sorted(SOURCE.glob('*.h')), METADATA, Path(__file__).resolve()]}}
         if args.keep_output:

@@ -48,3 +48,7 @@ The [Secure Enclave API](https://developer.apple.com/documentation/cryptokit/sec
 The later [Secure Enclave TLS experiment](macos-enclave-tls.md) establishes a local Network.framework handshake using a disposable enclave key. It does not close the lifecycle and protected-installation gates above.
 
 The [root provider assembly](../macos-request-providers.md) now includes a hardware-only restoration wrapper and root-private record loader. Its disposable same-process hardware test does not select an accessibility policy or close the lifecycle, cross-device, and protected-installation gates above.
+
+The [enclave lifecycle fixture](enclave-lifecycle.md) prepares protected persistence and a separately launched daemon restore.
+Its current evidence covers packaging, synthetic records and ordinary-account refusals only.
+No privileged file path, hardware operation or pre-login case has run.

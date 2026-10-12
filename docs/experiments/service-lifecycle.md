@@ -1,8 +1,9 @@
 # Protected service lifecycle experiment
 
 The disposable app can exercise Apple's service registration APIs during an interactive session.
-It contains an ordinary-account controller, one Aqua agent, one Root daemon and one dedicated-account transport daemon.
-It has no keys, listeners, approval RPC or command execution interface.
+It contains an ordinary-account controller, an Aqua agent, Root and transport daemons, and a separate enclave test daemon.
+The [enclave fixture](enclave-lifecycle.md) has explicit disposable-key operations.
+No helper exposes listeners, approval RPC or command execution.
 The production Remozio app does not activate these services.
 
 ```mermaid
@@ -20,7 +21,7 @@ flowchart TD
     W --> C[Protected signed replacement and re-registration]
 ```
 
-Only the build, synthetic account and refusal controls have run.
+Only the build, synthetic account, key-record and refusal controls have run.
 The arrows show required evidence, not completed operations.
 
 ## Apple API constraints
@@ -46,7 +47,7 @@ python3 scripts/check-service-lifecycle.py
 ```
 
 The script builds an arm64 Swift 6 app, signs it ad-hoc, and deletes its temporary copy afterward.
-It checks all three helpers, read-only status, exact manifests, missing confirmation, wrong roles and ordinary-account placement refusal.
+It checks all four helpers, read-only status, exact manifests, missing confirmation, wrong roles and ordinary-account placement refusal.
 It checks ad-hoc signature rejection and rejects altered labels, arguments, account selection and KeepAlive.
 It also rejects a transport manifest selecting Root.
 It never invokes a confirmed unregister command.
@@ -54,6 +55,8 @@ Confirmed register commands run only against its user-owned temporary app and fa
 The authority helper refuses ordinary-account service startup before its long-lived path.
 The transport helper also refuses its temporary, unprotected startup.
 No automated check starts the session helper's long-lived path.
+The enclave helper rejects ordinary-account creation, restore and service operations before key or filesystem access.
+Its record controls use synthetic wrapped bytes and a public curve point. They create no private key.
 
 To keep a new Developer ID fixture:
 
@@ -188,6 +191,6 @@ Do not use that mode as an ordinary build smoke test.
 
 Registration, Root placement, notarized acceptance, reboot, replacement and actual removal have not run.
 The transport role is prepared, but actual dedicated-account behavior and pre-login access remain untested.
-Pre-login hardware key access still needs a separate fixture and evidence.
+The [enclave lifecycle fixture](enclave-lifecycle.md) is prepared. Privileged storage and all hardware lifecycle paths remain untested.
 This app grants no production activation, anti-rollback, installer, enrollment or update-quiescence proof.
 Use the [interactive handoff](interactive-handoff.md) to retain those requirements.

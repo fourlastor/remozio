@@ -21,7 +21,7 @@ import ServiceManagement
             let args = Array(CommandLine.arguments.dropFirst()), app = Bundle.main.bundleURL
             if args == ["--status"] {
                 try emit(["experiment": "service-lifecycle", "operationsAttempted": false,
-                    "session": statusName(service(.session).status), "authority": statusName(service(.authority).status), "transport": statusName(service(.transport).status)])
+                    "session": statusName(service(.session).status), "authority": statusName(service(.authority).status), "transport": statusName(service(.transport).status), "enclave": statusName(service(.enclave).status)])
                 return
             }
             if args == ["--validate-manifests"] {
