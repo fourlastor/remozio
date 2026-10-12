@@ -4,8 +4,8 @@
   "status": "passed",
   "hostMacOS": "27.0.1",
   "deploymentTarget": "macOS 26.0",
-  "unitTests": 51,
-  "nativeControls": 5,
+  "unitTests": 71,
+  "nativeControls": 6,
   "cases": [
     {
       "control": "compressed-resource-data-fork",
@@ -28,10 +28,10 @@
         "schema": 2
       },
       "counts": {
-        "entries": 160,
-        "files": 89,
         "links": 9,
-        "bytes": 2895219
+        "bytes": 2895219,
+        "entries": 160,
+        "files": 89
       },
       "ordinaryPlacementMetadataVerified": true,
       "unsafeSourceModeAndACLNotCopied": true,
@@ -44,6 +44,19 @@
       "ownedCopyRemoved": true,
       "actualPolicyChanged": false,
       "activation": false
+    },
+    {
+      "activation": false,
+      "advancedFloorRejected": true,
+      "changedMetadataRejected": true,
+      "control": "durable-signed-copy-reopen",
+      "copyCountsMatch": true,
+      "metadataCleanupRecovered": true,
+      "nativeSignatureInspectorUsed": true,
+      "persistedRecordRetained": true,
+      "realCoreCopierUsed": true,
+      "RootIsolationTested": false,
+      "signingMetadataMatch": true
     },
     {
       "control": "source-held-descriptor",
@@ -65,15 +78,21 @@
   ],
   "sourceSHA256": {
     "macos/core/Sources/RemozioCore/DescriptorTreeCopy.swift": "548a826695ca77ca65eb5eb90b876fb32454357a252f772155e4b212cd4dff1f",
-    "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift": "fda3d07783b02da58b9d1ccaa0d1049145bfdbbe6c55ec4b09c897906b060c96",
+    "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift": "79cbf8741419887d56c9c04cfed81e49fcab905756702e51be559aa1932d652b",
     "macos/core/Sources/RemozioCore/ProtectedReleaseTreeInspection.swift": "0a608677d2963d51b725590e328530cba18860348273dd54e86c42cd46c9e1c8",
-    "macos/core/Sources/RemozioCore/ProtectedReleasePreparation.swift": "4d4bd49e9b4573ba94fbece2c42c4a66daafd2e0293edda4b39859165d95a82d",
+    "macos/core/Sources/RemozioCore/ProtectedReleasePreparation.swift": "d5185e383bc2ee722d3b3dd8247390709d3596258f38ae6217869d72d083fd9f",
     "macos/core/Tests/RemozioCoreTests/DescriptorTreeCopyTests.swift": "a0ef8e6904433d305e5588647d48850a3d4ca26b9ccad3c05ae7e68b6a9bcb4c",
     "macos/core/Tests/RemozioCoreTests/ReleaseDestinationLeaseTests.swift": "4071f22b2fe3505962ceabd9b254aed1a8e237899aaddc1ab5c7ab29eb801032",
     "macos/core/Tests/RemozioCoreTests/ProtectedReleaseTreeInspectionTests.swift": "cf306d445a889c5b7ea35ff2a3bedf9f0855182d279fdcad5180b593f65cc1e1",
-    "experiments/release-copy/Sources/ReleaseCopyProbe/main.swift": "0742eb6c3b4b0d8d3791b3e061577a37b70e3d49ea9762f15df07b7c2526a7ed",
-    "scripts/run-release-copy-experiment.py": "6b0ade6914dd9aaca786bc53499b37606e7b17ea94197c363dfdaa583a8c73e7",
-    "macos/core/Sources/RemozioCore/CopiedReleaseMetadata.swift": "cf229a79691860ba263fc68e924683e466d050e1d3537be9c9f53d59a86f33ab"
+    "experiments/release-copy/Sources/ReleaseCopyProbe/main.swift": "1cf2becdcce664f155b2e0768034058eadd6643e616235a7ec3f8d36b4a918d1",
+    "scripts/run-release-copy-experiment.py": "1a4349684ee1fdc5f7eb343164fde9dfa462725afad28df1cec5bd2eeee23002",
+    "macos/core/Sources/RemozioCore/CopiedReleaseMetadata.swift": "cf229a79691860ba263fc68e924683e466d050e1d3537be9c9f53d59a86f33ab",
+    "macos/core/Sources/RemozioCore/DurableReleasePreparation.swift": "170f6d551ec0ad82177faac9675029e89845cae606ea83e483637f592a2f2120",
+    "macos/core/Sources/RemozioCore/InstallationStorageLease.swift": "d5e974e9b5aa88c8269d2f663ea8ddc8c57b27f7ad098cc8b32ff71cdfe9054a",
+    "macos/core/Sources/RemozioCore/PreparationIntentRecord.swift": "0e71f63c91e00e83ae561c62a6fc0fbd06112de62dd8106e2d457dfd14e37291",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "0e9a3b203fe1dc6c0257705aeaeaea03d510a81563c07753307b965bd06e42cc",
+    "macos/core/Sources/RemozioCore/ProtectedStorageLease.swift": "bd5abf7042f522bb04f91fe99c72eb25eef8589d2bff92dc72b9ada1c961f0ae",
+    "macos/core/Tests/RemozioCoreTests/DurableReleasePreparationTests.swift": "431f0c44f7881b41c6ba41c5ad94f2c692703c03f96887b5b747f3b576465cb1"
   },
   "publicOrdinaryIdentityRefusalTested": true,
   "RootOwnershipAndIsolationTested": false,
@@ -84,7 +103,7 @@
   "limits": [
     "Ordinary-owner fixtures do not prove Root ownership or another-account isolation.",
     "Data-only copying is tested against the known SDK; source resource forks and attributes are not preserved. The copied tree follows the explicit metadata policy.",
-    "Immediate cleanup is tested. Crash recovery and orphan reconciliation remain pending.",
+    "Immediate cleanup and durable inactive-copy reopen are tested. Process-exit and rejected-commit controls are standalone prototypes. Root isolation, power-loss behavior, unknown-orphan reconciliation and activation recovery remain unproven.",
     "Compatibility, notarization, quiescence, health and durable activation remain separate gates."
   ],
   "initializationFailureControls": [
@@ -120,5 +139,20 @@
     "CoreTreeTests": 13,
     "RootIsolationTested": false,
     "activation": false
+  },
+  "durablePreparation": {
+    "storageSchema": 1,
+    "focusedRecoveryTests": 20,
+    "nativeSignedReopenPassed": true,
+    "freshNativeInspectorUsed": true,
+    "advancedFloorRejected": true,
+    "unexpectedCopiedMetadataRejected": true,
+    "storedMetadataGrantsActivationAuthority": false,
+    "RootIsolationTested": false,
+    "processExitPrototypeControls": 2,
+    "rejectedCommitPrototypeControls": 2,
+    "prototypeControlsAreCoreTests": false,
+    "nativeSQLiteCorruptionRetiresConnection": true,
+    "absentAbandonedRecordsReconciled": true
   }
 }

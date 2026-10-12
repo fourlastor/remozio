@@ -29,7 +29,7 @@ public enum ProtectedReleasePreparation {
         }
         let original = try SignedReleaseInspection.inspect(source, teamID: identity.teamID, appIdentifier: identity.identifier)
         try ReleaseGenerationPreflight.validate(original, against: initialPolicy)
-        let bundle = URL(fileURLWithPath: destination.path).appendingPathComponent(bundleName)
+        let bundle = URL(fileURLWithPath: destination.path).appendingPathComponent(bundleName, isDirectory: true)
         var copied: SignedReleaseEvidence?
         let counts = try destination.withDirectory { descriptor in
             try DescriptorTreeCopy.copy(source: source, parent: URL(fileURLWithPath: destination.path), name: bundleName,

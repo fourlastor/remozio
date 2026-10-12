@@ -66,7 +66,8 @@ If cleanup fails, the error retains both the original and cleanup failures.
 No failed preparation returns inactive evidence.
 If creation identity cannot be recorded, cleanup preserves the unknown directory and reports its failure.
 
-Crash recovery and orphan reconciliation remain unimplemented.
+The [durable preparation component](macos-durable-release-preparation.md) now records progress and revalidates completed copies after reopen.
+Unknown-orphan reconciliation and activation recovery remain unimplemented.
 A directory left by an interrupted operation is not activation evidence.
 The caller must revalidate protected state and the copy at the installation boundary.
 The returned value is a snapshot and grants no activation authority.

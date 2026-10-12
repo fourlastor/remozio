@@ -43,6 +43,8 @@ Each format declares separate, exact reader and writer sets, plus explicit migra
 A set such as `{2, 5}` does not include versions 3 or 4.
 Storage migration declarations do not authorize migration or erase retained generation floors.
 The journal accepts schemas 12 through 16. Its explicit legacy migration maps schemas 1 through 11 to 12.
+The authority declares preparation-store schema 1 as `authority.installation-preparation`.
+It remains separate from the account journal.
 Optional protected installation still controls later schema changes.
 
 Request contracts declare the kind, wire version, capture schema, action tags, and signature purposes.

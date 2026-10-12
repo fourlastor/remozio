@@ -80,3 +80,9 @@ Its observations do not select a production copying policy. Compressed resource 
 The [metadata policy](../macos-copied-release-metadata.md) checks copied files, directories and links.
 It permits zero file flags and only OS provenance attributes.
 Signature verification, protected placement and activation remain separate gates.
+
+## Durable inactive preparation
+
+The [Core recovery component](../macos-durable-release-preparation.md) records intent before copy and requires fresh native inspection after reopen.
+The signed SDK control checks retained metadata, inode binding and current floors.
+It grants no installation or activation authority.

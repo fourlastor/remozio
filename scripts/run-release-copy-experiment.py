@@ -98,6 +98,14 @@ try:
             if (rejected_parent/'Fixture.app').exists():raise RuntimeError('Rejected copy remained after successful owned cleanup')
             print(json.dumps({'control':'floor-advanced-during-preparation','preparationRejected':True,
                               'ownedCopyRemoved':True,'actualPolicyChanged':False,'activation':False}),flush=True)
+            durable_parent=copied_root/'Durable';durable_parent.mkdir(mode=0o700)
+            durable_result=subprocess.run([str(copy_probe),str(source),str(durable_parent),config.team,identity,'durable-copy'],
+                                          capture_output=True,timeout=20)
+            if durable_result.returncode:raise RuntimeError(durable_result.stderr.decode().strip())
+            durable_evidence=json.loads(durable_result.stdout)
+            if durable_evidence.get('control')!='durable-signed-copy-reopen':
+                raise RuntimeError('Durable copy probe returned no expected control')
+            print(json.dumps(durable_evidence),flush=True)
             os.pwrite(held,b'X',0);os.fsync(held)
             if inspect(copied,identity)!=expected or boundary.digest(copied)!=saved_digest:
                 raise RuntimeError('An open source descriptor changed the copy')

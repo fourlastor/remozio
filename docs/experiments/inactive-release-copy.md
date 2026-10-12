@@ -24,9 +24,10 @@ The original SDK must remain unchanged.
 | Valid signed copy | Bytes, link text, manifest and code hashes remain unchanged; copied placement and floors pass |
 | Policy advances during preparation | The second policy read rejects the candidate; owned cleanup removes the copy |
 | Source descriptor stays writable | A later source mutation cannot change copied bytes or signing evidence |
+| Durable signed copy after store reopen | Fresh native signing and placement match; advanced floors and unexpected copied metadata reject recovery |
 | Copied file gains a mutation ACL | The whole-tree placement check rejects it; removing the fixture ACL restores the check |
 
-The 51 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
+The 71 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
 They check cleanup against unknown entries and replacement inodes.
 They check destination lease retirement and the public Root refusal before source or policy access.
 
@@ -42,7 +43,8 @@ The kernel decodes the resource data before the copier writes a new uncompressed
 This proves the recorded compressed fixture, not arbitrary resource-fork semantics.
 The [copied metadata policy](../macos-copied-release-metadata.md) now rejects flags and unexpected copied attributes.
 It does not preserve arbitrary source metadata or replace signature verification.
-Crash recovery, protected service installation, notarization and activation remain pending.
+The [durable component](../macos-durable-release-preparation.md) checks completed-copy reopen.
+Root isolation, power loss, unknown-orphan reconciliation, protected service installation, notarization and activation remain pending.
 The macOS 26 deployment target does not establish runtime compatibility on macOS 26.
 
 The [evidence record](inactive-release-copy.json) identifies the tested source hashes and host version.
