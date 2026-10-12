@@ -2,7 +2,8 @@ import Foundation
 import XCTest
 
 final class FrontendTerminalIOTests: XCTestCase {
-    private func run(_ name: String, wrapper: Bool) throws {
+    @discardableResult
+    private func run(_ name: String, wrapper: Bool, arguments: [String] = [], expectedFailure: Int32 = 0) throws -> [String: Any] {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("remozio-frontend-io-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -30,15 +31,22 @@ final class FrontendTerminalIOTests: XCTestCase {
             native.appendingPathComponent("CommandStreamSource.c").path, "-o", driver.path]
         try compiler.run(); compiler.waitUntilExit(); XCTAssertEqual(compiler.terminationStatus, 0)
         guard compiler.terminationStatus == 0 else { throw CocoaError(.executableNotLoadable) }
-        let process = Process(); process.executableURL = driver
+        let process = Process(); process.executableURL = driver; process.arguments = arguments
         let output = Pipe(); process.standardOutput = output
         try process.run(); process.waitUntilExit()
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        XCTAssertEqual(process.terminationStatus, 0, String(decoding: data, as: UTF8.self))
+        XCTAssertEqual(process.terminationStatus, expectedFailure, String(decoding: data, as: UTF8.self))
         let result = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
-        XCTAssertEqual(result["failure"] as? Int, 0)
+        XCTAssertEqual(result["failure"] as? Int, Int(expectedFailure))
         XCTAssertEqual(result["sessionOwnerReaped"] as? Bool, true)
         if wrapper {
+            XCTAssertEqual(result["workerDiagnosticPresent"] as? Bool, true)
+            XCTAssertEqual(result["workerStatusKnown"] as? Bool, true)
+            XCTAssertEqual(result["workerReaped"] as? Bool, true)
+            if expectedFailure != 0 { return result }
+            XCTAssertEqual(result["workerExitCode"] as? Int, 0)
+            XCTAssertEqual(result["workerSignal"] as? Int, 0)
+            XCTAssertEqual(result["cleanupKillAttempted"] as? Bool, false)
             XCTAssertEqual(result["backgroundReadInterrupted"] as? Bool, true)
             XCTAssertEqual(result["queuedInputPreserved"] as? Bool, true)
             XCTAssertEqual(result["restorationRetainedThenCompleted"] as? Bool, true)
@@ -48,6 +56,7 @@ final class FrontendTerminalIOTests: XCTestCase {
             XCTAssertEqual(result["exactOutputBytes"] as? Int, 1_048_576)
             XCTAssertEqual(result["binaryInputPreserved"] as? Bool, true)
         }
+        return result
     }
     func testActualOwnerPreservesBinaryIOThroughRealTerminalBackpressure() throws {
         try run("frontend-terminal-io", wrapper: false)
@@ -55,4 +64,33 @@ final class FrontendTerminalIOTests: XCTestCase {
     func testActualBackgroundReadRaceRejectsUnsafeSignalsAndPreservesInput() throws {
         try run("frontend-terminal-read-race", wrapper: true)
     }
+    func testReadRacePreservesEarlyWorkerExit() throws {
+        let result = try run("frontend-terminal-read-race", wrapper: true,
+            arguments: ["--worker-exit-before-ready"], expectedFailure: 34)
+        XCTAssertEqual(result["supervisorPhase"] as? Int, 2)
+        XCTAssertEqual(result["reportReadResult"] as? Int, 0)
+        XCTAssertEqual(result["reportReadErrno"] as? Int, 0)
+        XCTAssertEqual(result["workerExitCode"] as? Int, 87)
+        XCTAssertEqual(result["workerSignal"] as? Int, 0)
+    }
+    func testReadRacePreservesWorkerSignal() throws {
+        let result = try run("frontend-terminal-read-race", wrapper: true,
+            arguments: ["--worker-signal-before-ready"], expectedFailure: 34)
+        XCTAssertEqual(result["supervisorPhase"] as? Int, 2)
+        XCTAssertEqual(result["reportReadResult"] as? Int, 0)
+        XCTAssertEqual(result["workerExitCode"] as? Int, -1)
+        XCTAssertEqual(result["workerSignal"] as? Int, 15)
+    }
+    func testReadRaceDistinguishesCleanupKillFromWorkerFailure() throws {
+        let result = try run("frontend-terminal-read-race", wrapper: true,
+            arguments: ["--worker-invalid-ready"], expectedFailure: 34)
+        XCTAssertEqual(result["supervisorPhase"] as? Int, 2)
+        XCTAssertEqual(result["reportReadResult"] as? Int, 1)
+        XCTAssertEqual(result["reportByte"] as? Int, 88)
+        XCTAssertEqual(result["workerExitCode"] as? Int, -1)
+        XCTAssertEqual(result["workerSignal"] as? Int, 9)
+        XCTAssertEqual(result["statusObservedBeforeCleanup"] as? Bool, false)
+        XCTAssertEqual(result["cleanupKillAttempted"] as? Bool, true)
+    }
+
 }
