@@ -7725,15 +7725,17 @@ extension MachCommandCallerReceiverTests {
     }
     private final class WorkerPort: Sendable { let value = Mutex<mach_port_t>(0) }
     private static func workerHost(port: WorkerPort, context: CommandSessionRegistry.Context,
-                                   policyRead: @escaping @Sendable () throws -> Void = {}) throws -> CommandReceiveHost {
+                                   policyRead: @escaping @Sendable () throws -> Void = {},
+                                   receiveWaitMilliseconds: UInt32 = 10,
+                                   observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws -> CommandReceiveHost {
         var receiver: mach_port_t = 0
         guard mach_port_allocate(mach_task_self_, MACH_PORT_RIGHT_RECEIVE, &receiver) == KERN_SUCCESS else {
             throw MachCommandCallerError.configuration
         }
         let host = try CommandReceiveHost(takingReceiveRight: receiver, macID: Data(repeating: 1, count: 16),
             accountID: Data(repeating: 2, count: 16), userID: geteuid(), auditSessionID: nil, maximumSessions: 4,
-            maximumPayloadBytes: 8192, receiveWaitMilliseconds: 10, replyTimeoutMilliseconds: 100,
-            capabilities: .admissionResults, context: { _ in try policyRead(); return context })
+            maximumPayloadBytes: 8192, receiveWaitMilliseconds: receiveWaitMilliseconds, replyTimeoutMilliseconds: 100,
+            capabilities: .admissionResults, context: { _ in try policyRead(); return context }, observeTimeout: observeTimeout)
         guard mach_port_insert_right(mach_task_self_, receiver, receiver, UInt32(MACH_MSG_TYPE_MAKE_SEND)) == KERN_SUCCESS else {
             host.close(); throw MachCommandCallerError.configuration
         }
@@ -8074,12 +8076,14 @@ extension MachCommandCallerReceiverTests {
     private func elevationWorker(_ fixture: CommandRequestFixture, port: WorkerPort,
                                  policy: CurrentCommandElevationPolicy,
                                  streamBinding: @escaping @Sendable () throws -> Data,
-                                 onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void) throws -> AuthorityCommandReceiveWorker {
+                                 onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void,
+                                 diagnostics: ReceiveDiagnostics? = nil) throws -> AuthorityCommandReceiveWorker {
         let journal = try XCTUnwrap(fixture.authority), epoch = fixture.clock, expression = try selfExpression()
         let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
         let limits = fixture.limits, environment = assemblyEnvironment, contract = fixture.contract
         return try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits,
-            makeHost: { try Self.workerHost(port: port, context: context, policyRead: {}) },
+            makeHost: { try Self.workerHost(port: port, context: context, policyRead: {},
+                observeTimeout: { stage in diagnostics?.record(stage) }) },
             admit: { attempt, time, stop in
                 try journal.admitCommandAttempt(attempt, expression: expression, elevationPolicy: policy,
                     captureSchemaVersion: 1, minimalEnvironment: environment, streamBinding: streamBinding,
@@ -8090,7 +8094,8 @@ extension MachCommandCallerReceiverTests {
                             createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
                     }, now: { .init(epoch: epoch, milliseconds: 110) }, receiptTimeMs: time,
                     checkCancellation: { try stop.check() })
-            }, receiptTime: { 777 }, onAdmission: onAdmission)
+            }, receiptTime: { 777 }, onAdmission: onAdmission,
+            observeReceive: { event in diagnostics?.record(event) })
     }
 
     private func workerElevationProfile(_ destination: mach_port_t) throws -> CommandHandshakeProfile {
@@ -8113,10 +8118,10 @@ extension MachCommandCallerReceiverTests {
 
     @MainActor func testReceiveWorkerElevationReloadsGrantAndRetainsHealthyQueueAfterDenial() async throws {
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort(), box = ElevationGrantBox()
-        let bindings = Mutex(0), outcomes = Mutex(0), policy = try currentElevation(box)
+        let bindings = Mutex(0), outcomes = Mutex(0), policy = try currentElevation(box), diagnostics = ReceiveDiagnostics()
         let worker = try elevationWorker(fixture, port: port, policy: policy, streamBinding: {
             bindings.withLock { $0 += 1 }; return Data(repeating: 0xe4, count: 16)
-        }, onAdmission: { _ in outcomes.withLock { $0 += 1 } })
+        }, onAdmission: { _ in outcomes.withLock { $0 += 1 } }, diagnostics: diagnostics)
         try await worker.start()
         let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
@@ -8125,7 +8130,7 @@ extension MachCommandCallerReceiverTests {
             catch {
                 let observation = "\(phase): status=\(worker.status), retired=\(worker.isRetired), "
                     + "outcomes=\(outcomes.withLock { $0 }), reads=\(box.state.withLock { $0.reads }), "
-                    + "bindings=\(bindings.withLock { $0 })"
+                    + "bindings=\(bindings.withLock { $0 }), receive=\(diagnostics.snapshot)"
                 XCTFail(observation)
                 await worker.close()
                 XCTAssertEqual(worker.status, .closed)
@@ -8697,6 +8702,128 @@ extension MachCommandCallerReceiverTests {
             XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .cancelledBeforeStart)
             XCTAssertEqual(journal.activeCommandCount, 0)
             XCTAssertThrowsError(try journal.read { _ in 0 })
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    private final class ReceiveDiagnostics: Sendable {
+        private struct Counts {
+            var idle = 0, hello = 0, inputHandled = 0
+            var malformed = 0, wrongPeer = 0, incompatible = 0, capacity = 0, replyFailure = 0
+            var previewWait = 0, authenticatedPreview = 0, packetReceive = 0
+        }
+        private let counts = Mutex(Counts())
+        private func increment(_ value: inout Int) { if value < Int.max { value += 1 } }
+        func record(_ event: AuthorityCommandReceiveWorker.ReceiveObservation) {
+            counts.withLock {
+                switch event {
+                case .idle: increment(&$0.idle)
+                case .hello: increment(&$0.hello)
+                case .inputHandled: increment(&$0.inputHandled)
+                case .rejected(.malformed): increment(&$0.malformed)
+                case .rejected(.wrongPeer): increment(&$0.wrongPeer)
+                case .rejected(.incompatible): increment(&$0.incompatible)
+                case .rejected(.capacity): increment(&$0.capacity)
+                case .rejected(.replyFailure): increment(&$0.replyFailure)
+                }
+            }
+        }
+        func record(_ stage: MachCommandReceiveTimeoutStage) {
+            counts.withLock {
+                switch stage {
+                case .previewWait: increment(&$0.previewWait)
+                case .authenticatedPreview: increment(&$0.authenticatedPreview)
+                case .packetReceive: increment(&$0.packetReceive)
+                }
+            }
+        }
+        var snapshot: String {
+            counts.withLock {
+                "idle=\($0.idle), hello=\($0.hello), input=\($0.inputHandled), malformed=\($0.malformed), "
+                    + "wrongPeer=\($0.wrongPeer), incompatible=\($0.incompatible), capacity=\($0.capacity), "
+                    + "replyFailure=\($0.replyFailure), previewWait=\($0.previewWait), "
+                    + "authenticatedPreview=\($0.authenticatedPreview), packetReceive=\($0.packetReceive)"
+            }
+        }
+        var helloCount: Int { counts.withLock { $0.hello } }
+        var malformedCount: Int { counts.withLock { $0.malformed } }
+    }
+
+    func testReceiveTimeoutDiagnosticsDistinguishEmptyQueue() throws {
+        let endpoint = try Endpoint(), observations = Mutex<[MachCommandReceiveTimeoutStage]>([])
+        let receive = try MachCommandCallerReceiver(receivePort: endpoint.port, expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, maxPayloadBytes: 4096,
+            observeTimeout: { stage in observations.withLock { $0.append(stage) } })
+        XCTAssertThrowsError(try receive.receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertEqual(observations.withLock { $0 }, [.previewWait])
+        XCTAssertTrue(receiveRightPresent(endpoint.port))
+    }
+
+    func testReceiveTimeoutDiagnosticsIdentifyAuthenticatedDiscardAndReleaseReplyRight() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint(), observations = Mutex<[MachCommandReceiveTimeoutStage]>([])
+        let times = Mutex<[UInt64]>([0, 1_000_000])
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        let receive = try MachCommandCallerReceiver(receivePort: endpoint.port, expression: selfExpression(),
+            userID: geteuid(), auditSessionID: nil, maxPayloadBytes: 4096,
+            observeTimeout: { stage in observations.withLock { $0.append(stage) } },
+            uptimeNanoseconds: { times.withLock { $0.removeFirst() } })
+        XCTAssertThrowsError(try receive.receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertEqual(observations.withLock { $0 }, [.authenticatedPreview])
+        XCTAssertTrue(times.withLock { $0.isEmpty })
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        XCTAssertThrowsError(try receiver(endpoint).receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+        XCTAssertTrue(receiveRightPresent(endpoint.port))
+    }
+
+    func testReceiveTimeoutDiagnosticsDoNotReplacePeerAuthentication() throws {
+        let endpoint = try Endpoint(), observations = Mutex<[MachCommandReceiveTimeoutStage]>([]), clockReads = Mutex(0)
+        try endpoint.send(Data([1]))
+        let receive = try MachCommandCallerReceiver(receivePort: endpoint.port, expression: selfExpression(),
+            userID: geteuid() ^ 1, auditSessionID: nil, maxPayloadBytes: 64,
+            observeTimeout: { stage in observations.withLock { $0.append(stage) } },
+            uptimeNanoseconds: { clockReads.withLock { $0 += 1; return UInt64($0) * 1_000_000 } })
+        XCTAssertThrowsError(try receive.receive(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+        XCTAssertTrue(observations.withLock { $0.isEmpty })
+        XCTAssertEqual(clockReads.withLock { $0 }, 1)
+    }
+
+    @MainActor func testReceiveWorkerDiagnosticsObserveMalformedThenHelloWithoutAdmission() async throws {
+        let port = WorkerPort(), diagnostics = ReceiveDiagnostics(), admissions = Mutex(0)
+        let context = CommandSessionRegistry.Context(expression: "always", roleRevision: UUID())
+        let worker = try AuthorityCommandReceiveWorker(submissionLimits: assemblyLimits,
+            makeHost: { try Self.workerHost(port: port, context: context, receiveWaitMilliseconds: 1000,
+                observeTimeout: { diagnostics.record($0) }) },
+            admit: { _, _, _ in throw CommandReceiveHostError.invalidConfiguration },
+            onAdmission: { _ in admissions.withLock { $0 += 1 } },
+            observeReceive: { diagnostics.record($0) })
+        try await worker.start()
+        let destination = port.value.withLock { $0 }
+        defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination) }
+        do {
+            let reply = try Endpoint()
+            try MachCommandWire.send(Data([0xff]), destination: destination, replyPort: reply.port,
+                identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+            try await waitForReceiveWorker { diagnostics.malformedCount == 1 }
+            _ = try workerElevationProfile(destination)
+            try await waitForReceiveWorker { diagnostics.helloCount == 1 }
+            XCTAssertEqual(admissions.withLock { $0 }, 0)
+            XCTAssertEqual(worker.status, .running); XCTAssertFalse(worker.isRetired)
+            await worker.close()
+            XCTAssertEqual(worker.status, .closed); XCTAssertFalse(receiveRightPresent(destination))
+        } catch {
+            XCTFail("Receive observations: \(diagnostics.snapshot)")
+            await worker.close(); throw error
         }
     }
 }

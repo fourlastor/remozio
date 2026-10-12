@@ -1,0 +1,46 @@
+{
+  "hostMacOS": "27.0.1",
+  "receiverSourceSHA256": "cc3db8d7444a35db4012918bc67c8c4834be66290f2d6eb7ef1d5ec8640d0cc5",
+  "probeSourceSHA256": "00182db4662e969b2148efdd1dd2180db5bb73c4492946c16e4e8d45b56f8e6e",
+  "cases": [
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 7.198583,
+      "outcome": "accepted",
+      "queuedAfter": 0,
+      "queuedBefore": 1,
+      "receiveBudgetMilliseconds": 10,
+      "sendDelayMilliseconds": 0,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 0.105,
+      "serviceRegistered": false
+    },
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 3.753958,
+      "outcome": "accepted",
+      "queuedAfter": 0,
+      "queuedBefore": 1,
+      "receiveBudgetMilliseconds": 1000,
+      "sendDelayMilliseconds": 0,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 0.005875,
+      "serviceRegistered": false
+    },
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 14.696833,
+      "outcome": "timeout",
+      "queuedAfter": 0,
+      "queuedBefore": 0,
+      "receiveBudgetMilliseconds": 10,
+      "sendDelayMilliseconds": 8,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 9.740833,
+      "serviceRegistered": false
+    }
+  ],
+  "scope": "Ordinary-account owned Mach ports; no service, approval or execution. Reproduces queued-frame discard near budget boundary, not the original CI grant-reload cause.",
+  "receiverBaselineCommit": "f7bf500b542524edb8a6b960afa9e7cc7abcae3b",
+  "note": "Native timing sample used the unmodified receiver. The probe was a disposable local program. Deterministic regression tests are committed separately."
+}

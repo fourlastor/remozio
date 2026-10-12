@@ -34,6 +34,7 @@ public final class CommandReceiveHost {
     private let auditSessionID: au_asid_t?
     private let maximumPayloadBytes: Int
     private let replyTimeoutMilliseconds: UInt32
+    private let observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)?
     private var busy = false
     private var running = false
     private var delivering = false
@@ -67,7 +68,9 @@ public final class CommandReceiveHost {
     init(takingReceiveRight: mach_port_t, macID: Data, accountID: Data, userID: uid_t, auditSessionID: au_asid_t?,
          maximumSessions: Int, maximumPayloadBytes: Int, receiveWaitMilliseconds: UInt32 = 250,
          replyTimeoutMilliseconds: UInt32 = 5000, capabilities: CommandHandshakeCapabilities = .current,
-         context: @escaping (CommandSessionRegistry) throws -> CommandSessionRegistry.Context) throws {
+         context: @escaping (CommandSessionRegistry) throws -> CommandSessionRegistry.Context,
+         observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil) throws {
+        self.observeTimeout = observeTimeout
         var references: mach_port_urefs_t = 0
         guard takingReceiveRight != MACH_PORT_NULL, takingReceiveRight != UInt32.max,
               mach_port_get_refs(mach_task_self_, takingReceiveRight, MACH_PORT_RIGHT_RECEIVE, &references) == KERN_SUCCESS,
@@ -217,7 +220,7 @@ public final class CommandReceiveHost {
         let before = try currentContext()
         let receiver: MachCommandCallerReceiver
         do { receiver = try MachCommandCallerReceiver(receivePort: port, expression: before.expression, userID: userID,
-            auditSessionID: auditSessionID, maxPayloadBytes: maximumPayloadBytes) }
+            auditSessionID: auditSessionID, maxPayloadBytes: maximumPayloadBytes, observeTimeout: observeTimeout) }
         catch { stop.requestStop(); throw error }
         let message: ReceivedMachCommandMessage
         do { message = try receiver.receiveNext(timeoutMilliseconds: receiveWaitMilliseconds) }

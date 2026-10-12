@@ -100,6 +100,18 @@ private final class CommandReceiveWorkerOwnership: Sendable {
 /// Status callbacks must return promptly and must not start or stop this worker.
 public final class AuthorityCommandReceiveWorker: Sendable {
     public enum Status: Equatable, Sendable { case idle, starting, running, stopping, failed, closed }
+    /// Fixture observations omit the handshake profile and all request data.
+    enum ReceiveObservation: Sendable, Equatable {
+        case idle, hello, inputHandled, rejected(CommandReceiveRejection)
+        init(_ event: CommandReceiveEvent) {
+            switch event {
+            case .idle: self = .idle
+            case .hello: self = .hello
+            case .inputHandled: self = .inputHandled
+            case .rejected(let reason): self = .rejected(reason)
+            }
+        }
+    }
     private let ownership: CommandReceiveWorkerOwnership
     private let queue = DispatchQueue(label: "dev.remozio.authority.command-receive", qos: .utility)
     private let makeHost: @Sendable () throws -> CommandReceiveHost
@@ -107,6 +119,7 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     private let admit: @Sendable (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload
     private let receiptTime: @Sendable () -> UInt64?
     private let onAdmission: @Sendable (Result<IssuedRequestPayload, any Error>) -> Void
+    private let observeReceive: (@Sendable (ReceiveObservation) -> Void)?
     public var status: Status { ownership.status }
     public var isRetired: Bool { ownership.failed }
     /// One enclosing service observes the buffered failure. Normal shutdown ends without a failure event.
@@ -163,15 +176,17 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     }
 
     /// Fixture admission seam. Product construction uses a Root-validated journal operation.
+    /// The optional observer runs on the receive queue and must return promptly without reentry.
     init(submissionLimits: CBORLimits, makeHost: @escaping @Sendable () throws -> CommandReceiveHost,
          admit: @escaping @Sendable (sending RetainedCommandAdmissionAttempt, UInt64?, CommandReceiveStop) throws -> IssuedRequestPayload,
          receiptTime: @escaping @Sendable () -> UInt64? = { nil },
          onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
-         report: @escaping @Sendable (Status) -> Void = { _ in }) throws {
+         report: @escaping @Sendable (Status) -> Void = { _ in },
+         observeReceive: (@Sendable (ReceiveObservation) -> Void)? = nil) throws {
         guard submissionLimits.maxBytes <= 16_777_216 else { throw CommandReceiveHostError.invalidConfiguration }
         ownership = CommandReceiveWorkerOwnership(report: report); limits = submissionLimits
         self.makeHost = makeHost; self.admit = admit
-        self.receiptTime = receiptTime; self.onAdmission = onAdmission
+        self.receiptTime = receiptTime; self.onAdmission = onAdmission; self.observeReceive = observeReceive
     }
     deinit { ownership.requestStop() }
 
@@ -179,7 +194,7 @@ public final class AuthorityCommandReceiveWorker: Sendable {
     public func start() async throws {
         try Task.checkCancellation()
         let ownership = ownership, queue = queue, makeHost = makeHost, limits = limits
-        let admit = admit, receiptTime = receiptTime, onAdmission = onAdmission
+        let admit = admit, receiptTime = receiptTime, onAdmission = onAdmission, observeReceive = observeReceive
         do {
             try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
@@ -196,8 +211,9 @@ public final class AuthorityCommandReceiveWorker: Sendable {
                             guard ownership.ready() else { throw CommandReceiveHostError.stopped }
                             ready = true; continuation.resume()
                             while !ownership.stopping {
-                                _ = try host.pollAdmission(submissionLimits: limits, receiptTime: receiptTime,
+                                let event = try host.pollAdmission(submissionLimits: limits, receiptTime: receiptTime,
                                     admit: admit, onResult: onAdmission)
+                                observeReceive?(ReceiveObservation(event))
                             }
                         } catch {
                             ownership.fail()

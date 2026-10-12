@@ -16,6 +16,8 @@ public enum MachCommandCallerError: Error, Equatable {
     case mach(Int32), security(OSStatus)
 }
 
+enum MachCommandReceiveTimeoutStage: Sendable, Equatable { case previewWait, authenticatedPreview, packetReceive }
+
 /// Receives untrusted submission bytes and authenticates their actual sender. This grants no command authority.
 /// This receiver is the port's sole consumer. The owner supplies the borrowed right, serializes access, and owns its lifetime.
 public final class MachCommandCallerReceiver {
@@ -43,6 +45,8 @@ public final class MachCommandCallerReceiver {
     private let expression: String
     private let userID: uid_t
     private let auditSessionID: au_asid_t?
+    private let observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)?
+    private let uptimeNanoseconds: () -> UInt64
 
     public convenience init(receivePort: mach_port_t, policy: XPCPeerPolicy, maxPayloadBytes: Int) throws {
         try self.init(receivePort: receivePort, expression: policy.requirement, userID: policy.expectedUserID,
@@ -50,13 +54,16 @@ public final class MachCommandCallerReceiver {
     }
 
     // Internal fixture policy does not expose an ad-hoc option to product callers.
-    init(receivePort: mach_port_t, expression: String, userID: uid_t, auditSessionID: au_asid_t?, maxPayloadBytes: Int) throws {
+    init(receivePort: mach_port_t, expression: String, userID: uid_t, auditSessionID: au_asid_t?, maxPayloadBytes: Int,
+         observeTimeout: (@Sendable (MachCommandReceiveTimeoutStage) -> Void)? = nil,
+         uptimeNanoseconds: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }) throws {
         guard receivePort != MACH_PORT_NULL, receivePort != UInt32.max, maxPayloadBytes > 0,
               maxPayloadBytes <= Int(UInt32.max) - 1024 else { throw MachCommandCallerError.configuration }
         self.port = receivePort; self.maxPayloadBytes = maxPayloadBytes
         _ = try Self.compile(expression)
         self.expression = expression
         self.userID = userID; self.auditSessionID = auditSessionID
+        self.observeTimeout = observeTimeout; self.uptimeNanoseconds = uptimeNanoseconds
     }
 
     /// A finite timeout keeps receive loops cancellable. Oversized and malformed packets fail without truncation.
@@ -182,10 +189,13 @@ public final class MachCommandCallerReceiver {
         guard (timeoutMilliseconds > 0 || requestedKind == .streamControl),
               (previewWait > 0 || requestedKind == .streamControl || allowNonblockingPreview),
               previewWait <= timeoutMilliseconds else { throw MachCommandCallerError.configuration }
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = uptimeNanoseconds()
         var preview = remozio_mach_preview_t()
         let previewResult = remozio_preview_audit(port, previewWait, &preview)
-        if previewResult == MACH_RCV_TIMED_OUT { throw MachCommandCallerError.timeout }
+        if previewResult == MACH_RCV_TIMED_OUT {
+            observeTimeout?(.previewWait)
+            throw MachCommandCallerError.timeout
+        }
         guard previewResult == KERN_SUCCESS else { throw MachCommandCallerError.mach(previewResult) }
         let kind: PacketKind
         if let requestedKind { kind = requestedKind }
@@ -246,10 +256,11 @@ public final class MachCommandCallerReceiver {
         }
         var completed = false
         defer { if !completed { caller.close() } }
-        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let elapsed = uptimeNanoseconds() - started
         let budget = UInt64(timeoutMilliseconds) * 1_000_000
         guard budget == 0 || elapsed < budget else {
             try discardQueueHead()
+            observeTimeout?(.authenticatedPreview)
             if kind == .terminalReply { throw CommandTerminalResultError.deadlineExceeded }
             throw MachCommandCallerError.timeout
         }
@@ -262,6 +273,7 @@ public final class MachCommandCallerReceiver {
         let header = storage.bindMemory(to: mach_msg_header_t.self, capacity: 1)
         let result = remozio_receive_audit(header, UInt32(capacity), port, remaining)
         if result == MACH_RCV_TIMED_OUT {
+            observeTimeout?(.packetReceive)
             if kind == .terminalReply { throw CommandTerminalResultError.deadlineExceeded }
             throw MachCommandCallerError.timeout
         }

@@ -13,6 +13,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
 | Command caller identity | [Kernel audit token, code pin, exec and exit measured on macOS 26 and 27](macos-command-caller.md) | Production IPC, trusted signing floor, protected admission |
+| Command receive budget | [Native loss path and redacted diagnostics](command-receive-budget.md) | Original CI failure classification and a deadline-preserving repair |
 | Command input transfer | [Fileport identity, queued input, later streaming and PTY resize measured](macos-command-fileport.md) | macOS 26 repeat, authenticated descriptor channel, resource budgets, capture and executor integration |
 | Command job control | [Private leader and session monitor measured](macos-command-job-control.md); [current monitor with nested Bash jobs measured](macos-nested-shell.md) | [Native mixed streams measured](../macos-native-stdio-layout.md); frontend signal integration, protected deployment and physical validation remain |
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
