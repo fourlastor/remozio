@@ -7788,28 +7788,44 @@ extension MachCommandCallerReceiverTests {
         try await worker.start()
         let destination = port.value.withLock { $0 }
         defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination) }
-        try await waitForReceiveWorker { reads.withLock { $0 >= 3 } }
-        XCTAssertTrue(sampled.withLock { $0.isEmpty })
-        let helloReply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
-        try MachCommandWire.send(offer.canonicalBytes, destination: destination, replyPort: helloReply.port,
-            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
-        let response = try receiver(helloReply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
-        defer { response.caller.close() }
-        let profile = try CommandHandshakeReply.decode(response.payload, offer: offer,
-            macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
-        XCTAssertTrue(sampled.withLock { $0.isEmpty })
-        current.withLock { $0 = 777 }
-        let inputReply = try Endpoint()
-        let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
-            callerBinding: profile.callerBinding))
-        let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
-        XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
-        try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: fd, destination: destination,
-            replyPort: inputReply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
-        try await waitForReceiveWorker { admitted.withLock { $0 } }
-        await worker.close()
-        XCTAssertEqual(sampled.withLock { $0 }, [777]); XCTAssertFalse(worker.isRetired)
+        var phase = "policy warm-up"
+        do {
+            try await waitForReceiveWorker { reads.withLock { $0 >= 3 } }
+            XCTAssertTrue(sampled.withLock { $0.isEmpty })
+            let helloReply = try Endpoint(), offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+            phase = "hello send"
+            try MachCommandWire.send(offer.canonicalBytes, destination: destination, replyPort: helloReply.port,
+                identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+            phase = "hello reply"
+            let response = try receiver(helloReply, maximum: 4096).receiveHelloReply(timeoutMilliseconds: 1000)
+            defer { response.caller.close() }
+            let profile = try CommandHandshakeReply.decode(response.payload, offer: offer,
+                macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16))
+            XCTAssertTrue(sampled.withLock { $0.isEmpty })
+            current.withLock { $0 = 777 }
+            let inputReply = try Endpoint()
+            let submission = try commandSubmission(binding: .init(id: Data(repeating: 0xb2, count: 16), nonce: Data(repeating: 0xb3, count: 32),
+                callerBinding: profile.callerBinding))
+            let fd = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
+            XCTAssertGreaterThanOrEqual(fd, 0); defer { _ = Darwin.close(fd) }
+            phase = "command submission"
+            try MachCommandAdmissionWire.send(submission.canonicalBytes, inputDescriptor: fd, destination: destination,
+                replyPort: inputReply.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            phase = "admission callback"
+            try await waitForReceiveWorker { admitted.withLock { $0 } }
+            await worker.close()
+            XCTAssertEqual(sampled.withLock { $0 }, [777]); XCTAssertFalse(worker.isRetired)
+        } catch {
+            let observation = "receipt fixture \(phase): status=\(worker.status), retired=\(worker.isRetired), "
+                + "reads=\(reads.withLock { $0 }), samples=\(sampled.withLock { $0.count }), admitted=\(admitted.withLock { $0 })"
+            XCTFail(observation)
+            await worker.close()
+            XCTAssertEqual(worker.status, .closed)
+            XCTAssertFalse(receiveRightPresent(destination), "Timed-out receipt worker retained its receive right")
+            throw error
+        }
     }
+
     @MainActor func testReceiveWorkerOwnsNativeHelloAndClosesBeforeSharedJournal() async throws {
         let fixture = try CommandRequestFixture(checkpointed: true, owned: true), port = WorkerPort()
         let worker = try receiveWorker(fixture, port: port)
@@ -8104,9 +8120,22 @@ extension MachCommandCallerReceiverTests {
         try await worker.start()
         let destination = port.value.withLock { $0 }, descriptor = Darwin.open("/dev/null", O_RDONLY | O_CLOEXEC)
         defer { worker.requestStop(); _ = mach_port_deallocate(mach_task_self_, destination); _ = Darwin.close(descriptor) }
+        func waitForOutcome(_ expected: Int, phase: String) async throws {
+            do { try await waitForReceiveWorker { outcomes.withLock { $0 == expected } } }
+            catch {
+                let observation = "\(phase): status=\(worker.status), retired=\(worker.isRetired), "
+                    + "outcomes=\(outcomes.withLock { $0 }), reads=\(box.state.withLock { $0.reads }), "
+                    + "bindings=\(bindings.withLock { $0 })"
+                XCTFail(observation)
+                await worker.close()
+                XCTAssertEqual(worker.status, .closed)
+                XCTAssertFalse(receiveRightPresent(destination), "Timed-out worker retained its receive right")
+                throw error
+            }
+        }
         let profile = try workerElevationProfile(destination), first = try Endpoint(), second = try Endpoint()
         let allowed = try workerElevationSubmission(destination, reply: first, profile: profile, descriptor: descriptor, id: 0xb2)
-        try await waitForReceiveWorker { outcomes.withLock { $0 == 1 } }
+        try await waitForOutcome(1, phase: "initial admission")
         guard case .admitted = try typedOutcome(first, submission: allowed, profile: profile) else {
             await worker.close(); return XCTFail("The original authenticated attempt must reach current policy admission")
         }
@@ -8114,7 +8143,7 @@ extension MachCommandCallerReceiverTests {
         box.state.withLock { $0.targets = [] }
         let denied = try workerElevationSubmission(destination, reply: second, profile: profile,
             descriptor: descriptor, id: 0xb4, executable: "/missing-before-policy")
-        try await waitForReceiveWorker { outcomes.withLock { $0 == 2 } }
+        try await waitForOutcome(2, phase: "revoked grant")
         XCTAssertEqual(try typedOutcome(second, submission: denied, profile: profile), .notAdmitted(.policyRejected, .never))
         XCTAssertNil(try fixture.reservation(denied.binding.id)); XCTAssertEqual(try fixture.auditRecordCount, before)
         XCTAssertEqual(box.state.withLock { $0.reads }, 4); XCTAssertEqual(bindings.withLock { $0 }, 1)
