@@ -5,8 +5,16 @@
   "hostMacOS": "27.0.1",
   "deploymentTarget": "macOS 26.0",
   "unitTests": 45,
-  "nativeControls": 4,
+  "nativeControls": 5,
   "cases": [
+    {
+      "control": "compressed-resource-data-fork",
+      "sourceCompressed": true,
+      "copiedUncompressed": true,
+      "logicalBytesMatch": true,
+      "actualCoreCopierUsed": true,
+      "RootIsolationTested": false
+    },
     {
       "control": "signed-sdk-swift-copy",
       "copiedBytesAndLinksMatch": true,
@@ -20,10 +28,10 @@
         "schema": 2
       },
       "counts": {
-        "bytes": 1879167,
-        "files": 88,
+        "files": 89,
         "links": 9,
-        "entries": 158
+        "bytes": 2895219,
+        "entries": 160
       },
       "ordinaryPlacementMetadataVerified": true,
       "unsafeSourceModeAndACLNotCopied": true,
@@ -64,7 +72,7 @@
     "macos/core/Tests/RemozioCoreTests/ReleaseDestinationLeaseTests.swift": "4071f22b2fe3505962ceabd9b254aed1a8e237899aaddc1ab5c7ab29eb801032",
     "macos/core/Tests/RemozioCoreTests/ProtectedReleaseTreeInspectionTests.swift": "d14878db7d7bfe0b46e93c6a6d2a35e3d1aca1a5a48e99e4e277a9b5828febe9",
     "experiments/release-copy/Sources/ReleaseCopyProbe/main.swift": "0742eb6c3b4b0d8d3791b3e061577a37b70e3d49ea9762f15df07b7c2526a7ed",
-    "scripts/run-release-copy-experiment.py": "277976133679e46d075a3fff8787614bac1231464ae6781dc84f80faadb61258"
+    "scripts/run-release-copy-experiment.py": "6b0ade6914dd9aaca786bc53499b37606e7b17ea94197c363dfdaa583a8c73e7"
   },
   "publicOrdinaryIdentityRefusalTested": true,
   "RootOwnershipAndIsolationTested": false,
@@ -93,5 +101,12 @@
   "descriptorFirstFileControls": [
     "named lookup EIO after exclusive open cleans the descriptor-recorded file",
     "named replacement cannot become the recorded creation; replacement retained"
-  ]
+  ],
+  "compressedResourceControl": {
+    "realStorageRequired": true,
+    "logicalDataPreserved": true,
+    "copyUncompressed": true,
+    "arbitraryResourceForkSemanticsProven": false,
+    "productionMetadataPolicySelected": false
+  }
 }

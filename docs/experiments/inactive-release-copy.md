@@ -20,6 +20,7 @@ The original SDK must remain unchanged.
 
 | Control | Required result |
 | --- | --- |
+| Compressed signed resource | Real compressed storage reads as the expected data; the copy is uncompressed and signed inspection remains unchanged |
 | Valid signed copy | Bytes, link text, manifest and code hashes remain unchanged; copied placement and floors pass |
 | Policy advances during preparation | The second policy read rejects the candidate; owned cleanup removes the copy |
 | Source descriptor stays writable | A later source mutation cannot change copied bytes or signing evidence |
@@ -36,10 +37,15 @@ The probe uses an internal ordinary-owner lease and a synthetic policy for the f
 Production uses current protected state through the Root-only API.
 The raised-floor case changes fixture return values; it changes no real policy.
 
-Data-only copying supports the tested SDK layout.
-Arbitrary signed extended attributes and resource forks remain untested.
+Data-only copying supports the tested SDK layout and its synthetic compressed resource.
+The kernel decodes the resource data before the copier writes a new uncompressed file.
+This proves the recorded compressed fixture, not arbitrary resource-fork semantics.
+The production attribute policy remains unselected.
 Crash recovery, protected service installation, notarization and activation remain pending.
 The macOS 26 deployment target does not establish runtime compatibility on macOS 26.
 
 The [evidence record](inactive-release-copy.json) identifies the tested source hashes and host version.
+The runner emits control records and a cleanup record as JSON lines.
+The evidence record combines successful output with the focused test result and hashes of its listed sources.
+Refresh the record only after all controls, cleanup and focused tests pass. The runner does not emit the combined record itself.
 The [component guide](../macos-inactive-release-copy.md) describes the production boundary.

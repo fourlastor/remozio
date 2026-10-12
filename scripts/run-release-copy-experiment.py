@@ -46,10 +46,22 @@ try:
         identity=boundary.PREFIX+uuid.uuid4().hex
         source=sdk.SDKFixtureSigner(boundary,config).bundle(source_root,'Host',products,identity,1,
                                                            base64.b64encode(bytes(32)).decode(),1)
-        boundary.command(inspector,'prepare',source,config.team,identity)
+        payload = b'disposable compression fixture\n' * 32768
+        input_file = source_root / 'compression-input'
+        input_file.write_bytes(payload)
+        resource = source / 'Contents/Resources/compressed-data'
+        resource.parent.mkdir(exist_ok=True)
+        boundary.command('/usr/bin/ditto', '--noclone', '--hfsCompression', input_file, resource)
+        if not resource.stat().st_flags & stat.UF_COMPRESSED or resource.read_bytes() != payload:
+            raise RuntimeError('The fixture did not exercise real compressed storage')
         entitlements=source_root/'empty.plist';entitlements.write_bytes(plistlib.dumps({}))
-        boundary.command('/usr/bin/codesign','--force','--sign',config.identity,'--options','runtime','--timestamp=none',
-                         '--identifier',identity,'--entitlements',entitlements,source)
+        def sign_source():
+            boundary.command('/usr/bin/codesign','--force','--sign',config.identity,'--options','runtime','--timestamp=none',
+                             '--identifier',identity,'--entitlements',entitlements,source)
+            boundary.command('/usr/bin/codesign', '--verify', '--deep', '--strict', source)
+        sign_source()
+        boundary.command(inspector,'prepare',source,config.team,identity)
+        sign_source()
         boundary.command('/usr/bin/codesign','--verify','--deep','--strict',source)
         expected=inspect(source,identity)
         executable=source/'Contents/MacOS/SparkleBoundaryProbe'
@@ -64,6 +76,12 @@ try:
             if copied_result.returncode:raise RuntimeError(copied_result.stderr.decode().strip())
             counts=json.loads(copied_result.stdout)
             copied=parent/'Fixture.app'
+            copied_resource = copied / 'Contents/Resources/compressed-data'
+            if copied_resource.read_bytes() != payload or copied_resource.stat().st_flags & stat.UF_COMPRESSED:
+                raise RuntimeError('The data-fork copy did not preserve decoded compressed content')
+            print(json.dumps({'control': 'compressed-resource-data-fork', 'sourceCompressed': True,
+                              'copiedUncompressed': True, 'logicalBytesMatch': True,
+                              'actualCoreCopierUsed': True, 'RootIsolationTested': False}), flush=True)
             if boundary.digest(copied)!=saved_digest:raise RuntimeError('Copied bytes or link texts changed')
             if inspect(copied,identity)!=expected:raise RuntimeError('Copied signature evidence changed')
             if os.stat(copied/'Contents/MacOS/SparkleBoundaryProbe').st_mode & 0o7022:

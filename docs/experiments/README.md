@@ -68,7 +68,7 @@ It verifies nine signed controls and starts no installer. Protected update activ
 
 ## Inactive release preparation
 
-The [copy experiment](inactive-release-copy.md) checks signed copies, current floors and owned cleanup. Root placement, crash recovery and activation remain unproven.
+The [copy experiment](inactive-release-copy.md) checks signed copies, decoded compressed resource data, current floors and owned cleanup. Root placement, crash recovery and activation remain unproven.
 
 ## Release file attributes
 
