@@ -3,7 +3,7 @@
 A release can include signed frameworks, applications, XPC services and tools without granting them an authority role.
 Schema 2 binds these dependencies to an existing component. The enclosing signature seals the declaration.
 Schema 1 retains its original bytes and rejects undeclared executable code.
-The current product build still emits schema 1.
+The current product build still emits schema 1. Schema 3 adds request features and retains the schema 2 dependency layout.
 
 | Declaration | Reader check |
 | --- | --- |
@@ -17,7 +17,7 @@ The current product build still emits schema 1.
 ```mermaid
 flowchart LR
   A[Trusted Team and app identifier] --> B[Verify enclosing signature]
-  B --> C[Decode schema 1 or 2]
+  B --> C[Decode schema 1, 2 or 3]
   C --> D[Compare complete executable inventory]
   D --> E[Verify component and dependency signatures]
   E --> F[Bind each executable alias]
@@ -41,8 +41,8 @@ Each dependency has these exact CBOR fields:
 | 8 | Sorted, unique executable alias paths |
 
 The decoder rejects future schemas, unknown fields, duplicate paths and identifiers, and noncanonical ordering.
-Schema 2 limits dependencies to 32, aliases to 16 per dependency, and all executable paths to 256.
-Both schemas keep the existing encoded byte, item, depth and filesystem traversal limits.
+Schemas 2 and 3 limit dependencies to 32, aliases to 16 per dependency, and all executable paths to 256.
+All supported schemas keep the existing encoded byte, item, depth and filesystem traversal limits.
 A decoded schema 2 declaration with no dependencies remains schema 2 when encoded again.
 
 Generation preflight requires the exact dependency hash set and the owner's Team.

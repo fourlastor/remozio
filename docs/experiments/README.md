@@ -63,8 +63,9 @@ Do not collect passwords, ADB payloads, notification tokens, or provider secrets
 
 ## Declared SDK code
 
-The [signed dependency experiment](release-dependencies.md) checks schema 2 against the pinned Sparkle SDK.
-It verifies nine signed controls and starts no installer. Protected update activation remains pending.
+The [signed dependency experiment](release-dependencies.md) checks schemas 2 and 3 against the pinned Sparkle SDK.
+It verifies thirteen native controls, including exact feature compatibility and unsigned tampering, and starts no installer.
+The [compatibility comparison](../macos-release-compatibility-preflight.md) grants no activation authority. Protected update activation remains pending.
 
 ## Inactive release preparation
 

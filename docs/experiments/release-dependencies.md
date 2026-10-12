@@ -11,8 +11,9 @@ python3 scripts/run-release-dependency-experiment.py --identity PUBLIC_SHA1 --te
 
 The options require explicit public identity metadata. The script neither selects an identity implicitly nor exports a private key.
 It builds the pinned Sparkle fixture and native inspector. It copies and thins the SDK inside an owned temporary directory.
-The fixture builder adds the signed schema 2 declaration; production inspection provides no builder entry point.
-Each declaration control receives a fresh enclosing signature and passes strict deep verification before inspection.
+The fixture builder adds signed schema 2 or 3 declarations; production inspection provides no builder entry point.
+Each signed declaration control receives a fresh enclosing signature and passes strict deep verification before inspection.
+The unsigned-change control deliberately omits that signature and must fail native validation.
 No fixture app, updater, installer or service job starts.
 
 | Case | Observed result |
@@ -26,6 +27,10 @@ No fixture app, updater, installer or service job starts.
 | Wrong declared build | Rejected by signed bundle metadata |
 | Wrong dependency identifier | Rejected by native signature policy |
 | Wrong declared Team | Rejected by identity comparison |
+| Signed synthetic feature contract | Schema 3 accepted; retained feature subset passed |
+| Missing required feature | Rejected despite matching wire, schema, actions and purposes |
+| Unsigned feature change | Rejected by the enclosing native signature |
+| Signed legacy contract | No features inferred; retained required feature rejected |
 
 The runner checks each expected rejection stage. An unrelated failure does not count as a passed control.
 The owned directory is removed and the original SDK digest remains unchanged.

@@ -33,6 +33,44 @@ final class JournalDatabaseTests: XCTestCase {
             captureDigest: Data(repeating: 9, count: 32))
     }
 
+    func testStorageSchemaObservationTracksProtectedMigrationWithoutChangingContinuity() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        var expired: JournalTransaction?
+        let before = try database.read { try $0.continuityDigests() }
+        XCTAssertEqual(try database.read { tx in
+            expired = tx
+            return try tx.storageSchemaVersion
+        }, UInt64(12))
+        XCTAssertEqual(try database.read { try $0.continuityDigests() }, before)
+        XCTAssertThrowsError(try expired!.storageSchemaVersion) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction)
+        }
+        _ = try installRecoveryPolicy(database)
+        XCTAssertEqual(try database.read { try $0.storageSchemaVersion }, UInt64(13))
+        XCTAssertThrowsError(try database.write { tx in
+            try tx.installCommandSubmissionReplay()
+            XCTAssertEqual(try tx.storageSchemaVersion, UInt64(15))
+            throw Failure.injected
+        })
+        XCTAssertEqual(try database.read { try $0.storageSchemaVersion }, UInt64(13))
+        try database.write { try $0.installCommandSubmissionReplay() }
+        XCTAssertEqual(try database.read { try $0.storageSchemaVersion }, UInt64(15))
+    }
+
+    func testUnsupportedObservedStorageSchemaRetiresTheConnection() throws {
+        let fixture = try Fixture(), database = try open(fixture, initialize: true)
+        defer { try? database.close() }
+        try fixture.sql("PRAGMA user_version=99")
+        XCTAssertThrowsError(try database.read { try $0.storageSchemaVersion }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore)
+        }
+        XCTAssertTrue(database.retired)
+        XCTAssertThrowsError(try database.read { try $0.storageSchemaVersion }) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+        }
+    }
+
     func testCommandReplayMigrationAndReservationSurviveReopenWithoutChangingCodePolicy() throws {
         let fixture = try Fixture(), database = try open(fixture, initialize: true)
         let policy = try installRecoveryPolicy(database), before = try database.read { try $0.continuityDigests() }

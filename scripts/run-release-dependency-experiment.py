@@ -27,12 +27,18 @@ def load_boundary():
     return boundary
 
 
-def inspect(probe, app, team, identity):
-    return subprocess.run([str(probe), 'inspect', str(app), team, identity], capture_output=True, timeout=10)
+def prepare(probe, operation, app, team, identity):
+    result = subprocess.run([str(probe), operation, str(app), team, identity], capture_output=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError(f'{operation}: {result.stderr.decode().strip()[:1024]}')
 
 
-def reject(probe, app, team, identity, control, expected):
-    result = inspect(probe, app, team, identity)
+def inspect(probe, app, team, identity, operation="inspect"):
+    return subprocess.run([str(probe), operation, str(app), team, identity], capture_output=True, timeout=10)
+
+
+def reject(probe, app, team, identity, control, expected, operation="inspect"):
+    result = inspect(probe, app, team, identity, operation)
     failure = result.stderr.decode().strip()
     if result.returncode != 65 or not failure.startswith('fixture inspection failed: '):
         raise RuntimeError(f'{control}: the native reader did not reject the fixture')
@@ -84,6 +90,22 @@ def controls(boundary, config, products, probe):
             boundary.command(probe, operation, app, config.team, identity)
             resign(boundary, config, app, identity, declaration)
             reject(probe, app, config.team, identity, operation, failure)
+        info.write_bytes(saved_info)
+        resign(boundary, config, app, identity, declaration)
+        prepare(probe, 'prepare-features', app, config.team, identity)
+        resign(boundary, config, app, identity, declaration)
+        result = inspect(probe, app, config.team, identity, "inspect-features")
+        if result.returncode:
+            raise RuntimeError(result.stderr.decode().strip())
+        value = json.loads(result.stdout)
+        if value != {**expected, 'schema': 3, 'compatibility': True, 'features': [2, 5]}:
+            raise RuntimeError('Unexpected signed feature declaration evidence')
+        print(json.dumps({'control': 'signed-feature-contract', 'result': value}), flush=True)
+        reject(probe, app, config.team, identity, 'missing-required-feature', 'missingFeatures', "inspect-missing-feature")
+        prepare(probe, 'prepare-legacy-contract', app, config.team, identity)
+        reject(probe, app, config.team, identity, 'unsigned-feature-declaration-change', 'security(')
+        resign(boundary, config, app, identity, declaration)
+        reject(probe, app, config.team, identity, 'legacy-contract-has-no-features', 'missingFeatures', "inspect-features")
 
 
 def main():

@@ -1,7 +1,7 @@
 # Signed Mac release declarations
 
 The app contains a canonical CBOR declaration in its signed `Info.plist`.
-The key is `RemozioReleaseManifest`. The current build emits schema 1; the reader supports schemas 1 and 2.
+The key is `RemozioReleaseManifest`. The current build emits schema 1; the reader supports schemas 1, 2 and 3.
 The build generates the plist input after signing the six helpers, before signing the app.
 It does not modify a processed plist or an existing signature.
 
@@ -21,19 +21,19 @@ The root map has these exact keys. Unknown or missing keys fail closed.
 
 | Key | Value |
 | --- | --- |
-| 0 | Schema 1 or 2 |
+| 0 | Schema 1, 2 or 3 |
 | 1 | Marketing release |
 | 2 | App build |
 | 3 | `arm64` |
 | 4 | Minimum macOS `26.0` |
 | 5 | Components sorted by stable `AuthorityCodeRole` |
-| 6 | Schema 2 only: dependencies sorted by canonical executable path |
+| 6 | Schemas 2 and 3: dependencies sorted by canonical executable path |
 
 Each component has a role, identifier, generation, relative executable path, build, Team ID, formats, and understood request contracts.
 The helper CDHash is 20 bytes. The app has no embedded self hash; inspection derives it from the validated signature.
 Ad-hoc builds have no Team ID. They are test artifacts.
 Component key 9 is zero: this bundle contains no launchd registration declarations.
-An installer needs explicit registration artifacts before it can rely on them. Neither schema supplies these artifacts.
+An installer needs explicit registration artifacts before it can rely on them. No supported schema supplies these artifacts.
 
 The current bundle contains the app, authority, transport, frontend, gateway, command child, and command monitor.
 `absentRoles` reports the other catalog roles. It does not imply that every optional role must run.
@@ -51,6 +51,8 @@ Request contracts declare the kind, wire version, capture schema, action tags, a
 The current command contracts use wire 1 and capture schemas 1, 2, and 3.
 They understand decline and execute. Execute still requires biometric authorization against the retained request.
 These declarations do not enable command mode or invent active 1Password or Little Snitch adapters.
+Schema 3 adds an exact security-feature set to each request contract. Schemas 1 and 2 imply no declared features.
+The [compatibility preflight](macos-release-compatibility-preflight.md) checks retained format and request requirements, including required features.
 
 Arrays are sorted and unique. Identifiers, roles, paths, contracts, and format names cannot repeat.
 The decoder has a 64 KiB ceiling, depth 8, and 8,192-item ceiling.

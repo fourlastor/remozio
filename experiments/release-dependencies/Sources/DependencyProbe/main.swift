@@ -35,7 +35,7 @@ func fixtureCanonical(_ url: URL) throws -> String {
     defer { free(value) }
     return String(cString: value)
 }
-func experimentManifest(_ root: URL, teamID: String, appIdentifier: String) throws -> ReleaseManifest {
+func experimentManifest(_ root: URL, teamID: String, appIdentifier: String, declareRequest: Bool = false, features: Set<UInt64> = []) throws -> ReleaseManifest {
     let (_, _, app) = try fixtureMetadata(root)
     guard let build = app["CFBundleVersion"] as? String,
           let release = app["CFBundleShortVersionString"] as? String,
@@ -75,25 +75,29 @@ func experimentManifest(_ root: URL, teamID: String, appIdentifier: String) thro
             identifier: identifier, codeDirectoryHash: hash, teamID: team, build: info["CFBundleVersion"] as? String,
             executableAliases: codeAliases)
     }
+    // Synthetic fixture contract. This declares no real SDK request capability.
+    let requests: [ReleaseRequestContract] = declareRequest ? [try .init(kind: 0, wireVersion: 1, schemaVersion: 3,
+        actions: [0, 2], purposes: [.issuedRequest, .biometricAuthorization], features: features)] : []
     let component = try ReleaseComponent(role: .app, identifier: appIdentifier, generation: 1,
-        relativePath: "Contents/MacOS/" + executable, codeDirectoryHash: nil, build: build, teamID: teamID, formats: [])
+        relativePath: "Contents/MacOS/" + executable, codeDirectoryHash: nil, build: build, teamID: teamID, formats: [], requests: requests)
     return try .init(release: release, build: build, components: [component], dependencies: dependencies)
 }
 
 do {
     let args = CommandLine.arguments
-    guard args.count == 5, ["prepare", "inspect", "bad-hash", "bad-alias", "bad-kind", "bad-build", "bad-identifier", "bad-team"].contains(args[1]),
+    guard args.count == 5, ["prepare", "prepare-features", "prepare-legacy-contract", "inspect", "inspect-features", "inspect-missing-feature", "bad-hash", "bad-alias", "bad-kind", "bad-build", "bad-identifier", "bad-team"].contains(args[1]),
           args[4].hasPrefix("dev.remozio.experiment.sparkleboundary.") else { throw ReleaseManifestError.invalidDeclaration }
     let root = try ownedFixture(args[2])
-    if args[1] == "prepare" {
-        let value = try experimentManifest(root, teamID: args[3], appIdentifier: args[4])
+    if args[1].hasPrefix("prepare") {
+        let value = try experimentManifest(root, teamID: args[3], appIdentifier: args[4],
+            declareRequest: args[1] != "prepare", features: args[1] == "prepare-features" ? [2, 5] : [])
         let infoURL = root.appendingPathComponent("Contents/Info.plist")
         var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
         info[ReleaseManifest.infoKey] = try value.canonicalBytes
         info["RemozioSecurityGeneration"] = "1"
         info["LSMinimumSystemVersion"] = "26.0"
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0).write(to: infoURL)
-        print("prepared schema2 dependency declaration")
+        print("prepared schema\(value.schemaVersion) fixture declaration")
     } else if args[1].hasPrefix("bad-") {
         let infoURL = root.appendingPathComponent("Contents/Info.plist")
         var info = try PropertyListSerialization.propertyList(from: Data(contentsOf: infoURL), format: nil) as! [String: Any]
@@ -144,9 +148,18 @@ do {
                 codeDirectoryHash: hash, active: true)
         })
         try ReleaseGenerationPreflight.validate(value, against: policy)
-        let record: [String: Any] = ["schema": value.manifest.schemaVersion, "roles": value.manifest.components.count,
+        var record: [String: Any] = ["schema": value.manifest.schemaVersion, "roles": value.manifest.components.count,
             "dependencies": value.manifest.dependencies.count, "dependencyHashes": value.dependencyCodeDirectoryHashes.count,
             "aliases": value.manifest.dependencies.reduce(0) { $0 + $1.executableAliases.count }, "preflight": true, "activation": false]
+        if args[1] != "inspect" {
+            let required = try ReleaseRequestContract(kind: 0, wireVersion: 1, schemaVersion: 3,
+                actions: [0, 2], purposes: [.issuedRequest, .biometricAuthorization],
+                features: args[1] == "inspect-missing-feature" ? [3] : [2])
+            try ReleaseCompatibilityPreflight.validate(value, policy: policy,
+                requirements: .init(formats: [], requests: [.init(role: .app, contract: required)]))
+            record["compatibility"] = true
+            record["features"] = value.manifest.components[0].requests[0].features.sorted()
+        }
         let bytes = try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys])
         FileHandle.standardOutput.write(bytes + Data([10]))
     }

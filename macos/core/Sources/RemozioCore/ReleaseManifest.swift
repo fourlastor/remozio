@@ -34,19 +34,22 @@ public struct ReleaseRequestContract: Equatable, Sendable {
     public let schemaVersion: UInt64
     public let actions: Set<UInt64>
     public let purposes: Set<SigningPurpose>
+    public let features: Set<UInt64>
 
     public init(kind: UInt64, wireVersion: UInt64, schemaVersion: UInt64,
-                actions: Set<UInt64>, purposes: Set<SigningPurpose>) throws {
+                actions: Set<UInt64>, purposes: Set<SigningPurpose>, features: Set<UInt64> = []) throws {
         guard kind <= 3, wireVersion > 0, schemaVersion > 0, !actions.isEmpty,
-              actions.allSatisfy({ $0 <= 9 }), !purposes.isEmpty else { throw ReleaseManifestError.invalidDeclaration }
+              actions.allSatisfy({ $0 <= 9 }), !purposes.isEmpty, features.count <= 32 else { throw ReleaseManifestError.invalidDeclaration }
         self.kind = kind; self.wireVersion = wireVersion; self.schemaVersion = schemaVersion
-        self.actions = actions; self.purposes = purposes
+        self.actions = actions; self.purposes = purposes; self.features = features
     }
     fileprivate var key: [UInt64] { [kind, wireVersion, schemaVersion] }
-    fileprivate var value: CBORValue {
-        .map([0: .unsigned(kind), 1: .unsigned(wireVersion), 2: .unsigned(schemaVersion),
+    fileprivate func value(manifestSchema: UInt64) -> CBORValue {
+        var fields: [UInt64: CBORValue] = [0: .unsigned(kind), 1: .unsigned(wireVersion), 2: .unsigned(schemaVersion),
               3: .array(actions.sorted().map(CBORValue.unsigned)),
-              4: .array(purposes.map(\.rawValue).sorted().map(CBORValue.unsigned))])
+              4: .array(purposes.map(\.rawValue).sorted().map(CBORValue.unsigned))]
+        if manifestSchema >= 3 { fields[5] = .array(features.sorted().map(CBORValue.unsigned)) }
+        return .map(fields)
     }
 }
 
@@ -83,11 +86,11 @@ public struct ReleaseComponent: Equatable, Sendable {
         self.formats = formats.sorted { $0.name < $1.name }
         self.requests = requests.sorted { $0.key.lexicographicallyPrecedes($1.key) }
     }
-    fileprivate var value: CBORValue {
+    fileprivate func value(manifestSchema: UInt64) -> CBORValue {
         .map([0: .unsigned(role.rawValue), 1: .text(identifier), 2: .unsigned(generation), 3: .text(relativePath),
               4: codeDirectoryHash.map(CBORValue.bytes) ?? .null, 5: .text(build), 6: teamID.map(CBORValue.text) ?? .null,
-              7: .array(formats.map(\.value)), 8: .array(requests.map(\.value)),
-              9: .unsigned(0)]) // Schema 1 contains no installed service registration.
+              7: .array(formats.map(\.value)), 8: .array(requests.map { $0.value(manifestSchema: manifestSchema) }),
+              9: .unsigned(0)]) // No supported schema contains installed service registration.
     }
 }
 
@@ -104,7 +107,7 @@ public struct ReleaseManifest: Equatable, Sendable {
 
     public init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency] = []) throws {
         try self.init(release: release, build: build, components: components, dependencies: dependencies,
-                      schemaVersion: dependencies.isEmpty ? 1 : 2)
+                      schemaVersion: components.contains(where: { $0.requests.contains(where: { !$0.features.isEmpty }) }) ? 3 : dependencies.isEmpty ? 1 : 2)
     }
 
     private init(release: String, build: String, components: [ReleaseComponent], dependencies: [ReleaseDependency],
@@ -115,7 +118,8 @@ public struct ReleaseManifest: Equatable, Sendable {
               Set(components.map(\.identifier)).count == components.count,
               Set(components.map(\.relativePath)).count == components.count,
               components.filter({ $0.role == .app }).count == 1 else { throw ReleaseManifestError.invalidDeclaration }
-        guard schemaVersion == 1 || schemaVersion == 2, schemaVersion == 2 || dependencies.isEmpty,
+        guard (1...3).contains(schemaVersion), schemaVersion >= 2 || dependencies.isEmpty,
+              schemaVersion >= 3 || components.allSatisfy({ $0.requests.allSatisfy({ $0.features.isEmpty }) }),
               dependencies.count <= 32, Set(dependencies.map(\.executablePath)).count == dependencies.count,
               dependencies.allSatisfy({ dependency in components.contains(where: { $0.role == dependency.owner }) }) else {
             throw ReleaseManifestError.invalidDeclaration
@@ -135,8 +139,8 @@ public struct ReleaseManifest: Equatable, Sendable {
     public var canonicalBytes: Data {
         get throws {
             var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: .text(release), 2: .text(build),
-                3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map(\.value))]
-            if schemaVersion == 2 { fields[6] = .array(dependencies.map(\.value)) }
+                3: .text("arm64"), 4: .text("26.0"), 5: .array(components.map { $0.value(manifestSchema: schemaVersion) })]
+            if schemaVersion >= 2 { fields[6] = .array(dependencies.map(\.value)) }
             return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
         }
     }
@@ -153,7 +157,7 @@ public struct ReleaseManifest: Equatable, Sendable {
             guard case .map(let header) = raw, case .unsigned(let version) = header[0] else {
                 throw ReleaseManifestError.corruptData
             }
-            guard version == 1 || version == 2 else { throw ReleaseManifestError.unsupportedSchema }
+            guard (1...3).contains(version) else { throw ReleaseManifestError.unsupportedSchema }
             let fields = try dictionary(raw, keys: version == 1 ? 0...5 : 0...6)
             guard fields[3] == .text("arm64"), fields[4] == .text("26.0") else { throw ReleaseManifestError.corruptData }
             let components = try array(fields[5]).map { item -> ReleaseComponent in
@@ -173,12 +177,12 @@ public struct ReleaseManifest: Equatable, Sendable {
                         migrations: migrations.mapValues { try number($0) })
                 }
                 let requests = try array(fields[8]).map { item -> ReleaseRequestContract in
-                    let f = try dictionary(item, keys: 0...4)
+                    let f = try dictionary(item, keys: version >= 3 ? 0...5 : 0...4)
                     let purposes = try numbers(f[4]).map { tag -> SigningPurpose in
                         guard let purpose = SigningPurpose(rawValue: tag) else { throw ReleaseManifestError.corruptData }; return purpose
                     }
                     return try ReleaseRequestContract(kind: number(f[0]), wireVersion: number(f[1]), schemaVersion: number(f[2]),
-                        actions: numbers(f[3]), purposes: Set(purposes))
+                        actions: numbers(f[3]), purposes: Set(purposes), features: version >= 3 ? numbers(f[5]) : [])
                 }
                 return try ReleaseComponent(role: role, identifier: text(fields[1]), generation: number(fields[2]),
                     relativePath: text(fields[3]), codeDirectoryHash: hash, build: text(fields[5]), teamID: team,

@@ -72,7 +72,7 @@ final class ReleaseManifestTests: XCTestCase {
         for candidate in candidates {
             XCTAssertThrowsError(try ReleaseManifest.decode(DeterministicCBOR.encode(.map(candidate), limits: ReleaseManifest.limits)))
         }
-        var next = original; next[0] = .unsigned(3)
+        var next = original; next[0] = .unsigned(4)
         XCTAssertThrowsError(try ReleaseManifest.decode(DeterministicCBOR.encode(.map(next), limits: ReleaseManifest.limits))) {
             XCTAssertEqual($0 as? ReleaseManifestError, .unsupportedSchema)
         }

@@ -28,7 +28,8 @@ The check does not change retained policy, commit a proposed floor, freeze admis
 
 A passing result remains a snapshot, not an installation permit.
 The trusted installer must read the current protected policy and revalidate protected copies.
-It must also check format compatibility, retained request semantics, notarization, quiescence and activation health.
+The [compatibility comparison](macos-release-compatibility-preflight.md) checks retained formats and request semantics.
+The owner must also establish notarization, quiescence and activation health.
 Policy revision changes and interrupted activation need their own serialized durable transaction.
 Neither a candidate's declarations nor this pure comparison authorize those effects.
 

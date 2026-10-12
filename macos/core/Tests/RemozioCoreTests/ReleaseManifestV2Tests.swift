@@ -42,7 +42,7 @@ final class ReleaseManifestV2Tests: XCTestCase {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 8, maxItems: 8192)
         let value = try ReleaseManifest(release: "0.1.0", build: "1", components: [app()], dependencies: [dependency()])
         guard case .map(var fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else { return XCTFail() }
-        fields[0] = .unsigned(3)
+        fields[0] = .unsigned(4)
         XCTAssertThrowsError(try ReleaseManifest.decode(DeterministicCBOR.encode(.map(fields), limits: limits)))
         fields[0] = .unsigned(2)
         guard case .array(var dependencies) = fields[6], case .map(var item) = dependencies[0], case .array(var aliases) = item[8] else { return XCTFail() }

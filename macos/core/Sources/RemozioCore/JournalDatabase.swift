@@ -139,6 +139,16 @@ public final class JournalDatabase {
         return tables
     }
 
+    fileprivate func storageSchemaVersion(_ token: UUID) throws -> UInt64 {
+        _ = try access(token)
+        let version = try integer("PRAGMA user_version")
+        guard (12...16).contains(version) else {
+            unavailable = true
+            throw JournalDatabaseError.incompatibleStore
+        }
+        return UInt64(version)
+    }
+
     fileprivate func continuityDigests(_ token: UUID) throws -> JournalContinuityDigests {
         _ = try access(token)
         guard let db else { throw JournalDatabaseError.expiredTransaction }
@@ -358,6 +368,15 @@ public final class JournalTransaction {
         guard !write || writable else { throw JournalDatabaseError.readOnly }
         return try owner.access(token)
     }
+    /// Observes the current protected schema under the live transaction. This does not authorize installation or migration.
+    public var storageSchemaVersion: UInt64 {
+        get throws {
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            do { return try owner.storageSchemaVersion(token) }
+            catch { failed = true; throw error }
+        }
+    }
+
     /// Includes uncommitted writes in this transaction. Publish only after both durable stores commit.
     public func continuityDigests() throws -> JournalContinuityDigests {
         guard let owner else { throw JournalDatabaseError.expiredTransaction }
