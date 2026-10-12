@@ -85,4 +85,79 @@ final class ProtectedReleaseTreeInspectionTests: XCTestCase {
             XCTAssertFalse(read)
         }
     }
+
+    private func descriptor(_ path: URL, _ body: (Int32) throws -> Void) throws {
+        var info = stat()
+        guard lstat(path.path, &info) == 0 else { throw JournalLeaseError.system(errno) }
+        let flags = O_RDONLY | O_CLOEXEC | (info.st_mode & S_IFMT == S_IFLNK ? O_SYMLINK : O_NOFOLLOW | O_NONBLOCK)
+        let fd = open(path.path, flags)
+        guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+        defer { close(fd) }
+        try body(fd)
+    }
+    private func attribute(_ fd: Int32, _ name: String, _ value: Data) throws {
+        guard value.withUnsafeBytes({ fsetxattr(fd, name, $0.baseAddress, $0.count, 0, 0) }) == 0 else {
+            throw JournalLeaseError.system(errno)
+        }
+    }
+    private func rejectsMetadata(_ lease: ReleaseDestinationLease) {
+        XCTAssertThrowsError(try lease.inspectCopiedTree(name: "Fixture.app")) {
+            XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+        }
+    }
+    func testUnexpectedAttributeOnCopiedFileIsRejected() throws {
+        try fixture { copy, lease in
+            try descriptor(copy.appendingPathComponent("file")) { fd in
+                try attribute(fd, "dev.remozio.fixture", Data([1]))
+                rejectsMetadata(lease)
+            }
+        }
+    }
+    func testUnexpectedAttributeOnCopiedDirectoryIsRejected() throws {
+        try fixture { copy, lease in
+            try descriptor(copy.appendingPathComponent("nested")) { fd in
+                try attribute(fd, "dev.remozio.fixture", Data([1]))
+                rejectsMetadata(lease)
+            }
+        }
+    }
+    func testUnexpectedAttributeOnCopiedLinkIsRejected() throws {
+        try fixture { copy, lease in
+            try descriptor(copy.appendingPathComponent("alias")) { fd in
+                try attribute(fd, "dev.remozio.fixture", Data([1]))
+                rejectsMetadata(lease)
+            }
+        }
+    }
+    func testCopiedResourceFinderAndQuarantineAttributesAreRejected() throws {
+        try fixture { copy, lease in
+            try descriptor(copy.appendingPathComponent("file")) { fd in
+                let attributes = [("com.apple.ResourceFork", Data([1])),
+                    ("com.apple.FinderInfo", Data([1]) + Data(repeating: 0, count: 31)),
+                    ("com.apple.quarantine", Data("0081;00000000;RemozioFixture;".utf8))]
+                for (name, value) in attributes {
+                    try attribute(fd, name, value)
+                    defer { XCTAssertEqual(fremovexattr(fd, name, 0), 0) }
+                    rejectsMetadata(lease)
+                }
+            }
+        }
+    }
+    func testCopiedFileAndDirectoryFlagsAreRejected() throws {
+        try fixture { copy, lease in
+            for name in ["file", "nested"] {
+                try descriptor(copy.appendingPathComponent(name)) { fd in
+                    XCTAssertEqual(fchflags(fd, UInt32(UF_NODUMP)), 0)
+                    defer { XCTAssertEqual(fchflags(fd, 0), 0) }
+                    rejectsMetadata(lease)
+                }
+                XCTAssertNoThrow(try lease.inspectCopiedTree(name: "Fixture.app"))
+            }
+        }
+    }
+    func testInvalidMetadataDescriptorCannotBecomeAnEmptyInventory() {
+        XCTAssertThrowsError(try CopiedReleaseMetadata.validate(-1, stat())) {
+            XCTAssertEqual($0 as? JournalLeaseError, .system(EBADF))
+        }
+    }
 }

@@ -26,7 +26,7 @@ The original SDK must remain unchanged.
 | Source descriptor stays writable | A later source mutation cannot change copied bytes or signing evidence |
 | Copied file gains a mutation ACL | The whole-tree placement check rejects it; removing the fixture ACL restores the check |
 
-The 45 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
+The 51 Core tests also cover cancellation, resource bounds, source replacement, hardlinks, special files and link escape.
 They check cleanup against unknown entries and replacement inodes.
 They check destination lease retirement and the public Root refusal before source or policy access.
 
@@ -40,7 +40,8 @@ The raised-floor case changes fixture return values; it changes no real policy.
 Data-only copying supports the tested SDK layout and its synthetic compressed resource.
 The kernel decodes the resource data before the copier writes a new uncompressed file.
 This proves the recorded compressed fixture, not arbitrary resource-fork semantics.
-The production attribute policy remains unselected.
+The [copied metadata policy](../macos-copied-release-metadata.md) now rejects flags and unexpected copied attributes.
+It does not preserve arbitrary source metadata or replace signature verification.
 Crash recovery, protected service installation, notarization and activation remain pending.
 The macOS 26 deployment target does not establish runtime compatibility on macOS 26.
 

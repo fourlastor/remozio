@@ -74,3 +74,9 @@ The [copy experiment](inactive-release-copy.md) checks signed copies, decoded co
 
 The [attribute experiment](release-attributes.md) inventories every SDK node through retained descriptors and checks synthetic attributes on a signed app.
 Its observations do not select a production copying policy. Compressed resource forks remain unproven.
+
+## Copied release metadata
+
+The [metadata policy](../macos-copied-release-metadata.md) checks copied files, directories and links.
+It permits zero file flags and only OS provenance attributes.
+Signature verification, protected placement and activation remain separate gates.

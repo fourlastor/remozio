@@ -28,6 +28,7 @@ enum ProtectedReleaseTreeInspection {
             guard stable(before, held) else { throw JournalLeaseError.identityChanged }
             try ProtectedStorageMetadata.validate(fd, held, directory: directory, privateObject: false,
                 owner: owner, ancestorOwner: owner)
+            try CopiedReleaseMetadata.validate(fd, try status(fd))
             if directory {
                 let duplicate = dup(fd)
                 guard duplicate >= 0 else { throw JournalLeaseError.system(errno) }
@@ -55,6 +56,13 @@ enum ProtectedReleaseTreeInspection {
                         guard child.st_uid == owner, child.st_nlink == 1, child.st_mode & 0o7000 == 0 else {
                             throw JournalLeaseError.unsafeMetadata
                         }
+                        let linkFD = openat(fd, name, O_RDONLY | O_SYMLINK | O_CLOEXEC)
+                        guard linkFD >= 0 else { throw JournalLeaseError.system(errno) }
+                        defer { Darwin.close(linkFD) }
+                        let held = try status(linkFD)
+                        guard stable(child, held) else { throw JournalLeaseError.identityChanged }
+                        try CopiedReleaseMetadata.validate(linkFD, held)
+                        guard stable(held, try status(linkFD)) else { throw JournalLeaseError.identityChanged }
                         counts.links += 1
                     } else {
                         guard type == S_IFDIR || type == S_IFREG else { throw JournalLeaseError.unsafeMetadata }
@@ -76,6 +84,7 @@ enum ProtectedReleaseTreeInspection {
             guard stable(held, try status(fd)) else { throw JournalLeaseError.identityChanged }
             try ProtectedStorageMetadata.validate(fd, try status(fd), directory: directory, privateObject: false,
                 owner: owner, ancestorOwner: owner)
+            try CopiedReleaseMetadata.validate(fd, try status(fd))
         }
     }
 
@@ -89,7 +98,7 @@ enum ProtectedReleaseTreeInspection {
     }
     private static func stable(_ a: stat, _ b: stat) -> Bool {
         a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_mode == b.st_mode && a.st_nlink == b.st_nlink
-            && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_size == b.st_size
+            && a.st_uid == b.st_uid && a.st_gid == b.st_gid && a.st_size == b.st_size && a.st_flags == b.st_flags
             && a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec
             && a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec
     }

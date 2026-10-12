@@ -50,8 +50,9 @@ Caller-selected limits can lower those bounds.
 Cancellation runs between nodes, data chunks and link expansion.
 The synchronous copy must run outside the app UI and authority dispatch queue.
 
-The placement check examines every copied file and directory.
+The placement check examines every copied file, directory and link.
 It checks ownership, mode, ACL, mount, link count and stable inode metadata.
+It also applies the [copied metadata policy](macos-copied-release-metadata.md) through retained object descriptors.
 Signature inspection then checks the complete executable inventory and enclosing seal.
 The copied manifest and every role and dependency hash must match the original evidence.
 A second policy read rejects a candidate that falls below newly retained floors.
@@ -71,7 +72,9 @@ The caller must revalidate protected state and the copy at the installation boun
 The returned value is a snapshot and grants no activation authority.
 
 Data-only copying has passed the known SDK fixture.
-Arbitrary resource forks and signed extended attributes need an explicit product policy.
+Source resource forks and attributes are not preserved.
+Releases that require them are unsupported by the copying contract.
+The copied tree rejects file flags and all attributes except OS provenance.
 Root ownership and another-account isolation still need platform tests.
 Compatibility, notarization, quiescence, service health and durable activation remain separate gates.
 
