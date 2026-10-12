@@ -65,3 +65,7 @@ Do not collect passwords, ADB payloads, notification tokens, or provider secrets
 
 The [signed dependency experiment](release-dependencies.md) checks schema 2 against the pinned Sparkle SDK.
 It verifies nine signed controls and starts no installer. Protected update activation remains pending.
+
+## Inactive release preparation
+
+The [copy experiment](inactive-release-copy.md) checks signed copies, current floors and owned cleanup. Root placement, crash recovery and activation remain unproven.

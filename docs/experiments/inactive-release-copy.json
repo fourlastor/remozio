@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "experiment": "inactive-release-preparation",
+  "status": "passed",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "macOS 26.0",
+  "unitTests": 45,
+  "nativeControls": 4,
+  "cases": [
+    {
+      "control": "signed-sdk-swift-copy",
+      "copiedBytesAndLinksMatch": true,
+      "inspection": {
+        "activation": false,
+        "aliases": 10,
+        "dependencies": 5,
+        "dependencyHashes": 5,
+        "preflight": true,
+        "roles": 1,
+        "schema": 2
+      },
+      "counts": {
+        "bytes": 1879167,
+        "files": 88,
+        "links": 9,
+        "entries": 158
+      },
+      "ordinaryPlacementMetadataVerified": true,
+      "unsafeSourceModeAndACLNotCopied": true,
+      "RootIsolationTested": false,
+      "activation": false
+    },
+    {
+      "control": "floor-advanced-during-preparation",
+      "preparationRejected": true,
+      "ownedCopyRemoved": true,
+      "actualPolicyChanged": false,
+      "activation": false
+    },
+    {
+      "control": "source-held-descriptor",
+      "sourceChangedAfterCopy": true,
+      "copyStillValid": true,
+      "noSharedFileInode": true
+    },
+    {
+      "control": "copied-mutation-acl",
+      "placementRejected": true
+    },
+    {
+      "event": "owned-fixtures-removed",
+      "originalSDKPreserved": true,
+      "installerStarted": false,
+      "RootOwnershipAndIsolationUnproven": true,
+      "notarizationTested": false
+    }
+  ],
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/DescriptorTreeCopy.swift": "548a826695ca77ca65eb5eb90b876fb32454357a252f772155e4b212cd4dff1f",
+    "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift": "fda3d07783b02da58b9d1ccaa0d1049145bfdbbe6c55ec4b09c897906b060c96",
+    "macos/core/Sources/RemozioCore/ProtectedReleaseTreeInspection.swift": "6af25e88ac4cd7fa7b2110f6ef38a551c5573c5a117112fb3d0d7fe77dbe08ac",
+    "macos/core/Sources/RemozioCore/ProtectedReleasePreparation.swift": "4d4bd49e9b4573ba94fbece2c42c4a66daafd2e0293edda4b39859165d95a82d",
+    "macos/core/Tests/RemozioCoreTests/DescriptorTreeCopyTests.swift": "a0ef8e6904433d305e5588647d48850a3d4ca26b9ccad3c05ae7e68b6a9bcb4c",
+    "macos/core/Tests/RemozioCoreTests/ReleaseDestinationLeaseTests.swift": "4071f22b2fe3505962ceabd9b254aed1a8e237899aaddc1ab5c7ab29eb801032",
+    "macos/core/Tests/RemozioCoreTests/ProtectedReleaseTreeInspectionTests.swift": "d14878db7d7bfe0b46e93c6a6d2a35e3d1aca1a5a48e99e4e277a9b5828febe9",
+    "experiments/release-copy/Sources/ReleaseCopyProbe/main.swift": "0742eb6c3b4b0d8d3791b3e061577a37b70e3d49ea9762f15df07b7c2526a7ed",
+    "scripts/run-release-copy-experiment.py": "277976133679e46d075a3fff8787614bac1231464ae6781dc84f80faadb61258"
+  },
+  "publicOrdinaryIdentityRefusalTested": true,
+  "RootOwnershipAndIsolationTested": false,
+  "notarizationTested": false,
+  "activationTested": false,
+  "serviceInstalled": false,
+  "actualPolicyChanged": false,
+  "limits": [
+    "Ordinary-owner fixtures do not prove Root ownership or another-account isolation.",
+    "Data-only copying is tested against the known SDK; arbitrary signed extended attributes and resource forks need a product policy.",
+    "Immediate cleanup is tested. Crash recovery and orphan reconciliation remain pending.",
+    "Compatibility, notarization, quiescence, health and durable activation remain separate gates."
+  ],
+  "initializationFailureControls": [
+    "output open reports EMFILE; owned empty directory removed",
+    "output fstat reports EIO; directory removed and descriptor closed",
+    "replacement directory retained; original and cleanup failures reported",
+    "opened inode must match the recorded creation"
+  ],
+  "nestedInitializationFailureControls": [
+    "nested output open reports EMFILE; whole owned copy removed",
+    "nested output inspection reports EIO; whole owned copy removed",
+    "new regular-file inspection reports EIO; whole owned copy removed",
+    "nested replacement remains untouched; original and cleanup errors retained"
+  ],
+  "descriptorFirstFileControls": [
+    "named lookup EIO after exclusive open cleans the descriptor-recorded file",
+    "named replacement cannot become the recorded creation; replacement retained"
+  ]
+}
