@@ -8772,7 +8772,7 @@ extension MachCommandCallerReceiverTests {
             userID: geteuid(), auditSessionID: nil, maxPayloadBytes: 4096,
             observeTimeout: { stage in observations.withLock { $0.append(stage) } },
             uptimeNanoseconds: { times.withLock { $0.removeFirst() } })
-        XCTAssertThrowsError(try receive.receiveNext(timeoutMilliseconds: 1)) {
+        XCTAssertThrowsError(try receive.receiveHello(timeoutMilliseconds: 1)) {
             XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
         }
         XCTAssertEqual(observations.withLock { $0 }, [.authenticatedPreview])
@@ -8824,6 +8824,124 @@ extension MachCommandCallerReceiverTests {
         } catch {
             XCTFail("Receive observations: \(diagnostics.snapshot)")
             await worker.close(); throw error
+        }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    private func receiverWithExpiredAuthenticationBudget(_ endpoint: Endpoint, userID: uid_t? = nil) throws -> MachCommandCallerReceiver {
+        let ticks = Mutex<UInt64>(0)
+        return try MachCommandCallerReceiver(receivePort: endpoint.port, expression: selfExpression(),
+            userID: userID ?? geteuid(), auditSessionID: nil, maxPayloadBytes: 8192,
+            uptimeNanoseconds: { ticks.withLock { let value = $0; $0 += 2_000_000; return value } })
+    }
+
+    func testQueuedListenerHelloSurvivesAuthenticationBeyondPollBudget() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint()
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        guard case .hello(let hello) = try receiverWithExpiredAuthenticationBudget(endpoint).receiveNext(timeoutMilliseconds: 1) else {
+            return XCTFail("The authenticated queued hello must survive the poll budget")
+        }
+        XCTAssertEqual(hello.payload, try offer.canonicalBytes)
+        hello.close()
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        XCTAssertThrowsError(try receiver(endpoint).receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+        }
+    }
+
+    func testQueuedListenerInputCarriersSurviveAuthenticationWithoutTakingBorrowedDescriptors() throws {
+        var input: [Int32] = [-1, -1]
+        XCTAssertEqual(pipe(&input), 0)
+        let descriptor = input[0], output = Darwin.open("/dev/null", O_RDWR | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(output, 0)
+        defer { input.forEach { _ = Darwin.close($0) }; _ = Darwin.close(output) }
+        let untouched = Data([0xfa, 0x00, 0x31])
+        XCTAssertEqual(untouched.withUnsafeBytes { Darwin.write(input[1], $0.baseAddress, $0.count) }, untouched.count)
+        _ = Darwin.close(input[1]); input[1] = -1
+        var fileport: mach_port_t = 0
+        XCTAssertEqual(fileport_makeport(descriptor, &fileport), 0)
+        defer { _ = mach_port_deallocate(mach_task_self_, fileport) }
+        for version in 2...5 {
+            let endpoint = try Endpoint(), admission = try Endpoint(), terminal = try Endpoint(), payload = Data([UInt8(version)])
+            switch version {
+            case 2: try endpoint.sendInput(payload, fileport: fileport)
+            case 3: try MachCommandAdmissionWire.send(payload, inputDescriptor: descriptor, destination: endpoint.port,
+                replyPort: admission.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            case 4: try MachCommandIOWire.send(payload, inputDescriptor: descriptor, outputDescriptor: output,
+                errorDescriptor: output, destination: endpoint.port, admissionReply: admission.port,
+                terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            default: try MachCommandIOWire.sendMapped(payload, inputDescriptor: descriptor, outputDescriptor: output,
+                errorDescriptor: output, controlTerminalDescriptor: nil, destination: endpoint.port,
+                admissionReply: admission.port, terminalReply: terminal.port, maximumPayloadBytes: 8192, timeoutMilliseconds: 1000)
+            }
+            guard case .input(let input) = try receiverWithExpiredAuthenticationBudget(endpoint).receiveNext(timeoutMilliseconds: 1) else {
+                return XCTFail("The original input carrier must survive the poll budget")
+            }
+            XCTAssertEqual(input.payload, payload); XCTAssertEqual(input.carrierVersion, UInt32(version))
+            input.closeIfUnclaimed()
+            XCTAssertGreaterThanOrEqual(fcntl(descriptor, F_GETFD), 0)
+            XCTAssertEqual(try sendReferences(admission.port), 1); XCTAssertEqual(try sendReferences(terminal.port), 1)
+            XCTAssertThrowsError(try receiver(endpoint).receiveNext(timeoutMilliseconds: 1)) {
+                XCTAssertEqual($0 as? MachCommandCallerError, .timeout)
+            }
+        }
+        var retained = Data(count: untouched.count)
+        let readCount = retained.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+        XCTAssertEqual(readCount, untouched.count); XCTAssertEqual(retained, untouched)
+    }
+
+    func testQueuedListenerBudgetCannotBypassPeerOrDescriptorChecks() throws {
+        let endpoint = try Endpoint(), reply = try Endpoint()
+        let offer = try CommandHandshakeOffer(nonce: Data(repeating: 0xd3, count: 32), capabilities: .admissionResults)
+        try MachCommandWire.send(offer.canonicalBytes, destination: endpoint.port, replyPort: reply.port,
+            identifier: MachCommandCallerReceiver.helloMessageID, timeoutMilliseconds: 1000)
+        XCTAssertThrowsError(try receiverWithExpiredAuthenticationBudget(endpoint, userID: geteuid() ^ 1).receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .wrongPeer)
+        }
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+        try endpoint.sendInput(offer.canonicalBytes, fileport: reply.port, version: 1, descriptorCount: 2,
+            identifier: MachCommandCallerReceiver.helloMessageID)
+        XCTAssertThrowsError(try receiverWithExpiredAuthenticationBudget(endpoint).receiveNext(timeoutMilliseconds: 1)) {
+            XCTAssertEqual($0 as? MachCommandCallerError, .malformed)
+        }
+        XCTAssertEqual(try sendReferences(reply.port), 1)
+    }
+
+    func testReplyReceiversKeepStrictAuthenticationDeadlines() throws {
+        for identifier in [MachCommandCallerReceiver.helloReplyMessageID, MachCommandCallerReceiver.admissionReplyMessageID,
+                           MachCommandCallerReceiver.terminalReplyMessageID] {
+            let endpoint = try Endpoint()
+            try endpoint.send(Data([1]), identifier: identifier)
+            let receive = try receiverWithExpiredAuthenticationBudget(endpoint)
+            XCTAssertThrowsError(try {
+                switch identifier {
+                case MachCommandCallerReceiver.helloReplyMessageID:
+                    let response = try receive.receiveHelloReply(timeoutMilliseconds: 1); response.caller.close()
+                case MachCommandCallerReceiver.admissionReplyMessageID:
+                    let response = try receive.receiveAdmissionReply(timeoutMilliseconds: 1); response.caller.close()
+                default:
+                    let response = try receive.receiveTerminalReply(timeoutMilliseconds: 1); response.caller.close()
+                }
+            }()) {
+                if identifier == MachCommandCallerReceiver.terminalReplyMessageID {
+                    XCTAssertEqual($0 as? CommandTerminalResultError, .deadlineExceeded)
+                } else { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            }
+        }
+    }
+
+    func testExecutionEventReceiverDoesNotInheritListenerBudgetSemantics() throws {
+        for identifier in [MachCommandCallerReceiver.streamOutputMessageID, MachCommandCallerReceiver.terminalReplyMessageID] {
+            let endpoint = try Endpoint()
+            try endpoint.send(Data([1]), identifier: identifier)
+            XCTAssertThrowsError(try receiverWithExpiredAuthenticationBudget(endpoint).receiveExecutionEvent(timeoutMilliseconds: 1)) {
+                if identifier == MachCommandCallerReceiver.terminalReplyMessageID {
+                    XCTAssertEqual($0 as? CommandTerminalResultError, .deadlineExceeded)
+                } else { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
+            }
         }
     }
 }

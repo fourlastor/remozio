@@ -1,0 +1,49 @@
+{
+  "hostMacOS": "27.0.1",
+  "baseCommit": "102ec87c92091211fb5a7cb33a0df20ac3c8bc18",
+  "receiveAPI": "receiveNext",
+  "receiverSourceSHA256": "8c68bef1d512221a60bde367a8e644a3126f073044694af61de82aa1216f6062",
+  "probeSourceSHA256": "511596d46d9ac3dee4468f01bd65f2538889016a2d9fd5b145350cfa99e34ccc",
+  "cases": [
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 8.784417,
+      "outcome": "accepted",
+      "queuedAfter": 0,
+      "queuedBefore": 1,
+      "receiveAPI": "receiveNext",
+      "receiveBudgetMilliseconds": 10,
+      "sendDelayMilliseconds": 0,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 0.170125,
+      "serviceRegistered": false
+    },
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 7.193541,
+      "outcome": "accepted",
+      "queuedAfter": 0,
+      "queuedBefore": 1,
+      "receiveAPI": "receiveNext",
+      "receiveBudgetMilliseconds": 1000,
+      "sendDelayMilliseconds": 0,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 0.007708,
+      "serviceRegistered": false
+    },
+    {
+      "approvalCreated": false,
+      "elapsedMilliseconds": 12.998667,
+      "outcome": "accepted",
+      "queuedAfter": 0,
+      "queuedBefore": 0,
+      "receiveAPI": "receiveNext",
+      "receiveBudgetMilliseconds": 10,
+      "sendDelayMilliseconds": 8,
+      "sendSucceeded": true,
+      "sentAtMilliseconds": 8.286792,
+      "serviceRegistered": false
+    }
+  ],
+  "scope": "Ordinary-account owned Mach ports; no service, completed handshake, approval or execution. Native timings are observations, not stable CI assertions. Deterministic Core tests prove the authentication-budget boundary."
+}

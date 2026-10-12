@@ -149,8 +149,9 @@ public final class MachCommandCallerReceiver {
 
     /// Select from the actual queue preview, then authenticate and receive through the same parser.
     /// Only hello and original-input submission carriers belong on a command listener.
+    /// The timeout bounds queue waiting. Authentication may finish a queued packet through a nonblocking receive.
     public func receiveNext(timeoutMilliseconds: UInt32) throws -> sending ReceivedMachCommandMessage {
-        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil)
+        let packet = try receivePacket(timeoutMilliseconds: timeoutMilliseconds, kind: nil, finishQueuedListenerPacket: true)
         switch packet.kind {
         case .hello:
             guard let reply = packet.reply else { packet.caller.close(); throw MachCommandCallerError.malformed }
@@ -184,7 +185,7 @@ public final class MachCommandCallerReceiver {
     }
 
     private func receivePacket(timeoutMilliseconds: UInt32, kind requestedKind: PacketKind?, previewTimeoutMilliseconds: UInt32? = nil,
-                               allowNonblockingPreview: Bool = false) throws -> sending Packet {
+                               allowNonblockingPreview: Bool = false, finishQueuedListenerPacket: Bool = false) throws -> sending Packet {
         let previewWait = previewTimeoutMilliseconds ?? timeoutMilliseconds
         guard (timeoutMilliseconds > 0 || requestedKind == .streamControl),
               (previewWait > 0 || requestedKind == .streamControl || allowNonblockingPreview),
@@ -258,13 +259,15 @@ public final class MachCommandCallerReceiver {
         defer { if !completed { caller.close() } }
         let elapsed = uptimeNanoseconds() - started
         let budget = UInt64(timeoutMilliseconds) * 1_000_000
-        guard budget == 0 || elapsed < budget else {
+        let expired = budget != 0 && elapsed >= budget
+        let queuedListenerPacket = finishQueuedListenerPacket && [.hello, .input, .admissionInput, .ioInput, .mappedIOInput].contains(kind)
+        if expired && !queuedListenerPacket {
             try discardQueueHead()
             observeTimeout?(.authenticatedPreview)
             if kind == .terminalReply { throw CommandTerminalResultError.deadlineExceeded }
             throw MachCommandCallerError.timeout
         }
-        let remaining = budget == 0 ? 0 : UInt32((budget - elapsed + 999_999) / 1_000_000)
+        let remaining = budget == 0 || expired ? 0 : UInt32((budget - elapsed + 999_999) / 1_000_000)
         let capacity = maximumMessage + MemoryLayout<mach_msg_audit_trailer_t>.size
         let storage = UnsafeMutableRawPointer.allocate(byteCount: capacity,
             alignment: max(MemoryLayout<mach_msg_header_t>.alignment, MemoryLayout<mach_msg_audit_trailer_t>.alignment))

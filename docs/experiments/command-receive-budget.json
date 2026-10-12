@@ -42,5 +42,6 @@
   ],
   "scope": "Ordinary-account owned Mach ports; no service, approval or execution. Reproduces queued-frame discard near budget boundary, not the original CI grant-reload cause.",
   "receiverBaselineCommit": "f7bf500b542524edb8a6b960afa9e7cc7abcae3b",
-  "note": "Native timing sample used the unmodified receiver. The probe was a disposable local program. Deterministic regression tests are committed separately."
+  "note": "Native timing sample used the unmodified receiver. The probe was a disposable local program. Deterministic regression tests are committed separately.",
+  "receiveAPI": "receiveHello"
 }
