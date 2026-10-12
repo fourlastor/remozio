@@ -1,0 +1,74 @@
+{
+  "experiment": "service-lifecycle",
+  "schemaVersion": 1,
+  "results": [
+    {
+      "recordedAt": "2026-10-12T16:45:12.373485+00:00",
+      "os": "27.0.1",
+      "architecture": "arm64",
+      "deploymentTarget": "26.0",
+      "swiftVersion": "6",
+      "signing": "ad-hoc",
+      "checks": [
+        "session:description-and-default-refusal",
+        "authority:description-and-default-refusal",
+        "authority:ordinary-account-refusal",
+        "read-only-status",
+        "exact-manifests",
+        "confirmation-account-and-protected-placement-refusals",
+        "ad-hoc-registration-signature-refusal",
+        "altered-manifest-refusals"
+      ],
+      "servicesRegistered": false,
+      "servicesUnregistered": false,
+      "rootInstalled": false,
+      "notarizationTested": false,
+      "bootTested": false,
+      "updateTested": false,
+      "dedicatedTransportAccountTested": false,
+      "status": "passed",
+      "sourceSHA256": {
+        "experiments/service-lifecycle/Controller.swift": "2b9ffd36e01f374b89371eefe71cb8c65f606f8c91ee3ba6391633637b8d4187",
+        "experiments/service-lifecycle/Preflight.swift": "9c5db9e238d75a2bd17fc6a3a244458cbb38a6bdd32260ccd895fa5f26a6f49c",
+        "experiments/service-lifecycle/Probe.swift": "4154516d2ef2065c95390bf58bea539159f4b3b8074114da1ba59081761ede73",
+        "macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift": "bc7520823b72f365dd4b505bd7f5b3ceaf4615cfda1ad70f7d951da26f0cbf53",
+        "scripts/check-service-lifecycle.py": "bc0c2fe4cfa56417d9f0ae7445db252ba060cfb8e0f92187d3dace822c36bed0"
+      }
+    },
+    {
+      "recordedAt": "2026-10-12T16:45:44.402180+00:00",
+      "os": "27.0.1",
+      "architecture": "arm64",
+      "deploymentTarget": "26.0",
+      "swiftVersion": "6",
+      "signing": "developer-id",
+      "checks": [
+        "session:description-and-default-refusal",
+        "authority:description-and-default-refusal",
+        "authority:ordinary-account-refusal",
+        "read-only-status",
+        "exact-manifests",
+        "confirmation-account-and-protected-placement-refusals",
+        "developer-id-publisher-validation",
+        "unnotarized-registration-refusal",
+        "altered-manifest-refusals"
+      ],
+      "servicesRegistered": false,
+      "servicesUnregistered": false,
+      "rootInstalled": false,
+      "notarizationTested": false,
+      "bootTested": false,
+      "updateTested": false,
+      "dedicatedTransportAccountTested": false,
+      "status": "passed",
+      "sourceSHA256": {
+        "experiments/service-lifecycle/Controller.swift": "2b9ffd36e01f374b89371eefe71cb8c65f606f8c91ee3ba6391633637b8d4187",
+        "experiments/service-lifecycle/Preflight.swift": "9c5db9e238d75a2bd17fc6a3a244458cbb38a6bdd32260ccd895fa5f26a6f49c",
+        "experiments/service-lifecycle/Probe.swift": "4154516d2ef2065c95390bf58bea539159f4b3b8074114da1ba59081761ede73",
+        "macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift": "bc7520823b72f365dd4b505bd7f5b3ceaf4615cfda1ad70f7d951da26f0cbf53",
+        "scripts/check-service-lifecycle.py": "bc0c2fe4cfa56417d9f0ae7445db252ba060cfb8e0f92187d3dace822c36bed0"
+      }
+    }
+  ],
+  "limits": "Build and refusal controls only. No registration, unregistration, notarized acceptance, Root placement, boot, replacement or dedicated transport-account test."
+}

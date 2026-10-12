@@ -37,7 +37,7 @@ The [Mac app guide](../../macos/app/README.md), [Android guide](../../android/RE
 - Agree on each device-setting change before making it. Biometric enrollment changes, debugging configuration and service registration are explicit test steps.
 - Use synthetic commands and disposable keys. Never submit a real 1Password, Little Snitch or sudo approval to exercise a fixture.
 
-Do not start with root service installation. The packaging fixture has no registration operation, and its manifests are not production service definitions.
+Do not start with production Root service installation. The packaging fixture remains read-only. The separate [lifecycle harness](service-lifecycle.md) has guarded experiment operations for a later authorized session; its manifests are not production service definitions.
 
 ## First session: prepared checks
 
@@ -66,7 +66,7 @@ These are not runnable product tests yet. Prepare the relevant implementation an
 
 | Work | Required evidence before relying on it |
 | --- | --- |
-| Protected Mac services | Developer ID checks, protected paths, registration/removal, reboot to login window, lock/logout, update replacement and pre-login key access |
+| Protected Mac services | [Lifecycle harness](service-lifecycle.md): Developer ID and notarization, protected placement, actual registration/removal, reboot, lock/logout and replacement. Dedicated transport and pre-login key access remain separate. |
 | Authority continuity | Protected local checkpoint, interrupted transitions, partial-state replacement, stale floors and offline recovery |
 | UI adapters and presence | Sanitized authorized dialog captures; local input, CRD, Screen Sharing, dark display, manual Away and offline states |
 | Cloudflare and FCM | Per-Mac configuration, scoped credentials, real delivery, reconnect, offline reconciliation and independent Mac operation |
