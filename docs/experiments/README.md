@@ -69,3 +69,8 @@ It verifies nine signed controls and starts no installer. Protected update activ
 ## Inactive release preparation
 
 The [copy experiment](inactive-release-copy.md) checks signed copies, current floors and owned cleanup. Root placement, crash recovery and activation remain unproven.
+
+## Release file attributes
+
+The [attribute experiment](release-attributes.md) inventories every SDK node through retained descriptors and checks synthetic attributes on a signed app.
+Its observations do not select a production copying policy. Compressed resource forks remain unproven.
