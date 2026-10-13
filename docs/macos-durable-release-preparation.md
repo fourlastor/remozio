@@ -24,7 +24,9 @@ flowchart TD
 Setup must provision a separate private machine-level directory, `writer.lock` and `installation.sqlite`.
 The lease retains each ancestor and file identity, checks private permissions and holds the exclusive writer lock.
 It checks the process identity and both user IDs throughout its lifetime.
-The storage schema is version 1. It is independent of account request and consumption journals.
+The default storage schema remains version 1.
+An explicit upgrade to version 2 adds [installation inventory](macos-durable-installation-inventory.md) under the same writer lock.
+Both versions are independent of account request and consumption journals.
 
 SQLite uses delete journaling, extra synchronous writes and full filesystem sync.
 The store fixes its application identity and Mac ID. It rejects unknown schemas and implicit reinitialization.

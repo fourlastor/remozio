@@ -2,7 +2,7 @@
 
 One installed bundle can serve several account contexts.
 Update planning must retain those owners and their service domains separately from request journals.
-The inventory now defines that bounded record and a guarded Root reader.
+The inventory now defines that bounded record, a guarded Root reader and durable storage under the machine writer lock.
 It does not install services or prove that the recorded inventory is complete.
 
 ```mermaid
@@ -57,15 +57,17 @@ Incomplete or inconsistent signing evidence cannot produce a digest.
 Comparison rejects changed code, missing declared roles and mismatched main-app identifiers.
 Callers must obtain fresh evidence using the trusted publisher pins.
 
-The signed app manifest declares schema 1 reader support and no inventory writer support.
-The existing preparation-store schema stays unchanged.
-No database table, storage migration or registration side effect is introduced.
+The signed app manifest declares inventory schema 1 reader and writer support.
+Machine storage supports schemas 1 and 2, with an explicit 1-to-2 migration.
+Opening a store never performs that migration.
+No registration side effect is introduced.
 
 ## Integration gates
 
 A Root-owned file alone does not prove current service registration, live process identity, code placement or generation floors.
 The installer must validate the signed service plists and protected account configurations against each declaration before retaining an authoritative inventory.
-Protected durable mutation, revision comparison and crash recovery remain to be implemented.
+The [durable store](macos-durable-installation-inventory.md) now retains inventory with revision checks.
+Its rows still do not establish installation completeness, current registration or live-process identity.
 Inventory changes and admissions must serialize with update closure before this record can participate in activation.
 
 Update readiness must inspect every affected account and role, including live GUI permits and actors.

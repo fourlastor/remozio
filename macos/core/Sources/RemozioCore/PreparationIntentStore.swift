@@ -1,9 +1,10 @@
 import Foundation
+import Darwin
 import SQLite3
 
 enum PreparationStoreError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongMac, closed, unavailable, transactionActive
-    case capacity, notFound, staleRevision, invalidTransition, corruptRecord
+    case capacity, notFound, staleRevision, invalidTransition, corruptRecord, inventoryNotEnabled, wrongInstallation
     case storage(Int32)
 }
 
@@ -12,6 +13,8 @@ public final class PreparationIntentStore {
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
+    private let macID: Data
+    private let didCommit: (() throws -> Void)?
     private var active = false
     private var unavailable = false
     private static let applicationID: Int64 = 0x524D4953
@@ -22,8 +25,9 @@ public final class PreparationIntentStore {
                   macID: macID, maximumRecords: maximumRecords, initialize: initialize)
     }
     // Internal fixture seam. The connection owns the lease even when initialization fails.
-    init(lease: InstallationStorageLease, macID: Data, maximumRecords: Int, initialize: Bool) throws {
-        self.lease = lease; self.maximumRecords = maximumRecords
+    init(lease: InstallationStorageLease, macID: Data, maximumRecords: Int, initialize: Bool,
+         didCommit: (() throws -> Void)? = nil) throws {
+        self.lease = lease; self.maximumRecords = maximumRecords; self.macID = macID; self.didCommit = didCommit
         do {
             guard macID.count == 16, (1...4096).contains(maximumRecords) else { throw PreparationStoreError.invalidConfiguration }
             try lease.validate()
@@ -67,6 +71,7 @@ public final class PreparationIntentStore {
                 }
             }
             try identity(macID)
+            if try scalar("PRAGMA user_version") == 2 { configureInventoryLimit() }
             try lease.validate()
         } catch { shutdown(); throw error }
     }
@@ -74,6 +79,101 @@ public final class PreparationIntentStore {
     public func close() throws {
         guard !active else { throw PreparationStoreError.transactionActive }
         shutdown()
+    }
+    /// Explicit storage upgrade only. It grants no service registration or update activation authority.
+    public func enableInventoryStorage() throws {
+        try requireRoot(); try upgradeInventoryStorage()
+    }
+    public func loadInventory() throws -> InstallationInventory? {
+        try requireRoot(); return try inventory()
+    }
+    @discardableResult
+    public func initializeInventory(_ value: InstallationInventory) throws -> InstallationInventory {
+        try requireRoot(); return try writeInventory(value, expectedRevision: nil)
+    }
+    @discardableResult
+    public func replaceInventory(_ value: InstallationInventory, expectedRevision: Data) throws -> InstallationInventory {
+        try requireRoot(); return try writeInventory(value, expectedRevision: expectedRevision)
+    }
+    private func requireRoot() throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+    }
+
+    // Internal ordinary-owner seams retain the same lease, transaction and record checks.
+    func upgradeInventoryStorage() throws {
+        try transaction(write: true) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") == 2 { return }
+            _ = try loadAll()
+            try exec("CREATE TABLE installation_inventory_v1(id INTEGER PRIMARY KEY CHECK(id=1),installation BLOB NOT NULL CHECK(length(installation)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 65536)) STRICT")
+            try exec("PRAGMA user_version=2")
+            try identity(macID)
+        }
+        configureInventoryLimit()
+    }
+    func inventory() throws -> InstallationInventory? {
+        try transaction(write: false) { try requireInventorySchema(); return try loadInventoryRecord() }
+    }
+    @discardableResult
+    func writeInventory(_ value: InstallationInventory, expectedRevision: Data?) throws -> InstallationInventory {
+        guard value.macID == macID, expectedRevision == nil || expectedRevision?.count == 16 else {
+            throw PreparationStoreError.invalidConfiguration
+        }
+        return try transaction(write: true) {
+            try requireInventorySchema()
+            let previous = try loadInventoryRecord()
+            var revision = bytes(UUID())
+            while revision == value.revision || revision == previous?.revision { revision = bytes(UUID()) }
+            let retained = try InstallationInventory(macID: value.macID, installationID: value.installationID,
+                revision: revision, bundlePath: value.bundlePath, releaseDigest: value.releaseDigest,
+                accounts: value.accounts, services: value.services)
+            if let expectedRevision {
+                guard let previous else { throw PreparationStoreError.notFound }
+                guard previous.revision == expectedRevision else {
+                    throw PreparationStoreError.staleRevision
+                }
+                guard previous.installationID == value.installationID else { throw PreparationStoreError.wrongInstallation }
+                try statement("UPDATE installation_inventory_v1 SET revision=?,record=? WHERE id=1 AND installation=? AND revision=?") { row in
+                    try bind(retained.revision, column: 1, row: row)
+                    try bind(retained.canonicalBytes, column: 2, row: row)
+                    try bind(value.installationID, column: 3, row: row)
+                    try bind(expectedRevision, column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+            } else {
+                guard previous == nil else { throw PreparationStoreError.invalidTransition }
+                try statement("INSERT INTO installation_inventory_v1 VALUES(1,?,?,?)") { row in
+                    try bind(value.installationID, column: 1, row: row)
+                    try bind(retained.revision, column: 2, row: row)
+                    try bind(retained.canonicalBytes, column: 3, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+                }
+            }
+            return retained
+        }
+    }
+    private func configureInventoryLimit() {
+        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 69_632) }
+    }
+    private func requireInventorySchema() throws {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") == 2 else { throw PreparationStoreError.inventoryNotEnabled }
+    }
+    private func loadInventoryRecord() throws -> InstallationInventory? {
+        try statement("SELECT id,installation,revision,record FROM installation_inventory_v1 ORDER BY id") { row in
+            let result = try step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                  sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.corruptRecord }
+            let value: InstallationInventory
+            do { value = try .decode(blob(row, column: 3, maximum: 65_536), expectedMacID: macID) }
+            catch { throw PreparationStoreError.corruptRecord }
+            guard try blob(row, column: 1, maximum: 16) == value.installationID,
+                  try blob(row, column: 2, maximum: 16) == value.revision, try step(row) == SQLITE_DONE else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value
+        }
     }
     func records() throws -> [PreparationIntentRecord] { try transaction(write: false) { try loadAll() } }
     func begin(parent: String, ancestry: [PreparationFileIdentity]) throws -> PreparationIntentRecord {
@@ -131,10 +231,24 @@ public final class PreparationIntentStore {
         }
     }
     private func identity(_ macID: Data) throws {
-        guard try scalar("PRAGMA application_id") == Self.applicationID, try scalar("PRAGMA user_version") == 1,
-              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == 2 else {
+        let version = try scalar("PRAGMA user_version")
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2].contains(version),
+              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == (version == 1 ? 2 : 3) else {
             throw PreparationStoreError.incompatibleStore
         }
+        let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
+            var names: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard names.count < 3, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
+                      String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
+                names.append(String(cString: name))
+            }
+            return names
+        }
+        let expected = version == 1 ? ["installation_identity_v1", "preparation_intents_v1"] :
+            ["installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"]
+        guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }
             guard try blob(row, column: 1, maximum: 16) == macID else { throw PreparationStoreError.wrongMac }
@@ -170,11 +284,11 @@ public final class PreparationIntentStore {
         do {
             let value = try body()
             try lease.validate()
-            do { try exec("COMMIT") } catch { unavailable = true; throw error }
+            do { try exec("COMMIT"); if write { try didCommit?() } } catch { unavailable = true; throw error }
             try lease.validate()
             return value
         } catch {
-            if error as? PreparationStoreError == .corruptRecord || error is JournalLeaseError || Self.isSQLiteCorruption(error) {
+            if error as? PreparationStoreError == .corruptRecord || error as? PreparationStoreError == .incompatibleStore || error is JournalLeaseError || Self.isSQLiteCorruption(error) {
                 unavailable = true
             }
             if let db, sqlite3_get_autocommit(db) == 0 {
