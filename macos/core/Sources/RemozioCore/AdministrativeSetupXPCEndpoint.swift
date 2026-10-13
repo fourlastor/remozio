@@ -18,11 +18,13 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private let verify: () throws -> uid_t
     private let authorize: (Data) throws -> Void
     private let invalidate: () -> Void
+    private let onHandshake: @Sendable () -> Void
     private var ready = false
     private var closed = false
     private var busy = false
 
-    public convenience init(connection: NSXPCConnection, peerPolicy: XPCPeerPolicy, owner: SetupAccountOwner) throws {
+    public convenience init(connection: NSXPCConnection, peerPolicy: XPCPeerPolicy, owner: SetupAccountOwner,
+                            onHandshake: @escaping @Sendable () -> Void = {}, onClose: @escaping @Sendable () -> Void = {}) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard peerPolicy.expectedUserID > 0, peerPolicy.expectedUserID < UInt32.max else {
             throw AdministrativeSetupError.invalidConfiguration
@@ -32,7 +34,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         try owner.verifyCurrent()
         self.init(owner: owner, verify: { try invocation.verifyInvocation().userID },
             authorize: { try SetupAdministratorAuthorization.validate(externalForm: $0, invocation: invocation) },
-            invalidate: { [weak connection] in connection?.invalidate() })
+            invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupXPCProtocol.self)
         connection.exportedObject = self
@@ -41,8 +43,9 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     }
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,
-         authorize: @escaping (Data) throws -> Void, invalidate: @escaping () -> Void) {
-        self.owner = owner; self.verify = verify; self.authorize = authorize; self.invalidate = invalidate
+         authorize: @escaping (Data) throws -> Void, invalidate: @escaping () -> Void,
+         onHandshake: @escaping @Sendable () -> Void = {}) {
+        self.owner = owner; self.verify = verify; self.authorize = authorize; self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     public func close() {
         let changed = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
@@ -51,6 +54,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     public func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             try operation(handshake: true) { _ in try owner.verifyCurrent(); ready = true }
+            onHandshake()
             send { reply(1) }
         } catch { close(); reply(0) }
     }
