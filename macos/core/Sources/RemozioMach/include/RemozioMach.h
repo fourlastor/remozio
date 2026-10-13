@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <sys/fileport.h>
 #include <sys/types.h>
+#include <membership.h>
 #include "RemozioCommandChild.h"
 #include "RemozioCommandProcess.h"
 #include "RemozioCommandMonitorProtocol.h"

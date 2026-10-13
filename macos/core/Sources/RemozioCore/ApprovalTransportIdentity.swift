@@ -6,7 +6,7 @@ import Security
 /// Loads only the provisioned transport identity. Lookup failure does not change the configured custody path.
 public enum ApprovalTransportIdentity {
     public static func load(configuration: ApprovalTransportConfiguration) throws -> SecIdentity {
-        try configuration.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try configuration.requireNativeProcess()
         return try load(configuration: configuration, lookup: { query in
             var result: CFTypeRef?
             let status = SecItemCopyMatching(query, &result)

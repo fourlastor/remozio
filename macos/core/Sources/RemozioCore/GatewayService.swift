@@ -73,7 +73,7 @@ public final class GatewayService: Sendable {
     public var isRetired: Bool { retired.value.withLock { $0 } }
 
     public static func open(configuration: GatewayServiceConfiguration) async throws -> GatewayService {
-        try configuration.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try configuration.requireNativeProcess()
         try Task.checkCancellation()
         let credentials = try GatewayServiceCredentials.load(configuration: configuration), clock = try AuthorityClock()
         let lease = try GatewayAuthorityLease(clock: clock, maximumLifetime: configuration.settings.authorityLeaseMillis)

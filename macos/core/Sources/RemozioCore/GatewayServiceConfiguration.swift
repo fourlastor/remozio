@@ -142,7 +142,7 @@ public struct GatewayServiceConfiguration: Sendable {
 
     public static func load(path: String) throws -> Self {
         let result = try decode(ProtectedServiceConfiguration.readPublic(path: path))
-        try result.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try result.requireNativeProcess()
         return result
     }
 
@@ -177,6 +177,12 @@ public struct GatewayServiceConfiguration: Sendable {
         return result
     }
 
+    /// Native startup rechecks directory membership and the process groups before private access.
+    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent) throws {
+        try requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        do { try validate(serviceUID, ownerUID) }
+        catch { throw GatewayServiceError.wrongAccount }
+    }
     func requireProcess(realUID: uid_t, effectiveUID: uid_t) throws {
         guard realUID == serviceUID, effectiveUID == serviceUID else { throw GatewayServiceError.wrongAccount }
     }

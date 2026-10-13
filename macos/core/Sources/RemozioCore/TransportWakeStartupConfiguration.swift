@@ -19,8 +19,8 @@ public struct TransportWakeStartupConfiguration: Sendable, CustomStringConvertib
     }
     public static func load(path: String) throws -> Self {
         let value = try decode(ProtectedServiceConfiguration.readPublic(path: path))
-        try value.transport.requireProcess(realUID: getuid(), effectiveUID: geteuid())
-        try value.wake.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try value.transport.requireNativeProcess()
+        try value.wake.requireNativeProcess()
         return value
     }
     public static func decode(_ bytes: Data) throws -> Self {
@@ -34,7 +34,7 @@ public struct TransportWakeStartupConfiguration: Sendable, CustomStringConvertib
     }
     /// Loads only the configured protected key. Failure never generates a replacement or changes custody.
     public func makeRuntime() throws -> TransportWakeRuntime {
-        try transport.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try transport.requireNativeProcess()
         let signer = try GatewayWakeSigner.load(configuration: wake)
         let hints = try AuthorityWakeHintChannel(serviceName: transport.authorityServiceName, transportUID: transport.serviceUID,
             authorityPolicy: transport.authorityPolicy, binding: wake.binding, timeoutMilliseconds: wake.timeoutMilliseconds)

@@ -21,7 +21,7 @@ public struct TransportRemoteStartupConfiguration: Sendable, CustomStringConvert
     }
     public static func load(path: String) throws -> Self {
         let value = try decode(ProtectedServiceConfiguration.readPublic(path: path))
-        try value.transport.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try value.transport.requireNativeProcess()
         return value
     }
     public static func decode(_ bytes: Data) throws -> Self {

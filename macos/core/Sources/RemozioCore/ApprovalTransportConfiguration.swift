@@ -87,8 +87,14 @@ public struct ApprovalTransportConfiguration: Sendable, CustomStringConvertible 
     /// Public metadata still requires Root ownership and protected local ancestors. No keychain lookup occurs here.
     public static func load(path: String) throws -> Self {
         let value = try decode(ProtectedServiceConfiguration.readPublic(path: path))
-        try value.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try value.requireNativeProcess()
         return value
+    }
+    /// Native startup rechecks directory membership and the process groups before private access.
+    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent) throws {
+        try requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        do { try validate(serviceUID, ownerUID) }
+        catch { throw ApprovalTransportStartupError.wrongAccount }
     }
     func requireProcess(realUID: UInt32, effectiveUID: UInt32) throws {
         guard realUID == serviceUID, effectiveUID == serviceUID else { throw ApprovalTransportStartupError.wrongAccount }

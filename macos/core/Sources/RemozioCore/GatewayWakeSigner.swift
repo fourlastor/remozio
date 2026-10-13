@@ -68,7 +68,8 @@ public final class GatewayWakeSigner: @unchecked Sendable, CustomStringConvertib
     deinit { context?.invalidate() }
 
     public static func load(configuration: GatewayWakeSignerConfiguration) throws -> GatewayWakeSigner {
-        try load(configuration: configuration, realUID: getuid(), effectiveUID: geteuid(),
+        try configuration.requireNativeProcess()
+        return try load(configuration: configuration, realUID: getuid(), effectiveUID: geteuid(),
             read: ProtectedServiceConfiguration.readServicePrivate)
     }
     /// The fixture seam keeps the same account and record validation before key restoration.

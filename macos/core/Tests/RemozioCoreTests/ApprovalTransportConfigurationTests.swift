@@ -13,6 +13,23 @@ final class ApprovalTransportConfigurationTests: XCTestCase {
             teamID: "TEAMID1234", authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 3, count: 20)],
             identityReference: reference, identityPublicKeyInfo: P256.Signing.PrivateKey().publicKey.derRepresentation)
     }
+
+    func testNativeProcessValidationPrecedesPrivateAccessAndMapsLookupFailure() throws {
+        let own = getuid(), other: uid_t = own == 601 ? 602 : 601
+        guard own > 0 else { throw XCTSkip("Ordinary-user fixture") }
+        let value = try configuration(owner: other, service: own)
+        var calls = 0
+        try value.requireNativeProcess { service, owner in
+            calls += 1; XCTAssertEqual(service, own); XCTAssertEqual(owner, other)
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertThrowsError(try value.requireNativeProcess { _, _ in throw DedicatedServiceAccountError.unsafeAccount }) {
+            XCTAssertEqual($0 as? ApprovalTransportStartupError, .wrongAccount)
+        }
+        XCTAssertThrowsError(try value.requireNativeProcess()) {
+            XCTAssertEqual($0 as? ApprovalTransportStartupError, .wrongAccount)
+        }
+    }
     func testCanonicalRoundTripFixesRootAuthorityAndDedicatedUID() throws {
         let original = try configuration()
         let loaded = try ApprovalTransportConfiguration.decode(original.canonicalBytes)

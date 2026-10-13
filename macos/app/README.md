@@ -137,7 +137,8 @@ It includes the same transport metadata, an optional wake worker, and a fixed lo
 The relay forwards opaque TLS bytes only to the current approval listener. Cloudflare provisioning remains pending.
 The process loads Root-owned public metadata and requires the configured service UID as both its real and effective UID.
 It rejects Root and the recorded interactive owner account.
-Provisioning must create the dedicated account and protect its key custody; different UID values alone do not prove that setup.
+The [native account check](../../docs/macos-service-account-startup.md) verifies a nonlogin shell, directory membership and process groups before private access.
+Provisioning must still create an exclusive dedicated account and protect its key custody.
 
 ```mermaid
 flowchart LR

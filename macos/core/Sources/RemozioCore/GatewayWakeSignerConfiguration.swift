@@ -54,8 +54,14 @@ public struct GatewayWakeSignerConfiguration: Sendable, CustomStringConvertible,
 
     public static func load(path: String) throws -> Self {
         let value = try decode(ProtectedServiceConfiguration.readPublic(path: path))
-        try value.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try value.requireNativeProcess()
         return value
+    }
+    /// Native startup rechecks directory membership and the process groups before private access.
+    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent) throws {
+        try requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        do { try validate(transportUID, ownerUID) }
+        catch { throw GatewayWakeSignerError.wrongAccount }
     }
     func requireProcess(realUID: UInt32, effectiveUID: UInt32) throws {
         guard realUID == transportUID, effectiveUID == transportUID else { throw GatewayWakeSignerError.wrongAccount }

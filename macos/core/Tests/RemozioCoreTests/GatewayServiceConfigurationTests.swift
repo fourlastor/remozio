@@ -17,18 +17,35 @@ final class GatewayServiceConfigurationTests: XCTestCase {
                 maximumLifetimeMillis: 300000, maximumTTLSeconds: 300), maximumOperations: maximumOperations, authorityLeaseMillis: lease)
     }
     private func configuration(receiptKey: Data? = nil, providerPath: String = "/Library/Remozio/provider.json",
-                               ownerUID: uid_t = 501, wakeEndpoint: GatewayWakeEndpointConfiguration? = nil) throws -> GatewayServiceConfiguration {
+                               ownerUID: uid_t = 501, serviceUID: uid_t? = nil, wakeEndpoint: GatewayWakeEndpointConfiguration? = nil) throws -> GatewayServiceConfiguration {
         let id = Data(repeating: 1, count: 16)
         return try GatewayServiceConfiguration(registration: GatewayRegistrationIdentity(ownerID: id, macID: id, accountID: id,
                 gatewayID: id, lifecycleEpoch: id, rootPublicKey: root.publicKey.x963Representation),
             receiptPublicKey: receiptKey ?? receipt.publicKey.x963Representation, directoryPath: "/Library/Remozio/gateway",
-            providerPath: providerPath, receiptKeyPath: "/Library/Remozio/receipt.cbor", serviceUID: uid, ownerUID: ownerUID,
+            providerPath: providerPath, receiptKeyPath: "/Library/Remozio/receipt.cbor", serviceUID: serviceUID ?? uid, ownerUID: ownerUID,
             serviceName: "dev.remozio.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
             authorityHashes: [Data(repeating: 1, count: 20), Data(repeating: 2, count: 20)],
             project: "fixture-project", packageName: "dev.remozio.android", settings: settings(), wakeEndpoint: wakeEndpoint)
     }
     private var limits: CBORLimits { get throws { try CBORLimits(maxBytes: 65536, maxDepth: 4, maxItems: 128) } }
 
+
+    func testNativeProcessValidationPrecedesPrivateAccessAndMapsLookupFailure() throws {
+        let own = getuid(), other: uid_t = own == 601 ? 602 : 601
+        guard own > 0 else { throw XCTSkip("Ordinary-user fixture") }
+        let value = try configuration(ownerUID: other, serviceUID: own)
+        var calls = 0
+        try value.requireNativeProcess { service, owner in
+            calls += 1; XCTAssertEqual(service, own); XCTAssertEqual(owner, other)
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertThrowsError(try value.requireNativeProcess { _, _ in throw DedicatedServiceAccountError.unsafeAccount }) {
+            XCTAssertEqual($0 as? GatewayServiceError, .wrongAccount)
+        }
+        XCTAssertThrowsError(try value.requireNativeProcess()) {
+            XCTAssertEqual($0 as? GatewayServiceError, .wrongAccount)
+        }
+    }
     func testRoundTripPinsRootScopeAndServicePolicyWithoutEmbeddingSecrets() throws {
         let original = try configuration(), decoded = try GatewayServiceConfiguration.decode(original.canonicalBytes)
         XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes)

@@ -29,7 +29,7 @@ struct GatewayServiceCredentials: Sendable {
     let receipts: GatewayReceiptSigner
 
     static func load(configuration: GatewayServiceConfiguration) throws -> Self {
-        try configuration.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+        try configuration.requireNativeProcess()
         return try load(configuration: configuration, read: ProtectedServiceConfiguration.readServicePrivate)
     }
 
