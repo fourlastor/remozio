@@ -104,3 +104,22 @@ public final class EnclaveAuthorityRequestSigner: @unchecked Sendable, CustomStr
         }
     }
 }
+
+extension AuthoritySigningKeyRecord {
+    /// Fixed-purpose hardware proof for setup. This is not an approval or enrollment signature.
+    func verifyProvisioningHardware() throws {
+        guard SecureEnclave.isAvailable else { throw AuthorityRequestSignerError.unavailable }
+        let context = LAContext(); context.interactionNotAllowed = true
+        defer { context.invalidate() }
+        do {
+            let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: representation, authenticationContext: context)
+            guard key.publicKey.x963Representation == publicKey else { throw AuthorityRequestSignerError.wrongIdentity }
+            let message = Data("Remozio/authority-key-provisioning/v1\0".utf8)
+            let signature = try key.signature(for: message)
+            guard key.publicKey.isValidSignature(signature, for: message) else { throw AuthorityRequestSignerError.unavailable }
+        } catch {
+            if let failure = error as? AuthorityRequestSignerError { throw failure }
+            throw AuthorityRequestSignerError.unavailable
+        }
+    }
+}

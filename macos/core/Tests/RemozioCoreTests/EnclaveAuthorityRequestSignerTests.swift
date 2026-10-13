@@ -63,6 +63,14 @@ final class EnclaveAuthorityRequestSignerTests: XCTestCase {
             }
         }
     }
+    func testSoftwareBlobCannotPassTheSetupHardwareProof() throws {
+        let software = P256.Signing.PrivateKey()
+        let record = try AuthoritySigningKeyRecord(macID: id(1), accountID: id(2),
+            publicKey: software.publicKey.x963Representation, representation: software.rawRepresentation)
+        XCTAssertThrowsError(try record.verifyProvisioningHardware()) {
+            XCTAssertEqual($0 as? AuthorityRequestSignerError, .unavailable)
+        }
+    }
     func testDisposableHardwareKeyRestoresAndSignsWithoutAuthenticationUI() throws {
         guard SecureEnclave.isAvailable else { throw XCTSkip("Requires Secure Enclave hardware; pre-login custody remains unproved") }
         let context = LAContext(); context.interactionNotAllowed = true
