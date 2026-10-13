@@ -33,18 +33,24 @@ public final class JournalDatabase {
     public static func open(directoryPath: String, macID: Data, accountID: Data,
                             recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
                             maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool = false, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
-                            maximumCommandSubmissions: Int = 1_000_000) throws -> JournalDatabase {
-        try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
+                            maximumCommandSubmissions: Int = 1_000_000,
+                            initialAuthority: AuthorityJournalInitialization? = nil) throws -> JournalDatabase {
+        if initialAuthority != nil {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        }
+        return try JournalDatabase(lease: ProtectedJournalLease.acquire(directoryPath: directoryPath), macID: macID, accountID: accountID,
                             recordLimits: recordLimits, descriptorLimits: descriptorLimits, decisionLimits: decisionLimits,
                             maximumConsumptions: maximumConsumptions, busyMilliseconds: busyMilliseconds,
-                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy, maximumCommandSubmissions: maximumCommandSubmissions)
+                            initialize: initialize, migrateFromVersion: migrateFromVersion, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy,
+                            maximumCommandSubmissions: maximumCommandSubmissions, initialAuthority: initialAuthority)
     }
 
     /// Internal fixture entry point. Ownership of the lease transfers to this connection, including on failure.
     init(lease: ProtectedJournalLease, macID: Data, accountID: Data,
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
-         maximumCommandSubmissions: Int = 1_000_000) throws {
+         maximumCommandSubmissions: Int = 1_000_000, initialAuthority: AuthorityJournalInitialization? = nil,
+         didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }) throws {
         self.lease = lease
         self.recordLimits = recordLimits
         do {
@@ -55,6 +61,11 @@ public final class JournalDatabase {
                   max(recordLimits.maxBytes, descriptorLimits.maxBytes) <= Int(Int32.max) - 4096,
                   decisionLimits.maxBytes <= Int(Int32.max) - 4096 - recordLimits.maxBytes else {
                 throw JournalDatabaseError.invalidConfiguration
+            }
+            if let initialAuthority {
+                guard initialize, initialAuthority.descriptor.macID == macID, initialAuthority.descriptor.accountID == accountID else {
+                    throw JournalDatabaseError.invalidConfiguration
+                }
             }
             try lease.validate()
             var connection: OpaquePointer?
@@ -86,7 +97,10 @@ public final class JournalDatabase {
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
-            if initialize { try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption) }
+            if initialize {
+                try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption,
+                    initialAuthority: initialAuthority, didInitializeAuthority: didInitializeAuthority)
+            }
             else if let migrateFromVersion { try migrate(macID: macID, accountID: accountID, consumption: consumption, from: migrateFromVersion) }
             try validateIdentity(macID: macID, accountID: accountID)
             try lease.validate()
@@ -206,7 +220,9 @@ public final class JournalDatabase {
         catch { unavailable = true; throw error }
     }
 
-    private func create(macID: Data, accountID: Data, tables: AuditJournalTables, consumption: ConsumptionJournal) throws {
+    private func create(macID: Data, accountID: Data, tables: AuditJournalTables, consumption: ConsumptionJournal,
+                        initialAuthority: AuthorityJournalInitialization?,
+                        didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void) throws {
         try exec("BEGIN IMMEDIATE")
         do {
             try requireEmptyStore()
@@ -232,6 +248,13 @@ public final class JournalDatabase {
             try EnrollmentJournal.createPairingSchema(db!)
             try exec("PRAGMA application_id=\(Self.applicationID)")
             try exec("PRAGMA user_version=12")
+            if let initialAuthority {
+                let token = UUID(); active = token
+                defer { active = nil }
+                let transaction = JournalTransaction(owner: self, token: token, writable: true)
+                try initialAuthority.apply(transaction, didStage: didInitializeAuthority)
+                guard !transaction.failed else { throw JournalDatabaseError.transactionFailed }
+            }
             try lease.validate()
             try exec("COMMIT")
         } catch { _ = sqlite3_exec(db, "ROLLBACK", nil, nil, nil); throw error }
