@@ -248,6 +248,10 @@ public final class PreparationIntentStore {
             try saveInitialization(value, expected: expected); return value
         }
     }
+    // Validate retained scope and revision before each controller storage step.
+    func validateInitialization(_ expected: AuthorityInitializationIntent) throws {
+        try transaction(write: false) { try requireInitialization(expected) }
+    }
     private func requireInitialization(_ expected: AuthorityInitializationIntent) throws {
         try identity(macID)
         guard try scalar("PRAGMA user_version") == 3,

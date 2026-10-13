@@ -43,7 +43,8 @@ checkpoint mismatches, corrupt records, directory containment, distinct descript
 The combined suite passes 33 controls, including existing inventory and atomic journal initialization controls.
 These tests use ordinary-owner files and real SQLite transactions. They do not prove power-loss durability.
 
-The product setup controller must resume each stage from retained progress and existing store state.
+The [account storage controller](macos-account-initialization-controller.md) now composes these stages.
+The product setup host must authenticate and authorize its typed operation.
 It must not infer fresh setup from empty files. Runtime startup must not perform setup initialization.
 Completion is storage evidence only. It grants no enrollment, command target, service registration or runtime admission.
 The controller, service integration and real Mac–Pixel approval remain unfinished.

@@ -29,7 +29,7 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
 
     // Same-owner fixture seam. Product callers cannot change the owner, anchor or fault hooks.
     init(anchor: String, relativePath: String, owner: uid_t, visibility: Visibility = .privateState,
-         didStage: (Stage) throws -> Void = { _ in }) throws {
+         createIfMissing: Bool = true, didStage: (Stage) throws -> Void = { _ in }) throws {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         path = (anchor == "/" ? "" : anchor) + "/" + relativePath
         guard getuid() == owner, geteuid() == owner, !anchor.utf8.contains(0),
@@ -52,7 +52,7 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
                 try retain(existing, parent: parent, name: name, final: true)
                 try validate(); try synchronize(existing); try synchronize(parent); try validate(); return
             }
-            guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
+            guard errno == ENOENT, createIfMissing else { throw JournalLeaseError.system(errno) }
             let staging = ".remozio-directory-" + UUID().uuidString
             guard mkdirat(parent, staging, 0o700) == 0 else { throw JournalLeaseError.system(errno) }
             let fd = openat(parent, staging, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
@@ -116,6 +116,12 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
                 try inspect(node.fd, info: held, final: node.final)
             }
         } catch { retired = true; throw error }
+    }
+    // Typed account setup compares actual ancestry without exposing descriptors.
+    func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
+        guard visibility == .privateState else { throw JournalLeaseError.unsafeMetadata }
+        try validate()
+        return nodes.map { .init(device: $0.device, inode: $0.inode) }
     }
     // Borrowed only by typed setup storage operations. No descriptor escapes through a public API.
     func withPrivateDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
