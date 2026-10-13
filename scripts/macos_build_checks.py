@@ -16,7 +16,7 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def verify_executable(path, identity):
+def verify_executable(path, identity, *, expected_entitlements=None):
     require(run('lipo', '-archs', str(path)).stdout.strip() == 'arm64', f'{path.name}: unexpected architecture')
     load_commands = run('xcrun', 'vtool', '-show-build', str(path)).stdout
     require(re.search(r'\bminos\s+26\.0(?:\.0)?\s', load_commands), f'{path.name}: deployment target is not macOS 26')
@@ -25,6 +25,10 @@ def verify_executable(path, identity):
     require('runtime)' in details, f'{path.name}: hardened runtime is absent')
     entitlements = run('codesign', '--display', '--entitlements', '-', '--xml', str(path)).stdout
     values = plistlib.loads(entitlements.encode()) if entitlements.strip() else {}
-    require(values in ({}, {'com.apple.application-identifier': identity}), f'{path.name}: unexpected entitlements')
+    if expected_entitlements is None:
+        require(values in ({}, {'com.apple.application-identifier': identity}), f'{path.name}: unexpected entitlements')
+    else:
+        require(values == expected_entitlements and all(type(values[k]) is type(v) for k, v in expected_entitlements.items()),
+                f'{path.name}: entitlements differ from the exact expected set')
 
 
