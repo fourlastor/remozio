@@ -16,7 +16,12 @@ enum ProtectedStorageMetadata {
             throw JournalLeaseError.unsafeMetadata
         }
     }
-    private static func accessList(_ fd: Int32, privateObject: Bool) throws {
+    /// Public readers open directory descriptors and inspect their metadata before reading a file.
+    static func validatePublicDirectoryAccess(_ fd: Int32, _ info: stat) throws {
+        guard info.st_mode & 0o055 == 0o055 else { throw JournalLeaseError.unsafeMetadata }
+        try accessList(fd, privateObject: false, publicDirectory: true)
+    }
+    private static func accessList(_ fd: Int32, privateObject: Bool, publicDirectory: Bool = false) throws {
         guard let security = filesec_init() else { throw JournalLeaseError.system(errno) }
         defer { filesec_free(security) }
         var info = stat(), present: Int32 = 0
@@ -45,6 +50,17 @@ enum ProtectedStorageMetadata {
                 throw JournalLeaseError.system(errno)
             }
             guard tag == ACL_EXTENDED_ALLOW || tag == ACL_EXTENDED_DENY else { throw JournalLeaseError.unsafeMetadata }
+            if publicDirectory, tag == ACL_EXTENDED_DENY {
+                let required = UInt64(ACL_LIST_DIRECTORY.rawValue) | UInt64(ACL_SEARCH.rawValue)
+                    | UInt64(ACL_READ_ATTRIBUTES.rawValue) | UInt64(ACL_READ_SECURITY.rawValue)
+                if permissions & required != 0 {
+                    var flags: acl_flagset_t?
+                    guard acl_get_flagset_np(UnsafeMutableRawPointer(entry), &flags) == 0, let flags else { throw JournalLeaseError.system(errno) }
+                    let onlyInherited = acl_get_flag_np(flags, ACL_ENTRY_ONLY_INHERIT)
+                    guard onlyInherited == 0 || onlyInherited == 1 else { throw JournalLeaseError.system(errno) }
+                    guard onlyInherited == 1 else { throw JournalLeaseError.unsafeMetadata }
+                }
+            }
             if tag == ACL_EXTENDED_ALLOW && (privateObject ? permissions != 0 : permissions & mutationMask != 0) {
                 throw JournalLeaseError.unsafeMetadata
             }
