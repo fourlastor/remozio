@@ -34,6 +34,7 @@ The combined initialization and file provisioning suite passes 22 controls. No R
 
 The independent continuity checkpoint remains a separate store. Its composition test reconciles a completed bootstrap after reopening.
 This does not make initialization across both stores atomic.
-The product setup controller still needs a durable setup intent to resume the journal-to-checkpoint boundary safely.
+The [machine setup intent](macos-authority-initialization-intent.md) now retains the exact declaration and initial checkpoint.
+The product setup controller still needs to resume each stage from this evidence.
 It must not infer fresh setup from empty files or use initialization as ordinary recovery.
 Real Root setup, hardware custody, service installation and physical approval remain interactive gates.

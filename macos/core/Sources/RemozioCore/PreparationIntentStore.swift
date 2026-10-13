@@ -71,7 +71,7 @@ public final class PreparationIntentStore {
                 }
             }
             try identity(macID)
-            if try scalar("PRAGMA user_version") == 2 { configureInventoryLimit() }
+            if try scalar("PRAGMA user_version") >= 2 { configureInventoryLimit() }
             try lease.validate()
         } catch { shutdown(); throw error }
     }
@@ -103,7 +103,7 @@ public final class PreparationIntentStore {
     func upgradeInventoryStorage() throws {
         try transaction(write: true) {
             try identity(macID)
-            if try scalar("PRAGMA user_version") == 2 { return }
+            if try scalar("PRAGMA user_version") >= 2 { return }
             _ = try loadAll()
             try exec("CREATE TABLE installation_inventory_v1(id INTEGER PRIMARY KEY CHECK(id=1),installation BLOB NOT NULL CHECK(length(installation)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 65536)) STRICT")
             try exec("PRAGMA user_version=2")
@@ -152,12 +152,140 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    /// Root setup only, after administrator, signed-code and fresh-account checks.
+    /// This record is not evidence of those checks. Retained or completed intents cannot be replaced.
+    public func beginAuthorityInitialization(initial: AuthorityJournalInitialization, journalPath: String, continuityPath: String,
+                                             expectedInventoryRevision: Data) throws -> AuthorityInitializationIntent {
+        try requireRoot()
+        return try beginInitialization(initial: initial, journalPath: journalPath, continuityPath: continuityPath,
+            expectedInventoryRevision: expectedInventoryRevision)
+    }
+    public func loadAuthorityInitialization(accountID: Data) throws -> AuthorityInitializationIntent? {
+        try requireRoot(); return try initialization(accountID: accountID)
+    }
+    /// Captures the exact pristine journal boundary. A retained boundary cannot be replaced after a crash.
+    public func captureAuthorityInitialization(expected: AuthorityInitializationIntent, initial: AuthorityJournalInitialization,
+                                               journal: JournalDatabase) throws -> AuthorityInitializationIntent {
+        try requireRoot(); return try captureInitialization(expected: expected, initial: initial, journal: journal)
+    }
+    /// Completion requires both live stores at the retained boundary. It grants no runtime admission.
+    public func completeAuthorityInitialization(expected: AuthorityInitializationIntent, journal: JournalDatabase,
+                                                continuity: ContinuityStore) throws -> AuthorityInitializationIntent {
+        try requireRoot(); return try completeInitialization(expected: expected, journal: journal, continuity: continuity)
+    }
+    func initialization(accountID: Data) throws -> AuthorityInitializationIntent? {
+        guard accountID.count == 16 else { throw AuthorityInitializationError.invalidIntent }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 3 { return nil }
+            return try loadInitialization(accountID: accountID)
+        }
+    }
+    func beginInitialization(initial: AuthorityJournalInitialization, journalPath: String, continuityPath: String,
+                             expectedInventoryRevision: Data) throws -> AuthorityInitializationIntent {
+        let digest = try initial.initializationDigest
+        return try transaction(write: true) {
+            try requireInventorySchema()
+            guard let inventory = try loadInventoryRecord(), inventory.revision == expectedInventoryRevision,
+                  initial.descriptor.macID == macID,
+                  inventory.accounts.contains(where: { $0.accountID == initial.descriptor.accountID }) else {
+                throw AuthorityInitializationError.conflictingIntent
+            }
+            if try scalar("PRAGMA user_version") == 2 {
+                try exec("CREATE TABLE authority_initialization_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 147456)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=3")
+            }
+            guard try loadInitialization(accountID: initial.descriptor.accountID) == nil else {
+                throw AuthorityInitializationError.conflictingIntent
+            }
+            let value = try AuthorityInitializationIntent(setupID: bytes(UUID()), revision: bytes(UUID()),
+                installationID: inventory.installationID, macID: macID, accountID: initial.descriptor.accountID,
+                releaseDigest: inventory.releaseDigest, initializationDigest: digest, initializationBytes: initial.initializationBytes, journalPath: journalPath, continuityPath: continuityPath)
+            try statement("INSERT INTO authority_initialization_v1 VALUES(?,?,?)") { row in
+                try bind(value.accountID, column: 1, row: row); try bind(value.revision, column: 2, row: row)
+                try bind(value.bytes, column: 3, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            return value
+        }
+    }
+    func captureInitialization(expected: AuthorityInitializationIntent, initial: AuthorityJournalInitialization,
+                               journal: JournalDatabase) throws -> AuthorityInitializationIntent {
+        guard expected.initializationDigest == (try initial.initializationDigest), expected.macID == initial.descriptor.macID,
+              expected.accountID == initial.descriptor.accountID else { throw AuthorityInitializationError.conflictingIntent }
+        return try transaction(write: true) {
+            try requireInitialization(expected)
+            guard !expected.complete else { throw AuthorityInitializationError.completed }
+            let checkpoint = try journal.initialAuthorityCheckpoint(initial: initial, databasePath: expected.journalPath)
+            if let retained = expected.checkpoint {
+                guard retained == checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+                return expected
+            }
+            let value = try expected.advancing(checkpoint: checkpoint, complete: false)
+            try saveInitialization(value, expected: expected); return value
+        }
+    }
+    func completeInitialization(expected: AuthorityInitializationIntent, journal: JournalDatabase,
+                                continuity: ContinuityStore) throws -> AuthorityInitializationIntent {
+        return try transaction(write: true) {
+            try requireInitialization(expected)
+            guard let checkpoint = expected.checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+            try journal.requireInitializationPath(expected.journalPath)
+            try continuity.requireInitializationScope(path: expected.continuityPath, mac: expected.macID, account: expected.accountID)
+            guard let journalDirectory = try journal.directoryIdentities().last,
+                  let continuityDirectory = try continuity.directoryIdentities().last,
+                  journalDirectory != continuityDirectory,
+                  !(try continuity.directoryIdentities()).contains(journalDirectory),
+                  !(try journal.directoryIdentities()).contains(continuityDirectory) else { throw AuthorityInitializationError.invalidBoundary }
+            let state = try continuity.read()
+            guard !state.recoveryRequired, state.pending == nil, state.committed == checkpoint,
+                  try journal.read({ try CheckpointedJournal.checkpoint(transaction: $0, epoch: checkpoint.journalEpoch,
+                    generation: 1, authorityGeneration: 1) }) == checkpoint else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            if expected.complete { return expected }
+            let value = try expected.advancing(checkpoint: checkpoint, complete: true)
+            try saveInitialization(value, expected: expected); return value
+        }
+    }
+    private func requireInitialization(_ expected: AuthorityInitializationIntent) throws {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") == 3,
+              let retained = try loadInitialization(accountID: expected.accountID) else { throw AuthorityInitializationError.missingIntent }
+        guard retained == expected else { throw AuthorityInitializationError.staleRevision }
+        guard let inventory = try loadInventoryRecord(), inventory.installationID == expected.installationID,
+              inventory.releaseDigest == expected.releaseDigest,
+              inventory.accounts.contains(where: { $0.accountID == expected.accountID }) else {
+            throw AuthorityInitializationError.conflictingIntent
+        }
+    }
+    private func saveInitialization(_ value: AuthorityInitializationIntent, expected: AuthorityInitializationIntent) throws {
+        try statement("UPDATE authority_initialization_v1 SET revision=?,record=? WHERE account=? AND revision=?") { row in
+            try bind(value.revision, column: 1, row: row); try bind(value.bytes, column: 2, row: row)
+            try bind(value.accountID, column: 3, row: row); try bind(expected.revision, column: 4, row: row)
+            guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw AuthorityInitializationError.staleRevision }
+        }
+    }
+    private func loadInitialization(accountID: Data) throws -> AuthorityInitializationIntent? {
+        try statement("SELECT revision,record FROM authority_initialization_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return nil }
+            let value: AuthorityInitializationIntent
+            do { value = try .decode(blob(row, column: 1, maximum: AuthorityInitializationIntent.maximumBytes)) }
+            catch { throw PreparationStoreError.corruptRecord }
+            guard value.macID == macID, value.accountID == accountID,
+                  try blob(row, column: 0, maximum: 16) == value.revision, try step(row) == SQLITE_DONE else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value
+        }
+    }
     private func configureInventoryLimit() {
-        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 69_632) }
+        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 155_648) }
     }
     private func requireInventorySchema() throws {
         try identity(macID)
-        guard try scalar("PRAGMA user_version") == 2 else { throw PreparationStoreError.inventoryNotEnabled }
+        guard try scalar("PRAGMA user_version") >= 2 else { throw PreparationStoreError.inventoryNotEnabled }
     }
     private func loadInventoryRecord() throws -> InstallationInventory? {
         try statement("SELECT id,installation,revision,record FROM installation_inventory_v1 ORDER BY id") { row in
@@ -232,14 +360,14 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2].contains(version),
-              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == (version == 1 ? 2 : 3) else {
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3].contains(version),
+              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 3, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 4, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -247,7 +375,8 @@ public final class PreparationIntentStore {
             return names
         }
         let expected = version == 1 ? ["installation_identity_v1", "preparation_intents_v1"] :
-            ["installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"]
+            (version == 2 ? ["installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"] :
+                ["authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"])
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }

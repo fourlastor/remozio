@@ -78,6 +78,13 @@ public final class ContinuityStore {
     }
     deinit { close() }
 
+    func requireInitializationScope(path: String, mac: Data, account: Data) throws {
+        try lease.validate()
+        guard lease.databasePath == path, macID == mac, accountID == account else {
+            throw AuthorityInitializationError.conflictingIntent
+        }
+    }
+
     public func read() throws -> ContinuityState {
         try transaction(write: false) {
             let state = try self.load()

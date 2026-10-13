@@ -69,3 +69,6 @@ It does not establish power-loss durability or Root isolation.
 The earlier separate-database prototype remains distinct from this implementation.
 Installed Root loading, signed plist/configuration matching, complete owner enumeration and service continuity remain platform gates.
 Inventory metadata grants no enrollment, command execution, admission freeze or update activation authority.
+
+The [account initialization intent](macos-authority-initialization-intent.md) adds explicit storage version 3.
+It retains setup progress under the same writer lock. Ordinary inventory reads do not create setup intent.
