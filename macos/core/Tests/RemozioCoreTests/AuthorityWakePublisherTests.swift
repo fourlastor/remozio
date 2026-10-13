@@ -334,13 +334,19 @@ final class AuthorityWakePublisherTests: XCTestCase, @unchecked Sendable {
             closes.withLock { $0 += 1 }; try f.journal.close()
         }, commandReceiver: worker)
         try await service.start()
+        try await waitUntil { publishers.withLock { $0 >= 2 } }
         try await waitUntil { await service.wakeStatus == .waiting(retryMilliseconds: 100) }
         failed.withLock { $0 = true }
         try await waitUntil { await service.wakeStatus == .closed }
         try await service.close()
         let retired = await service.isRetired
         XCTAssertTrue(retired); XCTAssertTrue(worker.isRetired)
-        XCTAssertEqual(publishers.withLock { $0 }, 1); XCTAssertEqual(closes.withLock { $0 }, 1)
+        let attemptsAfterClose = publishers.withLock { $0 }
+        XCTAssertGreaterThanOrEqual(attemptsAfterClose, 2)
+        XCTAssertEqual(closes.withLock { $0 }, 1, "Request cleanup must complete exactly once")
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(publishers.withLock { $0 }, attemptsAfterClose, "Retirement must stop gateway attempts")
+        XCTAssertEqual(closes.withLock { $0 }, 1, "A later retry interval must not repeat request cleanup")
     }
 
     func testAccountPresenceModeChangesReachPublisherAndLiveHintFeed() async throws {

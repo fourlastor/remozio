@@ -6384,7 +6384,7 @@ extension MachCommandCallerReceiverTests {
         }
         let observed = try XCTUnwrap(outcome)
         XCTAssertTrue(observed == .signalled(UInt32(isInput ? SIGINT : SIGKILL)) || observed == .failedBeforeStart ||
-            isInput && observed == .exited(130))
+            isInput && observed == .exited(130), "Observed synthetic early-control outcome: \(observed)")
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
         var ended = false, credit: UInt32 = 0
         while !ended {
