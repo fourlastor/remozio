@@ -117,6 +117,15 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
             }
         } catch { retired = true; throw error }
     }
+    // Borrowed only by typed setup storage operations. No descriptor escapes through a public API.
+    func withPrivateDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
+        guard visibility == .privateState else { throw JournalLeaseError.unsafeMetadata }
+        try validate()
+        let result: Value
+        do { result = try body(nodes.last!.fd) }
+        catch { try validate(); throw error }
+        try validate(); return result
+    }
     public func close() {
         guard !closed else { return }; closed = true
         for node in nodes.reversed() { _ = Darwin.close(node.fd) }; nodes.removeAll()
