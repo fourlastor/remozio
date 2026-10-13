@@ -65,6 +65,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1], 2: [1], 3: {}})
+        self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1], 2: [], 3: {}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
         self.assertEqual(MANIFEST.declarations(12)[-1][1], [2])

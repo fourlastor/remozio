@@ -38,6 +38,7 @@ def declarations(role):
     }
     values = [format_declaration(name, versions) for name, versions in names[role]]
     if role == 2:
+        values.append({0: 'authority.installation-inventory', 1: [1], 2: [], 3: {}})
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
     return sorted(values, key=lambda v: v[0])
 

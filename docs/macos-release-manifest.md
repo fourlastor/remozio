@@ -44,6 +44,8 @@ A set such as `{2, 5}` does not include versions 3 or 4.
 Storage migration declarations do not authorize migration or erase retained generation floors.
 The journal accepts schemas 12 through 16. Its explicit legacy migration maps schemas 1 through 11 to 12.
 The authority declares preparation-store schema 1 as `authority.installation-preparation`.
+It also declares schema 1 reader support for `authority.installation-inventory`, with no inventory writer support.
+The [inventory record](macos-installation-inventory.md) grants no registration or activation authority.
 It remains separate from the account journal.
 Optional protected installation still controls later schema changes.
 
