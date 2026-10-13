@@ -65,7 +65,8 @@ No registration side effect is introduced.
 ## Integration gates
 
 A Root-owned file alone does not prove current service registration, live process identity, code placement or generation floors.
-The installer must validate the signed service plists and protected account configurations against each declaration before retaining an authoritative inventory.
+The [service manifest matcher](macos-installation-service-manifests.md) checks planned plist fields against a retained declaration and exact release component.
+The installer must obtain those bytes from the verified protected bundle and independently validate account names and configurations.
 The [durable store](macos-durable-installation-inventory.md) now retains inventory with revision checks.
 Its rows still do not establish installation completeness, current registration or live-process identity.
 Inventory changes and admissions must serialize with update closure before this record can participate in activation.
