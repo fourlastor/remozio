@@ -63,7 +63,9 @@ The twenty existing preparation tests also pass.
 Fixtures use ordinary-owner private directories and the internal lease seam.
 They do not prove Root isolation, native I/O fault behavior or power-loss durability.
 
-The earlier disposable probe demonstrated a committed record across process exit.
-It used prototype storage and does not certify this implementation's crash or power-loss behavior.
+The [actual-store process experiment](experiments/installation-inventory-recovery.md) now checks writer exclusion, `_exit` and SIGKILL after commit.
+The local ordinary-owner run preserved inventory and preparation records on macOS 27.0.1.
+It does not establish power-loss durability or Root isolation.
+The earlier separate-database prototype remains distinct from this implementation.
 Installed Root loading, signed plist/configuration matching, complete owner enumeration and service continuity remain platform gates.
 Inventory metadata grants no enrollment, command execution, admission freeze or update activation authority.

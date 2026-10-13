@@ -10,6 +10,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Single app and background services | [Bundle checks](macos-packaging.md) and [guarded lifecycle harness](service-lifecycle.md) | Interactive registration, protected placement, notarization and replacement |
 | Release signature inspection | [Reproducible default and opt-in Developer ID controls](macos-release-signing.md) | Notarization, protected placement, and activation |
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
+| Installation inventory recovery | [Actual-store process exit and SIGKILL controls](installation-inventory-recovery.md) | Root isolation, native I/O faults, power loss and installed activation |
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
 | Command caller identity | [Kernel audit token, code pin, exec and exit measured on macOS 26 and 27](macos-command-caller.md) | Production IPC, trusted signing floor, protected admission |
