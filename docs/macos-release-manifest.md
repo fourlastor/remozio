@@ -32,12 +32,13 @@ The root map has these exact keys. Unknown or missing keys fail closed.
 Each component has a role, identifier, generation, relative executable path, build, Team ID, formats, and understood request contracts.
 The helper CDHash is 20 bytes. The app has no embedded self hash; inspection derives it from the validated signature.
 Ad-hoc builds have no Team ID. They are test artifacts.
-Component key 9 is zero: this bundle contains no launchd registration declarations.
-An installer needs explicit registration artifacts before it can rely on them. No supported schema supplies these artifacts.
+Component key 9 is zero: no supported manifest schema embeds launchd registration declarations.
+The bundle includes a sealed setup daemon plist. Its host compares those bytes with the expected machine declaration.
+The installer must still verify actual registration independently.
 
-The current bundle contains the app, authority, transport, frontend, gateway, command child, and command monitor.
+The current bundle contains the app, authority, transport, frontend, gateway, setup controller, command child, and command monitor.
 `absentRoles` reports the other catalog roles. It does not imply that every optional role must run.
-Compiled library support does not make a GUI adapter, setup controller, tunnel, or bridge executable present.
+Compiled library support does not make a GUI adapter, tunnel, or bridge executable present.
 
 Each format declares separate, exact reader and writer sets, plus explicit migration edges.
 A set such as `{2, 5}` does not include versions 3 or 4.

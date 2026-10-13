@@ -15,6 +15,19 @@ enum DynamicCodeValidation {
         try checked(SecCodeCheckValidity(code, [], requirement))
     }
 
+    static func selfPath() throws -> String {
+        var code: SecCode?
+        try checked(SecCodeCopySelf([], &code))
+        guard let code else { throw Failure.unavailable }
+        var staticCode: SecStaticCode?
+        try checked(SecCodeCopyStaticCode(code, [], &staticCode))
+        guard let staticCode else { throw Failure.unavailable }
+        var path: CFURL?
+        try checked(SecCodeCopyPath(staticCode, [], &path))
+        guard let path else { throw Failure.unavailable }
+        return (path as URL).path
+    }
+
     private static func checked(_ status: OSStatus) throws {
         guard status == errSecSuccess else { throw Failure.security(status) }
     }

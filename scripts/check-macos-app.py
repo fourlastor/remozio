@@ -37,6 +37,26 @@ def check(configuration):
             denied = subprocess.run([str(authority), flag, '/nonexistent/remozio.cbor'],
                                     text=True, capture_output=True, timeout=5)
             require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
+    setup = app / 'Contents/Library/LaunchServices/RemozioSetup'
+    setup_identity = 'dev.remozio.setup-controller.debug' if configuration == 'Debug' else 'dev.remozio.setup-controller'
+    require(setup.is_file(), 'Missing embedded setup executable')
+    verify_executable(setup, setup_identity)
+    run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(setup))
+    require(setup.read_bytes() == (BUILD / f'DerivedData/Build/Products/{configuration}/RemozioSetup').read_bytes(),
+            'Embedding changed the signed setup executable')
+    for arguments, status in (([], 64), (['--unknown', '/private/test-path'], 64),
+                              *([(['--configuration', '/private/test-path'], 77)] if os.geteuid() != 0 else [])):
+        read_descriptor, write_descriptor = os.pipe()
+        try:
+            original_input = b'unread setup input\x00\xff'
+            os.write(write_descriptor, original_input); os.close(write_descriptor); write_descriptor = -1
+            refused = subprocess.run([str(setup), *arguments], stdin=read_descriptor, capture_output=True, timeout=5)
+            require(refused.returncode == status, 'Setup must refuse invalid syntax or non-root startup')
+            require(os.read(read_descriptor, 64) == original_input and not refused.stdout, 'Refused setup consumed stdin or wrote stdout')
+            require(b'/private/test-path' not in refused.stderr, 'Setup startup disclosed a private path')
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor >= 0: os.close(write_descriptor)
     transport = app / 'Contents/Library/LaunchServices/RemozioTransport'
     transport_identity = 'dev.remozio.transport.debug' if configuration == 'Debug' else 'dev.remozio.transport'
     require(transport.is_file(), 'Missing embedded approval transport')
@@ -152,7 +172,13 @@ def check(configuration):
     strings = app / 'Contents/Resources/en.lproj/Localizable.strings'
     resources = plistlib.loads(run('plutil', '-convert', 'xml1', '-o', '-', str(strings)).stdout.encode())
     require(resources.get('This Mac is not configured') == 'This Mac is not configured', 'Missing application strings')
-    require(not (app / 'Contents/Library/LaunchDaemons').exists(), 'Unexpected service manifests in the app scaffold')
+    daemon_directory = app / 'Contents/Library/LaunchDaemons'
+    require({p.name for p in daemon_directory.iterdir()} == {'dev.remozio.setup.plist'}, 'Unexpected bundled daemon manifests')
+    job = plistlib.loads((daemon_directory / 'dev.remozio.setup.plist').read_bytes())
+    require(job == {'Label': 'dev.remozio.setup', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioSetup',
+        'ProgramArguments': ['Contents/Library/LaunchServices/RemozioSetup', '--configuration', '/Library/Application Support/Remozio/setup.cbor'],
+        'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.remozio.setup': True}},
+        'Setup manifest differs from the fixed local service contract')
     require(not (app / 'Contents/Library/LaunchAgents').exists(), 'Unexpected service manifests in the app scaffold')
     print(f'Mac app {configuration}: arm64, macOS 26, signature, runtime, resources, and bundle checks passed.')
 

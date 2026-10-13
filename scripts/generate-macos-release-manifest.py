@@ -13,6 +13,7 @@ COMPONENTS = (
     (4, 'transport', 'Contents/Library/LaunchServices/RemozioTransport', 'RemozioTransport', 'Transport'),
     (5, 'command-frontend', 'Contents/Helpers/remozio', 'remozio', 'CommandFrontend'),
     (6, 'gateway', 'Contents/Library/LaunchServices/RemozioGateway', 'RemozioGateway', 'Gateway'),
+    (8, 'setup-controller', 'Contents/Library/LaunchServices/RemozioSetup', 'RemozioSetup', 'Setup'),
     (11, 'command-child', 'Contents/Helpers/RemozioCommandChild', 'RemozioCommandChild', 'CommandChild'),
     (12, 'command-monitor', 'Contents/Helpers/RemozioCommandMonitor', 'RemozioCommandMonitor', 'CommandMonitor'),
 )
@@ -24,7 +25,7 @@ def format_declaration(name, versions, migrations=None):
 
 def declarations(role):
     names = {
-        1: [('authority.presence-client-config', [1])],
+        1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1])],
         2: [('authority.service-config', [1, 2]), ('authority.request-config', [1]),
             ('authority.wake-config', [1]), ('authority.presence-config', [1]),
             ('authority.command-config', [1, 2]), ('authority.command-execution-config', [1]),
@@ -33,6 +34,9 @@ def declarations(role):
             ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         5: [('command.frontend-config', [1]), ('command.submission', [1])],
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
+        8: [('setup.service-config', [1]), ('setup.local-ipc', [1]), ('authority.code-policy', [1, 2, 3]),
+            ('authority.installation-inventory', [1]), ('authority.installation-preparation', [1, 2, 3]),
+            ('authority.journal', [12, 13, 14, 15, 16])],
         11: [('command.child-frame', [1, 2])],
         12: [('command.monitor-frame', [2]), ('command.child-frame', [1, 2])],
     }

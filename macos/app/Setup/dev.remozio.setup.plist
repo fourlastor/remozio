@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BundleProgram</key>
+	<string>Contents/Library/LaunchServices/RemozioSetup</string>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>dev.remozio.setup</string>
+	<key>MachServices</key>
+	<dict>
+		<key>dev.remozio.setup</key>
+		<true/>
+	</dict>
+	<key>ProgramArguments</key>
+	<array>
+		<string>Contents/Library/LaunchServices/RemozioSetup</string>
+		<string>--configuration</string>
+		<string>/Library/Application Support/Remozio/setup.cbor</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>UserName</key>
+	<string>root</string>
+</dict>
+</plist>

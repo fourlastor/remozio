@@ -302,4 +302,68 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
             XCTAssertThrowsError(try SetupAccountProgress.decode(DeterministicCBOR.encode(value, limits: limits)))
         }
     }
+    func testChangedHostPolicyRefusesStorageBeforeResume() throws {
+        try fixture { root in
+            let machine = try store(root, initialize: true)
+            let installed = try inventory(machine)
+            let expected = try begin(root, machine, installed)
+            var changed = false, resumes = 0
+            let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: installed.releaseDigest,
+                resume: { _, _ in resumes += 1; throw AdministrativeSetupError.unavailable },
+                verifyHost: { _ in if changed { throw AdministrativeSetupServiceError.changedConfiguration } })
+            defer { try? owner.close() }
+            XCTAssertNoThrow(try owner.verifyCurrent())
+            changed = true
+            XCTAssertThrowsError(try owner.verifyCurrent())
+            XCTAssertThrowsError(try owner.progress(accountID: expected.accountID, callerUID: getuid()))
+            XCTAssertThrowsError(try owner.resumeAccount(accountID: expected.accountID, setupID: expected.setupID,
+                expectedRevision: expected.revision, callerUID: getuid()))
+            XCTAssertEqual(resumes, 0)
+            changed = false
+            XCTAssertNoThrow(try owner.verifyCurrent())
+        }
+    }
+
+    func testHostValidationReceivesCurrentBundleAndServiceInventory() throws {
+        try fixture { root in
+            let machine = try store(root, initialize: true)
+            let base = try inventory(machine)
+            let original = try machine.writeInventory(.init(macID: base.macID, installationID: base.installationID,
+                revision: base.revision, bundlePath: base.bundlePath, releaseDigest: base.releaseDigest, accounts: base.accounts,
+                services: base.services + [.init(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
+                    label: "dev.remozio.setup", plistName: "dev.remozio.setup.plist")]), expectedRevision: base.revision)
+            let expected = try begin(root, machine, original)
+            var observed: InstallationInventory?
+            let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: original.releaseDigest,
+                resume: { _, _ in XCTFail("Changed installation must not resume"); throw AdministrativeSetupError.unavailable },
+                verifyHost: { current in
+                    observed = current
+                    guard current.bundlePath == original.bundlePath, current.services == original.services else {
+                        throw AdministrativeSetupServiceError.wrongRelease
+                    }
+                })
+            defer { try? owner.close() }
+            XCTAssertNoThrow(try owner.verifyCurrent())
+            var retained = original
+            for change in 0..<3 {
+                let services: [InstallationService]
+                if change == 1 { services = original.services.filter { $0.role != .setupController } }
+                else if change == 2 {
+                    services = original.services.filter { $0.role != .setupController } + [try .init(role: .setupController,
+                        kind: .daemon, domainUID: nil, executionUID: 0, label: "dev.remozio.other", plistName: "dev.remozio.setup.plist")]
+                } else { services = original.services }
+                let next = try InstallationInventory(macID: original.macID, installationID: original.installationID,
+                    revision: original.revision, bundlePath: change == 0 ? "/Library/Other/Remozio.app" : original.bundlePath,
+                    releaseDigest: original.releaseDigest, accounts: original.accounts,
+                    services: services)
+                retained = try machine.writeInventory(next, expectedRevision: retained.revision)
+                XCTAssertThrowsError(try owner.verifyCurrent())
+                XCTAssertEqual(observed, retained)
+                XCTAssertThrowsError(try owner.progress(accountID: expected.accountID, callerUID: getuid()))
+                XCTAssertThrowsError(try owner.resumeAccount(accountID: expected.accountID, setupID: expected.setupID,
+                    expectedRevision: expected.revision, callerUID: getuid()))
+            }
+        }
+    }
+
 }

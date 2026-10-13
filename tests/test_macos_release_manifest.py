@@ -26,7 +26,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_helpers_are_checked_before_the_unsigned_app_input_is_created(self):
         with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)) as identity:
             info = MANIFEST.generate(self.environment())
-        self.assertEqual(identity.call_count, 6)
+        self.assertEqual(identity.call_count, 7)
         self.assertEqual(info['RemozioSecurityGeneration'], '1')
         self.assertIsInstance(info['RemozioReleaseManifest'], bytes)
         self.assertEqual(plistlib.loads(plistlib.dumps(info)), info)
@@ -44,7 +44,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual([call.kwargs['timeout'] for call in run.call_args_list], [20, 20])
 
     def test_different_helper_teams_fail_before_app_signing(self):
-        with patch.object(MANIFEST, 'signed_identity', side_effect=[(bytes([7]) * 20, 'ABCDEFGHIJ')] + [(bytes([7]) * 20, None)] * 5):
+        with patch.object(MANIFEST, 'signed_identity', side_effect=[(bytes([7]) * 20, 'ABCDEFGHIJ')] + [(bytes([7]) * 20, None)] * 6):
             with self.assertRaisesRegex(ValueError, 'Team IDs differ'):
                 MANIFEST.generate(self.environment())
 
@@ -61,7 +61,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
 
     def test_sets_are_explicit_and_storage_migrations_do_not_claim_activation(self):
         roles = {component[0] for component in MANIFEST.COMPONENTS}
-        self.assertEqual(roles, {1, 2, 4, 5, 6, 11, 12})
+        self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2], 2: [1, 2], 3: {1: 2}})

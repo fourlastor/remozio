@@ -22,9 +22,14 @@ final class SignedReleaseInspectionTests: XCTestCase {
             }
             let identifier = "dev.remozio.mac" + (configuration == "Debug" ? ".debug" : "")
             let evidence = try inspect(app, identifier: identifier)
-            XCTAssertEqual(evidence.manifest.components.count, 7)
-            XCTAssertEqual(evidence.codeDirectoryHashes.count, 7)
-            XCTAssertTrue(evidence.manifest.absentRoles.contains(.setupController))
+            XCTAssertEqual(evidence.manifest.components.count, 8)
+            XCTAssertEqual(evidence.codeDirectoryHashes.count, 8)
+            XCTAssertFalse(evidence.manifest.absentRoles.contains(.setupController))
+            let setup = try XCTUnwrap(evidence.manifest.components.first { $0.role == .setupController })
+            XCTAssertEqual(setup.relativePath, AdministrativeSetupConfiguration.executablePath)
+            XCTAssertEqual(setup.codeDirectoryHash, evidence.codeDirectoryHashes[.setupController])
+            XCTAssertEqual(setup.formats.first { $0.name == "setup.service-config" }?.readers, [1])
+            XCTAssertEqual(setup.formats.first { $0.name == "setup.local-ipc" }?.readers, [1])
             let authority = try XCTUnwrap(evidence.manifest.components.first { $0.role == .authority })
             func formats(_ name: String) throws -> ReleaseFormat { try XCTUnwrap(authority.formats.first { $0.name == name }) }
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)
@@ -44,7 +49,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }
-        for path in ["Contents/Info.plist", "Contents/Helpers/RemozioCommandChild"] {
+        for path in ["Contents/Info.plist", "Contents/Helpers/RemozioCommandChild", AdministrativeSetupConfiguration.executablePath,
+                     "Contents/Library/LaunchDaemons/" + AdministrativeSetupConfiguration.plistName] {
             let copy = root.appendingPathComponent(UUID().uuidString + ".app")
             try FileManager.default.copyItem(at: original, to: copy)
             XCTAssertNoThrow(try inspect(copy, identifier: "dev.remozio.mac.debug"))
