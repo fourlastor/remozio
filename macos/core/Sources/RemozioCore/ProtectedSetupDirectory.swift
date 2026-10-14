@@ -126,6 +126,10 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
     // Borrowed only by typed setup storage operations. No descriptor escapes through a public API.
     func withPrivateDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
         guard visibility == .privateState else { throw JournalLeaseError.unsafeMetadata }
+        return try withDirectory(body)
+    }
+    // Internal typed publication can borrow shared metadata directories. No descriptor becomes public.
+    func withDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
         try validate()
         let result: Value
         do { result = try body(nodes.last!.fd) }

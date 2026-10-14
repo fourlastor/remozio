@@ -45,5 +45,6 @@ Removing the retained hash check makes the release-policy control fail. Restorin
 Both app build configurations verify the embedded executable, signed generation, daemon bytes and refusal behavior.
 These builds use development signatures; they do not prove Developer ID installation or native Root execution.
 
-Fresh bootstrap, actual registration, service account creation, configuration publication and the app setup screen remain unfinished.
+The [configuration publisher](macos-setup-configuration-publication.md) now checks retained inventory and publishes the fixed private setup file.
+Fresh bootstrap, actual registration, service account creation and the app setup screen remain unfinished.
 Positive native administrator consent, installed XPC behavior and Mac–Pixel approval remain interactive gates.
