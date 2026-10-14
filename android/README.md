@@ -125,3 +125,20 @@ The permission flow follows [Android's Compose guidance](https://developer.andro
 The [biometric key component](../docs/android-biometric-keys.md) creates and inspects hardware-backed, per-use keys. The [command signer](../docs/android-command-biometrics.md) provides a request-bound native biometric prompt. Enrollment registration, launcher integration, and recovery remain pending. The debug probe alias remains separate.
 
 The [command connection owner](../docs/android-command-connection.md) assembles the enrolled Android identity, relay, pinned TLS, request inbox, and outgoing decision checks. Launcher and wake scheduling integration remain pending.
+
+## Native Mac pairing
+
+The launcher has a Pair a Mac action. Compact windows use a Material bottom sheet. Expanded windows use a dialog.
+Scan the Mac invitation or paste the same public pairing text. The scanner can require a Google Play services download; paste remains available.
+Setup requests local network access, then discovers the separate pairing service. Names and addresses remain untrusted hints.
+Pinned TLS verifies the invitation endpoint. Both screens derive the same comparison code from the complete Root transcript.
+
+The Android owner creates fresh hardware transport, decision, and biometric keys. It does not replace an existing enrollment silently.
+Explicit code comparison precedes durable PREPARED storage and a fresh biometric operation. A verified Root receipt alone activates the record.
+Cancelled biometrics can be retried after another explicit comparison. Expiry prevents a new comparison operation.
+Rotation retains the setup owner. Leaving setup closes its channel and joins cleanup. A prepared or uncertain record retains its keys.
+Lost receipt recovery and explicit re-enrollment remain integration work. The current UI preserves incomplete records and states that uncertainty.
+
+The debug-only PairingPreviewActivity renders synthetic layouts with inert callbacks. It never opens enrollment storage or creates a setup owner.
+Its expiry scene checks return from the biometric screen after the countdown ends. This is a Compose transition check, without biometric hardware.
+Native layout captures and JVM tests do not establish installed Mac services, Pixel key custody, or a complete approval flow.

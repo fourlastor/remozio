@@ -87,6 +87,22 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
         ]), limits: pairingLimits())
     }
     public func digest() throws -> Data { Data(SHA256.hash(data: try signingInput(purpose: .phoneBiometric))) }
+    /// Compare this code on independently authenticated setup surfaces. It never replaces the complete confirmation digest.
+    public func verificationCode() throws -> String {
+        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+        let bytes = try digest()
+        var symbols: [Character] = []
+        for start in stride(from: 0, to: 100, by: 5) {
+            var value = 0
+            for bit in start..<start + 5 {
+                value <<= 1
+                value |= Int((bytes[bit / 8] >> (7 - bit % 8)) & 1)
+            }
+            symbols.append(alphabet[value])
+        }
+        return stride(from: 0, to: symbols.count, by: 5)
+            .map { String(symbols[$0..<min($0 + 5, symbols.count)]) }.joined(separator: " ")
+    }
     public func signingInput(purpose: PairingProofPurpose) throws -> Data {
         try DeterministicCBOR.encode(.map([
             0: .text("dev.remozio.pairing"), 1: .unsigned(1), 2: .unsigned(purpose.rawValue), 3: .bytes(encode()),

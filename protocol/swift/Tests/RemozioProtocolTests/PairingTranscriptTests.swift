@@ -4,7 +4,7 @@ import XCTest
 @testable import RemozioProtocol
 
 final class PairingTranscriptTests: XCTestCase {
-    private struct Valid: Decodable { let name: String; let hex: String; let phoneInput: String; let macInput: String; let digest: String }
+    private struct Valid: Decodable { let name: String; let hex: String; let phoneInput: String; let macInput: String; let digest: String; let verificationCode: String }
     private struct Invalid: Decodable { let name: String; let hex: String }
     private struct Vectors: Decodable { let valid: [Valid]; let invalid: [Invalid] }
     private func vectors() throws -> Vectors {
@@ -25,6 +25,7 @@ final class PairingTranscriptTests: XCTestCase {
             XCTAssertEqual(try transcript.signingInput(purpose: .phoneBiometric), hex(row.phoneInput))
             XCTAssertEqual(try transcript.signingInput(purpose: .macCommit), hex(row.macInput))
             XCTAssertEqual(try transcript.digest(), hex(row.digest))
+            XCTAssertEqual(try transcript.verificationCode(), row.verificationCode)
             XCTAssertEqual(transcript.description, "PairingTranscript(redacted)")
         }
     }
@@ -45,6 +46,7 @@ final class PairingTranscriptTests: XCTestCase {
             guard case var .bytes(bytes) = fields[field] else { return XCTFail() }
             bytes[0] ^= 1; changed[field] = .bytes(bytes)
             let altered = try PairingTranscript.decode(DeterministicCBOR.encode(.map(changed), limits: limits))
+            XCTAssertNotEqual(try altered.verificationCode(), try transcript.verificationCode())
             XCTAssertFalse(try altered.verify(signature: signature, publicKey: key.publicKey.x963Representation, purpose: .phoneBiometric))
         }
     }

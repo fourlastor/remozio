@@ -20,6 +20,18 @@ import kotlinx.coroutines.flow.callbackFlow
 internal fun androidDirectRoutes(context: Context, macID: ByteArray): Flow<ApprovalCarrierRoute> {
     require(macID.size == 16)
     val name = "Remozio-" + macID.joinToString("") { "%02x".format(it.toInt() and 255) }
+    return androidNamedRoutes(context, "_remozio._tcp.", name)
+}
+
+/** Pairing hints use their separate service type and scope. Only pinned setup TLS authenticates the endpoint. */
+internal fun androidPairingRoutes(context: Context, macID: ByteArray, accountID: ByteArray): Flow<ApprovalCarrierRoute> {
+    require(macID.size == 16 && accountID.size == 16)
+    fun id(bytes: ByteArray) = android.util.Base64.encodeToString(bytes,
+        android.util.Base64.URL_SAFE or android.util.Base64.NO_PADDING or android.util.Base64.NO_WRAP)
+    return androidNamedRoutes(context, "_remozio-pairing._tcp.", "R-${id(macID)}-${id(accountID)}")
+}
+
+private fun androidNamedRoutes(context: Context, type: String, name: String): Flow<ApprovalCarrierRoute> {
     val app = context.applicationContext
     return callbackFlow {
         if (app.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) != PackageManager.PERMISSION_GRANTED) {
@@ -71,7 +83,7 @@ internal fun androidDirectRoutes(context: Context, macID: ByteArray): Flow<Appro
                 close(); return@execute
             }
             if (!stopped.get()) try {
-                val request = DiscoveryRequest.Builder("_remozio._tcp.")
+                val request = DiscoveryRequest.Builder(type)
                     .setFlags(DiscoveryRequest.FLAG_NO_PICKER)
                     .setServiceNameFilter(PatternMatcher(name, PatternMatcher.PATTERN_LITERAL)).build()
                 manager.discoverServices(request, executor, listener)

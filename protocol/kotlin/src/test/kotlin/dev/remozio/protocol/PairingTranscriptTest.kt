@@ -20,6 +20,7 @@ class PairingTranscriptTest {
             assertContentEquals(bytes(row, "phoneInput"), transcript.signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
             assertContentEquals(bytes(row, "macInput"), transcript.signingInput(PairingProofPurpose.MAC_COMMIT))
             assertContentEquals(bytes(row, "digest"), transcript.digest())
+            assertEquals(row.getValue("verificationCode").jsonPrimitive.content, transcript.verificationCode())
             encoded.fill(0)
             assertContentEquals(bytes(row, "hex"), transcript.encode())
             assertEquals("PairingTranscript(redacted)", transcript.toString())
@@ -48,6 +49,7 @@ class PairingTranscriptTest {
         for (field in listOf(1uL, 2uL, 10uL, 12uL)) {
             val changed = (fields.getValue(field) as CborValue.Bytes).copyBytes().also { it[0] = (it[0].toInt() xor 1).toByte() }
             val altered = PairingTranscript.decode(DeterministicCbor.encode(CborValue.Fields(fields + (field to CborValue.Bytes(changed))), limits))
+            assertNotEquals(transcript.verificationCode(), altered.verificationCode())
             assertFalse(altered.verify(signature, publicKey, PairingProofPurpose.PHONE_BIOMETRIC))
         }
     }

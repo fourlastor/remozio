@@ -62,6 +62,19 @@ class PairingTranscript(
         14uL to CborValue.Unsigned(expiresAtUnixMillis),
     )), LIMITS)
     fun digest(): ByteArray = MessageDigest.getInstance("SHA-256").digest(signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
+    /** Compare on independently authenticated setup surfaces. Signing still binds the complete transcript. */
+    fun verificationCode(): String {
+        val alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+        val bytes = digest()
+        return (0 until 100 step 5).map { start ->
+            var value = 0
+            for (bit in start until start + 5) {
+                value = value shl 1
+                value = value or ((bytes[bit / 8].toInt() ushr (7 - bit % 8)) and 1)
+            }
+            alphabet[value]
+        }.chunked(5).joinToString(" ") { it.joinToString("") }
+    }
     fun signingInput(purpose: PairingProofPurpose): ByteArray = DeterministicCbor.encode(CborValue.Fields(mapOf(
         0uL to CborValue.Text("dev.remozio.pairing"), 1uL to CborValue.Unsigned(1u),
         2uL to CborValue.Unsigned(purpose.tag), 3uL to CborValue.Bytes(encode()),

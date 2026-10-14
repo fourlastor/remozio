@@ -9,7 +9,7 @@ The form reports invalid durations and contradictory backoff values.
 These preferences apply to new CLI invocations and carry no authority pins or installation identity.
 CLI integration is still in progress. These settings do not activate a command service or change approval expiry.
 
-The app shows an explicit unconfigured state until protected metadata is available. It has no pairing, phone listeners, or approval actions yet. It does not load the experiment's service manifests, request permissions, or start privileged background services. Login registration applies only to the main app. Privileged services still need the protected installation and identity gates before integration.
+The app shows an explicit unconfigured state until protected metadata is available. The Pair a phone sheet now connects the existing local pairing channels when protected service metadata is available. It does not provision those services or complete the approval UI integration by itself. It does not load the experiment's service manifests, request permissions, or start privileged background services. Login registration applies only to the main app. Privileged services still need the protected installation and identity gates before integration.
 
 ## Build checks
 
@@ -239,3 +239,32 @@ Settings now controls `SMAppService.mainApp`. Turning on **Open Remozio at login
 The form reads macOS status when it appears, when its scene becomes active, after a change, and on explicit refresh. It distinguishes registration awaiting approval from an eligible login item. Pending approval exposes an explicit **Open Login Items settings** button. Registration does not automatically reopen settings or override revoked consent. Errors retain the measured system status; UserDefaults supplies no successful-registration claim.
 
 This setting controls the GUI app only. Protected daemon installation and authenticated authority readiness remain separate. The eight controller tests use fake drivers. Builds and tests perform no actual login registration. Actual registration, Login Items approval/revocation, logout/restart and native accessibility remain interactive checks. See [controller ownership](../core/mac-login-item-controls.md).
+
+## Pairing sheet
+
+The native sheet opens the authenticated Root channel before exposing its public invitation.
+QR and copied text contain public pins only. A current TLS-bound phone candidate needs native administrator authorization before staging.
+The returned Root transcript supplies the comparison code and local elapsed countdown.
+An explicit **The codes match** action combines with a valid fresh phone proof before one Root commit.
+The sheet distinguishes a verified Mac registration, receipt delivery, and a lost Root reply.
+It never claims phone activation from a local write or retries an uncertain commit.
+
+Public setup metadata is loaded from `presence-client-<UID>.cbor` and `pairing-client-<UID>.cbor` under the protected Remozio directory.
+The files must agree on Mac, account and owner scope. They are not published by this UI change.
+Closing the sheet aborts its channels and joins owned work, including pending native authorization cleanup.
+The app carries no administrator form in its display state.
+
+Nine focused logical coordinator tests pass. The Debug Xcode scheme builds the actual sheet.
+Native prompts, installed service identity, phone hardware setup and the first complete approval remain interactive integration gates.
+
+## Pair a phone
+
+The main window opens the native pairing sheet. The app first authenticates the protected Root and transport endpoints.
+The sheet shows a public QR invitation, equivalent copied text, and a bounded phone picker.
+Choosing a phone requests macOS administrator authorization. The Root returns the complete staged transcript for comparison.
+The Mac and Android app display the same code. An explicit Mac confirmation and a verified phone biometric proof gate one Root commit.
+A missing commit reply remains Unknown. A lost delivery reply remains registered on this Mac; neither state claims phone activation.
+
+The app reads Root-owned presence-client and pairing-client metadata for the current UID. Protected bootstrap must publish those files.
+The sheet does not create configuration files, install services, or bypass the native identity checks.
+The snapshot helper also renders synthetic pairing states. These captures establish layout, without enrollment or installed-service evidence.

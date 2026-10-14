@@ -1,4 +1,6 @@
 import AppKit
+import CryptoKit
+import RemozioProtocol
 import RemozioCore
 import SwiftUI
 
@@ -39,6 +41,39 @@ struct RenderSetupPreview {
             try png.write(to: output.appendingPathComponent(name + ".png"))
             window.contentView = nil
             print(name + ": rendered synthetic preview")
+        }
+        for (name, phase, dark) in [
+            ("pairing-waiting-light", MacPairingSessionPhase.waitingForPhone, false),
+            ("pairing-code-light", MacPairingSessionPhase.comparing, false),
+            ("pairing-code-dark", MacPairingSessionPhase.comparing, true),
+            ("pairing-expired-light", MacPairingSessionPhase.expired, false),
+            ("pairing-lost-receipt-light", MacPairingSessionPhase.registeredOnMac, false),
+        ] {
+            var state = PairingPresentation()
+            state.phase = phase
+            state.invitationText = try PairingInvitation(macID: Data(repeating: 1, count: 16),
+                accountID: Data(repeating: 2, count: 16), label: "Synthetic Mac",
+                authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                minimumEnvelopeVersion: 1).exportText()
+            state.comparisonCode = "37MRQ S9XSE 3EMYL 7QA8F"
+            state.remainingSeconds = 42
+            state.phones = [.init(id: Data(repeating: 1, count: 16), suffix: "C4D8E012")]
+            let view = PairingSheetContent(state: state, working: false, onSelect: { _ in }, onConfirm: {}, onClose: {})
+            app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
+            host.appearance = app.appearance
+            host.frame = NSRect(x: 0, y: 0, width: 540, height: 620)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+            try png.write(to: output.appendingPathComponent(name + ".png"))
+            window.contentView = nil
+            print(name + ": rendered synthetic pairing state")
         }
     }
 }

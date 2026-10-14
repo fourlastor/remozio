@@ -2,6 +2,7 @@ package dev.remozio.android
 
 import android.app.Application
 import dev.remozio.android.audit.androidStoredAuditReader
+import dev.remozio.android.enrollment.AndroidPairingAttempt
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.remozio.android.enrollment.validatePairingKeys
 import dev.remozio.android.enrollment.StoredPairingHost
@@ -15,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.async
 
 class RemozioApplication : Application() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -35,6 +37,10 @@ class RemozioApplication : Application() {
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, { commands.invalidateRecordsLocked(it) }, ::validatePairingKeys,
         )
+    }
+    internal fun retirePairing(attempt: AndroidPairingAttempt): kotlinx.coroutines.Deferred<Result<Unit>> {
+        attempt.close()
+        return scope.async { runCatching { attempt.closeAndJoin() } }
     }
     internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess) }
     internal val updates by lazy { androidUpdateHost(this, scope) }

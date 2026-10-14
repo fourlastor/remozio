@@ -419,4 +419,29 @@
     </plurals>
     <string name="lan_timeout_next_connection">Applies to the next connection. This includes discovery and authentication. It does not change a request’s expiry.</string>
     <string name="lan_settings_failed">Could not open the system control. Try again from Android Settings.</string>
+    <string name="pairing_setup_title">Pair a Mac</string>
+    <string name="pairing_setup_intro">On your Mac, open Remozio and choose Pair a phone. Scan its code or paste its invitation here. Keep both devices on the same LAN during setup.</string>
+    <string name="pairing_setup_invitation">Mac invitation</string>
+    <string name="pairing_setup_lan_denied">Allow local network access to find your Mac. You can also change this permission in Android settings.</string>
+    <string name="pairing_setup_connect">Connect to Mac</string>
+    <string name="pairing_setup_waiting">Choose this phone on your Mac and approve its setup prompt.</string>
+    <string name="pairing_setup_phone">Phone ID: %1$s</string>
+    <string name="pairing_setup_compare">Compare all four groups with the code on your Mac. Continue only if every character matches.</string>
+    <plurals name="pairing_setup_remaining">
+        <item quantity="one">Estimated time left: %1$d second</item>
+        <item quantity="other">Estimated time left: %1$d seconds</item>
+    </plurals>
+    <string name="pairing_setup_match">Codes match · use biometrics</string>
+    <string name="pairing_setup_mismatch">Codes do not match</string>
+    <string name="pairing_setup_preparing">Confirm pairing with your biometrics.</string>
+    <string name="pairing_setup_submitting">Waiting for your Mac to confirm registration…</string>
+    <string name="pairing_setup_complete">This Mac is paired. Open it from Your Macs to see its requests.</string>
+    <string name="pairing_setup_incomplete">Pairing could not finish. Setup may be saved, and your Mac may have registered this phone. Return to Your Macs to check the saved state.</string>
+    <string name="pairing_setup_failed">Could not connect or verify this Mac. Check the invitation and LAN connection, then close this sheet and try again.</string>
+    <string name="pairing_setup_expired">This setup expired. Close this sheet and check Your Macs before starting another setup.</string>
+    <string name="pairing_setup_closing">Closing this setup…</string>
+    <string name="pairing_setup_done">Done</string>
+    <string name="pairing_setup_scan">Scan Mac code</string>
+    <string name="pairing_setup_scan_failed">Could not read a Remozio invitation. Try again or paste the pairing text. The scanner may need a Google Play services download.</string>
+    <string name="pairing_setup_preview">Synthetic preview. No keys, enrollment, or approval.</string>
 </resources>

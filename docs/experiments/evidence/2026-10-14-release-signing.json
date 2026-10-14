@@ -1,0 +1,77 @@
+{
+  "appLaunched": false,
+  "baseCommit": "ffd2fa2202fe4ab937cbb2876410faba0ff2e1fd",
+  "cases": {
+    "adHocRelease": {
+      "result": "rejected"
+    },
+    "developerIDCompleteBundle": {
+      "absentRoles": [
+        3,
+        7,
+        9,
+        10
+      ],
+      "build": "1",
+      "components": 8,
+      "hashes": 8,
+      "release": "0.1.0",
+      "result": "accepted",
+      "roles": [
+        1,
+        2,
+        4,
+        5,
+        6,
+        8,
+        11,
+        12
+      ]
+    },
+    "foreignApplicationIdentifierEntitlement": {
+      "result": "rejected"
+    },
+    "signedUndeclaredHelper": {
+      "result": "rejected"
+    },
+    "wrongAppIdentifier": {
+      "result": "rejected"
+    },
+    "wrongTrustedTeam": {
+      "result": "rejected"
+    }
+  },
+  "experiment": "complete-release-signature-inspection",
+  "host": {
+    "architecture": "arm64",
+    "build": "26A434",
+    "deploymentTarget": "26.0",
+    "os": "27.0.1",
+    "sdk": "27.0"
+  },
+  "identityFingerprint": "A3DC2F63C2FAC4525C64F2D1ABF83AE08BCCC421",
+  "limits": [
+    "Candidate signature evidence only; no protected installation or activation",
+    "No password retrieval or authentication UI automation",
+    "No notarization, secure timestamp, revocation or macOS 26 runtime proof"
+  ],
+  "mode": "developer-id",
+  "notarizationTested": false,
+  "originalBundleUnchanged": true,
+  "probeSHA256": "53ee5a45f38a16959ed4cc98cc3b112690910b5f6293a81ac3dcc63eb7249e20",
+  "recordedAtUTC": "2026-10-14T12:11:34.947067+00:00",
+  "schemaVersion": 1,
+  "scope": "Rebuilt pairing integration app with serialized UI polling, eight exact roles and current pairing formats; no installed or physical-device activation",
+  "servicesInstalled": false,
+  "signingTimestampUsed": false,
+  "sources": {
+    "experiments/release-signing/Package.swift": "dc675dd622ce0f7b8ff74984568c251037fa263d5faf9f01af5a9f7f4f755ee0",
+    "experiments/release-signing/Sources/ReleaseSigningProbe/main.swift": "121328d86ae97a016221ef4f875e61b464f12ff138855f34b2f55166bed29fbf",
+    "macos/app/App/PairingSheet.swift": "de220a26e3e59df90bcbd1b69a14780f631303f7f36e1768619cc9ad6e90934e",
+    "macos/core/Sources/RemozioCore/SignedReleaseInspection.swift": "7d50110b4cf1c6f5a9489c4fb7c620ef11e06e12681a82f7f7350b2a6ac483cb",
+    "scripts/generate-macos-release-manifest.py": "ca616f5ec5ae8d8ef0608a7189b671c6adf082dd4cbe9f6b68b0f4221676babe",
+    "scripts/run-macos-release-signing-experiment.py": "20d792b6540c362b8a211261df81ecaba5ba45610a83731d5ac6a1ebdeaf924e"
+  },
+  "temporarySignedCopiesRemoved": true,
+  "trustedTeamID": "PVDFPZ5D64"
+}

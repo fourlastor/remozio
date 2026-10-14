@@ -62,6 +62,19 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
             with patch.object(RUNNER, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(evidence), '')):
                 with self.assertRaises(RuntimeError): RUNNER.inspect('/probe', '/private', 'ABCDEFGHIJ', True)
 
+    def test_current_complete_inventory_passes_and_old_or_crossed_inventory_fails(self):
+        roles = sorted(role for role, *_ in RUNNER.load_manifest().COMPONENTS)
+        valid = {'result': 'accepted', 'components': len(roles), 'hashes': len(roles),
+                 'roles': roles, 'absentRoles': [3, 7, 9, 10]}
+        with patch.object(RUNNER, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(valid), '')):
+            self.assertEqual(RUNNER.inspect('/probe', '/private', 'ABCDEFGHIJ', True), valid)
+        for changed in [dict(valid, components=7), dict(valid, hashes=7),
+                        dict(valid, roles=roles[:-1] + [3]), dict(valid, roles=roles + [3]),
+                        dict(valid, absentRoles=[8]), dict(valid, absentRoles=[3, 3]),
+                        dict(valid, absentRoles=[True])]:
+            with patch.object(RUNNER, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(changed), '')):
+                with self.assertRaises(RuntimeError): RUNNER.inspect('/probe', '/private', 'ABCDEFGHIJ', True)
+
     def test_tool_errors_do_not_expose_candidate_paths_or_diagnostics(self):
         with patch.object(RUNNER.subprocess, 'run', return_value=subprocess.CompletedProcess([], 2, '', 'private diagnostic')):
             with self.assertRaises(RuntimeError) as error: RUNNER.run(['/usr/bin/codesign', '/private/candidate'])

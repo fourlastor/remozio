@@ -1,6 +1,11 @@
 package dev.remozio.android
 
 import android.os.Bundle
+import androidx.lifecycle.ViewModelProvider
+import dev.remozio.android.enrollment.PairingViewModel
+import dev.remozio.android.enrollment.PairingSetupSheet
+import dev.remozio.android.enrollment.PairingPhase
+import androidx.compose.material3.Button
 import dev.remozio.android.audit.AuditScreen
 import dev.remozio.android.push.NotificationSettingsScreen
 import dev.remozio.android.enrollment.StoredMacList
@@ -37,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -54,7 +60,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent { RemozioTheme { RemozioScreen() } }
+        val pairing = ViewModelProvider(this, PairingViewModel.Factory(application as RemozioApplication))[PairingViewModel::class.java]
+        setContent { RemozioTheme { RemozioScreen(pairing, this) } }
     }
 }
 
@@ -70,7 +77,7 @@ internal fun RemozioTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun RemozioScreen() {
+private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity) {
     var destination by rememberSaveable { mutableIntStateOf(0) }
     val labels = listOf(R.string.nav_macs, R.string.nav_audit, R.string.nav_settings)
     val icons = listOf(R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)
@@ -94,15 +101,16 @@ private fun RemozioScreen() {
                     ) }
                 }
                 Box(Modifier.weight(1f)) {
-                    when (destination) { 1 -> AuditScreen(); 2 -> NotificationSettingsScreen(); else -> MacsScreen() }
+                    when (destination) { 1 -> AuditScreen(); 2 -> NotificationSettingsScreen(); else -> MacsScreen(pairing) }
                 }
             }
         }
     }
+    PairingSetupSheet(pairing, activity)
 }
 
 @Composable
-private fun MacsScreen() {
+private fun MacsScreen(pairing: PairingViewModel) {
     var selected by remember { mutableStateOf<StoredMac?>(null) }
     selected?.let { mac ->
         BackHandler { selected = null }
@@ -116,7 +124,11 @@ private fun MacsScreen() {
         Column(Modifier.widthIn(max = 720.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) {
             Text(stringResource(R.string.your_macs), style = MaterialTheme.typography.headlineLarge,
                 modifier = Modifier.semantics { heading() })
-            StoredMacList(onOpen = { selected = it })
+            Button(onClick = pairing::open) { Text(stringResource(R.string.pairing_setup_title)) }
+            val setup by pairing.state.collectAsState()
+            androidx.compose.runtime.key(setup.phase == PairingPhase.CLOSED) {
+                StoredMacList(onOpen = { selected = it })
+            }
             UpdateStatusCard()
             DevelopmentTools()
         }

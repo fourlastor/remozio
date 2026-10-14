@@ -20,7 +20,7 @@ class PairingSetupChannel private constructor(
     private val owner: Job, scope: CoroutineScope, private val stream: ApprovalByteStream,
     private val invitation: PairingInvitation, private val proposal: PairingPhoneProposal, timeoutMillis: Long,
 ) : AutoCloseable {
-    private enum class State { OPENING, STAGED, PROOF_SUBMITTED, FINISHED }
+    private enum class State { OPENING, AUTHENTICATED, PROPOSAL_SENT, STAGED, PROOF_SUBMITTED, FINISHED }
     private val closed = AtomicBoolean(false)
     private val operationLock = Mutex()
     private var state = State.OPENING
@@ -39,14 +39,23 @@ class PairingSetupChannel private constructor(
     }
     val transcript: PairingTranscript get() = checkNotNull(staged)
 
-    private suspend fun open() = operation {
+    private suspend fun authenticate() = operation {
+        check(state == State.OPENING)
         stream.awaitOpen(); active()
         check(read() == PairingSetupFrame.Hello)
+        state = State.AUTHENTICATED
+    }
+
+    /** Start the sole proposal only after selecting an authenticated route. Human setup has its own longer deadline. */
+    suspend fun awaitTranscript(): PairingTranscript = operation {
+        check(state == State.AUTHENTICATED)
+        state = State.PROPOSAL_SENT
         write(PairingSetupFrame.Proposal(proposal))
         val frame = read() as? PairingSetupFrame.Transcript ?: throw IOException("Missing pairing transcript")
         invitation.validateMacClaims(frame.value); proposal.validate(frame.value)
         require(frame.value.selectedEnvelopeVersion == 1uL && frame.value.expiresAtUnixMillis - frame.value.issuedAtUnixMillis <= 300_000uL)
         staged = frame.value; state = State.STAGED
+        frame.value
     }
 
     /** Call once after human confirmation, durable PREPARED storage and a fresh hardware biometric proof.
@@ -111,6 +120,18 @@ class PairingSetupChannel private constructor(
         suspend fun connect(parent: CoroutineScope, carrier: EncryptedRecordTransport, localKeys: Array<KeyManager>,
             invitation: PairingInvitation, proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
         ): PairingSetupChannel {
+            val channel = authenticate(parent, carrier, localKeys, invitation, proposal, timeoutMillis)
+            try { channel.awaitTranscript(); return channel }
+            catch (failure: Throwable) {
+                withContext(NonCancellable) { channel.closeAndJoin() }
+                throw failure
+            }
+        }
+
+        /** Only pinned TLS and the restricted hello are read here. No phone proposal or enrollment action is sent. */
+        suspend fun authenticate(parent: CoroutineScope, carrier: EncryptedRecordTransport, localKeys: Array<KeyManager>,
+            invitation: PairingInvitation, proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
+        ): PairingSetupChannel {
             val owner = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
             val scope = CoroutineScope(owner + Dispatchers.IO)
             var engine: PinnedTLSClient? = null
@@ -124,10 +145,30 @@ class PairingSetupChannel private constructor(
                     PairingSetupFrame.APPLICATION_PROTOCOL, 1_048_576)
                 session = TLSRecordSession(scope, engine, carrier)
                 result = PairingSetupChannel(owner, scope, PairingTLSStream(session), invitation, proposal, timeoutMillis)
-                result.open(); return result
+                result.authenticate(); return result
             } catch (failure: Throwable) {
-                when { result != null -> result.close(); session != null -> session.close(); else -> { carrier.close(); engine?.close() } }
-                owner.cancel(); throw failure
+                owner.cancel()
+                withContext(NonCancellable) {
+                    when { result != null -> result.closeAndJoin(); session != null -> session.closeAndJoin(); else -> { carrier.close(); carrier.awaitClosed(); engine?.close() } }
+                    owner.join()
+                }
+                throw failure
+            }
+        }
+        internal suspend fun authenticate(parent: CoroutineScope, stream: ApprovalByteStream, invitation: PairingInvitation,
+            proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
+        ): PairingSetupChannel {
+            val owner = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
+            val scope = CoroutineScope(owner + Dispatchers.IO)
+            var result: PairingSetupChannel? = null
+            try {
+                result = PairingSetupChannel(owner, scope, stream, invitation, proposal, timeoutMillis)
+                result.authenticate(); return result
+            } catch (failure: Throwable) {
+                withContext(NonCancellable) {
+                    if (result != null) result.closeAndJoin() else { stream.close(); stream.awaitClosed(); owner.cancel(); owner.join() }
+                }
+                throw failure
             }
         }
         // Injected streams cannot prove TLS peer identity or hardware key custody.
@@ -139,7 +180,7 @@ class PairingSetupChannel private constructor(
             var result: PairingSetupChannel? = null
             try {
                 result = PairingSetupChannel(owner, scope, stream, invitation, proposal, timeoutMillis)
-                result.open(); return result
+                result.authenticate(); result.awaitTranscript(); return result
             } catch (failure: Throwable) { if (result != null) result.close() else { stream.close(); owner.cancel() }; throw failure }
         }
     }

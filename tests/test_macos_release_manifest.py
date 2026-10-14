@@ -59,6 +59,22 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 MANIFEST.generate(environment)
 
+    def test_pairing_formats_are_declared_only_by_the_roles_that_handle_them(self):
+        by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
+        self.assertEqual((by_role[2]['authority.presence-config'][1], by_role[2]['authority.presence-config'][2]), ([1, 2], [1, 2]))
+        for role in (1, 2, 4):
+            self.assertEqual(by_role[role]['pairing.transcript'], MANIFEST.format_declaration('pairing.transcript', [1]))
+        for role in (1, 4):
+            self.assertEqual(by_role[role]['transport.pairing-control-config'][1], [1])
+            self.assertEqual(by_role[role]['transport.pairing-control'][1], [1])
+        self.assertEqual(by_role[4]['transport.pairing-config'][1], [1])
+        self.assertEqual(by_role[4]['pairing.setup-frame'][1], [1])
+        self.assertNotIn('pairing.setup-frame', by_role[1])
+        self.assertNotIn('pairing.setup-frame', by_role[2])
+        for role in (5, 6, 8, 11, 12):
+            self.assertNotIn('pairing.transcript', by_role[role])
+        self.assertTrue(all(item[3] == {} for values in by_role.values() for name, item in values.items() if 'pairing' in name))
+
     def test_sets_are_explicit_and_storage_migrations_do_not_claim_activation(self):
         roles = {component[0] for component in MANIFEST.COMPONENTS}
         self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})

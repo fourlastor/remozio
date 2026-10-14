@@ -73,8 +73,15 @@ def inspect(probe, bundle, team, expected, identifier=APP_IDENTIFIER):
         value = json.loads(result.stdout)
     except (ValueError, TypeError):
         raise RuntimeError('The production reader returned invalid evidence') from None
-    if not isinstance(value, dict) or value.get('result') != 'accepted' or value.get('components') != 7 or value.get('hashes') != 7:
+    expected_roles = sorted(role for role, *_ in load_manifest().COMPONENTS)
+    if not isinstance(value, dict) or value.get('result') != 'accepted' or \
+       value.get('components') != len(expected_roles) or value.get('hashes') != len(expected_roles) or \
+       value.get('roles') != expected_roles:
         raise RuntimeError('The production reader returned incomplete evidence')
+    absent = value.get('absentRoles')
+    if not isinstance(absent, list) or any(type(role) is not int or role <= 0 for role in absent) or \
+       len(set(absent)) != len(absent) or set(absent).intersection(expected_roles):
+        raise RuntimeError('The production reader returned conflicting absence evidence')
     return value
 
 

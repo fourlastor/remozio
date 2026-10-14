@@ -90,6 +90,7 @@ private struct CommandCallerSettingsForm: View {
 private struct SetupOverview: View {
     let presence: PresenceControls
     @State private var showingSetupPreview = false
+    @State private var showingPairing = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -102,13 +103,14 @@ private struct SetupOverview: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Label(presence.status != nil ? "This Mac’s authority is connected" : presence.configured ? "This Mac’s authority is unavailable" : "This Mac is not configured", systemImage: "macbook.and.iphone")
                             .font(.headline)
-                        Text("This early build cannot pair devices, send requests, or approve actions.")
+                        Text("Pairing requires configured Mac services. The complete approval flow is still being connected.")
                         Text("Mac service setup is still being built.")
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                 }
+                Button("Pair a phone…") { showingPairing = true }
                 Button("Preview setup file…") { showingSetupPreview = true }
                 HStack {
                     SettingsLink()
@@ -121,6 +123,7 @@ private struct SetupOverview: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 440, minHeight: 340)
+        .sheet(isPresented: $showingPairing) { PairingSheet() }
         .sheet(isPresented: $showingSetupPreview) { SetupFilePreview() }
     }
 }

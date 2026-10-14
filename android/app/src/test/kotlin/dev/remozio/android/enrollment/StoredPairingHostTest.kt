@@ -129,4 +129,44 @@ class StoredPairingHostTest {
         assertFails { host().activate(e.recordID, receipt(t)) }
         open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
     }
+    @Test fun preparedLeaseRetiresBeforeRemovalAndCannotLoadAnAlteredTranscript() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val access = h.prepared(e.recordID, t)
+        assertTrue(access.lease.isCurrent())
+        assertFails { h.prepared(e.recordID, transcript(record(2))) }
+        h.remove(e.recordID, 1u)
+        assertFalse(access.lease.isCurrent())
+        assertFails { h.prepared(e.recordID, t) }
+    }
+
+    @Test fun verifiedActivationRetiresItsPreparedBiometricLease() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val access = h.prepared(e.recordID, t)
+        h.activate(e.recordID, receipt(t))
+        assertFalse(access.lease.isCurrent())
+        assertFails { h.prepared(e.recordID, t) }
+    }
+
+    @Test fun releasingOnePreparedLeaseDoesNotRetireAnother() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val first = h.prepared(e.recordID, t); val second = h.prepared(e.recordID, t)
+        h.release(e.recordID, first.lease)
+        assertFalse(first.lease.isCurrent()); assertTrue(second.lease.isCurrent())
+        h.release(e.recordID, second.lease)
+        assertFalse(second.lease.isCurrent())
+    }
+
+    @Test fun preparedLeasesAreBoundedAndReleasedCapacityCanBeReused() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val leases = (1..32).map { h.prepared(e.recordID, t).lease }
+        assertFails { h.prepared(e.recordID, t) }
+        h.release(e.recordID, leases.first())
+        assertTrue(h.prepared(e.recordID, t).lease.isCurrent())
+        h.remove(e.recordID, 1u)
+        assertTrue(leases.none { it.isCurrent() })
+    }
 }

@@ -45,7 +45,7 @@ class PairingSetupChannelTest {
         val input = ArrayDeque<ByteArray>()
         val suspended = CompletableDeferred<Unit>()
         val ended = CompletableDeferred<ByteArray?>()
-        var proofSubmissions = 0; var closes = 0
+        var proofSubmissions = 0; var proposalSubmissions = 0; var closes = 0
         init { queue(initial ?: wire(PairingSetupFrame.Hello)) }
         fun queue(bytes: ByteArray) { bytes.toList().chunked(fragment).forEach { input.add(it.toByteArray()) } }
         override suspend fun awaitOpen() {}
@@ -56,7 +56,7 @@ class PairingSetupChannelTest {
             if (all.size < n + 4) return
             check(all.size == n + 4); output.reset()
             when (val frame = PairingSetupFrame.decode(all.copyOfRange(4, all.size))) {
-                is PairingSetupFrame.Proposal -> { frame.value.validate(f.transcript); if (!omitTranscript) queue(wire(PairingSetupFrame.Transcript(f.transcript))) }
+                is PairingSetupFrame.Proposal -> { proposalSubmissions++; frame.value.validate(f.transcript); if (!omitTranscript) queue(wire(PairingSetupFrame.Transcript(f.transcript))) }
                 is PairingSetupFrame.Proof -> {
                     proofSubmissions++
                     require(frame.setupID == f.transcript.setupID && frame.digest == CborValue.Bytes(f.transcript.digest()))
@@ -120,6 +120,24 @@ class PairingSetupChannelTest {
             finally { parent.cancelAndJoin() }
             assertEquals(1,stream.closes)
         } }
+    }
+    @Test fun authenticatedRouteSendsNoProposalAndHumanTranscriptWaitUsesTheLongerDeadline(): Unit = runBlocking {
+        val f = Fixture(); val stream = Stream(f, omitTranscript = true); val parent = SupervisorJob()
+        val channel = withTimeout(500) {
+            PairingSetupChannel.authenticate(CoroutineScope(parent), stream, f.invitation, f.proposal)
+        }
+        try {
+            assertEquals(0, stream.proposalSubmissions)
+            assertFails { channel.transcript }
+            val pending = async { channel.awaitTranscript() }
+            stream.suspended.await()
+            delay(600)
+            assertFalse(pending.isCompleted)
+            stream.ended.complete(wire(PairingSetupFrame.Transcript(f.transcript)))
+            assertContentEquals(f.transcript.encode(), pending.await().encode())
+            assertEquals(1, stream.proposalSubmissions)
+            assertFails { channel.awaitTranscript() }
+        } finally { channel.closeAndJoin(); parent.cancelAndJoin() }
     }
     @Test fun unknownVersionAndOversizedHeaderRejectBeforeProposal(): Unit = runBlocking {
         val f=Fixture()

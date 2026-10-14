@@ -25,12 +25,17 @@ def format_declaration(name, versions, migrations=None):
 
 def declarations(role):
     names = {
-        1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1])],
+        1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1]),
+            ('transport.pairing-control-config', [1]), ('transport.pairing-control', [1]),
+            ('authority.pairing-ipc', [1]), ('pairing.invitation', [1]), ('pairing.transcript', [1])],
         2: [('authority.service-config', [1, 2]), ('authority.request-config', [1]),
-            ('authority.wake-config', [1]), ('authority.presence-config', [1]),
+            ('authority.wake-config', [1]), ('authority.presence-config', [1, 2]),
+            ('authority.pairing-setup-config', [1]), ('authority.pairing-ipc', [1]), ('pairing.transcript', [1]),
             ('authority.command-config', [1, 2]), ('authority.command-host-config', [1]), ('authority.command-execution-config', [1]),
             ('authority.code-policy', [1, 2, 3]), ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         4: [('transport.config', [1, 2]), ('transport.wake-config', [1]), ('transport.remote-config', [1]),
+            ('transport.pairing-config', [1]), ('transport.pairing-control-config', [1]), ('transport.pairing-control', [1]),
+            ('pairing.invitation', [1]), ('pairing.transcript', [1]), ('pairing.setup-frame', [1]),
             ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         5: [('command.frontend-config', [1]), ('command.submission', [1])],
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
