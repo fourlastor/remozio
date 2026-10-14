@@ -131,24 +131,20 @@ public final class AuthorityJournal: @unchecked Sendable {
     /// The host authenticates the human transcript first and rechecks native administrator consent in the callback.
     /// Callbacks must not await or reenter this owner. A lost receipt requires reconciliation, not another enrollment.
     public func commitPairing(_ attempt: PairingEnrollmentAttempt, biometricProof: Data,
-                              signer: EnclaveAuthorityRequestSigner, addEventID: Data, removalEventID: Data? = nil,
-                              receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval? = nil,
-                              recheckAdministrator: () throws -> Void, now: () throws -> AuthorityMoment)
+                          signer: EnclaveAuthorityRequestSigner, addEventID: Data, removalEventID: Data? = nil,
+                          receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval? = nil,
+                          recheckAdministrator: () throws -> Void, now: () throws -> AuthorityMoment,
+                          validateSetupCode: (JournalTransaction) throws -> Void = { _ in })
         throws -> (revision: UUID, receipt: Data, gatewayControl: GatewayAuthorityEnvelope?) {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard signer.macID == attempt.transcript.phone.scope.macID,
               signer.accountID == attempt.transcript.phone.scope.accountID else { throw AuthorityRequestSignerError.wrongIdentity }
-        return try lock.withLock {
-            try requireNoRequestOperation()
-            guard let requests else { throw ApprovalCoordinatorError.unavailable }
-            try requests.requirePairingCheckpoint()
-            requestOperationActive = true; defer { requestOperationActive = false }
-            return try withStorageFailureCleanup {
-                try requests.commitPairing(attempt, biometricProof: biometricProof, authorityPublicKey: signer.publicKey,
-                    addEventID: addEventID, removalEventID: removalEventID, receiptTimeMs: receiptTimeMs, gateway: gateway,
-                    verifyHost: AuthoritySelfValidation.validate, recheckAdministrator: recheckAdministrator,
-                    now: now, sign: signer.sign)
-            }
+        return try withPairingRequestOwner { requests in
+            try requests.commitPairing(attempt, biometricProof: biometricProof, authorityPublicKey: signer.publicKey,
+                addEventID: addEventID, removalEventID: removalEventID, receiptTimeMs: receiptTimeMs, gateway: gateway,
+                verifyHost: { tx in try AuthoritySelfValidation.validate(transaction: tx); try validateSetupCode(tx) },
+                recheckAdministrator: recheckAdministrator,
+                now: now, sign: signer.sign)
         }
     }
 
@@ -158,15 +154,31 @@ public final class AuthorityJournal: @unchecked Sendable {
         guard signer.macID == binding.scope.macID, signer.accountID == binding.scope.accountID else {
             throw AuthorityRequestSignerError.wrongIdentity
         }
-        return try lock.withLock {
+        return try withPairingRequestOwner { requests in
+            try requests.pairingReceipt(setupID: setupID, binding: binding, authorityPublicKey: signer.publicKey,
+                verifyHost: AuthoritySelfValidation.validate, sign: signer.sign)
+        }
+    }
+
+    // Same-owner component fixture. Public pairing always validates Root code and uses the enclave signer.
+    func commitPairingFixture(_ attempt: PairingEnrollmentAttempt, biometricProof: Data, authorityPublicKey: Data,
+                              addEventID: Data, recheckAdministrator: () throws -> Void,
+                              now: () throws -> AuthorityMoment, validate: (JournalTransaction) throws -> Void,
+                              sign: (Data) throws -> Data) throws -> Data {
+        try withPairingRequestOwner { requests in
+            try requests.commitPairing(attempt, biometricProof: biometricProof, authorityPublicKey: authorityPublicKey,
+                addEventID: addEventID, removalEventID: nil, receiptTimeMs: nil, gateway: nil, verifyHost: validate,
+                recheckAdministrator: recheckAdministrator, now: now, sign: sign).receipt
+        }
+    }
+    /// Pairing stays on the exported invocation stack. Native authorization callbacks do not cross executors.
+    private func withPairingRequestOwner<Value>(_ body: (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
+        try lock.withLock {
             try requireNoRequestOperation()
             guard let requests else { throw ApprovalCoordinatorError.unavailable }
             try requests.requirePairingCheckpoint()
             requestOperationActive = true; defer { requestOperationActive = false }
-            return try withStorageFailureCleanup {
-                try requests.pairingReceipt(setupID: setupID, binding: binding, authorityPublicKey: signer.publicKey,
-                    verifyHost: AuthoritySelfValidation.validate, sign: signer.sign)
-            }
+            return try withStorageFailureCleanup { try body(requests) }
         }
     }
 

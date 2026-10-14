@@ -74,7 +74,7 @@ public actor AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         let clock = try AuthorityClock()
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service)
-        return try compose(configuration: configuration, journal: journal, clock: clock, presence: nil, appEndpoint: nil,
+        return try compose(configuration: configuration, journal: journal, clock: clock, presence: nil, appEndpoint: nil, pairingConfiguration: nil,
             routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     public static func open(configuration: AuthorityPresenceStartupConfiguration,
@@ -83,12 +83,12 @@ public actor AuthorityWakeService {
                             commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         try open(configuration: configuration.wake, accountPresence: configuration.presence,
-            appEndpoint: configuration.endpoint, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
+            appEndpoint: configuration.endpoint, pairingConfiguration: configuration.pairing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     /// Enable the durable mode ledger and share one Root epoch with observations, signing and wake publication.
     /// The owning authenticated GUI endpoint supplies observations; unavailable observations keep their explicit unknown state.
     public static func open(configuration: AuthorityWakeStartupConfiguration, accountPresence: AuthorityAccountPresenceConfiguration,
-                            appEndpoint: AuthorityPresenceEndpointConfiguration,
+                            appEndpoint: AuthorityPresenceEndpointConfiguration, pairingConfiguration: AuthorityPairingSetupConfiguration? = nil,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
                             commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
@@ -107,11 +107,12 @@ public actor AuthorityWakeService {
             payloadLimits: limits, signingLimits: CBORLimits(maxBytes: 131_072, maxDepth: 16, maxItems: 4096))
         let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy)
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
-        return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint,
+        return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint, pairingConfiguration: pairingConfiguration,
             routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     private static func compose(configuration: AuthorityWakeStartupConfiguration, journal: AuthorityJournal, clock: AuthorityClock,
-                                presence: AuthorityPresenceRuntime?, appEndpoint: AuthorityPresenceEndpointConfiguration?, routing: @escaping @Sendable () throws -> PresenceRouting,
+                                presence: AuthorityPresenceRuntime?, appEndpoint: AuthorityPresenceEndpointConfiguration?,
+                                pairingConfiguration: AuthorityPairingSetupConfiguration?, routing: @escaping @Sendable () throws -> PresenceRouting,
                                 reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                                 commandReceiverFactory: AuthorityCommandReceiveFactory?,
                                 commandExecutionFactory: AuthorityCommandExecutionFactory?,
@@ -145,7 +146,9 @@ public actor AuthorityWakeService {
                 })
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
-                presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock)
+                presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock,
+                    pairingConfiguration: pairingConfiguration, signer: pairingConfiguration == nil ? nil : signer,
+                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: configuration.request.service.auditVersions)
             } else { presenceListener = nil }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
             return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,

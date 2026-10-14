@@ -7,7 +7,7 @@ import XCTest
 
 final class AuthorityCommandStartupConfigurationTests: XCTestCase {
     private func id(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
-    private func presence() throws -> AuthorityPresenceStartupConfiguration {
+    private func presence(pairing: AuthorityPairingSetupConfiguration? = nil) throws -> AuthorityPresenceStartupConfiguration {
         let key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/Library/Remozio/journal",
             serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
@@ -19,7 +19,7 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
             gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402, teamID: "TEAMID1234",
             gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)])
         return try .init(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence", teamID: "TEAMID1234",
-            appIdentifier: "dev.remozio.mac", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
+            appIdentifier: "dev.remozio.mac", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000), pairing: pairing)
     }
     private func config(service: String = "dev.remozio.command", path: String = "/Library/Remozio/elevation.cbor",
                         environment: [CapturedEnvironmentEntry] = [], captureBytes: Int = 65_536,
@@ -33,6 +33,34 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
         .init(name: Data(name.utf8), value: value, source: source)
     }
     private var limits: CBORLimits { get throws { try .init(maxBytes: 65_536, maxDepth: 4, maxItems: 1024) } }
+
+    func testPairingStartupPreservesLegacyVersionOneAndExplicitVersionTwo() throws {
+        let legacy = try presence()
+        guard case .map(let legacyFields) = try DeterministicCBOR.decode(legacy.canonicalBytes, limits: limits) else { return XCTFail("Map required") }
+        XCTAssertEqual(legacyFields[0], .unsigned(1)); XCTAssertNil(legacyFields[10])
+        XCTAssertNil(try AuthorityPresenceStartupConfiguration.decode(legacy.canonicalBytes).pairing)
+        let setup = try AuthorityPairingSetupConfiguration(transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+        let modern = try presence(pairing: setup), decoded = try AuthorityPresenceStartupConfiguration.decode(modern.canonicalBytes)
+        XCTAssertEqual(decoded.canonicalBytes, modern.canonicalBytes)
+        XCTAssertEqual(decoded.pairing?.canonicalBytes, setup.canonicalBytes)
+        XCTAssertEqual(decoded.endpoint.serviceName, legacy.endpoint.serviceName)
+        XCTAssertEqual(decoded.presence.ownerUID, legacy.presence.ownerUID)
+        XCTAssertEqual(decoded.endpoint.appPolicy.requirement, legacy.endpoint.appPolicy.requirement)
+        let command = try AuthorityCommandStartupConfiguration(presence: modern, serviceName: "dev.remozio.command",
+            policyPath: "/Library/Remozio/elevation.cbor", environment: [], submissionLimits: .init(maxBytes: 8192, maxDepth: 8, maxItems: 1024),
+            captureLimits: .init(maxBytes: 65536, maxDepth: 8, maxItems: 4096))
+        XCTAssertEqual(try AuthorityCommandStartupConfiguration.decode(command.canonicalBytes).presence.pairing?.canonicalBytes, setup.canonicalBytes)
+    }
+    func testPairingStartupRejectsMixedMissingUnknownAndUncanonicalVersions() throws {
+        let setup = try AuthorityPairingSetupConfiguration(transportPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
+        let modern = try presence(pairing: setup)
+        guard case .map(let fields) = try DeterministicCBOR.decode(modern.canonicalBytes, limits: limits) else { return XCTFail("Map required") }
+        for (field, value): (UInt64, CBORValue?) in [(0, .unsigned(1)), (0, .unsigned(3)), (10, nil), (10, .null), (10, .text("setup")), (11, .unsigned(1))] {
+            var changed = fields; changed[field] = value
+            XCTAssertThrowsError(try AuthorityPresenceStartupConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+        XCTAssertThrowsError(try AuthorityPresenceStartupConfiguration.decode(modern.canonicalBytes + Data([0])))
+    }
 
     func testRejectsPermanentlyUnusableProtocolBudgets() throws {
         let baseline = try config()

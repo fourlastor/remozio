@@ -6,34 +6,45 @@ public struct AuthorityPresenceStartupConfiguration: Sendable, CustomStringConve
     public let wake: AuthorityWakeStartupConfiguration
     public let presence: AuthorityAccountPresenceConfiguration
     public let endpoint: AuthorityPresenceEndpointConfiguration
+    public let pairing: AuthorityPairingSetupConfiguration?
     public let canonicalBytes: Data
     public var description: String { "AuthorityPresenceStartupConfiguration(redacted)" }
     public init(wake: AuthorityWakeStartupConfiguration, ownerUID: UInt32, appServiceName: String,
-                teamID: String, appIdentifier: String, appHashes: Set<Data>, policy: PresenceConfiguration) throws {
+                teamID: String, appIdentifier: String, appHashes: Set<Data>, policy: PresenceConfiguration,
+                pairing: AuthorityPairingSetupConfiguration? = nil) throws {
         guard ownerUID != wake.request.service.transportPolicy.expectedUserID, ownerUID != wake.gatewayPolicy.expectedUserID,
               appServiceName != wake.request.service.serviceName, appServiceName != wake.gatewayServiceName else { throw AuthorityPresenceError.invalidConfiguration }
         presence = try .init(macID: wake.request.service.macID, accountID: wake.request.service.accountID, ownerUID: ownerUID, policy: policy)
         endpoint = try .init(serviceName: appServiceName, appPolicy: .init(teamID: teamID, componentIdentifier: appIdentifier,
             approvedCodeDirectoryHashes: appHashes, expectedUserID: ownerUID))
-        self.wake = wake
-        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(wake.canonicalBytes),
+        self.wake = wake; self.pairing = pairing
+        var fields: [UInt64: CBORValue] = [0: .unsigned(pairing == nil ? 1 : 2), 1: .bytes(wake.canonicalBytes),
             2: .unsigned(UInt64(ownerUID)), 3: .text(appServiceName), 4: .text(teamID), 5: .text(appIdentifier),
             6: .array(appHashes.sorted { $0.lexicographicallyPrecedes($1) }.map(CBORValue.bytes)),
             7: .unsigned(policy.idleMilliseconds), 8: .unsigned(policy.observationLifetimeMilliseconds),
-            9: .unsigned(policy.unavailableGraceMilliseconds)]), limits: Self.limits)
+            9: .unsigned(policy.unavailableGraceMilliseconds)]
+        if let pairing { fields[10] = .bytes(pairing.canonicalBytes) }
+        canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
     public static func load(path: String) throws -> Self { try decode(ProtectedServiceConfiguration.read(path: path)) }
     public static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...9),
-              fields[0] == .unsigned(1), case .bytes(let wake) = fields[1], case .unsigned(let uid) = fields[2], let ownerUID = UInt32(exactly: uid),
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
+              (fields[0] == .unsigned(1) && Set(fields.keys) == Set(UInt64(0)...9)) ||
+              (fields[0] == .unsigned(2) && Set(fields.keys) == Set(UInt64(0)...10)), case .bytes(let wake) = fields[1], case .unsigned(let uid) = fields[2], let ownerUID = UInt32(exactly: uid),
               case .text(let service) = fields[3], case .text(let team) = fields[4], case .text(let app) = fields[5],
               case .array(let hashes) = fields[6], case .unsigned(let idle) = fields[7], case .unsigned(let lifetime) = fields[8],
               case .unsigned(let grace) = fields[9] else { throw AuthorityPresenceError.invalidConfiguration }
         let values = try hashes.map { value -> Data in
             guard case .bytes(let bytes) = value else { throw AuthorityPresenceError.invalidConfiguration }; return bytes
         }
+        let pairing: AuthorityPairingSetupConfiguration?
+        if fields[0] == .unsigned(2) {
+            guard case .bytes(let setup) = fields[10] else { throw AuthorityPresenceError.invalidConfiguration }
+            pairing = try .decode(setup)
+        } else { pairing = nil }
         let result = try Self(wake: .decode(wake), ownerUID: ownerUID, appServiceName: service, teamID: team, appIdentifier: app,
-            appHashes: Set(values), policy: .init(idleMilliseconds: idle, observationLifetimeMilliseconds: lifetime, unavailableGraceMilliseconds: grace))
+            appHashes: Set(values), policy: .init(idleMilliseconds: idle, observationLifetimeMilliseconds: lifetime,
+                unavailableGraceMilliseconds: grace), pairing: pairing)
         guard result.canonicalBytes == bytes else { throw AuthorityPresenceError.invalidConfiguration }
         return result
     }

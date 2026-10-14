@@ -7,7 +7,7 @@ public enum PairingEnrollmentError: Error, Equatable {
 
 /// Root-local setup state. Construct only after administrator authorization and human transcript verification.
 /// Network input cannot create this authorization context. A restart requires a new authorized attempt.
-public final class PairingEnrollmentAttempt {
+public final class PairingEnrollmentAttempt: Sendable {
     public let transcript: PairingTranscript
     private let authorizedReplacement: PairingReplacement?
     private let revision: UUID
