@@ -126,7 +126,7 @@ public struct PairingTranscript: Sendable, CustomStringConvertible {
     }
 }
 private func pairingCheck(_ condition: Bool) throws { if !condition { throw PairingError.invalidTranscript } }
-private func pairingPoint(_ bytes: Data) throws {
+func pairingPoint(_ bytes: Data) throws {
     try pairingCheck(bytes.count == 65 && bytes.first == 4)
     _ = try P256.Signing.PublicKey(x963Representation: bytes)
 }

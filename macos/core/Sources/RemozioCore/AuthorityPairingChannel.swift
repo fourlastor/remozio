@@ -17,6 +17,12 @@ public struct AuthorityPairingContext: Sendable, CustomStringConvertible {
     public let minimumEnvelopeVersion: UInt64
     public let lifetimeMilliseconds: UInt64
     public var description: String { "AuthorityPairingContext(redacted)" }
+    /// Export only the pins obtained after the authenticated local Root handshake. This creates no setup attempt.
+    public func invitation(label: String) throws -> PairingInvitation {
+        try PairingInvitation(macID: macID, accountID: accountID, label: label,
+            authorityPublicKey: authorityPublicKey, transportPublicKey: transportPublicKey,
+            minimumEnvelopeVersion: minimumEnvelopeVersion)
+    }
     static func decode(_ bytes: Data, macID: Data, accountID: Data) throws -> Self {
         let limits = try CBORLimits(maxBytes: 512, maxDepth: 1, maxItems: 15)
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...6),

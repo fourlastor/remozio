@@ -83,3 +83,5 @@ The [channel negotiation contract](channel-negotiation.md) binds bounded capabil
 The [negotiated message hosts](session-envelope.md) preserve framing across the handshake and bind application payloads to session IDs and sequences.
 
 The [signed approval carrier](approval-message.md) retains exact bodies and signatures for delivery through the negotiated channel.
+
+The [pairing invitation](pairing-invitation.md) carries public Mac pins through matching QR and text payloads. It does not activate trust.

@@ -68,3 +68,5 @@ The existing design still requires QR and equivalent text pairing, human verific
 The configured Mac authority now commits pairing through its shared checkpointed request owner and signs or recovers commit receipts. See [the host contract and evidence limits](../docs/macos-checkpointed-pairing-receipts.md). This does not provide an invitation endpoint or usable pairing UI.
 
 Shared add/replacement vectors test identical Swift/Kotlin bytes and digests. Invalid vectors cover malformed keys, repeated identities, incompatible roles and versions, expiry ordering, and schema changes. Tests also verify purpose separation and altered setup claims. Physical pairing and hardware proof remain untested.
+
+The [pairing invitation](pairing-invitation.md) now defines the public pin handoff for QR and text. Usable setup UI and invitation transport remain incomplete.
