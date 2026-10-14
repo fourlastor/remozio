@@ -90,6 +90,9 @@ public actor NetworkByteChannel {
 
     deinit { deadline?.cancel(); driver.cancel() }
 
+    /// Includes observed input EOF and native closure, even when no application operation is pending.
+    public var isClosed: Bool { state == .closed || readEnded || !cancellation.ifActive({}) }
+
     /// Invalidates pending operations immediately. Native I/O and actor cleanup follow without waiting for the caller.
     public nonisolated func abort() {
         cancellation.cancel()

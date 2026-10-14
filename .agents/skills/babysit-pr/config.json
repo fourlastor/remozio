@@ -4,6 +4,7 @@
   "required_checks": [
     "Python checks",
     "Mac build",
+    "Mac interoperability",
     "Kotlin protocol",
     "Android build"
   ],

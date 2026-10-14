@@ -19,6 +19,7 @@ public actor PairingSetupNetworkSession {
     private let invitation: PairingInvitation
     private let peerPoint: Data
     private let abortIO: @Sendable () -> Void
+    private let underlyingClosed: @Sendable () async -> Bool
     private let cancellation = ChannelCancellation()
     private var state = State.opening
     private var proposalValue: PairingPhoneProposal?
@@ -27,21 +28,26 @@ public actor PairingSetupNetworkSession {
     private var offset = 0
     private var busy = false
     private var timer: Task<Void, Never>?
-    private init(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data, abortIO: @escaping @Sendable () -> Void) {
-        self.stream = stream; self.invitation = invitation; self.peerPoint = peerPoint; self.abortIO = abortIO
+    private var reader: Task<Void, Never>?
+    private var inputWaiter: CheckedContinuation<Void, any Error>?
+    private init(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
+                 abortIO: @escaping @Sendable () -> Void, underlyingClosed: @escaping @Sendable () async -> Bool) {
+        self.stream = stream; self.invitation = invitation; self.peerPoint = peerPoint
+        self.abortIO = abortIO; self.underlyingClosed = underlyingClosed
     }
-    deinit { timer?.cancel() }
+    deinit { timer?.cancel(); reader?.cancel() }
     static func acceptStarted(channel: NetworkByteChannel, invitation: PairingInvitation, peerPoint: Data,
                               timeoutMilliseconds: UInt64) async throws -> Self {
         try await accept(stream: PairingNetworkStream(channel: channel), invitation: invitation, peerPoint: peerPoint,
-            timeoutMilliseconds: timeoutMilliseconds, abortIO: { channel.abort() })
+            timeoutMilliseconds: timeoutMilliseconds, abortIO: { channel.abort() }, underlyingClosed: { await channel.isClosed })
     }
     // Injected streams prove state and framing only, never native peer identity.
     static func accept(stream: any ApprovalByteStream, invitation: PairingInvitation, peerPoint: Data,
-                       timeoutMilliseconds: UInt64 = 300_000, abortIO: @escaping @Sendable () -> Void = {}) async throws -> Self {
-        let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint, abortIO: abortIO)
+                       timeoutMilliseconds: UInt64 = 300_000, abortIO: @escaping @Sendable () -> Void = {},
+                       underlyingClosed: @escaping @Sendable () async -> Bool = { false }) async throws -> Self {
+        let owner = Self(stream: stream, invitation: invitation, peerPoint: peerPoint, abortIO: abortIO, underlyingClosed: underlyingClosed)
         do { try await owner.open(timeoutMilliseconds: timeoutMilliseconds); return owner }
-        catch { await owner.close(); throw error }
+        catch { await owner.closeAndWait(); throw error }
     }
     private func open(timeoutMilliseconds: UInt64) async throws {
         guard (1...300_000).contains(timeoutMilliseconds), peerPoint.count == 65 else { throw PairingSetupChannelError.rejected }
@@ -50,12 +56,20 @@ public actor PairingSetupNetworkSession {
             self?.abort()
         }
         try await stream.awaitOpen(timeoutMilliseconds: min(timeoutMilliseconds, 60_000))
+        startReader()
         try await write(.hello)
         guard case .proposal(let value) = try await read(), value.transportKey.publicKey == peerPoint,
               value.phone.scope.macID == invitation.macID, value.phone.scope.accountID == invitation.accountID else {
             throw PairingSetupChannelError.rejected
         }
         proposalValue = value; state = .proposed
+    }
+    /// Reports owner closure only. It grants no enrollment or action authority.
+    public var isClosed: Bool {
+        get async {
+            if state == .closed || !cancellation.ifActive({}) { return true }
+            return await underlyingClosed()
+        }
     }
     public func proposal() throws -> PairingPhoneProposal {
         try active(); guard let proposalValue else { throw PairingSetupChannelError.closed }; return proposalValue
@@ -99,9 +113,36 @@ public actor PairingSetupNetworkSession {
     public func close() async {
         cancellation.cancel(); abortIO()
         guard state != .closed else { return }
-        state = .closed; timer?.cancel(); timer = nil
+        state = .closed; timer?.cancel(); timer = nil; reader?.cancel()
+        let waiter = inputWaiter; inputWaiter = nil
+        waiter?.resume(throwing: PairingSetupChannelError.closed)
         pending.removeAll(); offset = 0; proposalValue = nil; staged = nil
         await stream.close()
+    }
+    /// Close I/O and join the owned byte reader before reporting quiescence.
+    public func closeAndWait() async {
+        await close()
+        await reader?.value
+    }
+    private func startReader() {
+        let stream = stream
+        reader = Task { [weak self] in
+            do {
+                while !Task.isCancelled {
+                    guard let bytes = try await stream.receive(), !bytes.isEmpty else { break }
+                    guard let self, await self.appendInput(bytes) else { break }
+                }
+            } catch {}
+            await self?.close()
+        }
+    }
+    private func appendInput(_ bytes: Data) -> Bool {
+        guard state != .closed, cancellation.ifActive({}), bytes.count <= NetworkByteChannel.maximumChunkBytes else { return false }
+        if offset > 0 { pending = pending.subdata(in: offset..<pending.count); offset = 0 }
+        guard bytes.count <= PairingSetupFrame.maximumBytes + 4 + NetworkByteChannel.maximumChunkBytes - pending.count else { return false }
+        pending.append(bytes)
+        let waiter = inputWaiter; inputWaiter = nil; waiter?.resume()
+        return true
     }
     private func active() throws {
         try Task.checkCancellation()
@@ -133,15 +174,11 @@ public actor PairingSetupNetworkSession {
                 if offset == pending.count { pending.removeAll(keepingCapacity: true); offset = 0 }
                 return result
             }
-            guard let next = try await stream.receive(), !next.isEmpty, next.count <= NetworkByteChannel.maximumChunkBytes else {
-                throw PairingSetupChannelError.rejected
-            }
-            try active()
-            if offset > 0 { pending = pending.subdata(in: offset..<pending.count); offset = 0 }
-            guard next.count <= PairingSetupFrame.maximumBytes + 4 + NetworkByteChannel.maximumChunkBytes - pending.count else {
-                throw PairingSetupChannelError.rejected
-            }
-            pending.append(next)
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, any Error>) in
+                    inputWaiter = waiter
+                }
+            } onCancel: { self.abort() }
         }
     }
 }

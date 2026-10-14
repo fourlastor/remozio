@@ -54,3 +54,15 @@ The user made an Android 17 Pixel available through LAN ADB. Prepare and run its
 Reuse the user's existing Developer ID Application identity where suitable. Keep credentials outside the repository and select the intended identity explicitly. A certificate inspection alone does not establish private-key access, notarization or protected service behavior.
 
 Mac service installation, lock/logout/restart, and CRD/Screen Sharing tests come last. The [interactive handoff](experiments/interactive-handoff.md) remains the test procedure, with this ordering amendment.
+
+## Local macOS distribution and installation
+
+The user confirmed local distribution on 14 October 2026. Apple App Store publication is outside the current scope.
+A `.pkg` installer is an approved bootstrap route. Keep the services inside the single Remozio `.app`.
+Do not make Apple approval for the privileged-file-operations entitlement the only installation route.
+The installer must preserve the protected paths, security floors, key custody, recovery state, and explicit elevation grants.
+Actual privileged installation tests remain pending in [issue #363](https://github.com/rock3r/remozio/issues/363).
+
+Keep Sparkle update detection and installation in the implementation plan.
+Updates must use the existing signed-release and protected-activation contracts.
+Prioritize the first complete Mac–Pixel approval flow before the updater UI.

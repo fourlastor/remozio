@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "experiment": "restricted-pairing-native-jvm-tls",
   "status": "passed",
-  "baseCommit": "48acf3e2c4ab0c3f961ad15c14d687b8a390279f",
-  "testTimestampUTC": "2026-10-14T06:32:37.389Z",
+  "baseCommit": "3742e8f564c8ec8dfef92e510bdc40573392e287",
+  "testTimestampUTC": "2026-10-14T08:27:01.965Z",
   "hostMacOS": "27.0.1",
   "deploymentTarget": "26.0",
   "tlsVersion": "TLSv1.3",
   "loopbackOnly": true,
-  "tests": 4,
+  "tests": 5,
   "failures": 0,
   "errors": 0,
   "skipped": 0,
   "cases": [
+    "idleNativeSetupReleasesDisconnectedCandidatesBeforeTheTimeout",
     "invitationPinAndAuthorityChangesFailBeforeABiometricProof",
     "unpairedTLSCandidateReceivesAndVerifiesTheExactSetupReceipt",
     "nativeSetupRejectsATransportClaimThatDiffersFromTheTLSClient",
@@ -29,11 +30,12 @@
   "serviceAccountsTested": false,
   "macOS26RuntimeTested": false,
   "sourceSHA256": {
-    "experiments/approval-flow/Sources/TLSPeer/main.swift": "23d2c88075d81a0381565446bbf2d2a5ebffbeff51093948adb6d9f816eece1c",
-    "macos/core/Sources/RemozioCore/PairingSetupListener.swift": "387964f5c1d3616008073eef69c04a4b3877548e2220e5a76fbc2f9edd8ceb26",
-    "macos/core/Sources/RemozioCore/PairingSetupNetworkSession.swift": "ad22e212a42fdddee36d3c670fdff71543cbe1d99af261f69825e2f4b70ab951",
+    "experiments/approval-flow/Sources/TLSPeer/main.swift": "54dbb72882e0da91e3a9cae6cee44a15b6057279f4cd3a0d4e2f4e92359a7ed1",
+    "macos/core/Sources/RemozioCore/PairingSetupListener.swift": "bee0b218dcd0728f2f855be3463ff3e75c34c9827915a07504c1d6589c82fb42",
+    "macos/core/Sources/RemozioCore/PairingSetupNetworkSession.swift": "4ef110c9e0394f8cbd93b47e09df459423c9399cda4bcdf892ac4fd2abf4114e",
     "phone/core/src/main/kotlin/dev/remozio/phone/transport/PairingSetupChannel.kt": "e07702bd9f40bcca97728c9ea0a97ad625c9945280f0a02e3995207b6f147661",
-    "phone/core/src/test/kotlin/dev/remozio/phone/crypto/PairingSetupInteropTest.kt": "7167635865810d70a400d5d2e0bd802d72d3b4337adc6ff0a739bbf1fce36b84",
+    "phone/core/src/test/kotlin/dev/remozio/phone/crypto/PairingSetupInteropTest.kt": "bed318013c5c7ac55c8f83e9cdf5e6c2e9b5abc168f1447da76a0390c89157cb",
     "protocol/vectors/pairing-setup-v1.json": "f49976f6f6322d400e6fbf66aab7e77411c19a75d586ff79ff66b40a2c69114a"
-  }
+  },
+  "idleDisconnectReleasesDefaultListenerSlots": true
 }

@@ -52,7 +52,7 @@ public struct InstallationServiceManifest {
     private static func modes(for role: AuthorityCodeRole) -> Set<String> {
         switch role {
         case .authority: ["--configuration", "--presence-configuration", "--command-configuration"]
-        case .transport: ["--configuration", "--wake-configuration", "--remote-configuration"]
+        case .transport: ["--configuration", "--wake-configuration", "--remote-configuration", "--pairing-configuration"]
         default: ["--configuration"]
         }
     }

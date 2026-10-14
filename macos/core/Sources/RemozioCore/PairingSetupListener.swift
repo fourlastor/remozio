@@ -117,8 +117,8 @@ public final class PairingSetupListener: @unchecked Sendable {
                 let session = try await PairingSetupNetworkSession.acceptStarted(channel: channel, invitation: invitation,
                     peerPoint: point, timeoutMilliseconds: timeout)
                 do { try Task.checkCancellation(); try await handler(session) }
-                catch { await session.close(); throw error }
-                await session.close()
+                catch { await session.closeAndWait(); throw error }
+                await session.closeAndWait()
             } catch {}
             await channel.close(); self?.release(id)
             }

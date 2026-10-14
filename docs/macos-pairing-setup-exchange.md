@@ -6,7 +6,7 @@ Its handler receives a proposal bound to the actual TLS client key. Only the sig
 ```mermaid
 flowchart LR
     Phone[Unpaired phone] -->|TLS 1.3: remozio-pairing/1| Setup[Bounded setup listener]
-    Setup -->|Public claims and checked proof| App[Signed app control bridge: pending]
+    Setup -->|Public claims and checked proof| App[Signed app control channel]
     App -->|Local admin authorization| Root[Existing Root pairing owner]
     Root --> Journal[Checkpointed journal]
     Enrolled[Enrolled phone] -->|TLS 1.3: remozio/1| Approval[Approval listener]
@@ -23,6 +23,6 @@ A lost receipt cannot trigger another commit. Keep the Android PREPARED record f
 Call `closeAndWait` before treating the listener as quiescent. It waits for the actual handler tasks after aborting their I/O and cancelling them.
 The handler must propagate cancellation into its app control exchange. It must not create detached work that outlives the listener.
 
-The current change supplies these components and the local staging adapter. It does not wire them into product startup.
-The signed app control bridge, setup UI, hardware phone owner, and installed-service validation remain required before interactive pairing.
+The [local app control channel](macos-pairing-control.md) connects these components through explicit protected transport startup.
+The setup UI, Android hardware setup composition, configuration publication, and installed-service validation remain required before interactive pairing.
 See the [wire contract](../protocol/pairing-setup.md) for formats, limits, authorization, and evidence boundaries.

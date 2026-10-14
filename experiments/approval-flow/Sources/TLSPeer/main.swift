@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -156,6 +156,10 @@ if setup.pairing == true {
             }
         }, handler: { channel in
             let proposal = try await channel.proposal()
+            if setup.holdPairingStage == true {
+                while !(await channel.isClosed) { try await Task.sleep(for: .milliseconds(10)) }
+                return
+            }
             let offer = try ChannelOffer(role: .mac, scope: proposal.phone.scope, nonce: pairingRandom(32), envelopeVersions: [1],
                 requests: [], auditVersions: [])
             let wall = UInt64(Date().timeIntervalSince1970 * 1000)

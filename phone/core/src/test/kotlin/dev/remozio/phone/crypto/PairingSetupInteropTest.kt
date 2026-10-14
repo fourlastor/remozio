@@ -35,7 +35,7 @@ class PairingSetupInteropTest {
         val failure = assertFails { withTimeout(timeoutMillis) { operation() } }
         assertFalse(failure is TimeoutCancellationException, "A timeout does not prove rejection")
     }
-    private inner class Fixture : AutoCloseable {
+    private inner class Fixture(private val holdPairingStage: Boolean = false) : AutoCloseable {
         val phone = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-phone").build()
         val mac = HeldCertificate.Builder().ecdsa256().commonName("disposable-pairing-mac").build()
         val biometric = key(); val decision = key()
@@ -58,7 +58,7 @@ class PairingSetupInteropTest {
                     .redirectError(directory.resolve("stderr.log").toFile()).start()
                 process = started
                 process.outputStream.write(("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) +
-                    "\",\"pairing\":true}\n").toByteArray()); process.outputStream.flush()
+                    "\",\"pairing\":true,\"holdPairingStage\":" + holdPairingStage + "}\n").toByteArray()); process.outputStream.flush()
                 val executor = Executors.newSingleThreadExecutor()
                 val line = try { executor.submit<String> { process.inputStream.bufferedReader().readLine() }.get(10, TimeUnit.SECONDS) }
                 finally { executor.shutdownNow() }
@@ -122,6 +122,32 @@ class PairingSetupInteropTest {
                 val owner = SupervisorJob(); val scope = CoroutineScope(owner)
                 try { rejectedWithin(10000) { PairingSetupChannel.connect(scope, f.open(scope), f.keys, invitation, f.proposal(invitation)) } }
                 finally { owner.cancelAndJoin() }
+            }
+        }
+    }
+    @Test fun idleNativeSetupReleasesDisconnectedCandidatesBeforeTheTimeout(): Unit = runBlocking {
+        Fixture(holdPairingStage = true).use { f ->
+            repeat(3) {
+                val owner = SupervisorJob(); val scope = CoroutineScope(owner)
+                var session: TLSRecordSession? = null
+                try {
+                    session = TLSRecordSession(scope, PinnedTLSClient(f.keys, f.mac.certificate.publicKey.encoded,
+                        PairingSetupFrame.APPLICATION_PROTOCOL, 1_048_576), f.open(scope))
+                    withTimeout(5000) {
+                        session.awaitOpen()
+                        val incoming = checkNotNull(session.receive())
+                        assertTrue(incoming.size >= 4)
+                        val length = incoming.take(4).fold(0) { n, b -> (n shl 8) or (b.toInt() and 255) }
+                        val body = incoming.drop(4).toMutableList()
+                        while (body.size < length) { body.addAll(checkNotNull(session.receive()).toList()) }
+                        assertEquals(PairingSetupFrame.Hello, PairingSetupFrame.decode(body.toByteArray()))
+                        val proposal = PairingSetupFrame.Proposal(f.proposal()).encode()
+                        val size = proposal.size
+                        session.send(byteArrayOf((size ushr 24).toByte(), (size ushr 16).toByte(), (size ushr 8).toByte(), size.toByte()) + proposal)
+                        delay(200)
+                    }
+                } finally { session?.closeAndJoin(); owner.cancelAndJoin() }
+                delay(300)
             }
         }
     }
