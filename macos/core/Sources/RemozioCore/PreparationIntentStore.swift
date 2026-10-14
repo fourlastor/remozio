@@ -126,13 +126,15 @@ public final class PreparationIntentStore {
             while revision == value.revision || revision == previous?.revision { revision = bytes(UUID()) }
             let retained = try InstallationInventory(macID: value.macID, installationID: value.installationID,
                 revision: revision, bundlePath: value.bundlePath, releaseDigest: value.releaseDigest,
-                accounts: value.accounts, services: value.services)
+                accounts: value.accounts, services: value.services, formatVersion: value.formatVersion)
             if let expectedRevision {
                 guard let previous else { throw PreparationStoreError.notFound }
                 guard previous.revision == expectedRevision else {
                     throw PreparationStoreError.staleRevision
                 }
                 guard previous.installationID == value.installationID else { throw PreparationStoreError.wrongInstallation }
+                guard value.formatVersion >= previous.formatVersion,
+                      previous.accounts.isEmpty || !value.accounts.isEmpty else { throw PreparationStoreError.invalidTransition }
                 try statement("UPDATE installation_inventory_v1 SET revision=?,record=? WHERE id=1 AND installation=? AND revision=?") { row in
                     try bind(retained.revision, column: 1, row: row)
                     try bind(retained.canonicalBytes, column: 2, row: row)

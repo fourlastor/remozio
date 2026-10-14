@@ -256,4 +256,70 @@ final class DurableInstallationInventoryTests: XCTestCase {
         }
     }
 
+    func testBootstrapSurvivesReopenWithoutInferringTheCallerAccount() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true)
+            try store.upgradeInventoryStorage()
+            let proposed = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(4),
+                bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 9, count: 32))
+            let saved = try store.writeInventory(proposed, expectedRevision: nil)
+            XCTAssertEqual(saved.formatVersion, 2)
+            XCTAssertNotEqual(saved.revision, proposed.revision)
+            try store.close()
+            let reopened = try f.store()
+            XCTAssertEqual(try reopened.inventory(), saved)
+            let owner = try SetupAccountOwner(machine: reopened, expectedReleaseDigest: saved.releaseDigest,
+                resume: { _, _ in XCTFail("Bootstrap must not resume an inferred account"); throw AdministrativeSetupError.invalidConfiguration })
+            defer { try? owner.close() }
+            XCTAssertThrowsError(try owner.progress(accountID: id(3), callerUID: getuid())) {
+                XCTAssertEqual($0 as? AdministrativeSetupError, .wrongAccount)
+            }
+            XCTAssertEqual(try reopened.inventory(), saved)
+        }
+    }
+
+    func testRecordUpgradeCannotDowngradeOrEraseEnrolledAccounts() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true); defer { try? store.close() }
+            try store.upgradeInventoryStorage()
+            let legacy = try store.writeInventory(value(), expectedRevision: nil)
+            let proposed = try InstallationInventory(macID: legacy.macID, installationID: legacy.installationID,
+                revision: legacy.revision, bundlePath: legacy.bundlePath, releaseDigest: legacy.releaseDigest,
+                accounts: legacy.accounts, services: legacy.services, formatVersion: 2)
+            let current = try store.writeInventory(proposed, expectedRevision: legacy.revision)
+            XCTAssertEqual(current.formatVersion, 2)
+            XCTAssertEqual(current.accounts, legacy.accounts)
+            XCTAssertEqual(current.services, legacy.services)
+            XCTAssertThrowsError(try store.writeInventory(legacy, expectedRevision: current.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            let bootstrap = try InstallationInventory.machineBootstrap(macID: current.macID, installationID: current.installationID,
+                revision: current.revision, bundlePath: current.bundlePath, releaseDigest: current.releaseDigest)
+            XCTAssertThrowsError(try store.writeInventory(bootstrap, expectedRevision: current.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertEqual(try store.inventory(), current)
+        }
+    }
+
+    func testLostBootstrapAcknowledgmentRetainsItsVersionAndScope() throws {
+        struct LostAcknowledgment: Error {}
+        try fixture { f in
+            var armed = false
+            let store = try f.store(initialize: true, didCommit: { if armed { throw LostAcknowledgment() } })
+            try store.upgradeInventoryStorage()
+            let proposed = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(4),
+                bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 9, count: 32))
+            armed = true
+            XCTAssertThrowsError(try store.writeInventory(proposed, expectedRevision: nil)) { XCTAssertTrue($0 is LostAcknowledgment) }
+            XCTAssertThrowsError(try store.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+            let reopened = try f.store(); defer { try? reopened.close() }
+            let retained = try XCTUnwrap(reopened.inventory())
+            XCTAssertEqual(retained.formatVersion, 2)
+            XCTAssertTrue(retained.accounts.isEmpty)
+            XCTAssertEqual(retained.services, proposed.services)
+            XCTAssertNotEqual(retained.revision, proposed.revision)
+        }
+    }
+
 }

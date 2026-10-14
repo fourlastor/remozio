@@ -99,7 +99,7 @@ final class InstallationInventoryTests: XCTestCase {
         let value = try inventory(accounts: [account(), account(2, uid: 502)], services: [daemon(), app(), app(502)])
         guard case .map(let original) = try DeterministicCBOR.decode(value.canonicalBytes, limits: InstallationInventory.limits),
               case .array(let accounts) = original[6], case .array(let services) = original[7] else { return XCTFail() }
-        var changed = original; changed[0] = .unsigned(2)
+        var changed = original; changed[0] = .unsigned(3)
         var missing = original; missing.removeValue(forKey: 3)
         var unknown = original; unknown[8] = .null
         var reordered = original; reordered[6] = .array(accounts.reversed())
@@ -202,4 +202,70 @@ final class InstallationInventoryTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    func testMachineBootstrapRetainsOnlyTheFixedSetupDeclaration() throws {
+        let value = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 3, count: 32))
+        XCTAssertEqual(value.formatVersion, 2)
+        XCTAssertTrue(value.accounts.isEmpty)
+        XCTAssertEqual(value.services.count, 1)
+        XCTAssertEqual(value.services[0].role, .setupController)
+        XCTAssertEqual(value.services[0].executionUID, 0)
+        XCTAssertNil(value.services[0].accountID)
+        XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)
+    }
+
+    func testLegacyFormatCannotDecodeAnAccountlessBootstrapRecord() throws {
+        let value = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 3, count: 32))
+        guard case .map(var fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: InstallationInventory.limits) else { return XCTFail() }
+        fields[0] = .unsigned(1)
+        XCTAssertThrowsError(try InstallationInventory.decode(
+            DeterministicCBOR.encode(.map(fields), limits: InstallationInventory.limits), expectedMacID: id(1)))
+    }
+
+    func testBootstrapRejectsExtraServicesAndAlteredSetupIdentity() throws {
+        let setup = try InstallationService(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
+            label: AdministrativeSetupConfiguration.serviceName, plistName: AdministrativeSetupConfiguration.plistName)
+        let otherName = try InstallationService(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
+            label: "dev.remozio.other", plistName: AdministrativeSetupConfiguration.plistName)
+        let otherPlist = try InstallationService(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
+            label: AdministrativeSetupConfiguration.serviceName, plistName: "dev.remozio.other.plist")
+        let tunnel = try InstallationService(role: .tunnelClient, kind: .daemon, domainUID: nil, executionUID: 401,
+            label: "dev.remozio.tunnel", plistName: "dev.remozio.tunnel.plist")
+        for services in [[], [otherName], [otherPlist], [setup, tunnel]] {
+            XCTAssertThrowsError(try InstallationInventory(macID: id(1), installationID: id(2), revision: id(3),
+                bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 3, count: 32),
+                accounts: [], services: services, formatVersion: 2))
+        }
+    }
+
+    func testConfiguredFormatTwoPreservesLegacyAccountAndServiceScope() throws {
+        let legacy = try inventory()
+        XCTAssertEqual(legacy.formatVersion, 1)
+        let current = try InstallationInventory(macID: legacy.macID, installationID: legacy.installationID,
+            revision: legacy.revision, bundlePath: legacy.bundlePath, releaseDigest: legacy.releaseDigest,
+            accounts: legacy.accounts, services: legacy.services, formatVersion: 2)
+        XCTAssertEqual(current.accounts, legacy.accounts)
+        XCTAssertEqual(current.services, legacy.services)
+        XCTAssertEqual(try InstallationInventory.decode(legacy.canonicalBytes, expectedMacID: id(1)), legacy)
+        XCTAssertEqual(try InstallationInventory.decode(current.canonicalBytes, expectedMacID: id(1)), current)
+        XCTAssertThrowsError(try InstallationInventory(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: legacy.bundlePath, releaseDigest: legacy.releaseDigest,
+            accounts: legacy.accounts, services: [app()], formatVersion: 2))
+    }
+
+    func testBootstrapReleaseComparisonRequiresItsDeclaredSetupCode() throws {
+        let base = try evidence()
+        let setup = try ReleaseComponent(role: .setupController, identifier: "dev.remozio.setup-controller", generation: 1,
+            relativePath: AdministrativeSetupConfiguration.executablePath, codeDirectoryHash: Data(repeating: 3, count: 20),
+            build: "1", teamID: nil, formats: [])
+        let manifest = try ReleaseManifest(release: "1", build: "1", components: base.manifest.components + [setup])
+        let signed = SignedReleaseEvidence(manifest: manifest,
+            codeDirectoryHashes: base.codeDirectoryHashes.merging([.setupController: Data(repeating: 3, count: 20)]) { _, new in new })
+        let value = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: InstallationInventory.digest(signed))
+        try value.compareRelease(signed)
+        XCTAssertThrowsError(try value.compareRelease(base))
+    }
+
 }

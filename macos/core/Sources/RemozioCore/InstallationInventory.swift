@@ -74,6 +74,7 @@ public struct InstallationService: Equatable, Sendable {
 
 /// Machine-scoped metadata. Decoding grants no installation, live-process or update activation authority.
 public struct InstallationInventory: Equatable, Sendable, CustomStringConvertible {
+    public let formatVersion: UInt64
     public let macID: Data
     public let installationID: Data
     public let revision: Data
@@ -85,13 +86,14 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
     public var description: String { "InstallationInventory(redacted)" }
 
     public init(macID: Data, installationID: Data, revision: Data, bundlePath: String, releaseDigest: Data,
-                accounts: [InstallationAccount], services: [InstallationService]) throws {
+                accounts: [InstallationAccount], services: [InstallationService], formatVersion: UInt64 = 1) throws {
         let parts = bundlePath.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
-        guard [macID, installationID, revision].allSatisfy({ $0.count == 16 }), releaseDigest.count == 32,
+        guard (1...2).contains(formatVersion),
+              [macID, installationID, revision].allSatisfy({ $0.count == 16 }), releaseDigest.count == 32,
               bundlePath.hasPrefix("/"), bundlePath.utf8.count < Int(PATH_MAX), parts.count <= 64,
               parts.last?.hasSuffix(".app") == true,
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
-              !accounts.isEmpty, accounts.count <= 64, Set(accounts.map(\.accountID)).count == accounts.count,
+              (formatVersion == 2 || !accounts.isEmpty), accounts.count <= 64, Set(accounts.map(\.accountID)).count == accounts.count,
               Set(accounts.map(\.ownerUID)).count == accounts.count, !services.isEmpty, services.count <= 256 else {
             throw InstallationInventoryError.invalidRecord
         }
@@ -108,7 +110,17 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
                   domains[domain, default: []].insert(service.label).inserted,
                   roles[domain, default: [:]][service.accountID, default: []].insert(service.role).inserted else { throw InstallationInventoryError.invalidRecord }
         }
-        guard services.contains(where: { $0.role == .authority && $0.kind == .daemon }) else { throw InstallationInventoryError.invalidRecord }
+        if accounts.isEmpty {
+            guard formatVersion == 2, services.count == 1 else { throw InstallationInventoryError.invalidRecord }
+            let setup = services[0]
+            guard setup.role == .setupController, setup.kind == .daemon, setup.domainUID == nil,
+                  setup.executionUID == 0, setup.accountID == nil,
+                  setup.label == AdministrativeSetupConfiguration.serviceName,
+                  setup.plistName == AdministrativeSetupConfiguration.plistName else { throw InstallationInventoryError.invalidRecord }
+        } else {
+            guard services.contains(where: { $0.role == .authority && $0.kind == .daemon }) else { throw InstallationInventoryError.invalidRecord }
+        }
+        self.formatVersion = formatVersion
         self.macID = macID; self.installationID = installationID; self.revision = revision
         self.bundlePath = bundlePath; self.releaseDigest = releaseDigest
         self.accounts = accounts.sorted { $0.accountID.lexicographicallyPrecedes($1.accountID) }
@@ -118,9 +130,19 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
             let x = $0.accountID ?? Data(), y = $1.accountID ?? Data()
             return x == y ? $0.role.rawValue < $1.role.rawValue : x.lexicographicallyPrecedes(y)
         }
-        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(macID), 2: .bytes(installationID),
+        canonicalBytes = try DeterministicCBOR.encode(.map([0: .unsigned(formatVersion), 1: .bytes(macID), 2: .bytes(installationID),
             3: .bytes(revision), 4: .text(bundlePath), 5: .bytes(releaseDigest),
             6: .array(self.accounts.map(\.value)), 7: .array(self.services.map(\.value))]), limits: Self.limits)
+    }
+
+    /// Describes a machine before account enrollment. It grants no account, pairing or command authority.
+    public static func machineBootstrap(macID: Data, installationID: Data, revision: Data,
+                                        bundlePath: String, releaseDigest: Data) throws -> Self {
+        let setup = try InstallationService(role: .setupController, kind: .daemon, domainUID: nil,
+            executionUID: 0, label: AdministrativeSetupConfiguration.serviceName,
+            plistName: AdministrativeSetupConfiguration.plistName)
+        return try .init(macID: macID, installationID: installationID, revision: revision,
+            bundlePath: bundlePath, releaseDigest: releaseDigest, accounts: [], services: [setup], formatVersion: 2)
     }
 
     /// Root startup reads retained metadata only. It never initializes, migrates or repairs inventory.
@@ -134,7 +156,8 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
         let decoded: CBORValue
         do { decoded = try DeterministicCBOR.decode(bytes, limits: limits) }
         catch { throw InstallationInventoryError.corruptRecord }
-        guard case .map(let f) = decoded, Set(f.keys) == Set(UInt64(0)...7), f[0] == .unsigned(1),
+        guard case .map(let f) = decoded, Set(f.keys) == Set(UInt64(0)...7),
+              case .unsigned(let version) = f[0], (1...2).contains(version),
               case .bytes(let mac) = f[1], case .bytes(let installation) = f[2], case .bytes(let revision) = f[3],
               case .text(let path) = f[4], case .bytes(let digest) = f[5],
               case .array(let accountValues) = f[6], case .array(let serviceValues) = f[7],
@@ -171,7 +194,7 @@ public struct InstallationInventory: Equatable, Sendable, CustomStringConvertibl
                                            label: label, plistName: plist, accountID: accountID)
         }
         let result = try Self(macID: mac, installationID: installation, revision: revision, bundlePath: path,
-                              releaseDigest: digest, accounts: accounts, services: services)
+                              releaseDigest: digest, accounts: accounts, services: services, formatVersion: version)
         guard result.canonicalBytes == bytes else { throw InstallationInventoryError.corruptRecord }
         return result
     }

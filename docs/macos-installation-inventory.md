@@ -19,7 +19,8 @@ flowchart LR
 
 ## Record and scope
 
-Schema 1 uses deterministic CBOR with exact fields.
+Formats 1 and 2 use deterministic CBOR with the same exact fields.
+Format 2 also permits a machine record before account enrollment.
 It retains the Mac ID, installation ID, revision, absolute bundle path, release digest, account contexts and service declarations.
 Accounts have unique account IDs and owner UIDs.
 The record permits up to 64 accounts and 256 service declarations, within 65,536 bytes.
@@ -40,7 +41,8 @@ Two accounts can retain distinct authority and transport jobs in the same system
 The same app label can occur in two distinct user domains.
 This matches the SDK requirement to register agents from each user's session.
 
-A system authority declaration is mandatory.
+Configured inventory requires a system authority declaration.
+The [machine bootstrap record](macos-machine-bootstrap-inventory.md) permits only the fixed setup declaration before account enrollment.
 Missing optional role declarations do not establish that those roles have no running actors.
 The complete-owner and complete-role checks remain installer and update-owner responsibilities.
 Account IDs and UIDs do not prove directory-account continuity or grant command execution, enrollment or fleet management.
@@ -57,9 +59,10 @@ Incomplete or inconsistent signing evidence cannot produce a digest.
 Comparison rejects changed code, missing declared roles and mismatched main-app identifiers.
 Callers must obtain fresh evidence using the trusted publisher pins.
 
-The signed app manifest declares inventory schema 1 reader and writer support.
-Machine storage supports schemas 1 and 2, with an explicit 1-to-2 migration.
-Opening a store never performs that migration.
+The signed app manifest declares inventory formats 1 and 2 for the authority and setup components.
+It declares the explicit 1-to-2 transition. Other components do not claim inventory access.
+The machine store has separate storage versions. Inventory records require storage version 2 or 3.
+Opening a store never performs a storage upgrade.
 No registration side effect is introduced.
 
 ## Integration gates
