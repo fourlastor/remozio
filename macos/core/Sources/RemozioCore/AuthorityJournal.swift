@@ -127,6 +127,49 @@ public final class AuthorityJournal: @unchecked Sendable {
         self.requests = requests
     }
 
+    /// Authorized local setup uses the existing request owner, audit writer and independent checkpoint.
+    /// The host authenticates the human transcript first and rechecks native administrator consent in the callback.
+    /// Callbacks must not await or reenter this owner. A lost receipt requires reconciliation, not another enrollment.
+    public func commitPairing(_ attempt: PairingEnrollmentAttempt, biometricProof: Data,
+                              signer: EnclaveAuthorityRequestSigner, addEventID: Data, removalEventID: Data? = nil,
+                              receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval? = nil,
+                              recheckAdministrator: () throws -> Void, now: () throws -> AuthorityMoment)
+        throws -> (revision: UUID, receipt: Data, gatewayControl: GatewayAuthorityEnvelope?) {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard signer.macID == attempt.transcript.phone.scope.macID,
+              signer.accountID == attempt.transcript.phone.scope.accountID else { throw AuthorityRequestSignerError.wrongIdentity }
+        return try lock.withLock {
+            try requireNoRequestOperation()
+            guard let requests else { throw ApprovalCoordinatorError.unavailable }
+            try requests.requirePairingCheckpoint()
+            requestOperationActive = true; defer { requestOperationActive = false }
+            return try withStorageFailureCleanup {
+                try requests.commitPairing(attempt, biometricProof: biometricProof, authorityPublicKey: signer.publicKey,
+                    addEventID: addEventID, removalEventID: removalEventID, receiptTimeMs: receiptTimeMs, gateway: gateway,
+                    verifyHost: AuthoritySelfValidation.validate, recheckAdministrator: recheckAdministrator,
+                    now: now, sign: signer.sign)
+            }
+        }
+    }
+
+    /// Receipt recovery requires a current authenticated phone binding. It cannot grant or restore enrollment.
+    public func pairingReceipt(setupID: Data, binding: AuthorityPeerBinding, signer: EnclaveAuthorityRequestSigner) throws -> Data? {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard signer.macID == binding.scope.macID, signer.accountID == binding.scope.accountID else {
+            throw AuthorityRequestSignerError.wrongIdentity
+        }
+        return try lock.withLock {
+            try requireNoRequestOperation()
+            guard let requests else { throw ApprovalCoordinatorError.unavailable }
+            try requests.requirePairingCheckpoint()
+            requestOperationActive = true; defer { requestOperationActive = false }
+            return try withStorageFailureCleanup {
+                try requests.pairingReceipt(setupID: setupID, binding: binding, authorityPublicKey: signer.publicKey,
+                    verifyHost: AuthoritySelfValidation.validate, sign: signer.sign)
+            }
+        }
+    }
+
     /// Runs synchronous request work under the journal lock. The coordinator cannot escape in the result.
     /// The callback must not await or reenter this owner.
     public func withRequests<Value: Sendable>(_ body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {

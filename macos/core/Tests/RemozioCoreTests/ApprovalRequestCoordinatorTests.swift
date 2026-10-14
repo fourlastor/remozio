@@ -266,6 +266,184 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         try restarted.close()
     }
 
+    private func pairingAttempt(_ db: JournalDatabase, authority: P256.Signing.PrivateKey,
+                                replacement: PairingReplacement? = nil) throws -> (PairingEnrollmentAttempt, Data) {
+        let trust = try db.read { try $0.approvalTrustSnapshot() }
+        let scope = try ChannelScope(macID: id(1), accountID: id(2), phoneID: id(8), enrollmentEpoch: id(10))
+        let phoneKey = P256.Signing.PrivateKey(), transport = P256.Signing.PrivateKey()
+        let offers = try [ChannelRole.phone, .mac].enumerated().map { index, role in
+            try ChannelOffer(role: role, scope: scope, nonce: id(UInt8(20 + index), 32), envelopeVersions: [1],
+                requests: [ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [1])], auditVersions: [1])
+        }
+        var revision = trust.revision.uuid
+        let transcript = try PairingTranscript(setupID: id(31), challenge: id(32, 32), phone: offers[0], mac: offers[1],
+            minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: authority.publicKey.x963Representation,
+            macTransportKey: transport.publicKey.x963Representation,
+            transportKey: PairingKey(keyID: id(33), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            decisionKey: PairingKey(keyID: id(34), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            biometricKey: PairingKey(keyID: id(35), publicKey: phoneKey.publicKey.x963Representation),
+            enrollmentTag: id(36, 32), replacement: replacement, expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) },
+            issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+        return (try PairingEnrollmentAttempt(transcript: transcript, trusted: trust, authorizedReplacement: replacement,
+            authorityPublicKey: authority.publicKey.x963Representation, transportPublicKey: transport.publicKey.x963Representation,
+            minimumEnvelopeVersion: 1, started: now(100), startedAtUnixMillis: 1000, deadlineMilliseconds: 1100),
+            try phoneKey.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation)
+    }
+    private func pairingBinding(_ db: JournalDatabase) throws -> AuthorityPeerBinding {
+        let trust = try db.read { try $0.directApprovalTrust(maximumPayloadBytes: 4096) }
+        return AuthorityPeerBinding(peer: try XCTUnwrap(trust.peers.first { $0.scope.phoneID == id(8) }), revision: trust.revision)
+    }
+    private func commitPairing(_ requests: ApprovalRequestCoordinator, _ attempt: PairingEnrollmentAttempt, proof: Data,
+                               authority: P256.Signing.PrivateKey, replacement: Bool = false,
+                               authorize: () throws -> Void = {}, verify: (JournalTransaction) throws -> Void = { _ in },
+                               clock: (() throws -> AuthorityMoment)? = nil, sign: ((Data) throws -> Data)? = nil) throws -> Data {
+        try requests.commitPairing(attempt, biometricProof: proof, authorityPublicKey: authority.publicKey.x963Representation,
+            addEventID: id(40), removalEventID: replacement ? id(41) : nil, receiptTimeMs: 1001, gateway: nil,
+            verifyHost: verify, recheckAdministrator: authorize, now: clock ?? { self.now() },
+            sign: sign ?? { try authority.signature(for: $0).rawRepresentation }).receipt
+    }
+
+    func testPairingProductionBoundaryRejectsAnUnpairedJournalOwner() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), unpaired = try owner(db, writer)
+        defer { try? db.close() }
+        let before = try events(db, writer)
+        XCTAssertThrowsError(try unpaired.requirePairingCheckpoint()) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable)
+        }
+        XCTAssertEqual(try events(db, writer), before)
+        let (paired, store) = try checkpointedOwner(fixture, db, writer)
+        defer { store.close() }
+        XCTAssertNoThrow(try paired.requirePairingCheckpoint())
+        try assertCheckpoint(db, store, writer)
+    }
+
+    func testPairingCommitsCheckpointBeforeSigningAndRejectsReplay() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+        let (requests, store) = try checkpointedOwner(fixture, db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+        defer { try? db.close(); store.close() }
+        var authorized = 0, signed = 0
+        let receipt = try commitPairing(requests, attempt, proof: proof, authority: authority, authorize: { authorized += 1 }, sign: {
+            signed += 1; try self.assertCheckpoint(db, store, writer)
+            XCTAssertEqual(try store.read().committed.generation, 2)
+            XCTAssertEqual(try db.read { try $0.approvalEnrollments().count }, 2)
+            return try authority.signature(for: $0).rawRepresentation
+        })
+        XCTAssertEqual(authorized, 1); XCTAssertEqual(signed, 1)
+        XCTAssertTrue(try attempt.transcript.verify(signature: receipt, publicKey: authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertFalse(try attempt.transcript.verify(signature: receipt, publicKey: authority.publicKey.x963Representation, purpose: .phoneBiometric))
+        let eventsBefore = try events(db, writer)
+        XCTAssertThrowsError(try commitPairing(requests, attempt, proof: proof, authority: authority))
+        XCTAssertEqual(try events(db, writer), eventsBefore); try assertCheckpoint(db, store, writer)
+    }
+
+    func testPairingDeniedConsentBadProofAndExpiryNeverSignOrEnroll() throws {
+        for mode in 0...3 {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+            let (requests, store) = try checkpointedOwner(fixture, db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+            defer { try? db.close(); store.close() }
+            let before = try db.read { try $0.approvalTrustSnapshot().revision }, eventsBefore = try events(db, writer)
+            var signed = false
+            XCTAssertThrowsError(try commitPairing(requests, attempt, proof: mode == 1 ? id(0, 64) : proof, authority: authority,
+                authorize: { if mode == 0 { throw Failure.fixture } }, clock: {
+                    if mode == 3 { throw Failure.fixture }
+                    return self.now(mode == 2 ? 1100 : 110)
+                }, sign: { _ in signed = true; throw Failure.fixture }))
+            XCTAssertFalse(signed); XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, before)
+            XCTAssertEqual(try events(db, writer), eventsBefore); try assertCheckpoint(db, store, writer)
+        }
+    }
+
+    func testPairingLostReceiptRecoversAfterRestartWithoutAnotherCommit() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+        let (requests, store) = try checkpointedOwner(fixture, db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+        XCTAssertThrowsError(try commitPairing(requests, attempt, proof: proof, authority: authority, sign: { _ in throw Failure.fixture }))
+        try assertCheckpoint(db, store, writer)
+        let expectedEvents = try events(db, writer)
+        requests.close(); try db.close(); store.close()
+        let reopened = try open(fixture, initialize: false)
+        let continuity = try ContinuityStore(lease: ProtectedContinuityLease(anchor: fixture.root.path, relativeDirectory: "continuity", owner: getuid()),
+            macID: id(1), accountID: id(2), initialize: nil)
+        defer { try? reopened.close(); continuity.close() }
+        let restarted = try ApprovalRequestCoordinator(database: reopened, continuity: continuity, writer: writer, clockEpoch: UUID(),
+            maximumRequests: 8, maximumRetainedBytes: 32768, requestLimits: limits, captureLimits: limits,
+            decisionLimits: limits, signingLimits: limits, auditLimits: limits)
+        let receipt = try XCTUnwrap(restarted.pairingReceipt(setupID: attempt.transcript.setupID, binding: pairingBinding(reopened),
+            authorityPublicKey: authority.publicKey.x963Representation, verifyHost: { _ in },
+            sign: { try authority.signature(for: $0).rawRepresentation }))
+        XCTAssertTrue(try attempt.transcript.verify(signature: receipt, publicKey: authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(try events(reopened, writer), expectedEvents); try assertCheckpoint(reopened, continuity, writer)
+    }
+
+    func testPairingReceiptRequiresCurrentBindingAndExpectedAuthority() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey(), requests = try owner(db, writer)
+        defer { try? db.close() }
+        let (attempt, proof) = try pairingAttempt(db, authority: authority)
+        _ = try commitPairing(requests, attempt, proof: proof, authority: authority)
+        let binding = try pairingBinding(db), before = try events(db, writer)
+        let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
+        var signed = 0
+        func receipt(_ setup: Data, _ peer: AuthorityPeerBinding, _ key: Data) throws -> Data? {
+            try requests.pairingReceipt(setupID: setup, binding: peer, authorityPublicKey: key, verifyHost: { _ in }, sign: {
+                signed += 1; return try authority.signature(for: $0).rawRepresentation
+            })
+        }
+        XCTAssertThrowsError(try receipt(attempt.transcript.setupID, stale, authority.publicKey.x963Representation))
+        XCTAssertThrowsError(try receipt(attempt.transcript.setupID, binding, P256.Signing.PrivateKey().publicKey.x963Representation))
+        XCTAssertNil(try receipt(id(99), binding, authority.publicKey.x963Representation))
+        XCTAssertEqual(signed, 0)
+        XCTAssertThrowsError(try requests.pairingReceipt(setupID: attempt.transcript.setupID, binding: binding,
+            authorityPublicKey: authority.publicKey.x963Representation, verifyHost: { _ in }, sign: { _ in self.id(0, 64) }))
+        XCTAssertEqual(try events(db, writer), before)
+    }
+
+    func testPairingReplacementUsesOneCheckpointForRevocationEnrollmentAndAudit() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+        let (requests, store) = try checkpointedOwner(fixture, db, writer)
+        defer { try? db.close(); store.close() }
+        let (attempt, proof) = try pairingAttempt(db, authority: authority, replacement: PairingReplacement(phoneID: id(5), epoch: id(9)))
+        _ = try commitPairing(requests, attempt, proof: proof, authority: authority, replacement: true, sign: {
+            try self.assertCheckpoint(db, store, writer)
+            XCTAssertEqual(try store.read().committed.generation, 2)
+            let enrollments = try db.read { try $0.approvalEnrollments() }
+            XCTAssertFalse(try XCTUnwrap(enrollments.first { $0.approval.phoneID == self.id(5) }).approval.active)
+            XCTAssertTrue(try XCTUnwrap(enrollments.first { $0.approval.phoneID == self.id(8) }).approval.active)
+            XCTAssertEqual(try self.events(db, writer).count, 3)
+            return try authority.signature(for: $0).rawRepresentation
+        })
+    }
+
+    func testPairingRevokedWhileSigningCannotReturnReceipt() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey(), requests = try owner(db, writer)
+        defer { try? db.close() }
+        let (attempt, proof) = try pairingAttempt(db, authority: authority)
+        _ = try commitPairing(requests, attempt, proof: proof, authority: authority)
+        let binding = try pairingBinding(db)
+        XCTAssertThrowsError(try requests.pairingReceipt(setupID: attempt.transcript.setupID, binding: binding,
+            authorityPublicKey: authority.publicKey.x963Representation, verifyHost: { _ in }, sign: { input in
+                _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: self.id(8), epoch: self.id(10),
+                    expectedTrustRevision: binding.revision, eventID: self.id(42), receiptTimeMs: 3000, writer: writer, expectedAuditHead: 2) }
+                return try authority.signature(for: input).rawRepresentation
+            }))
+        var signed = false
+        XCTAssertThrowsError(try requests.pairingReceipt(setupID: attempt.transcript.setupID, binding: binding,
+            authorityPublicKey: authority.publicKey.x963Representation, verifyHost: { _ in }, sign: { _ in signed = true; throw Failure.fixture }))
+        XCTAssertFalse(signed)
+    }
+
+    func testPairingHostRecheckFailureLeavesRecoverableCommittedState() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+        let (requests, store) = try checkpointedOwner(fixture, db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+        defer { try? db.close(); store.close() }
+        var checks = 0
+        XCTAssertThrowsError(try commitPairing(requests, attempt, proof: proof, authority: authority, verify: { _ in
+            checks += 1; if checks == 3 { throw Failure.fixture }
+        }))
+        XCTAssertEqual(checks, 3); try assertCheckpoint(db, store, writer)
+        XCTAssertNotNil(try requests.pairingReceipt(setupID: attempt.transcript.setupID, binding: pairingBinding(db),
+            authorityPublicKey: authority.publicKey.x963Representation, verifyHost: { _ in },
+            sign: { try authority.signature(for: $0).rawRepresentation }))
+    }
+
     func testRequestLifecycleCommitsIndependentCheckpointBeforeEachResult() throws {
         let fixture = try Fixture(), (db, writer) = try setup(fixture)
         let (owner, store) = try checkpointedOwner(fixture, db, writer)

@@ -72,7 +72,19 @@ public final class PairingEnrollmentAttempt {
     public func commit(database: JournalDatabase, biometricProof: Data, writer: AuditEpochWriter,
                        expectedAuditHead: UInt64, addEventID: Data, removalEventID: Data? = nil,
                        receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval? = nil,
-                       now: () -> AuthorityMoment) throws -> (revision: UUID, gatewayControl: GatewayAuthorityEnvelope?) {
+                       now: () throws -> AuthorityMoment) throws -> (revision: UUID, gatewayControl: GatewayAuthorityEnvelope?) {
+        try database.write { transaction in
+            try commit(transaction: transaction, biometricProof: biometricProof, writer: writer,
+                expectedAuditHead: expectedAuditHead, addEventID: addEventID, removalEventID: removalEventID,
+                receiptTimeMs: receiptTimeMs, gateway: gateway, now: now)
+        }
+    }
+
+    /// The shared request owner supplies its checkpointed transaction and current audit head.
+    func commit(transaction: JournalTransaction, biometricProof: Data, writer: AuditEpochWriter,
+                expectedAuditHead: UInt64, addEventID: Data, removalEventID: Data?,
+                receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval?,
+                now: () throws -> AuthorityMoment) throws -> (revision: UUID, gatewayControl: GatewayAuthorityEnvelope?) {
         guard try transcript.verify(signature: biometricProof, publicKey: transcript.biometricKey.publicKey, purpose: .phoneBiometric) else {
             throw PairingEnrollmentError.invalidProof
         }
@@ -81,30 +93,28 @@ public final class PairingEnrollmentAttempt {
             guard let removalEventID, removalEventID.count == 16, removalEventID != addEventID,
                   expectedAuditHead < UInt64.max - 1 else { throw PairingEnrollmentError.invalidAudit }
         } else if removalEventID != nil || gateway != nil { throw PairingEnrollmentError.wrongContext }
-        return try database.write { transaction in
-            let current = now()
-            guard current.epoch == started.epoch, current.milliseconds >= started.milliseconds,
-                  current.milliseconds < deadline else { throw PairingEnrollmentError.expired }
-            let trust = try transaction.approvalTrustSnapshot()
-            guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
-            guard try transcript.phone.scope == ChannelScope(macID: trust.macID, accountID: trust.accountID,
-                phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch) else { throw PairingEnrollmentError.wrongContext }
-            var expected = revision
-            var head = expectedAuditHead
-            var control: GatewayAuthorityEnvelope?
-            if let replacement = authorizedReplacement {
-                let removed = try transaction.revokeApprovalEnrollment(phoneID: replacement.phoneID, epoch: replacement.epoch,
-                    expectedTrustRevision: expected, eventID: removalEventID!, receiptTimeMs: receiptTimeMs,
-                    writer: writer, expectedAuditHead: head, gateway: gateway)
-                expected = removed.revision; control = removed.gatewayControl; head += 1
-            }
-            let next = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: expected,
-                eventID: addEventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: head)
-            try transaction.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment)
-            let finished = now()
-            guard finished.epoch == started.epoch, finished.milliseconds >= current.milliseconds,
-                  finished.milliseconds < deadline else { throw PairingEnrollmentError.expired }
-            return (next, control)
+        let current = try now()
+        guard current.epoch == started.epoch, current.milliseconds >= started.milliseconds,
+              current.milliseconds < deadline else { throw PairingEnrollmentError.expired }
+        let trust = try transaction.approvalTrustSnapshot()
+        guard trust.revision == revision else { throw EnrollmentJournalError.staleRevision }
+        guard try transcript.phone.scope == ChannelScope(macID: trust.macID, accountID: trust.accountID,
+            phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch) else { throw PairingEnrollmentError.wrongContext }
+        var expected = revision
+        var head = expectedAuditHead
+        var control: GatewayAuthorityEnvelope?
+        if let replacement = authorizedReplacement {
+            let removed = try transaction.revokeApprovalEnrollment(phoneID: replacement.phoneID, epoch: replacement.epoch,
+                expectedTrustRevision: expected, eventID: removalEventID!, receiptTimeMs: receiptTimeMs,
+                writer: writer, expectedAuditHead: head, gateway: gateway)
+            expected = removed.revision; control = removed.gatewayControl; head += 1
         }
+        let next = try transaction.addApprovalEnrollment(enrollment, expectedTrustRevision: expected,
+            eventID: addEventID, receiptTimeMs: receiptTimeMs, writer: writer, expectedAuditHead: head)
+        try transaction.retainPairing(transcript, biometricProof: biometricProof, enrollment: enrollment)
+        let finished = try now()
+        guard finished.epoch == started.epoch, finished.milliseconds >= current.milliseconds,
+              finished.milliseconds < deadline else { throw PairingEnrollmentError.expired }
+        return (next, control)
     }
 }

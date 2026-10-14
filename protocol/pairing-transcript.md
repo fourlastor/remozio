@@ -65,4 +65,6 @@ Android must retain PREPARED state and the exact expected transcript through amb
 
 The existing design still requires QR and equivalent text pairing, human verification, administrator authorization, and a phone biometric. These codecs do not implement those flows, an invitation endpoint, a verification-code UX, or crash recovery. No network message can call privileged enrollment merely because it decodes here.
 
+The configured Mac authority now commits pairing through its shared checkpointed request owner and signs or recovers commit receipts. See [the host contract and evidence limits](../docs/macos-checkpointed-pairing-receipts.md). This does not provide an invitation endpoint or usable pairing UI.
+
 Shared add/replacement vectors test identical Swift/Kotlin bytes and digests. Invalid vectors cover malformed keys, repeated identities, incompatible roles and versions, expiry ordering, and schema changes. Tests also verify purpose separation and altered setup claims. Physical pairing and hardware proof remain untested.

@@ -145,6 +145,68 @@ public final class ApprovalRequestCoordinator {
         checkpointed = commits
     }
 
+    /// Product pairing requires the independent store. Unpaired owners remain internal component fixtures only.
+    func requirePairingCheckpoint() throws {
+        try running()
+        guard checkpointed != nil else { throw ApprovalCoordinatorError.unavailable }
+    }
+
+    /// Local setup only. The host rechecks administrator consent inside the checkpointed commit.
+    /// A signing failure after commit is ambiguous; recover the retained receipt instead of enrolling again.
+    func commitPairing(_ attempt: PairingEnrollmentAttempt, biometricProof: Data, authorityPublicKey: Data,
+                       addEventID: Data, removalEventID: Data?, receiptTimeMs: UInt64?, gateway: EnrollmentGatewayRemoval?,
+                       verifyHost: (JournalTransaction) throws -> Void, recheckAdministrator: () throws -> Void,
+                       now: () throws -> AuthorityMoment, sign: (Data) throws -> Data)
+        throws -> (revision: UUID, receipt: Data, gatewayControl: GatewayAuthorityEnvelope?) {
+        let transcript = attempt.transcript
+        guard transcript.phone.scope.macID == mac, transcript.phone.scope.accountID == account,
+              transcript.macAuthorityKey == authorityPublicKey else { throw PairingEnrollmentError.wrongContext }
+        let committed = try write { tx in
+            try verifyHost(tx)
+            try recheckAdministrator()
+            return try attempt.commit(transaction: tx, biometricProof: biometricProof, writer: writer,
+                expectedAuditHead: head(tx), addEventID: addEventID, removalEventID: removalEventID,
+                receiptTimeMs: receiptTimeMs, gateway: gateway, now: {
+                    let moment = try now(); try checkClock(moment); return moment
+                })
+        }
+        let receipt = try retainedPairingReceipt(setupID: transcript.setupID, phoneID: transcript.phone.scope.phoneID,
+            epoch: transcript.phone.scope.enrollmentEpoch, authorityPublicKey: authorityPublicKey,
+            verifyHost: verifyHost, sign: sign)
+        guard let receipt else { throw EnrollmentJournalError.unavailableEnrollment }
+        return (committed.revision, receipt, committed.gatewayControl)
+    }
+
+    /// The transport supplies the authenticated binding. Expiry does not undo an already durable enrollment.
+    func pairingReceipt(setupID: Data, binding: AuthorityPeerBinding, authorityPublicKey: Data,
+                        verifyHost: (JournalTransaction) throws -> Void, sign: (Data) throws -> Data) throws -> Data? {
+        guard binding.scope.macID == mac, binding.scope.accountID == account else { throw PairingEnrollmentError.wrongContext }
+        return try retainedPairingReceipt(setupID: setupID, phoneID: binding.scope.phoneID,
+            epoch: binding.scope.enrollmentEpoch, authorityPublicKey: authorityPublicKey,
+            verifyHost: { tx in try verifyHost(tx); try tx.requireDirectApprovalBinding(binding) }, sign: sign)
+    }
+
+    private func retainedPairingReceipt(setupID: Data, phoneID: Data, epoch: Data, authorityPublicKey: Data,
+                                       verifyHost: (JournalTransaction) throws -> Void, sign: (Data) throws -> Data) throws -> Data? {
+        func retained(_ tx: JournalTransaction) throws -> PairingTranscript? {
+            try verifyHost(tx)
+            guard let transcript = try tx.committedPairing(setupID: setupID, authenticatedPhoneID: phoneID,
+                authenticatedEnrollmentEpoch: epoch) else { return nil }
+            guard transcript.phone.scope.macID == mac, transcript.phone.scope.accountID == account,
+                  transcript.macAuthorityKey == authorityPublicKey else { throw PairingEnrollmentError.wrongContext }
+            return transcript
+        }
+        guard let transcript = try read(retained) else { return nil }
+        let receipt = try sign(transcript.signingInput(purpose: .macCommit))
+        guard try transcript.verify(signature: receipt, publicKey: authorityPublicKey, purpose: .macCommit) else {
+            throw PairingEnrollmentError.invalidProof
+        }
+        guard let current = try read(retained), try current.encode() == transcript.encode() else {
+            throw EnrollmentJournalError.unavailableEnrollment
+        }
+        return receipt
+    }
+
     deinit { close() }
 
     /// Retires live requests and their OS resources. The journal owner closes storage separately.
