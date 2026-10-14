@@ -126,6 +126,14 @@ Privileged reconciliation and installed service discovery remain release gates.
 Headless PTY output routing remains a pending user choice.
 Setup provisioning, CLI path installation, Developer ID signing, and real-device approval tests remain separate gates.
 
+## Installed command mode
+
+`RemozioAuthority --command-configuration /absolute/protected/command-host.cbor` selects the existing complete command runtime.
+The [host factory](../../docs/macos-installed-command-entrypoint.md) verifies current protected code, release and account metadata before native check-in.
+The app bundles its fixed daemon declaration. Bundling does not register or activate it.
+Setup must still publish valid host inputs, explicit elevation grants and frontend metadata.
+Native installation, hardware custody, target credentials and Mac–Pixel pairing remain separate gates.
+
 ## Embedded approval transport
 
 `RemozioTransport` is embedded at `Contents/Library/LaunchServices/RemozioTransport`.

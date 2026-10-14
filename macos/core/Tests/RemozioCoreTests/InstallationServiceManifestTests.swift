@@ -109,12 +109,12 @@ final class InstallationServiceManifestTests: XCTestCase {
         let path = "/Library/Remozio/authority.cbor"
         let malformed = [[component.relativePath, path], [component.relativePath, path, "--configuration"],
             [component.relativePath, "--configuration", "/other", path],
-            [component.relativePath, "--unsupported", path], [component.relativePath, "--command-configuration", path]]
+            [component.relativePath, "--unsupported", path]]
         for arguments in malformed {
             XCTAssertThrowsError(try InstallationServiceManifest(declaration: service, component: component,
                 configurationPath: path, userName: "root", arguments: arguments, machServices: [], runAtLoad: true, keepAlive: true))
         }
-        for mode in ["--configuration", "--presence-configuration"] {
+        for mode in ["--configuration", "--presence-configuration", "--command-configuration"] {
             XCTAssertNoThrow(try InstallationServiceManifest(declaration: service, component: component,
                 configurationPath: path, userName: "root", arguments: [component.relativePath, mode, path],
                 machServices: [], runAtLoad: true, keepAlive: true))

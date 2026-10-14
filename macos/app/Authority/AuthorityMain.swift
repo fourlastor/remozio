@@ -7,14 +7,14 @@ struct AuthorityMain {
     private enum RunFailure: Error { case startup(AuthorityStartupFailure), retired, shutdown }
     static func main() async {
         guard CommandLine.arguments.count == 3,
-              ["--configuration", "--presence-configuration"].contains(CommandLine.arguments[1]) else {
-            fail("Usage: RemozioAuthority --configuration|--presence-configuration /absolute/protected/configuration.cbor", code: EX_USAGE)
+              ["--configuration", "--presence-configuration", "--command-configuration"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioAuthority --configuration|--presence-configuration|--command-configuration /absolute/protected/configuration.cbor", code: EX_USAGE)
         }
         guard getuid() == 0, geteuid() == 0 else { fail("Authority startup requires the Root account.", code: EX_NOPERM) }
         signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
-        let presenceMode = CommandLine.arguments[1] == "--presence-configuration", path = CommandLine.arguments[2]
+        let requestMode = CommandLine.arguments[1] != "--configuration", commandMode = CommandLine.arguments[1] == "--command-configuration", path = CommandLine.arguments[2]
         let worker = Task {
-            if presenceMode { try await runPresence(path: path) }
+            if requestMode { try await runRequests(path: path, command: commandMode) }
             else { try await runLegacy(path: path) }
         }
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
@@ -35,8 +35,10 @@ struct AuthorityMain {
             }
         } catch { fail("Authority startup failed. Check protected provisioning and configuration.", code: EX_CONFIG) }
     }
-    private static func runPresence(path: String) async throws {
-        let runner = try AuthorityRuntimeRunner(presenceConfigurationPath: path, report: reportRuntime)
+    private static func runRequests(path: String, command: Bool) async throws {
+        let runner = try command
+            ? AuthorityRuntimeRunner(installedCommandConfigurationPath: path, report: reportRuntime)
+            : AuthorityRuntimeRunner(presenceConfigurationPath: path, report: reportRuntime)
         do {
             try await runner.start()
             while true {

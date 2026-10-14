@@ -66,7 +66,8 @@ It checks retained age, lifetime, actions, exact arguments and environment addit
 It uses an anonymous receive right, software fixture keys and an ordinary-account identity seam.
 The terminal profile uses redirected disposable streams. It does not prove a real controlling terminal.
 
-The application does not select this startup mode yet.
+The embedded authority now selects this runtime through the [installed command host](macos-installed-command-entrypoint.md).
+Protected setup and actual installed activation remain pending.
 The APIs do not install accounts or register a service.
 Configured version 2 execution still requires the installed activation gates below.
 Installed IPC validation in [issue 286](https://github.com/rock3r/remozio/issues/286) and full target-group semantics in [issue 298](https://github.com/rock3r/remozio/issues/298) remain activation gates.
@@ -121,7 +122,7 @@ A notice refused during saturation or shutdown receives the same exact-request r
 Shutdown joins in-flight rejection work. A rejection storage failure retires the runtime and reports failure without claiming cancellation.
 Saturation retires the enclosing runtime after rejection instead of silently dropping an approval.
 The execution queue and active command limits remain explicit host settings. Installed Root behavior and complete target groups remain gates in issues 286 and 298.
-The app entry point and installer do not activate command mode as part of this integration change.
+The embedded entry point can select command mode after protected installation checks. The installer remains pending.
 
 Twenty-three focused checks cover the scheduler, versioned configuration, original-request rejection, native ownership and enclosing runtime lifecycle.
 The native cases execute disposable ordinary-account targets through both current mapped profiles.

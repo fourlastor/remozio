@@ -33,7 +33,7 @@ def check(configuration):
     usage = subprocess.run([str(authority)], text=True, capture_output=True, timeout=5)
     require(usage.returncode == 64 and 'Usage:' in usage.stderr, 'Authority must reject missing configuration')
     if os.geteuid() != 0:
-        for flag in ('--configuration', '--presence-configuration'):
+        for flag in ('--configuration', '--presence-configuration', '--command-configuration'):
             denied = subprocess.run([str(authority), flag, '/nonexistent/remozio.cbor'],
                                     text=True, capture_output=True, timeout=5)
             require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
@@ -173,12 +173,15 @@ def check(configuration):
     resources = plistlib.loads(run('plutil', '-convert', 'xml1', '-o', '-', str(strings)).stdout.encode())
     require(resources.get('This Mac is not configured') == 'This Mac is not configured', 'Missing application strings')
     daemon_directory = app / 'Contents/Library/LaunchDaemons'
-    require({p.name for p in daemon_directory.iterdir()} == {'dev.remozio.setup.plist'}, 'Unexpected bundled daemon manifests')
+    require({p.name for p in daemon_directory.iterdir()} == {'dev.remozio.setup.plist', 'dev.remozio.authority.plist'}, 'Unexpected bundled daemon manifests')
     job = plistlib.loads((daemon_directory / 'dev.remozio.setup.plist').read_bytes())
     require(job == {'Label': 'dev.remozio.setup', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioSetup',
         'ProgramArguments': ['Contents/Library/LaunchServices/RemozioSetup', '--configuration', '/Library/Application Support/Remozio/setup.cbor'],
         'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.remozio.setup': True}},
         'Setup manifest differs from the fixed local service contract')
+    authority_job = plistlib.loads((daemon_directory / 'dev.remozio.authority.plist').read_bytes())
+    require(authority_job == {'Label': 'dev.remozio.authority', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioAuthority', 'ProgramArguments': ['Contents/Library/LaunchServices/RemozioAuthority', '--command-configuration', '/Library/Application Support/Remozio/command-host.cbor'], 'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.remozio.authority': True, 'dev.remozio.presence': True, 'dev.remozio.commands': True}},
+        'Authority manifest differs from the fixed command service contract')
     require(not (app / 'Contents/Library/LaunchAgents').exists(), 'Unexpected service manifests in the app scaffold')
     print(f'Mac app {configuration}: arm64, macOS 26, signature, runtime, resources, and bundle checks passed.')
 

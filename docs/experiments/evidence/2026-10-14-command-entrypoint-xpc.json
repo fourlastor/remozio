@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "experiment": "macos-xpc-identifiers",
+  "recordedAt": "2026-10-14T01:02:56.882750+00:00",
+  "status": "passed",
+  "cases": [
+    {
+      "name": "matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "wrong-client-identifier",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "wrong-server-requirement",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "guarded-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "guarded-matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "matching-peers-after-rejections",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "discovery-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "discovery-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "discovery-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "exchange-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "exchange-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "frame-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "frame-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    }
+  ],
+  "environment": {
+    "macOS": "27.0.1",
+    "architecture": "arm64",
+    "xcode": "Xcode 27.0\nBuild version 27A266a",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx27.0.0",
+    "deploymentTarget": "arm64-apple-macosx26.0",
+    "signing": "ad-hoc identifiers only; not Developer ID or Team ID validation"
+  },
+  "temporaryService": "gui/<local-user>/dev.remozio.experiments.<disposable-id>",
+  "cleanup": {
+    "bootoutExitCode": 0,
+    "serviceAbsent": true
+  },
+  "sourceCommit": "4bd98e36aee005534434dbb2f75d2d35d5e21242",
+  "uncommittedChanges": "Explicit continuity guards in the new command host; no change to the live probe or its imported XPC selectors",
+  "sourceSHA256": {
+    "scripts/run-macos-xpc-experiment.py": "8f1ff3538b226986ce013882e398827955034a2a22a3dc6b1e0b7de3779b1706",
+    "experiments/macos/Package.swift": "10e101775b236e63e72f2b4f98d1f9decef3d07c9b87fa93bc9ee524a0be7e00",
+    "experiments/macos/Package.resolved": "57ac46ab3d200e8c5e821a2e2f6d59baed3b221384d12e5dbb62c667b9ec6357",
+    "experiments/macos/Sources/XPCProbe/Probe.swift": "5568e424387b7a1eacfe769ff1286cbc44ccbdec64194dd1dc29425e9f16cea7",
+    "macos/core/Sources/RemozioCore/AuthorityXPCChannel.swift": "177fc471af00ae1c2427ce741c5fe9c8ef49bfd773779071785dcde61de8b554"
+  },
+  "liveInputsMatchBase": true,
+  "installedRootIPCVerified": false,
+  "registeredCommandReceiveRightTested": false,
+  "realDeviceE2ETested": false
+}

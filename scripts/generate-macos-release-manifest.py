@@ -28,7 +28,7 @@ def declarations(role):
         1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1])],
         2: [('authority.service-config', [1, 2]), ('authority.request-config', [1]),
             ('authority.wake-config', [1]), ('authority.presence-config', [1]),
-            ('authority.command-config', [1, 2]), ('authority.command-execution-config', [1]),
+            ('authority.command-config', [1, 2]), ('authority.command-host-config', [1]), ('authority.command-execution-config', [1]),
             ('authority.code-policy', [1, 2, 3]), ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         4: [('transport.config', [1, 2]), ('transport.wake-config', [1]), ('transport.remote-config', [1]),
             ('command.capture', [1, 2, 3]), ('approval.message', [1])],

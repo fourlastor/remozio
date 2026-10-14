@@ -139,7 +139,9 @@
   000000000000000000000213 = { isa = PBXBuildFile; fileRef = 000000000000000000000204; settings = { ATTRIBUTES = (); }; };
   000000000000000000000220 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Setup/dev.remozio.setup.plist"; sourceTree = "<group>"; };
   000000000000000000000221 = { isa = PBXBuildFile; fileRef = 000000000000000000000220; };
-  000000000000000000000222 = { isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = Contents/Library/LaunchDaemons; dstSubfolderSpec = 1; files = (000000000000000000000221,); name = "Embed Setup Registration"; runOnlyForDeploymentPostprocessing = 0; };
+  000000000000000000000222 = { isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = Contents/Library/LaunchDaemons; dstSubfolderSpec = 1; files = (000000000000000000000221,000000000000000000000224,); name = "Embed Service Registrations"; runOnlyForDeploymentPostprocessing = 0; };
+  000000000000000000000223 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Authority/dev.remozio.authority.plist"; sourceTree = "<group>"; };
+  000000000000000000000224 = { isa = PBXBuildFile; fileRef = 000000000000000000000223; };
  };
  rootObject = 000000000000000000000001;
 }

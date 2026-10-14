@@ -1,0 +1,116 @@
+import Darwin
+import Foundation
+import RemozioMach
+
+/// Holds current protected placement and machine metadata through runtime shutdown.
+/// Every operation on the machine store uses this lock. The receive host owns a transferred right.
+final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
+    let configuration: InstalledAuthorityCommandConfiguration
+    private let lock = NSLock()
+    private let path: String
+    private let selfPath: String
+    private let bundle: URL
+    private let requirement: String
+    private let placement: ReleaseDestinationLease
+    private let machine: PreparationIntentStore
+    private var closed = false
+    private var taken = false
+
+    static func open(path: String) throws -> InstalledAuthorityCommandRegistration {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let config = try InstalledAuthorityCommandConfiguration.load(path: path)
+        let entry = config.codePolicy.entries.first(where: { $0.role == .authority })!
+        let requirement = try XPCPeerPolicy(teamID: entry.teamID, componentIdentifier: entry.identifier,
+            approvedCodeDirectoryHashes: [entry.codeDirectoryHash], expectedUserID: 0).requirement
+            + " and info[\"RemozioSecurityGeneration\"] = \"\(entry.installedGeneration)\""
+        try DynamicCodeValidation.validateSelf(requirement: requirement)
+        let selfPath = try DynamicCodeValidation.selfPath(), suffix = "/" + InstalledAuthorityCommandConfiguration.executablePath
+        guard selfPath.hasSuffix(suffix) else { throw InstalledAuthorityCommandError.wrongExecutable }
+        let bundle = URL(fileURLWithPath: String(selfPath.dropLast(suffix.count)))
+        let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
+        var store: PreparationIntentStore?
+        do {
+            _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+            let app = config.codePolicy.entries.first(where: { $0.role == .app })!
+            try config.validateRelease(SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier), bundlePath: bundle.path)
+            let machine = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
+            store = machine
+            let owner = InstalledAuthorityCommandRegistration(configuration: config, path: path, selfPath: selfPath,
+                bundle: bundle, requirement: requirement, placement: placement, machine: machine)
+            try owner.validate()
+            return owner
+        } catch { try? store?.close(); placement.close(); throw error }
+    }
+    private init(configuration: InstalledAuthorityCommandConfiguration, path: String, selfPath: String,
+                 bundle: URL, requirement: String, placement: ReleaseDestinationLease, machine: PreparationIntentStore) {
+        self.configuration = configuration; self.path = path; self.selfPath = selfPath; self.bundle = bundle
+        self.requirement = requirement; self.placement = placement; self.machine = machine
+    }
+    private func validate() throws {
+        guard !closed, getuid() == 0, geteuid() == 0 else { throw InstalledAuthorityCommandError.unavailable }
+        guard try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == configuration.canonicalBytes else {
+            throw InstalledAuthorityCommandError.changedConfiguration
+        }
+        try DynamicCodeValidation.validateSelf(requirement: requirement)
+        guard try DynamicCodeValidation.selfPath() == selfPath else { throw InstalledAuthorityCommandError.wrongExecutable }
+        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        let app = configuration.codePolicy.entries.first(where: { $0.role == .app })!
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        guard let inventory = try machine.loadInventory() else { throw InstalledAuthorityCommandError.wrongInstallation }
+        let declaration = try configuration.validate(inventory: inventory, release: release, bundlePath: bundle.path)
+        let service = configuration.command.presence.wake.request.service
+        guard let continuityDirectory = service.continuityDirectory,
+              let intent = try machine.initialization(accountID: configuration.command.accountID), intent.complete,
+              intent.installationID == configuration.installationID,
+              intent.journalPath == service.journalDirectory + "/journal.sqlite",
+              intent.continuityPath == continuityDirectory + "/continuity.sqlite" else {
+            throw InstalledAuthorityCommandError.wrongInstallation
+        }
+        let component = release.manifest.components.first(where: { $0.role == .authority })!
+        let manifest = try InstallationServiceManifest(declaration: declaration, component: component, configurationPath: path,
+            userName: "root", arguments: [component.relativePath, "--command-configuration", path],
+            machServices: [service.serviceName, configuration.command.presence.endpoint.serviceName, configuration.command.serviceName],
+            runAtLoad: true, keepAlive: true)
+        try manifest.validate(ProtectedServiceConfiguration.readPublic(path: bundle.appendingPathComponent(
+            "Contents/Library/LaunchDaemons/" + configuration.plistName).path), inventory: inventory, release: release)
+        try placement.validate()
+    }
+    func takeReceiveRight() throws -> mach_port_t {
+        try lock.withLock {
+            guard !taken else { throw InstalledAuthorityCommandError.unavailable }
+            try validate()
+            var port = mach_port_t(MACH_PORT_NULL)
+            let status = configuration.command.serviceName.withCString { remozio_authority_check_in_service($0, &port) }
+            guard status == KERN_SUCCESS else { throw InstalledAuthorityCommandError.unavailable }
+            taken = true
+            return port
+        }
+    }
+    func close() throws {
+        try lock.withLock {
+            guard !closed else { return }
+            try machine.close(); placement.close(); closed = true
+        }
+    }
+    deinit { try? machine.close(); placement.close() }
+}
+
+extension AuthorityRuntimeRunner {
+    /// Restores one configured command runtime from current protected installation state on every attempt.
+    public init(installedCommandConfigurationPath: String, initialRetryMilliseconds: Int = 1000,
+                maximumRetryMilliseconds: Int = 30_000, monitorMilliseconds: Int = 250,
+                report: @escaping @Sendable (Status) -> Void) throws {
+        try self.init(initialRetryMilliseconds: initialRetryMilliseconds, maximumRetryMilliseconds: maximumRetryMilliseconds,
+            monitorMilliseconds: monitorMilliseconds, open: {
+                let registration = try InstalledAuthorityCommandRegistration.open(path: installedCommandConfigurationPath)
+                do {
+                    let service = try AuthorityWakeService.open(configuration: registration.configuration.command,
+                        takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
+                        reconcileExpired: Self.reconcileCoordinatorExpiration)
+                    return AuthorityRuntimeInstance(start: { try await service.start() }, close: {
+                        try await service.close(); try registration.close()
+                    }, retired: { await service.isRetired })
+                } catch { try? registration.close(); throw error }
+            }, report: report)
+    }
+}
