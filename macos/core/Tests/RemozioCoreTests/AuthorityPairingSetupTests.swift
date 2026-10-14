@@ -311,6 +311,21 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         try fixture.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation
     }
 
+    func testPhoneOnlyProposalStagesThroughTheExistingVersionOneRootChannel() async throws {
+        let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
+        let original = try f.proposal()
+        let proposal = try PairingPhoneProposal(phone: original.phone, transportKey: original.transportKey,
+            decisionKey: original.decisionKey, biometricKey: original.biometricKey)
+        _ = try await channel.start()
+        let value = try await channel.stage(proposal, authorization: authorization)
+        try proposal.validate(value)
+        XCTAssertNotEqual(value.setupID, Data(count: 16)); XCTAssertNotEqual(value.challenge, Data(count: 32))
+        XCTAssertNotEqual(value.enrollmentTag, Data(count: 32)); XCTAssertEqual(value.issuedAtUnixMillis, 1000)
+        let receipt = try await channel.commit(confirmedDigest: value.digest(), biometricProof: proof(value, f), authorization: authorization)
+        XCTAssertTrue(try value.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(driver.commitSends.value, 1); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
+        await channel.close()
+    }
     func testClientAuthenticatesParametersStagesAndVerifiesReceipt() async throws {
         let f = try Fixture(), driver = try ClientDriver(f), channel = client(f, driver: driver)
         let context = try await channel.start()

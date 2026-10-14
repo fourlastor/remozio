@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Network
@@ -7,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -124,6 +125,54 @@ let result = SecPKCS12Import(identityData as CFData, [kSecImportExportPassphrase
 guard result == errSecSuccess else { throw ProbeError.identityImport(result) }
 guard let items = imported as? [[String: Any]], let value = items.first?[kSecImportItemIdentity as String] else { throw ProbeError.invalidInput }
 let identity = value as! SecIdentity
+@Sendable func pairingRandom(_ count: Int) throws -> Data {
+    var result = Data(count: count)
+    guard result.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }) == errSecSuccess else {
+        throw ProbeError.invalidInput
+    }
+    return result
+}
+if setup.pairing == true {
+    // This fixture signs a synthetic receipt. It has no Root journal, enrollment, hardware key or administrator consent.
+    var certificate: SecCertificate?
+    guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess, let certificate,
+          let key = SecCertificateCopyKey(certificate), let transport = SecKeyCopyExternalRepresentation(key, nil) as Data? else {
+        throw ProbeError.invalidInput
+    }
+    let authority = P256.Signing.PrivateKey()
+    let invitation = try PairingInvitation(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+        label: "Synthetic pairing fixture", authorityPublicKey: authority.publicKey.x963Representation,
+        transportPublicKey: transport, minimumEnvelopeVersion: 1)
+    let invitationText = try invitation.exportText()
+    let pairing = try PairingSetupListener(identity: identity, invitation: invitation, binding: .loopback,
+        maximumConnections: setup.maximumConnections ?? 2, handshakeTimeoutMilliseconds: 4000,
+        setupTimeoutMilliseconds: 10000, event: { event in
+            switch event {
+            case .ready(let port):
+                guard let data = try? JSONSerialization.data(withJSONObject: ["port": Int(port), "invitation": invitationText]) else { exit(1) }
+                FileHandle.standardOutput.write(data + Data([10]))
+            case .failed: exit(1)
+            case .stopped: break
+            }
+        }, handler: { channel in
+            let proposal = try await channel.proposal()
+            let offer = try ChannelOffer(role: .mac, scope: proposal.phone.scope, nonce: pairingRandom(32), envelopeVersions: [1],
+                requests: [], auditVersions: [])
+            let wall = UInt64(Date().timeIntervalSince1970 * 1000)
+            let transcript = try PairingTranscript(setupID: pairingRandom(16), challenge: pairingRandom(32), phone: proposal.phone, mac: offer,
+                minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: invitation.authorityPublicKey,
+                macTransportKey: invitation.transportPublicKey, transportKey: proposal.transportKey,
+                decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey, enrollmentTag: pairingRandom(32),
+                replacement: nil, expectedTrustRevision: pairingRandom(16), issuedAtUnixMillis: wall, expiresAtUnixMillis: wall + 10000)
+            try await channel.stage(transcript)
+            _ = try await channel.receiveProof()
+            let receipt = try authority.signature(for: transcript.signingInput(purpose: .macCommit)).rawRepresentation
+            try await channel.sendReceipt(receipt)
+        })
+    try pairing.start()
+    DispatchQueue.global().async { _ = getchar(); Task { await pairing.closeAndWait(); exit(0) } }
+    dispatchMain()
+}
 if setup.negotiate == true {
     let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
         phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))

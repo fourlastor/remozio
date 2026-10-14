@@ -132,6 +132,22 @@ public actor AuthorityPairingChannel {
             self.context = context; state = .open; return context
         } catch { close(); throw error }
     }
+    /// Adapt phone-only network claims to the existing local version-1 staging contract.
+    /// The placeholder fields never leave local XPC. Only Root's returned transcript can be confirmed or signed.
+    public func stage(_ proposal: PairingPhoneProposal, authorization: Data) async throws -> PairingTranscript {
+        guard state == .open, let context else { throw AuthorityPairingChannelError.closed }
+        var nonce = proposal.phone.nonce; nonce[0] ^= 1
+        let mac = try ChannelOffer(role: .mac, scope: proposal.phone.scope, nonce: nonce, envelopeVersions: [1],
+            requests: [], auditVersions: [])
+        let local = try PairingTranscript(setupID: Data(count: 16), challenge: Data(count: 32), phone: proposal.phone, mac: mac,
+            minimumEnvelopeVersion: context.minimumEnvelopeVersion,
+            selectedEnvelopeVersion: CompatibilityPolicy.envelopeVersion(local: [1], peer: proposal.phone.envelopeVersions,
+                trustedMinimum: context.minimumEnvelopeVersion), macAuthorityKey: context.authorityPublicKey,
+            macTransportKey: context.transportPublicKey, transportKey: proposal.transportKey,
+            decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey, enrollmentTag: Data(count: 32),
+            replacement: nil, expectedTrustRevision: Data(count: 16), issuedAtUnixMillis: 0, expiresAtUnixMillis: 1)
+        return try await stage(local, authorization: authorization)
+    }
     /// Retain and show the returned transcript. The proposal's Mac-generated fields are replaced by Root.
     public func stage(_ proposal: PairingTranscript, authorization: Data) async throws -> PairingTranscript {
         guard state == .open, let context, staged == nil else { throw AuthorityPairingChannelError.closed }

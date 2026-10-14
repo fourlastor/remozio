@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "experiment": "restricted-pairing-native-jvm-tls",
+  "status": "passed",
+  "baseCommit": "48acf3e2c4ab0c3f961ad15c14d687b8a390279f",
+  "testTimestampUTC": "2026-10-14T06:32:37.389Z",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "tlsVersion": "TLSv1.3",
+  "loopbackOnly": true,
+  "tests": 4,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "cases": [
+    "invitationPinAndAuthorityChangesFailBeforeABiometricProof",
+    "unpairedTLSCandidateReceivesAndVerifiesTheExactSetupReceipt",
+    "nativeSetupRejectsATransportClaimThatDiffersFromTheTLSClient",
+    "approvalALPNCannotUseTheSetupListener"
+  ],
+  "negativeTimeoutsCountAsRejection": false,
+  "gracefulHandlerDrainAndZeroExitRequired": true,
+  "disposableSoftwareKeysOnly": true,
+  "installedRootTested": false,
+  "durableAuthorityCommitTested": false,
+  "administratorConsentTested": false,
+  "androidHardwareBiometricsTested": false,
+  "physicalPixelTested": false,
+  "serviceAccountsTested": false,
+  "macOS26RuntimeTested": false,
+  "sourceSHA256": {
+    "experiments/approval-flow/Sources/TLSPeer/main.swift": "23d2c88075d81a0381565446bbf2d2a5ebffbeff51093948adb6d9f816eece1c",
+    "macos/core/Sources/RemozioCore/PairingSetupListener.swift": "387964f5c1d3616008073eef69c04a4b3877548e2220e5a76fbc2f9edd8ceb26",
+    "macos/core/Sources/RemozioCore/PairingSetupNetworkSession.swift": "ad22e212a42fdddee36d3c670fdff71543cbe1d99af261f69825e2f4b70ab951",
+    "phone/core/src/main/kotlin/dev/remozio/phone/transport/PairingSetupChannel.kt": "e07702bd9f40bcca97728c9ea0a97ad625c9945280f0a02e3995207b6f147661",
+    "phone/core/src/test/kotlin/dev/remozio/phone/crypto/PairingSetupInteropTest.kt": "7167635865810d70a400d5d2e0bd802d72d3b4337adc6ff0a739bbf1fce36b84",
+    "protocol/vectors/pairing-setup-v1.json": "f49976f6f6322d400e6fbf66aab7e77411c19a75d586ff79ff66b40a2c69114a"
+  }
+}

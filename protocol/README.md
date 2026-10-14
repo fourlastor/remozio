@@ -85,3 +85,5 @@ The [negotiated message hosts](session-envelope.md) preserve framing across the 
 The [signed approval carrier](approval-message.md) retains exact bodies and signatures for delivery through the negotiated channel.
 
 The [pairing invitation](pairing-invitation.md) carries public Mac pins through matching QR and text payloads. It does not activate trust.
+
+The [restricted pairing exchange](pairing-setup.md) carries public phone claims, the returned transcript, and purpose-bound proofs through a separate TLS profile.
