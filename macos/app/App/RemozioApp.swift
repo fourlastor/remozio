@@ -93,6 +93,13 @@ private struct SetupOverview: View {
     let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
+    @State private var showingAccountSetup = {
+        #if DEBUG
+        CommandLine.arguments.contains("--preview-account-setup")
+        #else
+        false
+        #endif
+    }()
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -107,6 +114,9 @@ private struct SetupOverview: View {
                             .font(.headline)
                         Divider()
                         SetupServiceSection(controls: setup)
+                        if setup.state == .enabled {
+                            Button("Set up command approvals…") { showingAccountSetup = true }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
@@ -128,6 +138,7 @@ private struct SetupOverview: View {
         .frame(minWidth: 440, minHeight: 340)
         .sheet(isPresented: $showingPairing) { PairingSheet() }
         .sheet(isPresented: $showingSetupPreview) { SetupFilePreview() }
+        .sheet(isPresented: $showingAccountSetup) { AccountSetupSheet() }
     }
 }
 
@@ -253,5 +264,76 @@ private struct SetupServiceSection: View {
         case .unavailable:
             Text("The setup service status is unavailable. Refresh to try again.")
         }
+    }
+}
+
+private struct AccountSetupSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var controls = MacAccountSetupControls()
+    @State private var targets = "0"
+    @State private var accepted = false
+    @State private var work: Task<Void, Never>?
+    private var request: AccountEnrollmentRequest? {
+        if let progress = controls.progress {
+            return try? .init(allowedTargetUIDs: progress.allowedTargetUIDs, independentPolicyDisclosureAccepted: true)
+        }
+        let parts = targets.split(separator: ",", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
+        guard !parts.isEmpty, parts.count <= 64, parts.allSatisfy({ !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) } }) else { return nil }
+        let values = parts.compactMap(UInt32.init)
+        guard values.count == parts.count, Set(values).count == values.count else { return nil }
+        return try? .init(allowedTargetUIDs: Set(values), independentPolicyDisclosureAccepted: accepted)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Set up command approvals").font(.title2).accessibilityAddTraits(.isHeader)
+            Text("Remozio uses its own command policy. It does not inherit sudoers restrictions.")
+            Text("A paired phone can approve commands for this Mac account as the target users selected below.")
+                .foregroundStyle(.secondary)
+            if let progress = controls.progress {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Saved target UIDs").font(.headline)
+                    Text(verbatim: progress.allowedTargetUIDs.sorted().map(String.init).joined(separator: ", "))
+                        .textSelection(.enabled)
+                    Label("Command permissions saved", systemImage: "checkmark.circle")
+                    Label(progress.keyPrepared ? "Authority key prepared" : "Authority key pending",
+                          systemImage: progress.keyPrepared ? "checkmark.circle" : "circle")
+                    Label(progress.storagePrepared ? "Account storage prepared" : "Account storage pending",
+                          systemImage: progress.storagePrepared ? "checkmark.circle" : "circle")
+                }
+                if progress.storagePrepared {
+                    Text("Approval services are not configured yet. This step does not pair a phone or enable command execution.")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                TextField("Allowed target UIDs", text: $targets).disabled(controls.working || !controls.loaded)
+                Text("0 is root. Separate multiple UIDs with commas.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Toggle("I accept the separate Remozio command policy for these target users", isOn: $accepted)
+                    .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
+            }
+            if controls.working { ProgressView("Preparing account setup…").controlSize(.small) }
+            if controls.failed {
+                Label("Could not confirm setup. Refresh to read retained progress before trying again.", systemImage: "exclamationmark.triangle")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Refresh") { run { await controls.refresh() } }.disabled(controls.working)
+                Spacer()
+                Button("Close") { work?.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
+                if controls.progress?.storagePrepared != true {
+                    Button(controls.progress == nil ? "Prepare account…" : "Continue setup…") {
+                        if let request { run { await controls.prepare(request) } }
+                    }
+                    .keyboardShortcut(.defaultAction).disabled(!controls.loaded || controls.working || request == nil)
+                }
+            }
+        }
+        .padding(24).frame(width: 540)
+        .task { await controls.refresh() }
+        .onDisappear { work?.cancel() }
+    }
+    private func run(_ operation: @escaping @MainActor () async -> Void) {
+        work?.cancel()
+        work = Task { await operation(); work = nil }
     }
 }

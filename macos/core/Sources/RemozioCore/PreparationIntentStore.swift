@@ -154,6 +154,125 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    // Account reservation precedes any key, journal or service creation. Only the authenticated setup owner calls this.
+    func beginAccountPreparation(owner: LocalAccountIdentity, allowedTargetUIDs: Set<UInt32>,
+                                 disclosureAccepted: Bool, expectedInventoryRevision: Data,
+                                 makeInitial: (Data, Data) throws -> AuthorityJournalInitialization) throws -> AccountPreparationIntent {
+        return try transaction(write: true) {
+            try requireInventorySchema()
+            guard let inventory = try loadInventoryRecord(), inventory.revision == expectedInventoryRevision else {
+                throw AccountPreparationError.staleRevision
+            }
+            if try scalar("PRAGMA user_version") >= 4, let retained = try loadAccountPreparation(ownerUID: owner.uid) {
+                try LocalAccountDirectory.validateOwnership(owner, uid: retained.ownerUID, directoryID: retained.directoryID)
+                guard retained.installationID == inventory.installationID, retained.releaseDigest == inventory.releaseDigest,
+                      disclosureAccepted, try retained.commandPolicy.allowedTargetUIDs == allowedTargetUIDs else {
+                    throw AccountPreparationError.conflict
+                }
+                return retained
+            }
+            guard !inventory.accounts.contains(where: { $0.ownerUID == owner.uid }),
+                  try scalar("PRAGMA user_version") < 4 || scalar("SELECT COUNT(*) FROM account_preparation_v1") < 64 else {
+                throw AccountPreparationError.conflict
+            }
+            var accountID = AccountPreparationIntent.randomID()
+            while inventory.accounts.contains(where: { $0.accountID == accountID }) { accountID = AccountPreparationIntent.randomID() }
+            let policy = try CommandElevationPolicy(macID: macID, accountID: accountID, callerUID: owner.uid,
+                allowedTargetUIDs: allowedTargetUIDs, independentPolicyDisclosureAccepted: disclosureAccepted)
+            let initial = try makeInitial(macID, accountID)
+            let value = try AccountPreparationIntent(setupID: AccountPreparationIntent.randomID(), revision: AccountPreparationIntent.randomID(),
+                macID: macID, installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, accountID: accountID,
+                ownerUID: owner.uid, directoryID: owner.directoryID, policyBytes: policy.canonicalBytes, initializationBytes: initial.initializationBytes)
+            if try scalar("PRAGMA user_version") == 2 { try upgradeInitializationStorage() }
+            if try scalar("PRAGMA user_version") == 3 {
+                try exec("CREATE TABLE account_preparation_v1(owner INTEGER PRIMARY KEY CHECK(owner>0 AND owner<4294967295),account BLOB UNIQUE NOT NULL CHECK(length(account)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 147456)) STRICT")
+                try exec("PRAGMA user_version=4")
+            }
+            try statement("INSERT INTO account_preparation_v1 VALUES(?,?,?,?)") { row in
+                guard sqlite3_bind_int64(row, 1, Int64(owner.uid)) == SQLITE_OK else { throw PreparationStoreError.corruptRecord }
+                try bind(accountID, column: 2, row: row); try bind(value.revision, column: 3, row: row)
+                try bind(value.bytes, column: 4, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+            return value
+        }
+    }
+    func accountPreparation(ownerUID: UInt32) throws -> AccountPreparationIntent? {
+        guard ownerUID > 0, ownerUID < UInt32.max else { throw AccountPreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 4 { return nil }
+            return try loadAccountPreparation(ownerUID: ownerUID)
+        }
+    }
+    func pinAccountPreparation(expected: AccountPreparationIntent, publicKey: Data) throws -> AccountPreparationIntent {
+        try changeAccountPreparation(expected: expected) { try $0.pinning(publicKey) }
+    }
+    func completeAccountPreparation(expected: AccountPreparationIntent) throws -> AccountPreparationIntent {
+        try changeAccountPreparation(expected: expected) { current in
+            guard let initial = try loadInitialization(accountID: current.accountID) else { throw AccountPreparationError.incomplete }
+            return try current.prepared(initialization: initial)
+        }
+    }
+    func validateAccountPreparation(_ expected: AccountPreparationIntent) throws {
+        try transaction(write: false) { try requireAccountPreparation(expected) }
+    }
+    private func requireAccountPreparation(_ expected: AccountPreparationIntent) throws {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") >= 4,
+              let current = try loadAccountPreparation(ownerUID: expected.ownerUID) else { throw AccountPreparationError.missing }
+        guard current == expected else { throw AccountPreparationError.staleRevision }
+        guard let inventory = try loadInventoryRecord(), inventory.installationID == current.installationID,
+              inventory.releaseDigest == current.releaseDigest else { throw AccountPreparationError.conflict }
+    }
+    private func changeAccountPreparation(expected: AccountPreparationIntent,
+                                         transform: (AccountPreparationIntent) throws -> AccountPreparationIntent) throws -> AccountPreparationIntent {
+        try transaction(write: true) {
+            try requireAccountPreparation(expected)
+            let value = try transform(expected)
+            if value == expected { return expected }
+            try statement("UPDATE account_preparation_v1 SET revision=?,record=? WHERE owner=? AND revision=?") { row in
+                try bind(value.revision, column: 1, row: row); try bind(value.bytes, column: 2, row: row)
+                guard sqlite3_bind_int64(row, 3, Int64(value.ownerUID)) == SQLITE_OK else { throw PreparationStoreError.corruptRecord }
+                try bind(expected.revision, column: 4, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw AccountPreparationError.staleRevision }
+            }
+            return value
+        }
+    }
+    private func loadAccountPreparation(ownerUID: UInt32) throws -> AccountPreparationIntent? {
+        try statement("SELECT account,revision,record FROM account_preparation_v1 WHERE owner=?") { row in
+            guard sqlite3_bind_int64(row, 1, Int64(ownerUID)) == SQLITE_OK else { throw PreparationStoreError.corruptRecord }
+            if try step(row) == SQLITE_DONE { return nil }
+            let value: AccountPreparationIntent
+            do { value = try .decode(blob(row, column: 2, maximum: AccountPreparationIntent.maximumBytes)) }
+            catch { throw PreparationStoreError.corruptRecord }
+            guard value.macID == macID, value.ownerUID == ownerUID,
+                  try blob(row, column: 0, maximum: 16) == value.accountID,
+                  try blob(row, column: 1, maximum: 16) == value.revision, try step(row) == SQLITE_DONE else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value
+        }
+    }
+    private func upgradeInitializationStorage() throws {
+        try exec("CREATE TABLE authority_initialization_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 147456)) STRICT, WITHOUT ROWID")
+        try exec("PRAGMA user_version=3")
+    }
+    private func containsInitializationScope(_ inventory: InstallationInventory, initial: AuthorityJournalInitialization) throws -> Bool {
+        if inventory.accounts.contains(where: { $0.accountID == initial.descriptor.accountID }) { return true }
+        guard try scalar("PRAGMA user_version") >= 4 else { return false }
+        return try statement("SELECT owner FROM account_preparation_v1 WHERE account=?") { row in
+            try bind(initial.descriptor.accountID, column: 1, row: row)
+            guard try step(row) == SQLITE_ROW, let uid = UInt32(exactly: sqlite3_column_int64(row, 0)),
+                  let retained = try loadAccountPreparation(ownerUID: uid) else { return false }
+            guard retained.authorityPublicKey != nil, retained.installationID == inventory.installationID,
+                  retained.releaseDigest == inventory.releaseDigest,
+                  retained.initializationBytes == (try initial.initializationBytes) else { return false }
+            return true
+        }
+    }
     /// Root setup only, after administrator, signed-code and fresh-account checks.
     /// This record is not evidence of those checks. Retained or completed intents cannot be replaced.
     public func beginAuthorityInitialization(initial: AuthorityJournalInitialization, journalPath: String, continuityPath: String,
@@ -190,12 +309,11 @@ public final class PreparationIntentStore {
             try requireInventorySchema()
             guard let inventory = try loadInventoryRecord(), inventory.revision == expectedInventoryRevision,
                   initial.descriptor.macID == macID,
-                  inventory.accounts.contains(where: { $0.accountID == initial.descriptor.accountID }) else {
+                  try containsInitializationScope(inventory, initial: initial) else {
                 throw AuthorityInitializationError.conflictingIntent
             }
             if try scalar("PRAGMA user_version") == 2 {
-                try exec("CREATE TABLE authority_initialization_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 147456)) STRICT, WITHOUT ROWID")
-                try exec("PRAGMA user_version=3")
+                try upgradeInitializationStorage()
             }
             guard try loadInitialization(accountID: initial.descriptor.accountID) == nil else {
                 throw AuthorityInitializationError.conflictingIntent
@@ -256,12 +374,12 @@ public final class PreparationIntentStore {
     }
     private func requireInitialization(_ expected: AuthorityInitializationIntent) throws {
         try identity(macID)
-        guard try scalar("PRAGMA user_version") == 3,
+        guard try scalar("PRAGMA user_version") >= 3,
               let retained = try loadInitialization(accountID: expected.accountID) else { throw AuthorityInitializationError.missingIntent }
         guard retained == expected else { throw AuthorityInitializationError.staleRevision }
         guard let inventory = try loadInventoryRecord(), inventory.installationID == expected.installationID,
               inventory.releaseDigest == expected.releaseDigest,
-              inventory.accounts.contains(where: { $0.accountID == expected.accountID }) else {
+              try containsInitializationScope(inventory, initial: expected.initialAuthority) else {
             throw AuthorityInitializationError.conflictingIntent
         }
     }
@@ -366,14 +484,14 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3].contains(version),
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4].contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 4, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 5, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -382,7 +500,8 @@ public final class PreparationIntentStore {
         }
         let expected = version == 1 ? ["installation_identity_v1", "preparation_intents_v1"] :
             (version == 2 ? ["installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"] :
-                ["authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"])
+                (version == 3 ? ["authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"] :
+                    ["account_preparation_v1", "authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"]))
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }

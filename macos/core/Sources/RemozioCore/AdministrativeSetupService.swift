@@ -136,7 +136,8 @@ public final class AdministrativeSetupService {
             let next = try SetupAccountOwner(openMachine: {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
-                resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost)
+                resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
+                accountCodePolicy: configuration.codePolicy)
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                 teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,

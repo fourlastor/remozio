@@ -29,7 +29,12 @@ final class SignedReleaseInspectionTests: XCTestCase {
             XCTAssertEqual(setup.relativePath, AdministrativeSetupConfiguration.executablePath)
             XCTAssertEqual(setup.codeDirectoryHash, evidence.codeDirectoryHashes[.setupController])
             XCTAssertEqual(setup.formats.first { $0.name == "setup.service-config" }?.readers, [1])
-            XCTAssertEqual(setup.formats.first { $0.name == "setup.local-ipc" }?.readers, [1])
+            for role: AuthorityCodeRole in [.app, .setupController] {
+                let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
+                let local = try XCTUnwrap(component.formats.first { $0.name == "setup.local-ipc" })
+                XCTAssertEqual(local.readers, AdministrativeSetupInterface.supportedVersions)
+                XCTAssertEqual(local.writers, AdministrativeSetupInterface.supportedVersions)
+            }
             let authority = try XCTUnwrap(evidence.manifest.components.first { $0.role == .authority })
             func formats(_ name: String) throws -> ReleaseFormat { try XCTUnwrap(authority.formats.first { $0.name == name }) }
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)

@@ -29,7 +29,22 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
     func inspect() throws -> MacSetupServiceState { try perform(registering: false) }
     func register() throws -> MacSetupServiceState { try perform(registering: true) }
 
-    private func perform(registering: Bool) throws -> MacSetupServiceState {
+    func enrollmentChannel() throws -> AdministrativeSetupChannel {
+        var channel: AdministrativeSetupChannel?
+        let state = try perform(registering: false) { release in
+            guard let component = release.manifest.components.first(where: { $0.role == .setupController }),
+                  let team = component.teamID, let hash = release.codeDirectoryHashes[.setupController] else {
+                throw SetupRegistrationError.wrongRelease
+            }
+            let policy = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
+                approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
+            channel = try AdministrativeSetupChannel(serviceName: AdministrativeSetupConfiguration.serviceName,
+                rootPolicy: policy, ownerUID: getuid(), timeoutMilliseconds: 60_000)
+        }
+        guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
+        return channel
+    }
+    private func perform(registering: Bool, onVerified: ((SignedReleaseEvidence) throws -> Void)? = nil) throws -> MacSetupServiceState {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupRegistrationError.wrongProcess }
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
         let ownBundle = Bundle.main.bundleURL.resolvingSymlinksInPath().path
@@ -61,6 +76,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
             throw SetupRegistrationError.wrongRelease
         }
         try DynamicCodeValidation.validateSelf(requirement: identity.requirement)
+        if result == .enabled { try onVerified?(current) }
         return result
     }
 
@@ -142,4 +158,11 @@ public final class MacSetupServiceControls {
         }
     }
     public func openSettings() { SMAppService.openSystemSettingsLoginItems() }
+}
+
+/// Verifies protected placement and the running app before opening a pinned Root setup connection.
+public enum MacAccountSetupConnection {
+    public static func open() async throws -> AdministrativeSetupChannel {
+        try await NativeMacSetupServiceDriver().enrollmentChannel()
+    }
 }

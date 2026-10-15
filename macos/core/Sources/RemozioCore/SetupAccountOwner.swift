@@ -34,6 +34,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let expectedReleaseDigest: Data
     private let resume: (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent
     private let verifyHost: (InstallationInventory) throws -> Void
+    private let accountCodePolicy: AuthorityCodePolicy?
+    private let lookupAccount: (uid_t) throws -> LocalAccountIdentity
+    private let prepareAccount: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent
     private var closed = false
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
@@ -45,19 +48,34 @@ public final class SetupAccountOwner: @unchecked Sendable {
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
-         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
-        try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost)
+         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in },
+         accountCodePolicy: AuthorityCodePolicy? = nil,
+         lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity = LocalAccountDirectory.lookup,
+         prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent = {
+             try AccountPreparationController.resume(machine: $0, expected: $1, verifyCurrent: $2)
+         }) throws {
+        try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
-         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
-        try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost)
+         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in },
+         accountCodePolicy: AuthorityCodePolicy? = nil,
+         lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity = LocalAccountDirectory.lookup,
+         prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent = {
+             try AccountPreparationController.resume(machine: $0, expected: $1, verifyCurrent: $2)
+         }) throws {
+        try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
-         verifyHost: @escaping (InstallationInventory) throws -> Void) throws {
+         verifyHost: @escaping (InstallationInventory) throws -> Void,
+         accountCodePolicy: AuthorityCodePolicy?, lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity,
+         prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent) throws {
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
+        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount
         do {
             installationID = try machines.use { machine in
                 guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
@@ -101,6 +119,62 @@ public final class SetupAccountOwner: @unchecked Sendable {
             _ = try currentInventory(machine)
             return result
         }
+    }
+    func enrollment(callerUID: uid_t) throws -> AccountPreparationIntent? {
+        try withMachine { machine in
+            _ = try currentInventory(machine)
+            let owner = try lookupAccount(callerUID)
+            guard owner.uid == callerUID else { throw AdministrativeSetupError.wrongAccount }
+            let retained = try machine.accountPreparation(ownerUID: callerUID)
+            if let retained { try verifyEnrollment(retained, callerUID: callerUID, machine: machine) }
+            _ = try currentInventory(machine)
+            return retained
+        }
+    }
+    // The endpoint supplies the kernel-authenticated UID and validates current administrator rights first.
+    func beginEnrollment(callerUID: uid_t, allowedTargetUIDs: Set<UInt32>, disclosureAccepted: Bool) throws -> AccountPreparationIntent {
+        try withMachine { machine in
+            let inventory = try currentInventory(machine)
+            guard let policy = accountCodePolicy else { throw AdministrativeSetupError.unavailable }
+            let owner = try lookupAccount(callerUID)
+            guard owner.uid == callerUID else { throw AdministrativeSetupError.wrongAccount }
+            let intent = try machine.beginAccountPreparation(owner: owner, allowedTargetUIDs: allowedTargetUIDs,
+                disclosureAccepted: disclosureAccepted, expectedInventoryRevision: inventory.revision,
+                makeInitial: { mac, account in try Self.initialAuthority(macID: mac, accountID: account, codePolicy: policy) })
+            try verifyEnrollment(intent, callerUID: callerUID, machine: machine)
+            return intent
+        }
+    }
+    func resumeEnrollment(callerUID: uid_t, setupID: Data, expectedRevision: Data) throws -> AccountPreparationIntent {
+        try withMachine { machine in
+            guard setupID.count == 16, expectedRevision.count == 16,
+                  let expected = try machine.accountPreparation(ownerUID: callerUID), expected.setupID == setupID,
+                  expected.revision == expectedRevision else { throw AdministrativeSetupError.staleProgress }
+            try verifyEnrollment(expected, callerUID: callerUID, machine: machine)
+            let result = try prepareAccount(machine, expected, { try self.verifyEnrollment(expected, callerUID: callerUID, machine: machine) })
+            try verifyEnrollment(result, callerUID: callerUID, machine: machine)
+            return result
+        }
+    }
+    private func verifyEnrollment(_ value: AccountPreparationIntent, callerUID: uid_t, machine: PreparationIntentStore) throws {
+        guard value.ownerUID == callerUID else { throw AdministrativeSetupError.wrongAccount }
+        let inventory = try currentInventory(machine)
+        guard value.macID == inventory.macID, value.installationID == inventory.installationID,
+              value.releaseDigest == inventory.releaseDigest,
+              let accountCodePolicy, try value.initialAuthority.codePolicy.bytes == accountCodePolicy.bytes else {
+            throw AdministrativeSetupError.changedInstallation
+        }
+        try LocalAccountDirectory.validateOwnership(lookupAccount(callerUID), uid: callerUID, directoryID: value.directoryID)
+    }
+    private static func initialAuthority(macID: Data, accountID: Data, codePolicy: AuthorityCodePolicy) throws -> AuthorityJournalInitialization {
+        let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
+        let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+            0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID), 3: .bytes(AccountPreparationIntent.randomID()),
+            4: .unsigned(1), 5: .unsigned(AuditEpochCause.initial.rawValue), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
+        let contract = try RequestContract(requestKind: .command, wireVersion: 1,
+            schemaVersion: AuthorityCommandStartupConfiguration.captureSchemaVersion)
+        return .init(descriptor: descriptor, codePolicy: codePolicy, capabilities: .init(contracts: [contract: []]),
+            allowedContracts: [contract], installCommandReplay: true)
     }
     private func currentInventory(_ machine: PreparationIntentStore) throws -> InstallationInventory {
         guard !closed, let inventory = try machine.inventory() else { throw AdministrativeSetupError.unavailable }

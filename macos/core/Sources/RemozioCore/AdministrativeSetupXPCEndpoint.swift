@@ -2,9 +2,19 @@ import Darwin
 import Foundation
 import Security
 
-/// Version 1 local administrative interface. Hello must succeed before sending an external authorization form.
+public enum AdministrativeSetupInterface {
+    public static let storageVersion: UInt64 = 1
+    public static let enrollmentVersion: UInt64 = 2
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion]
+}
+
+/// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol AdministrativeSetupXPCProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
+    func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+    func resumeAccountEnrollment(_ setupID: Data, expectedRevision: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     func accountStorageProgress(_ accountID: Data, reply: @escaping @Sendable (Data?) -> Void)
     func resumeAccountStorage(_ accountID: Data, setupID: Data, expectedRevision: Data, authorization: Data,
                               reply: @escaping @Sendable (Data?) -> Void)
@@ -20,6 +30,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
     private var ready = false
+    private var enrollmentReady = false
     private var closed = false
     private var busy = false
 
@@ -55,8 +66,52 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         do {
             try operation(handshake: true) { _ in try owner.verifyCurrent(); ready = true }
             onHandshake()
-            send { reply(1) }
+            send { reply(AdministrativeSetupInterface.storageVersion) }
         } catch { close(); reply(0) }
+    }
+    public func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            try operation(handshake: true) { _ in try owner.verifyCurrent(); ready = true; enrollmentReady = true }
+            onHandshake(); send { reply(AdministrativeSetupInterface.enrollmentVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard enrollmentReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.enrollment(callerUID: uid).map { try SetupAccountEnrollmentProgress($0).bytes } ?? Data()
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard enrollmentReady, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.invalidConfiguration
+                }
+                let choices = try AccountEnrollmentRequest.decode(request)
+                try authorize(authorization)
+                return try SetupAccountEnrollmentProgress(owner.beginEnrollment(callerUID: uid, allowedTargetUIDs: choices.allowedTargetUIDs,
+                    disclosureAccepted: choices.independentPolicyDisclosureAccepted)).bytes
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func resumeAccountEnrollment(_ setupID: Data, expectedRevision: Data, authorization: Data,
+                                        reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard enrollmentReady, setupID.count == 16, expectedRevision.count == 16,
+                      authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.invalidConfiguration
+                }
+                try authorize(authorization)
+                return try SetupAccountEnrollmentProgress(owner.resumeEnrollment(callerUID: uid, setupID: setupID,
+                    expectedRevision: expectedRevision)).bytes
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
     }
     public func accountStorageProgress(_ accountID: Data, reply: @escaping @Sendable (Data?) -> Void) {
         do {
