@@ -1,12 +1,12 @@
 # Remozio
 
-Approve requests from your Macs through one Android app. The idea covers privileged commands, 1Password, and Little Snitch, with request details and biometrics where needed.
+Remozio is a prototype for approving requests from your Macs through one Android app. It has no production approval implementation yet. The proposed app covers privileged commands, 1Password, and Little Snitch, with request details and biometrics where needed.
 
 The [accepted implementation limits](docs/design-decisions.md) record the user-approved threat-model amendments from 2026-10-03.
 
 Read the [Remozio specification](https://remozio-plan.seebrock3r.chatgpt.site/) for the proposed architecture, app experience, and open questions.
 
-Remozio is building experiments, protocol foundations, and native app scaffolds. There is no production approval implementation yet.
+This repository contains experiments, protocol foundations, and native app scaffolds.
 
 See the [experiment sequence](docs/experiments/README.md) and the [Mac XPC experiment](docs/experiments/macos-xpc.md) for measured results and reproducible checks. The [protocol modules](protocol/README.md) share encoding fixtures across Swift and Kotlin. The [Android app](android/README.md) shows saved Mac records and cached audit history without claiming a live connection. The [native Mac app](macos/app/README.md) provides its window, menu bar entry, and Settings surface.
 

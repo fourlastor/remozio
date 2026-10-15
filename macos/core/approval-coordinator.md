@@ -42,7 +42,19 @@ Admission publishes the payload only after creation metadata commits. It does no
 
 `consumedRequest` retains the original binding while the phase is Authorized or Executing. It is data for the executor's separate target and checkpoint checks, never permission to dispatch. Expiry cannot rewrite an already consumed action. Terminal transitions release the coordinator's capture reference. The host must also release any copies held by adapters or transport queues.
 
-`state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description. Terminal time stays fixed. The wire terminal age is that time minus the first-observed time, not the elapsed time since completion. It is not a signed status message or a freshness guarantee. The host drives deadline evaluation even without phone traffic, reconciles terminal state to all devices, and withdraws queued work. Use `reconcileDelivery` after every owner transition and before transport work. It reads current owner state, commits elapsed expiry, and closes deliveries after capture release. Apply its withdrawals to queued and started retry tasks before discarding a closed delivery owner. Call it before `forgetTerminal`; forgotten requests cannot be reconciled. Storage or clock errors prohibit transport work and require the host to stop affected delivery tasks.
+`state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description.
+
+Terminal time stays fixed. The wire terminal age equals terminal time minus first-observed time. This value measures time until completion. The metadata alone carries no signature and guarantees no freshness.
+
+The host must:
+
+- Drive deadline evaluation even without phone traffic.
+- Reconcile terminal state to all devices and withdraw queued work.
+- Call `reconcileDelivery` after every owner transition and before transport work. It reads current owner state, commits elapsed expiry, and closes deliveries after capture release.
+- Apply its withdrawals to queued and started retry tasks before discarding a closed delivery owner.
+- Call it before `forgetTerminal`; forgotten requests cannot be reconciled.
+
+Storage or clock errors prohibit transport work. The host must stop affected delivery tasks.
 
 Before the first transport write, call `handoffDelivery` under the root owner's serialization boundary.
 Prepare asynchronous resources first. The method rereads current owner state and protected journal trust, then calls the synchronous transport callback.
