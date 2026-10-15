@@ -66,6 +66,10 @@ Do not collect passwords, ADB payloads, notification tokens, or provider secrets
 
 ## Declared SDK code
 
+The [transport file experiment](transport-file-tls.md) now uses the production certificate producer.
+The [enclave TLS experiment](macos-enclave-tls.md) also exercises that issuer with a disposable hardware key.
+Installed credential publication and persistent hardware TLS custody remain unproven.
+
 The [signed dependency experiment](release-dependencies.md) checks schemas 2 and 3 against the pinned Sparkle SDK.
 It verifies thirteen native controls, including exact feature compatibility and unsigned tampering, and starts no installer.
 The [compatibility comparison](../macos-release-compatibility-preflight.md) grants no activation authority. Protected update activation remains pending.

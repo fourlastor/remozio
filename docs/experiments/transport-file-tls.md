@@ -40,7 +40,14 @@ The file reader uses an ordinary-user fixture anchor.
 It checks file mode, ownership, ACLs, links, and retained descriptor identity.
 The core decoder checks the transport role, private key, certificate, configured pin, and certificate validity.
 No Keychain search or import supplies the server identity.
-All keys and certificates are disposable fixtures; the certificate helper is not a production issuer.
+All keys and certificates are disposable fixtures. The current creator calls the production transport file producer and typed certificate issuer.
+
+The [15 October result](evidence/2026-10-15-transport-issued-file-tls.json) repeats these controls with the production producer.
+The issuer uses Apple swift-certificates 1.21.0 and native Security.framework signing.
+The generated leaf permits client and server authentication, prohibits certificate signing, and retains the existing P-256 pin format.
+Unit tests cover renewal with the same key, wrong keys, invalid dates, and conservative whole-second validity encoding.
+This adds no automatic renewal, custody selection UI, protected credential writer, or service activation.
+The runtime caller must retain the selected identity. It must not generate another key during ordinary reload.
 
 ## Run
 

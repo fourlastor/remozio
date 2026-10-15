@@ -5,6 +5,30 @@ import Security
 
 /// Explicit transport-only custody. Authority and credential recipient loaders do not use this format.
 enum TransportFileIdentity {
+    struct Created {
+        let encoded: Data
+        let subjectPublicKeyInfo: Data
+        let publicKeyX963: Data
+    }
+
+    /// Creates the explicitly selected transport file format. It writes no file and performs no fallback.
+    static func create(notValidBefore: Date, notValidAfter: Date) throws -> Created {
+        let privateKey = P256.Signing.PrivateKey()
+        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits: 256]
+        guard let native = SecKeyCreateWithData(privateKey.x963Representation as CFData,
+                                                attributes as CFDictionary, nil) else {
+            throw ApprovalTransportStartupError.invalidIdentity
+        }
+        let certificate = try TransportTLSCertificate.issue(key: native,
+            notValidBefore: notValidBefore, notValidAfter: notValidAfter)
+        let encoded = try DeterministicCBOR.encode(.map([0: .unsigned(1),
+            1: .text("remozio-transport-identity"), 2: .bytes(privateKey.x963Representation),
+            3: .bytes(certificate)]), limits: CBORLimits(maxBytes: 16_384, maxDepth: 1, maxItems: 9))
+        return Created(encoded: encoded, subjectPublicKeyInfo: privateKey.publicKey.derRepresentation,
+            publicKeyX963: privateKey.publicKey.x963Representation)
+    }
+
     static func load(bytes: Data, publicKeyInfo: Data) throws -> SecIdentity {
         let limits = try CBORLimits(maxBytes: 16_384, maxDepth: 1, maxItems: 9)
         guard let decoded = try? DeterministicCBOR.decode(bytes, limits: limits), case .map(let fields) = decoded,

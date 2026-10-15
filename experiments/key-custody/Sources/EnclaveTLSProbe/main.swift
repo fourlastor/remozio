@@ -41,41 +41,23 @@ struct Report: Encodable {
     var errorCode: Int?
 }
 
-// Minimal DER for synthetic self-signed certificates only. Production issuance is separate.
-func der(_ tag: UInt8, _ bytes: Data) -> Data {
-    let count = bytes.count
-    let length: [UInt8] = count < 128 ? [UInt8(count)] : count < 256 ? [0x81, UInt8(count)] : [0x82, UInt8(count >> 8), UInt8(count & 255)]
-    return Data([tag] + length) + bytes
-}
-func sequence(_ bytes: Data) -> Data { der(0x30, bytes) }
-let signatureAlgorithm = sequence(Data([0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]))
-
 func publicKey(_ key: SecKey) throws -> P256.Signing.PublicKey {
     guard let publicKey = SecKeyCopyPublicKey(key),
           let encoded = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else { throw ProbeError.key }
     return try P256.Signing.PublicKey(x963Representation: encoded)
 }
 
-func identity(_ key: SecKey, name: String) throws -> SecIdentity {
-    let subject = sequence(der(0x31, sequence(Data([0x06, 0x03, 0x55, 0x04, 0x03]) + der(0x0c, Data(name.utf8)))))
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.timeZone = TimeZone(secondsFromGMT: 0)
-    formatter.dateFormat = "yyMMddHHmmss'Z'"
+func identity(_ key: SecKey) throws -> SecIdentity {
+    #if DEBUG
     let now = Date()
-    let validity = sequence(der(0x17, Data(formatter.string(from: now.addingTimeInterval(-60)).utf8))
-        + der(0x17, Data(formatter.string(from: now.addingTimeInterval(300)).utf8)))
-    let tbs = sequence(Data([0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01])
-        + signatureAlgorithm + subject + validity + subject + (try publicKey(key)).derRepresentation)
-    var error: Unmanaged<CFError>?
-    guard let signature = SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, tbs as CFData, &error) as Data? else {
-        if let error { throw error.takeRetainedValue() }
-        throw ProbeError.certificate
-    }
-    let encoded = sequence(tbs + signatureAlgorithm + der(0x03, Data([0]) + signature))
+    let encoded = try TransportTLSCertificate.issue(key: key, notValidBefore: now.addingTimeInterval(-60),
+        notValidAfter: now.addingTimeInterval(300))
     guard let certificate = SecCertificateCreateWithData(nil, encoded as CFData),
           let identity = SecIdentityCreate(nil, certificate, key) else { throw ProbeError.identity }
     return identity
+    #else
+    throw ProbeError.identity
+    #endif
 }
 
 func key(enclave: Bool, context: LAContext) throws -> SecKey {
@@ -108,18 +90,9 @@ func createFileFixture(directory: String) throws {
     guard fstat(directoryFD, &info) == 0, info.st_mode & 0o077 == 0 else { throw ProbeError.identity }
     try ProtectedStorageMetadata.validate(directoryFD, info, directory: true, privateObject: false,
                                          owner: getuid(), ancestorOwner: getuid())
-    let context = LAContext()
-    context.interactionNotAllowed = true
-    defer { context.invalidate() }
-    let serverKey = try key(enclave: false, context: context)
-    guard let privateBytes = SecKeyCopyExternalRepresentation(serverKey, nil) as Data?, privateBytes.count == 97,
-          try P256.Signing.PrivateKey(x963Representation: privateBytes).x963Representation == privateBytes else { throw ProbeError.key }
-    let server = try identity(serverKey, name: "synthetic-remozio-file-server")
-    var certificate: SecCertificate?
-    guard SecIdentityCopyCertificate(server, &certificate) == errSecSuccess, let certificate else { throw ProbeError.certificate }
-    let envelope = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-transport-identity"),
-        2: .bytes(privateBytes), 3: .bytes(SecCertificateCopyData(certificate) as Data)]),
-        limits: CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 9))
+    let now = Date()
+    let created = try TransportFileIdentity.create(notValidBefore: now.addingTimeInterval(-60),
+        notValidAfter: now.addingTimeInterval(300))
     func writeFixture(_ name: String, _ bytes: Data) throws {
         let fd = openat(directoryFD, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw ProbeError.identity }
@@ -133,8 +106,8 @@ func createFileFixture(directory: String) throws {
         }
         guard fsync(fd) == 0 else { throw ProbeError.identity }
     }
-    try writeFixture("identity.cbor", envelope)
-    try writeFixture("pin.spki", publicKey(serverKey).derRepresentation)
+    try writeFixture("identity.cbor", created.encoded)
+    try writeFixture("pin.spki", created.subjectPublicKeyInfo)
     try writeFixture("wrong-pin.spki", P256.Signing.PrivateKey().publicKey.derRepresentation)
 }
 #endif
@@ -259,10 +232,10 @@ func admitted(_ connection: NWConnection) -> Bool {
             report.privateKeyExportRejected = SecKeyCopyExternalRepresentation(serverKey, nil) == nil
             guard report.privateKeyExportRejected else { throw ProbeError.key }
             report.stage = "create-identity"
-            let server = try identity(serverKey, name: "synthetic-remozio-enclave")
+            let server = try identity(serverKey)
             report.identityCreated = true
             let clientKey = try key(enclave: false, context: context)
-            let client = try identity(clientKey, name: "synthetic-remozio-client")
+            let client = try identity(clientKey)
             report.stage = "mutual-tls"
             try await exchange(server: server, client: client, serverPin: publicKey(serverKey).derRepresentation,
                                clientPin: publicKey(clientKey).derRepresentation)
@@ -324,7 +297,7 @@ func admitted(_ connection: NWConnection) -> Bool {
                     P256.Signing.ECDSASignature(derRepresentation: signature), for: message) else { throw ProbeError.key }
             report.nativeSignatureVerified = true
             let clientKey = try key(enclave: false, context: context)
-            let client = try identity(clientKey, name: "synthetic-remozio-file-client")
+            let client = try identity(clientKey)
             report.stage = "mutual-tls"
             try await exchange(server: server, client: client, serverPin: pin, clientPin: publicKey(clientKey).derRepresentation)
             report.mutualTLS13Exchange = true

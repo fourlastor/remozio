@@ -14,6 +14,9 @@ flowchart LR
     W[Client with wrong server pin] --> R[Verifier rejects; channel does not open]
 ```
 
+The [15 October result](evidence/2026-10-15-transport-issued-enclave-tls.json) repeats this exchange with the production certificate issuer.
+The server key remains ephemeral and nonexportable. This does not prove persistent hardware custody or service-account access.
+
 ## Controls and result
 
 | Check | Recorded result |
@@ -30,7 +33,7 @@ flowchart LR
 
 The negative control changes only the server pin to another generated public key. A timeout alone cannot pass it. The probe also requires a direct rejection from the client certificate verifier. If the channel opens, the control fails before sending application bytes. The initial uninstrumented negative run timed out and was not counted as rejection evidence.
 
-Both peers use the native byte owner and public certificate APIs. The certificate helper is minimal synthetic DER, not a production certificate issuer. The client key is a software fixture; it does not stand in for Android Keystore evidence. No private key, opaque key representation, certificate, or signature is written to the report.
+Both peers use the native byte owner and public certificate APIs. The current probe uses the production transport issuer and Apple swift-certificates 1.21.0. The original 3 October result used a synthetic DER helper. The client key is a software fixture; it does not stand in for Android Keystore evidence. No private key, opaque key representation, certificate, or signature is written to the report.
 
 ## Run explicitly
 

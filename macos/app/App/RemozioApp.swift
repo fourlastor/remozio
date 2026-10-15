@@ -258,7 +258,7 @@ private struct SetupServiceSection: View {
         case .requiresApproval:
             Text("Approve Remozio in Login Items & Extensions, then return here.")
         case .enabled:
-            Text("macOS allows the setup service to run. Account setup is still being connected.")
+            Text("macOS allows the setup service to run. Prepare command approvals for this account.")
         case .notFound:
             Text("macOS could not find the setup service. Reinstall Remozio with its package.")
         case .unavailable:

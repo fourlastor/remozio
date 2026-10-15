@@ -118,7 +118,7 @@
 "Install Remozio with its package, then open the installed app." = "Install Remozio with its package, then open the installed app.";
 "Enable the setup service to continue setting up this Mac. macOS requires administrator approval." = "Enable the setup service to continue setting up this Mac. macOS requires administrator approval.";
 "Approve Remozio in Login Items & Extensions, then return here." = "Approve Remozio in Login Items & Extensions, then return here.";
-"macOS allows the setup service to run. Account setup is still being connected." = "macOS allows the setup service to run. Account setup is still being connected.";
+"macOS allows the setup service to run. Prepare command approvals for this account." = "macOS allows the setup service to run. Prepare command approvals for this account.";
 "macOS could not find the setup service. Reinstall Remozio with its package." = "macOS could not find the setup service. Reinstall Remozio with its package.";
 "The setup service status is unavailable. Refresh to try again." = "The setup service status is unavailable. Refresh to try again.";
 "Set up command approvals…" = "Set up command approvals…";
