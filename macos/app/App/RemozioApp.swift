@@ -6,11 +6,12 @@ import SwiftUI
 struct RemozioApp: App {
     @State private var presence = PresenceControls()
     @State private var login = MacLoginItemControls()
+    @State private var setup = MacSetupServiceControls()
     @AppStorage("showMenuBarExtra") private var showMenuBarExtra = true
 
     var body: some Scene {
         Window("Remozio", id: "main") {
-            SetupOverview(presence: presence)
+            SetupOverview(presence: presence, setup: setup)
                 .task { presence.start() }
         }
         .defaultSize(width: 600, height: 440)
@@ -89,6 +90,7 @@ private struct CommandCallerSettingsForm: View {
 
 private struct SetupOverview: View {
     let presence: PresenceControls
+    let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
     var body: some View {
@@ -103,15 +105,16 @@ private struct SetupOverview: View {
                     VStack(alignment: .leading, spacing: 12) {
                         Label(presence.status != nil ? "This Mac’s authority is connected" : presence.configured ? "This Mac’s authority is unavailable" : "This Mac is not configured", systemImage: "macbook.and.iphone")
                             .font(.headline)
-                        Text("Pairing requires configured Mac services. The complete approval flow is still being connected.")
-                        Text("Mac service setup is still being built.")
-                            .foregroundStyle(.secondary)
+                        Divider()
+                        SetupServiceSection(controls: setup)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12)
                 }
-                Button("Pair a phone…") { showingPairing = true }
-                Button("Preview setup file…") { showingSetupPreview = true }
+                HStack(spacing: 12) {
+                    Button("Pair a phone…") { showingPairing = true }
+                    Button("Preview setup file…") { showingSetupPreview = true }
+                }
                 HStack {
                     SettingsLink()
                     Spacer()
@@ -189,6 +192,66 @@ private struct LoginItemSettingsSection: View {
         case .requiresApproval: Text("Waiting for your approval in Login Items settings.")
         case .notFound: Text("macOS could not find the login item.")
         case .unknown: Text("Login status is unavailable. Refresh to try again.")
+        }
+    }
+}
+
+private struct SetupServiceSection: View {
+    @Environment(\.scenePhase) private var scenePhase
+    let controls: MacSetupServiceControls
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Mac setup service").font(.headline)
+            statusText.foregroundStyle(.secondary)
+            if let operation = controls.operation {
+                switch operation {
+                case .inspecting: ProgressView("Checking setup service…")
+                case .registering: ProgressView("Enabling setup service…")
+                }
+            }
+            HStack {
+                if controls.state == .notRegistered {
+                    Button("Enable setup service") { Task { await controls.enable() } }
+                        .buttonStyle(.borderedProminent)
+                }
+                if controls.state == .requiresApproval {
+                    Button("Approve in System Settings…") { controls.openSettings() }
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Refresh setup status") { Task { await controls.refresh() } }
+            }
+            .disabled(controls.operation != nil)
+            if let notice = controls.notice {
+                switch notice {
+                case .inspectionFailed:
+                    Label("Could not check the setup service. Refresh to try again.", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                case .registrationFailed:
+                    Label("Could not finish enabling the setup service. Review its current status before trying again.", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .task { await controls.refresh() }
+        .onChange(of: scenePhase) { _, next in
+            if next == .active { Task { await controls.refresh() } }
+        }
+    }
+    private var statusText: Text {
+        switch controls.state {
+        case .requiresInstallation:
+            Text("Install Remozio with its package, then open the installed app.")
+        case .notRegistered:
+            Text("Enable the setup service to continue setting up this Mac. macOS requires administrator approval.")
+        case .requiresApproval:
+            Text("Approve Remozio in Login Items & Extensions, then return here.")
+        case .enabled:
+            Text("macOS allows the setup service to run. Account setup is still being connected.")
+        case .notFound:
+            Text("macOS could not find the setup service. Reinstall Remozio with its package.")
+        case .unavailable:
+            Text("The setup service status is unavailable. Refresh to try again.")
         }
     }
 }

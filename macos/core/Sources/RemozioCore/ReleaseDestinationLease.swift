@@ -11,6 +11,7 @@ public final class ReleaseDestinationLease {
     }
     private var nodes: [Node] = []
     private let owner: uid_t
+    private let readerUID: uid_t
     private let processID = getpid()
     private var closed = false
     public let path: String
@@ -20,9 +21,15 @@ public final class ReleaseDestinationLease {
         guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
         return try .init(anchor: "/", relativeDirectory: String(path.dropFirst()), owner: 0)
     }
+    /// Ordinary app registration reads Root-owned placement. This does not authorize any file mutation.
+    static func readForServiceRegistration(path: String) throws -> ReleaseDestinationLease {
+        guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try .init(anchor: "/", relativeDirectory: String(path.dropFirst()), owner: 0, readerUID: getuid())
+    }
     // Internal ordinary-account seam. Production walks from / with fixed Root ownership.
-    init(anchor: String, relativeDirectory: String, owner: uid_t) throws {
-        self.owner = owner
+    init(anchor: String, relativeDirectory: String, owner: uid_t, readerUID: uid_t? = nil) throws {
+        self.owner = owner; self.readerUID = readerUID ?? owner
         path = (anchor == "/" ? "" : anchor) + "/" + relativeDirectory
         let parts = relativeDirectory.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !anchor.utf8.contains(0), path.utf8.count < Int(PATH_MAX), !parts.isEmpty,
@@ -43,7 +50,7 @@ public final class ReleaseDestinationLease {
     public func validate() throws {
         guard !closed else { throw JournalLeaseError.invalidated }
         do {
-            guard getpid() == processID, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
+            guard getpid() == processID, getuid() == readerUID, geteuid() == readerUID else { throw JournalLeaseError.unsafeMetadata }
             for node in nodes {
                 var held = stat(), named = stat()
                 guard fstat(node.fd, &held) == 0 else { throw JournalLeaseError.system(errno) }

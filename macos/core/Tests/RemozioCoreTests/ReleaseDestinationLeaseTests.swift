@@ -110,4 +110,23 @@ final class ReleaseDestinationLeaseTests: XCTestCase {
         }
     }
 
+    func testOrdinaryRegistrationReaderChecksRootOwnedAncestryWithoutGrantingWriteAccess() throws {
+        guard getuid() != 0 else { throw XCTSkip("Ordinary account") }
+        let lease = try ReleaseDestinationLease.readForServiceRegistration(path: "/Library")
+        defer { lease.close() }
+        try lease.validate()
+        XCTAssertThrowsError(try ReleaseDestinationLease.acquire(path: "/Library")) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+    }
+    func testOrdinaryRegistrationReaderRejectsWritableAncestryAndRelativePaths() throws {
+        guard getuid() != 0 else { throw XCTSkip("Ordinary account") }
+        XCTAssertThrowsError(try ReleaseDestinationLease.readForServiceRegistration(path: "/private/tmp")) {
+            XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+        }
+        XCTAssertThrowsError(try ReleaseDestinationLease.readForServiceRegistration(path: "Library")) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidPath)
+        }
+    }
+
 }
