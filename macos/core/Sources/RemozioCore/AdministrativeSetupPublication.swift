@@ -39,18 +39,34 @@ public enum AdministrativeSetupPublication {
     // Ordinary-owner fixtures exercise real file operations without claiming Root or native signing evidence.
     static func publish(_ configuration: AdministrativeSetupConfiguration, directory: ProtectedSetupDirectory, owner: uid_t,
                         verify: () throws -> Void = {}, didStage: (Stage) throws -> Void = { _ in }) throws -> AdministrativeSetupPublicationResult {
-        let bytes = configuration.canonicalBytes
+        try publish(configuration.canonicalBytes, file: .startup, directory: directory, owner: owner,
+                    verify: verify, didStage: didStage)
+    }
+
+    enum File {
+        case startup, bootstrapIntent, bootstrapCompletion
+        var name: String {
+            switch self {
+            case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
+            case .bootstrapIntent: "bootstrap-intent.cbor"
+            case .bootstrapCompletion: "bootstrap-complete.cbor"
+            }
+        }
+    }
+    // Only typed setup operations select these fixed names. No public arbitrary-file publisher exists.
+    static func publish(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t,
+                        verify: () throws -> Void = {}, didStage: (Stage) throws -> Void = { _ in }) throws -> AdministrativeSetupPublicationResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
-        let name = URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
+        let name = file.name
         return try directory.withDirectory { parent in
             try verify()
             var existing = stat()
             if fstatat(parent, name, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
-                try match(configuration, directory: directory, owner: owner)
+                try match(bytes, name: name, directory: directory, owner: owner)
                 try synchronizeRetained(parent: parent, name: name, bytes: bytes, owner: owner)
                 guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-                try match(configuration, directory: directory, owner: owner)
+                try match(bytes, name: name, directory: directory, owner: owner)
                 try verify(); try directory.validate()
                 return .retained
             }
@@ -98,7 +114,7 @@ public enum AdministrativeSetupPublication {
             published = true
             try didStage(.published)
             guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-            try match(configuration, directory: directory, owner: owner)
+            try match(bytes, name: name, directory: directory, owner: owner)
             try verify(); try directory.validate()
             return .created
         }
@@ -140,11 +156,10 @@ public enum AdministrativeSetupPublication {
         try ProtectedStorageMetadata.validate(fd, after, directory: false, privateObject: true, owner: owner, ancestorOwner: owner)
     }
 
-    private static func match(_ configuration: AdministrativeSetupConfiguration, directory: ProtectedSetupDirectory, owner: uid_t) throws {
+    private static func match(_ bytes: Data, name: String, directory: ProtectedSetupDirectory, owner: uid_t) throws {
         try directory.validate()
-        let name = URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
         let retained = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: name, owner: owner)
-        guard retained == configuration.canonicalBytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+        guard retained == bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
         try directory.validate()
     }
 }

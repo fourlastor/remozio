@@ -45,7 +45,8 @@ def check(configuration):
     require(setup.read_bytes() == (BUILD / f'DerivedData/Build/Products/{configuration}/RemozioSetup').read_bytes(),
             'Embedding changed the signed setup executable')
     for arguments, status in (([], 64), (['--unknown', '/private/test-path'], 64),
-                              *([(['--configuration', '/private/test-path'], 77)] if os.geteuid() != 0 else [])):
+                              *([(['--configuration', '/private/test-path'], 77),
+                                 (['--bootstrap-installation', 'ABCDEFGHIJ'], 77)] if os.geteuid() != 0 else [])):
         read_descriptor, write_descriptor = os.pipe()
         try:
             original_input = b'unread setup input\x00\xff'
