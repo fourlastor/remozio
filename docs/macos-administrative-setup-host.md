@@ -1,7 +1,7 @@
 # Bundled administrative setup host
 
 The app now contains `RemozioSetup` and its fixed daemon declaration.
-The executable owns the existing setup listener and machine store. It exposes no network listener or approval authority.
+The executable owns the existing setup listener and opens the machine store for each owner operation. It exposes no network listener or approval authority.
 It accepts only `--configuration` with the fixed protected setup path.
 Ordinary users fail before any configuration read. Invalid arguments never consume stdin or disclose private paths.
 
@@ -14,7 +14,8 @@ flowchart TD
     B --> M[Open existing machine inventory]
     M --> I[Match Mac, installation, release and bundle path]
     I --> J[Match fixed signed daemon declaration]
-    J --> L[Construct bounded setup listener]
+    J --> X[Close startup machine writer]
+    X --> L[Construct bounded setup listener]
     L --> O[Recheck host on each owner operation]
     O --> A[Existing scoped account checks and native administrator validation]
 ```
@@ -30,7 +31,9 @@ The host verifies its own dynamic code identity before opening machine storage.
 It verifies Root ownership, local metadata, signed bundle contents and the current inventory before opening the listener.
 The setup owner passes its freshly read inventory to host validation before checking progress or resuming storage.
 Moving the recorded bundle or removing or changing its setup declaration refuses the operation.
-Listener shutdown precedes machine-store and protected-placement lease closure.
+Each owner operation closes its fresh machine connection before returning.
+Listener shutdown precedes owner closure and release of protected placement.
+The [machine-store lifecycle](macos-machine-store-ownership.md) permits idle setup and active command hosts to coexist.
 
 The fixed plist binds the helper path, Root account, configuration argument and local Mach name.
 Its signature is part of the containing app seal. Matching these bytes is not proof of actual service registration.
@@ -47,5 +50,6 @@ These builds use development signatures; they do not prove Developer ID installa
 
 The [configuration publisher](macos-setup-configuration-publication.md) now checks retained inventory and publishes the fixed private setup file.
 The [explicit bootstrap entry](macos-machine-bootstrap.md) now prepares retained machine identity and setup inputs.
-The package driver, actual registration, service account creation and the app setup screen remain unfinished.
+The [package builder](macos-initial-package.md) now prepares a guarded archive candidate.
+Actual registration, service account creation and the app setup screen remain unfinished.
 Positive native administrator consent, installed XPC behavior and Mac–Pixel approval remain interactive gates.

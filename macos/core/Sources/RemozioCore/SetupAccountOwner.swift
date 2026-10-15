@@ -6,11 +6,30 @@ public enum AdministrativeSetupError: Error, Equatable {
     case invalidConfiguration, unavailable, wrongAccount, changedInstallation, staleProgress
 }
 
-/// One serialized owner for administrative account setup. It owns the machine store across all accepted connections.
-/// The host must verify its current signed release and protected placement before opening this owner.
+/// Serializes setup operations. Production opens a fresh machine writer for each operation.
+/// The host retains protected placement and verifies its current signed release on each use.
 public final class SetupAccountOwner: @unchecked Sendable {
+    private enum Machines {
+        // Logical endpoint fixtures can borrow an existing connection. Production uses scoped access.
+        case retained(PreparationIntentStore)
+        case scoped(() throws -> PreparationIntentStore)
+        func use<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
+            switch self {
+            case .retained(let machine): return try body(machine)
+            case .scoped(let open):
+                let machine = try open()
+                do {
+                    let value = try body(machine)
+                    try machine.close()
+                    return value
+                } catch { try? machine.close(); throw error }
+            }
+        }
+        func close() throws { if case .retained(let machine) = self { try machine.close() } }
+    }
     private let lock = NSRecursiveLock()
-    private let machine: PreparationIntentStore
+    private let machines: Machines
+    private let processID = getpid()
     private let installationID: Data
     private let expectedReleaseDigest: Data
     private let resume: (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent
@@ -19,51 +38,71 @@ public final class SetupAccountOwner: @unchecked Sendable {
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        return try .init(machine: PreparationIntentStore.open(directoryPath: machineDirectory, macID: macID),
+        return try .init(openMachine: { try PreparationIntentStore.open(directoryPath: machineDirectory, macID: macID) },
             expectedReleaseDigest: expectedReleaseDigest,
             resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) })
     }
-    // Ordinary-owner fixtures retain actual protected storage. They cannot establish native administrator consent.
-    init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
+    // Same-owner lifecycle fixtures use the same scoped factory as production.
+    convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
          verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
-        self.machine = machine; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
+        try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost)
+    }
+    // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
+    convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
+         resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
+         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
+        try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost)
+    }
+    private init(machines: Machines, expectedReleaseDigest: Data,
+         resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
+         verifyHost: @escaping (InstallationInventory) throws -> Void) throws {
+        self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         do {
-            guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
-                  inventory.releaseDigest == expectedReleaseDigest else { throw AdministrativeSetupError.invalidConfiguration }
-            installationID = inventory.installationID
-        } catch { try? machine.close(); throw error }
+            installationID = try machines.use { machine in
+                guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
+                      inventory.releaseDigest == expectedReleaseDigest else { throw AdministrativeSetupError.invalidConfiguration }
+                return inventory.installationID
+            }
+        } catch { try? machines.close(); throw error }
     }
     deinit { try? close() }
     public func close() throws {
         try lock.withLock {
             guard !closed else { return }
-            try machine.close(); closed = true
+            try machines.close(); closed = true
+        }
+    }
+    private func withMachine<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
+        try lock.withLock {
+            guard !closed else { throw AdministrativeSetupError.unavailable }
+            guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+            return try machines.use(body)
         }
     }
     func verifyCurrent() throws {
-        try lock.withLock { _ = try currentInventory() }
+        try withMachine { _ = try currentInventory($0) }
     }
     func progress(accountID: Data, callerUID: uid_t) throws -> AuthorityInitializationIntent? {
-        try lock.withLock {
-            try requireAccount(accountID, callerUID: callerUID)
+        try withMachine { machine in
+            try requireAccount(accountID, callerUID: callerUID, machine: machine)
             let value = try machine.initialization(accountID: accountID)
-            _ = try currentInventory()
+            _ = try currentInventory(machine)
             return value
         }
     }
     func resumeAccount(accountID: Data, setupID: Data, expectedRevision: Data, callerUID: uid_t) throws -> AuthorityInitializationIntent {
-        try lock.withLock {
+        try withMachine { machine in
             guard setupID.count == 16, expectedRevision.count == 16 else { throw AdministrativeSetupError.invalidConfiguration }
-            try requireAccount(accountID, callerUID: callerUID)
+            try requireAccount(accountID, callerUID: callerUID, machine: machine)
             guard let expected = try machine.initialization(accountID: accountID), expected.setupID == setupID,
                   expected.revision == expectedRevision else { throw AdministrativeSetupError.staleProgress }
             let result = try resume(machine, expected)
-            _ = try currentInventory()
+            _ = try currentInventory(machine)
             return result
         }
     }
-    private func currentInventory() throws -> InstallationInventory {
+    private func currentInventory(_ machine: PreparationIntentStore) throws -> InstallationInventory {
         guard !closed, let inventory = try machine.inventory() else { throw AdministrativeSetupError.unavailable }
         try verifyHost(inventory)
         guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
@@ -71,9 +110,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
         return inventory
     }
-    private func requireAccount(_ accountID: Data, callerUID: uid_t) throws {
+    private func requireAccount(_ accountID: Data, callerUID: uid_t, machine: PreparationIntentStore) throws {
         guard accountID.count == 16, callerUID > 0, callerUID < UInt32.max,
-              try currentInventory().accounts.contains(where: { $0.accountID == accountID && $0.ownerUID == callerUID }) else {
+              try currentInventory(machine).accounts.contains(where: { $0.accountID == accountID && $0.ownerUID == callerUID }) else {
             throw AdministrativeSetupError.wrongAccount
         }
     }

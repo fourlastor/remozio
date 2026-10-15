@@ -2,7 +2,20 @@ import Darwin
 import Foundation
 import RemozioMach
 
-/// Holds current protected placement and machine metadata through runtime shutdown.
+/// Resource transfer only. The registration owner must validate the installation before calling this helper.
+enum InstalledCommandMachineHandoff {
+    static func take(machine: PreparationIntentStore, checkIn: () throws -> mach_port_t) throws -> mach_port_t {
+        let port = try checkIn()
+        do { try machine.close() }
+        catch {
+            _ = mach_port_mod_refs(mach_task_self_, port, MACH_PORT_RIGHT_RECEIVE, -1)
+            throw error
+        }
+        return port
+    }
+}
+
+/// Retains protected placement through shutdown and machine metadata through validated check-in.
 /// Every operation on the machine store uses this lock. The receive host owns a transferred right.
 final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     let configuration: InstalledAuthorityCommandConfiguration
@@ -79,9 +92,12 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try lock.withLock {
             guard !taken else { throw InstalledAuthorityCommandError.unavailable }
             try validate()
-            var port = mach_port_t(MACH_PORT_NULL)
-            let status = configuration.command.serviceName.withCString { remozio_authority_check_in_service($0, &port) }
-            guard status == KERN_SUCCESS else { throw InstalledAuthorityCommandError.unavailable }
+            let port = try InstalledCommandMachineHandoff.take(machine: machine) {
+                var port = mach_port_t(MACH_PORT_NULL)
+                let status = configuration.command.serviceName.withCString { remozio_authority_check_in_service($0, &port) }
+                guard status == KERN_SUCCESS else { throw InstalledAuthorityCommandError.unavailable }
+                return port
+            }
             taken = true
             return port
         }

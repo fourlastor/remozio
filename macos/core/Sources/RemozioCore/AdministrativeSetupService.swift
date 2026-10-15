@@ -132,7 +132,10 @@ public final class AdministrativeSetupService {
                 try placement.validate()
             }
             try verifyHost(inventory)
-            let next = try SetupAccountOwner(machine: store, expectedReleaseDigest: configuration.releaseDigest,
+            try store.close(); machine = nil
+            let next = try SetupAccountOwner(openMachine: {
+                try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
+            }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost)
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,

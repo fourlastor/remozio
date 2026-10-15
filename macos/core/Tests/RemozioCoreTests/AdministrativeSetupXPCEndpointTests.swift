@@ -183,19 +183,29 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("journal/journal.sqlite")), Data())
         }
     }
-    func testLogicalFixtureAuthorizationRunsActualStorageControllerAndRetainsCompletion() throws {
+    func testLogicalFixtureAuthorizationRunsScopedStorageControllerAndRetainsCompletion() throws {
         try fixture { root in
             let machine = try store(root, initialize: true), inventory = try inventory(machine), expected = try begin(root, machine, inventory)
+            try machine.close()
             var authorizations = 0, executions = 0
-            let owner = try owner(root, machine: machine, release: inventory.releaseDigest, observe: {
-                XCTAssertEqual(authorizations, 1); executions += 1
-            }); defer { try? owner.close() }
+            let owner = try SetupAccountOwner(openMachine: { try self.store(root) }, expectedReleaseDigest: inventory.releaseDigest,
+                resume: { machine, expected in
+                    XCTAssertEqual(authorizations, 1); executions += 1
+                    return try self.resume(root, machine: machine, expected: expected)
+                })
+            defer { try? owner.close() }
             let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { getuid() }, authorize: { _ in authorizations += 1 }, invalidate: {})
             XCTAssertEqual(hello(endpoint), 1)
             let result = try XCTUnwrap(execute(endpoint, expected: expected))
             XCTAssertTrue(result.complete); XCTAssertTrue(result.checkpointCaptured); XCTAssertEqual(executions, 1)
             XCTAssertEqual(try progress(endpoint), result)
-            XCTAssertTrue(try XCTUnwrap(machine.initialization(accountID: account)).complete)
+            let reader = try store(root)
+            XCTAssertTrue(try XCTUnwrap(reader.initialization(accountID: account)).complete)
+            try reader.close(); try owner.close()
+            let restarted = try SetupAccountOwner(openMachine: { try self.store(root) }, expectedReleaseDigest: inventory.releaseDigest,
+                resume: { _, _ in XCTFail("Progress does not resume storage"); throw Interrupted() })
+            defer { try? restarted.close() }
+            XCTAssertEqual(try restarted.progress(accountID: account, callerUID: getuid())?.complete, true)
             try requireReleasedAccountLeases(root)
         }
     }

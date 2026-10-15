@@ -16,7 +16,8 @@ flowchart TD
     J --> F[Create the existing shared runtime]
     F --> V[Recheck configuration, code, inventory and job bytes]
     V --> K[Acquire the launchd-registered receive right]
-    K --> O[Original command capture and explicit grant checks]
+    K --> W[Release machine writer; retain runtime ownership]
+    W --> O[Original command capture and explicit grant checks]
     O --> D[Shared request journal, phone decision and execution owner]
 ```
 
@@ -37,7 +38,9 @@ Check-in alone does not establish installation, signing, account scope or retain
 The runtime shares its existing journal, continuous clock and execution scheduler.
 It still captures the original command and reads explicit current caller/target grants.
 A phone approval does not bypass final capture, enrollment, code, credential or release checks.
-Shutdown drains the runtime before closing the registration owner's machine store and placement lease.
+The [machine writer](macos-machine-store-ownership.md) closes after validated native check-in.
+The account stores and protected placement remain owned through runtime shutdown.
+Closing machine bookkeeping does not establish update quiescence.
 Each startup attempt reloads protected inputs. No failed attempt adopts a different startup mode.
 
 ## Evidence and remaining gates
