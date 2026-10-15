@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Darwin
 import SQLite3
@@ -152,6 +153,95 @@ public final class PreparationIntentStore {
                 }
             }
             return retained
+        }
+    }
+    func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
+        guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 7 { return .init(plan: nil, jobsRegistered: false) }
+            return try loadRuntimeActivation(accountID: accountID)
+        }
+    }
+    // Freeze intent before publishing jobs. No inventory enrollment or native registration occurs here.
+    func retainRuntimeActivation(_ plan: RuntimeActivationPlan) throws {
+        let encoded = try plan.encoded
+        try transaction(write: true) {
+            try identity(macID); try requireRuntimeActivationScope(plan)
+            if try scalar("PRAGMA user_version") == 6 {
+                try exec("CREATE TABLE runtime_activation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),material BLOB NOT NULL UNIQUE CHECK(length(material)=16),digest BLOB NOT NULL CHECK(length(digest)=32),registered INTEGER NOT NULL CHECK(registered IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=7")
+            }
+            let current = try loadRuntimeActivation(accountID: plan.accountID)
+            if let retained = current.plan {
+                guard try retained.encoded == encoded else { throw RuntimeActivationError.conflictingPlan }; return
+            }
+            guard try scalar("SELECT COUNT(*) FROM runtime_activation_v1") < 64 else { throw RuntimeActivationError.exhausted }
+            try statement("INSERT INTO runtime_activation_v1 VALUES(?,?,?,0,?)") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.reference.materialID, column: 2, row: row)
+                try bind(Data(SHA256.hash(data: encoded)), column: 3, row: row); try bind(encoded, column: 4, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    // Publish exact host/job files first. Native registration follows only after this writer's lease is released.
+    func enrollRuntimeActivation(_ plan: RuntimeActivationPlan) throws -> InstallationInventory {
+        let before: InstallationInventory = try transaction(write: false) {
+            try identity(macID); try requireRuntimeActivationScope(plan)
+            guard try scalar("PRAGMA user_version") >= 7,
+                  let retained = try loadRuntimeActivation(accountID: plan.accountID).plan,
+                  try retained.encoded == plan.encoded, let inventory = try loadInventoryRecord() else {
+                throw RuntimeActivationError.incomplete
+            }
+            return inventory
+        }
+        let after = try plan.enrolledInventory(before)
+        if after == before { return before }
+        return try writeInventory(after, expectedRevision: before.revision)
+    }
+    // The controller must independently confirm both native job registrations before retaining this historical marker.
+    func markRuntimeJobsRegistered(_ plan: RuntimeActivationPlan) throws {
+        try transaction(write: true) {
+            try identity(macID); try requireRuntimeActivationScope(plan)
+            guard try scalar("PRAGMA user_version") >= 7 else { throw RuntimeActivationError.incomplete }
+            let current = try loadRuntimeActivation(accountID: plan.accountID)
+            guard let retained = current.plan, try retained.encoded == plan.encoded,
+                  let inventory = try loadInventoryRecord(), try plan.enrolledInventory(inventory) == inventory else {
+                throw RuntimeActivationError.incomplete
+            }
+            if current.jobsRegistered { return }
+            try statement("UPDATE runtime_activation_v1 SET registered=1 WHERE account=? AND record=? AND registered=0") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.encoded, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw RuntimeActivationError.conflictingPlan }
+            }
+        }
+    }
+    private func requireRuntimeActivationScope(_ plan: RuntimeActivationPlan) throws {
+        guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimeActivationError.incomplete }
+        try requireRuntimeMaterialScope(plan.reference)
+        let runtime = try loadRuntimePreparation(accountID: plan.accountID)
+        guard runtime.configurationPublished, runtime.reference == plan.reference,
+              let account = try loadAccountPreparation(ownerUID: plan.reference.services.ownerUID),
+              let inventory = try loadInventoryRecord() else { throw RuntimeActivationError.incomplete }
+        try plan.validate(account: account, reference: plan.reference)
+        _ = try plan.enrolledInventory(inventory)
+    }
+    private func loadRuntimeActivation(accountID: Data) throws -> RuntimeActivationState {
+        try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return .init(plan: nil, jobsRegistered: false) }
+            let bytes = try blob(row, column: 3, maximum: 262144), plan: RuntimeActivationPlan
+            do { plan = try .decode(bytes) } catch { throw PreparationStoreError.corruptRecord }
+            guard plan.accountID == accountID, plan.reference.services.macID == macID,
+                  try blob(row, column: 0, maximum: 16) == plan.reference.materialID,
+                  try blob(row, column: 1, maximum: 32) == Data(SHA256.hash(data: bytes)),
+                  sqlite3_column_type(row, 2) == SQLITE_INTEGER, [0, 1].contains(sqlite3_column_int64(row, 2)) else {
+                throw PreparationStoreError.corruptRecord
+            }
+            let registered = sqlite3_column_int64(row, 2) == 1
+            guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return .init(plan: plan, jobsRegistered: registered)
         }
     }
     func runtimePreparation(accountID: Data) throws -> RuntimePreparationState {
@@ -578,7 +668,7 @@ public final class PreparationIntentStore {
         }
     }
     private func configureInventoryLimit() {
-        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 155_648) }
+        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 278_528) }
     }
     private func requireInventorySchema() throws {
         try identity(macID)
@@ -657,14 +747,14 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5, 6].contains(version),
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5, 6, 7].contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 7, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 8, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -677,6 +767,7 @@ public final class PreparationIntentStore {
         if version >= 4 { expected.append("account_preparation_v1") }
         if version >= 5 { expected.append("service_accounts_v1") }
         if version >= 6 { expected.append("runtime_preparation_v1") }
+        if version >= 7 { expected.append("runtime_activation_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in

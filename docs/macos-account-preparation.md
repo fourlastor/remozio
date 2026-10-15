@@ -50,7 +50,7 @@ Refresh never opens administrator UI or retries a mutation.
 ## Storage and protocol versions
 
 Explicit account preparation upgrades the machine store to schema 4.
-Normal opening and progress reads preserve schemas 1 through 6 without upgrading them.
+Normal opening and progress reads preserve schemas 1 through 7 without upgrading them.
 The added table retains the account reservation independently of the installed-service inventory.
 Prepared storage can exist before account service declarations are installed.
 It grants no service registration, pairing or command admission.
@@ -60,7 +60,7 @@ The existing storage interface keeps its version 1 hello and operations.
 New enrollment operations require a separate version 2 hello.
 The app verifies the Root peer before it exports native administrator rights.
 Each mutation rechecks native rights, caller scope, current protected release and retained progress.
-Signed manifests declare local interface versions 1 through 4, and machine schemas 1 through 6.
+Signed manifests declare local interface versions 1 through 5, and machine schemas 1 through 7.
 
 ## Evidence and remaining gates
 
@@ -74,7 +74,7 @@ Actual privileged installation and service tests remain in issues [#363](https:/
 [#374](https://github.com/rock3r/remozio/issues/374).
 The app reports storage preparation separately from service readiness.
 Service account creation still needs the native installation test.
-Runtime file publication is available after service account preparation. Service activation remains the next integration step.
+Runtime file publication and explicit service activation follow service account preparation. Their installed behavior still needs the interactive validation gate.
 Real device and end-to-end checks still require the user's interactive session.
 
 ## Dedicated service accounts
@@ -167,8 +167,65 @@ A retry after a lost reply restores the same identity and local gateway IDs.
 A retained identity reference prevents regeneration if private material disappears.
 Completed progress is historical. Reading it does not repair files, recreate keys or claim that services are healthy.
 The command runtime file is a blueprint, not an installed service declaration.
-Per-account service registration and the installed command-host wrapper remain required before activation.
+The explicit activation step publishes the installed command-host wrapper and registers per-account jobs. Publication alone does neither.
 
 Tests cover actual SQLite and owned-file recovery, four interrupted composition stages, authorization refusal, stale progress and explicit app consent.
 The [live selector evidence](experiments/macos-xpc.md#runtime-preparation-selectors) covers separate ordinary-user processes.
 Native Root ownership, real service account access, activation and Mac–Pixel approval remain interactive gates.
+
+## Explicit service activation
+
+After runtime files are prepared, **Start services** requires current administrator authorization.
+**Restore services** repeats the same scoped operation. It retains the existing identities, account claims and configuration.
+Refresh reads progress without starting jobs or importing administrator rights.
+
+```mermaid
+sequenceDiagram
+    participant App as Signed Mac app
+    participant Setup as Root setup helper
+    participant DB as Machine store
+    participant Files as Protected host and job files
+    participant OS as launchd
+    App->>Setup: Version 5 hello, then read scoped progress
+    Note over App: Explicit Start or Restore and native administrator approval
+    App->>Setup: Exact progress and current native rights
+    Setup->>DB: Retain activation plan before job publication
+    Setup->>Files: Verify existing keys/configs; publish exact host and job files
+    Setup->>DB: Enroll only this account and its exact services
+    Setup->>DB: Close machine writer
+    Note over Setup,DB: Native registration never holds the machine writer
+    Setup->>OS: Inspect matching authority job; bootstrap only if absent
+    Setup->>OS: Inspect matching transport job; bootstrap only if absent
+    Setup->>DB: Reopen scoped writer; retain registration marker
+    Setup-->>App: Historical registration progress
+    Note over App: Main window checks the live authority connection separately
+```
+
+The frozen plan advances the machine store to schema 7. It contains no private transport key.
+The plan binds the retained material, signed release, installed command host and transport startup configuration.
+Account and service enrollment preserves unrelated accounts and jobs.
+Conflicting labels, declarations, files or loaded programs stop the operation. The helper never stops or replaces an unproven job.
+
+Each job has a derived name under `/Library/LaunchDaemons` and points into the same signed app bundle.
+The authority runs as Root. The transport runs as its reserved service user and group.
+Both jobs start at system startup and use launchd restart behavior.
+The app does not modify its signed bundle or require a central Mac.
+Installed host format 1 retains bundled-job validation. Format 2 explicitly selects protected system jobs for the account.
+
+Native commands receive a minimal environment, no caller descriptors, a time limit and bounded output.
+The helper compares launchd's reported source path, program, arguments, user and group when it reconciles a lost registration reply.
+It also requires the exact Mach service names, managed endpoint settings, and the saved startup flags.
+These operational fields are not proof of complete loaded settings, process credentials or runtime health.
+Actual request admission still requires protected metadata, the signed role, kernel credentials and the existing runtime checks.
+Unknown inspection output fails without a mutation. A conflicting loaded job is not removed.
+
+The [owned-job experiment](experiments/evidence/2026-10-15-owned-job-registration.json) confirms these fields across a real GUI-job registration.
+It also confirms that changing the plist preserves the loaded program, endpoints and flags. A same-label bootstrap does not replace the job.
+Wrong user/group declarations have fixture coverage; their system-domain behavior remains an installed test gate.
+The probe removes its exact temporary job and retains no raw job environment.
+The [version 5 selector evidence](experiments/macos-xpc.md#runtime-activation-selectors) checks the new XPC methods across separate ordinary-user processes.
+
+Tests cover actual owned files and SQLite, six interrupted activation stages, writer release before registration, denied rights and stale progress.
+They also cover passive app refresh and explicit restore after a lost reply.
+They do not prove installed Root registration, dedicated-user access, hardware-key restoration or Mac–Pixel approval.
+Those physical gates remain open. Push delivery remains unconfigured in this initial foreground LAN path.

@@ -35,20 +35,21 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
                 codeDirectoryHash: id(changedAuthorityHash && role == .authority ? 99 : UInt8(role.rawValue), 20), active: true)
         })
     }
-    private func command(execution: Bool = true, monitorPath: String? = nil) throws -> AuthorityCommandStartupConfiguration {
+    private func command(execution: Bool = true, monitorPath: String? = nil, scoped: Bool = false) throws -> AuthorityCommandStartupConfiguration {
+        let paths = try RuntimePreparationPaths(accountID: id(22))
         let key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(21), accountID: id(22), journalDirectory: "/Library/Remozio/journal",
-            serviceName: "dev.remozio.authority", teamID: "ABCDEFGHIJ", transportIdentifier: identifier(.transport),
+            serviceName: scoped ? paths.authorityService : "dev.remozio.authority", teamID: "ABCDEFGHIJ", transportIdentifier: identifier(.transport),
             transportHashes: [id(UInt8(AuthorityCodeRole.transport.rawValue), 20)], transportUID: 401,
             continuityDirectory: "/Library/Remozio/continuity")
-        let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/key.cbor", authorityPublicKey: key)
+        let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: scoped ? paths.authorityDirectory + "/Key/" + AuthorityKeyProvisioning.recordFileName : "/Library/Remozio/key.cbor", authorityPublicKey: key)
         let wake = try AuthorityWakeStartupConfiguration(request: request,
             registration: .init(ownerID: id(23), macID: id(21), accountID: id(22), gatewayID: id(24), lifecycleEpoch: id(25), rootPublicKey: key),
-            gatewayServiceName: "dev.remozio.gateway", gatewayUID: 402, teamID: "ABCDEFGHIJ", gatewayIdentifier: identifier(.notificationGateway),
+            gatewayServiceName: scoped ? paths.gatewayService : "dev.remozio.gateway", gatewayUID: 402, teamID: "ABCDEFGHIJ", gatewayIdentifier: identifier(.notificationGateway),
             gatewayHashes: [id(UInt8(AuthorityCodeRole.notificationGateway.rawValue), 20)])
-        let presence = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence",
+        let presence = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: scoped ? paths.presenceService : "dev.remozio.presence",
             teamID: "ABCDEFGHIJ", appIdentifier: identifier(.app), appHashes: [id(1, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
-        return try .init(presence: presence, serviceName: "dev.remozio.commands", policyPath: "/Library/Remozio/elevation.cbor", environment: [],
+        return try .init(presence: presence, serviceName: scoped ? paths.commandService : "dev.remozio.commands", policyPath: scoped ? paths.policy : "/Library/Remozio/elevation.cbor", environment: [],
             submissionLimits: .init(maxBytes: 8192, maxDepth: 8, maxItems: 1024), captureLimits: .init(maxBytes: 65536, maxDepth: 8, maxItems: 4096),
             execution: execution ? .init(monitorPath: monitorPath ?? (bundle + "/" + relative(.commandMonitor)), childPath: bundle + "/" + relative(.commandChild)) : nil)
     }
@@ -63,6 +64,44 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
             releaseDigest: InstallationInventory.digest(release()), accounts: [.init(accountID: account, ownerUID: owner)],
             services: [.init(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0, label: label,
                 plistName: "dev.remozio.authority.plist", accountID: account)])
+    }
+    private func scopedConfig() throws -> InstalledAuthorityCommandConfiguration {
+        let paths = try RuntimePreparationPaths(accountID: id(22)), label = paths.namespace + ".authority"
+        return try .init(machineDirectory: MachineBootstrap.machineDirectory, installationID: id(26),
+            releaseDigest: InstallationInventory.digest(release()), codePolicy: policy(), command: command(scoped: true),
+            label: label, plistName: label + ".plist", jobPlacement: .systemAccount)
+    }
+    private func scopedInventory(transportUID: UInt32? = 401) throws -> InstallationInventory {
+        let paths = try RuntimePreparationPaths(accountID: id(22)), authority = paths.namespace + ".authority"
+        var services = [try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
+            label: authority, plistName: authority + ".plist", accountID: id(22))]
+        if let transportUID {
+            services.append(try .init(role: .transport, kind: .daemon, domainUID: nil, executionUID: transportUID,
+                label: paths.namespace + ".transport", plistName: paths.namespace + ".transport.plist", accountID: id(22)))
+        }
+        return try .init(macID: id(21), installationID: id(26), revision: id(27), bundlePath: bundle,
+            releaseDigest: InstallationInventory.digest(release()), accounts: [.init(accountID: id(22), ownerUID: 501)], services: services)
+    }
+    func testVersionTwoExplicitlySelectsProtectedSystemJobsAndPreservesVersionOne() throws {
+        let value = try scopedConfig(), decoded = try InstalledAuthorityCommandConfiguration.decode(value.canonicalBytes)
+        XCTAssertEqual(decoded.jobPlacement, .systemAccount); XCTAssertEqual(decoded.canonicalBytes, value.canonicalBytes)
+        XCTAssertNoThrow(try decoded.validate(inventory: scopedInventory(), release: release(), bundlePath: bundle))
+        let legacy = try config()
+        XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(legacy.canonicalBytes).jobPlacement, .bundled)
+        XCTAssertEqual(InstalledAuthorityCommandConfiguration.supportedVersions, [1, 2])
+        XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: nil), release: release(), bundlePath: bundle))
+        XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: 402), release: release(), bundlePath: bundle))
+    }
+    func testVersionTwoCannotSelectAnArbitraryHostPathNamespaceOrLegacyCommand() throws {
+        let value = try scopedConfig(), limits = try CBORLimits(maxBytes: 131072, maxDepth: 2, maxItems: 32)
+        guard case .map(let fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else { return XCTFail() }
+        for (key, replacement): (UInt64, CBORValue) in [(1, .text("/Library/Other/machine")), (6, .text("dev.remozio.other")),
+            (7, .text("dev.remozio.other.plist")), (8, .text("other-placement")), (5, .bytes(try command().canonicalBytes)), (0, .unsigned(1))] {
+            var changed = fields; changed[key] = replacement
+            XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+        var missing = fields; missing.removeValue(forKey: 8)
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(DeterministicCBOR.encode(.map(missing), limits: limits)))
     }
     func testCanonicalHostKeepsTheConfiguredExecutionAndAccountScope() throws {
         let original = try config(), decoded = try InstalledAuthorityCommandConfiguration.decode(original.canonicalBytes)

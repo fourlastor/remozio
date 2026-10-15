@@ -70,11 +70,8 @@ enum RuntimePublicationController {
         try machine.retainRuntimeMaterial(reference)
         retainedReference = reference
         try didStage(.referenceRetained); try verify()
-        let bundle = try RuntimeConfigurationBundle(account: account, initialization: initialization, reference: reference,
-            inventory: inventory, presencePolicy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000),
-            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
-            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
-            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+        let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
+            reference: reference, inventory: inventory)
         try publish(bundle, material, verify)
         try didStage(.filesPublished); try verify()
         // Recheck the retained material after all outputs. An established reference never permits creation here.

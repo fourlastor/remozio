@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "experiment": "owned-launchd-job-inspection",
+  "recordedAt": "2026-10-15T19:39:39.183829+00:00",
+  "status": "passed",
+  "macOS": "27.0.1",
+  "rootSystemDomainTested": false,
+  "nativeServiceUIDsTested": false,
+  "runtimeHealthTested": false,
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/BoundedNativeCommand.swift": "fe5a3dc1849f7b7b216eb39edf9bf8db3333c6327b340a089dcf09d55a815c37",
+    "macos/core/Sources/RemozioCore/RuntimeJobRegistration.swift": "cb27bd5feb5a964b13509b1f1cb23d38155aca5a20aea3a3de2332d05c534ea3",
+    "macos/core/Tests/RemozioCoreTests/LiveOwnedJobInspectionTests.swift": "a94e3af996c37f538d2b216ee41f8c9cb169532e95c122be662baf0bf8a368f6",
+    "scripts/run-macos-job-registration-experiment.py": "63a3d026cbe2e2efc51e03e97038972f27bcefcadf7ca998c0b8a1c9608c381e"
+  },
+  "cases": {
+    "changedFileRetainsLoadedEndpointsAndProperties": true,
+    "conflictDidNotReplaceOwnedJob": true,
+    "loadedConfigurationIndependentOfDisk": true,
+    "loadedEndpointSettingsMatch": true,
+    "loadedFieldsMatchOriginal": true,
+    "loadedPropertiesMatch": true,
+    "sameLabelBootstrapRejected": true,
+    "temporaryJobRemoved": true,
+    "unknownOwnedLabelAbsent": true
+  }
+}

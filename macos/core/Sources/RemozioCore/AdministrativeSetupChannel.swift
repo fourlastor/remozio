@@ -7,10 +7,11 @@ public enum AdministrativeSetupChannelError: Error, Equatable {
 }
 enum SetupClientCall: Sendable {
     case hello, progress(Data), resume(SetupAccountProgress, Data)
+    case activationHello, activationProgress, activateRuntime(SetupActivationProgress, Data)
     case runtimeHello, runtimeProgress, prepareRuntime(SetupRuntimeProgress, Bool, Data)
     case serviceAccountsHello, serviceAccountsProgress, prepareServiceAccounts(SetupServiceAccountProgress, Data)
     case enrollmentHello, enrollmentProgress, beginEnrollment(Data, Data), resumeEnrollment(SetupAccountEnrollmentProgress, Data)
-    var handshake: Bool { switch self { case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello: true; default: false } }
+    var handshake: Bool { switch self { case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello: true; default: false } }
 }
 enum SetupClientReply: Sendable { case version(UInt64), progress(Data?), failed }
 protocol SetupClientDriver: Sendable {
@@ -39,6 +40,11 @@ private final class NativeSetupClientDriver: SetupClientDriver, @unchecked Senda
             reply(.failed); return
         }
         switch call {
+        case .activationHello: proxy.activationHello { [self] in checked(.version($0), reply: reply) }
+        case .activationProgress: proxy.activationProgress { [self] in checked(.progress($0), reply: reply) }
+        case .activateRuntime(let expected, let form):
+            do { proxy.activateRuntime(try expected.bytes, authorization: form) { [self] in checked(.progress($0), reply: reply) } }
+            catch { reply(.failed) }
         case .runtimeHello: proxy.runtimeHello { [self] in checked(.version($0), reply: reply) }
         case .runtimeProgress: proxy.runtimeProgress { [self] in checked(.progress($0), reply: reply) }
         case .prepareRuntime(let expected, let accepted, let form):
@@ -82,6 +88,7 @@ public actor AdministrativeSetupChannel {
     private let driver: any SetupClientDriver
     private let accountID: Data?
     private let ownerUID: uid_t
+    private let activation: Bool
     private let runtime: Bool
     private let serviceAccounts: Bool
     private let timeout: UInt64
@@ -92,16 +99,16 @@ public actor AdministrativeSetupChannel {
     private var pending: (id: UUID, continuation: CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
-    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false, runtime: Bool = false,
+    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false,
                 timeoutMilliseconds: UInt64 = 5000, onClose: @escaping @Sendable () -> Void = {}) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
-              (!(serviceAccounts || runtime) || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
+              (!(serviceAccounts || runtime || activation) || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
               (1...60_000).contains(timeoutMilliseconds) else { throw AdministrativeSetupChannelError.invalidConfiguration }
         guard getuid() == ownerUID, geteuid() == ownerUID else { throw AdministrativeSetupChannelError.wrongAccount }
         let processID = getpid()
         driver = NativeSetupClientDriver(serviceName: serviceName, policy: rootPolicy)
-        self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime; self.runtime = runtime; timeout = timeoutMilliseconds; self.onClose = onClose
+        self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation; self.runtime = runtime || activation; self.activation = activation; timeout = timeoutMilliseconds; self.onClose = onClose
         verifyAccount = {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else {
                 throw AdministrativeSetupChannelError.wrongAccount
@@ -109,9 +116,9 @@ public actor AdministrativeSetupChannel {
         }
     }
     // Logical lifecycle controls do not prove native signing, service registration or administrator consent.
-    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), serviceAccounts: Bool = false, runtime: Bool = false, timeoutMilliseconds: UInt64 = 5000,
+    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, timeoutMilliseconds: UInt64 = 5000,
          verifyAccount: @escaping @Sendable () throws -> Void = {}, onClose: @escaping @Sendable () -> Void = {}) {
-        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime; self.runtime = runtime; timeout = timeoutMilliseconds
+        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation; self.runtime = runtime || activation; self.activation = activation; timeout = timeoutMilliseconds
         self.verifyAccount = verifyAccount; self.onClose = onClose
     }
     deinit { timer?.cancel(); driver.close() }
@@ -119,9 +126,9 @@ public actor AdministrativeSetupChannel {
         guard state == .new else { throw AdministrativeSetupChannelError.closed }
         state = .opening
         do {
-            let expected = runtime ? AdministrativeSetupInterface.runtimeVersion : serviceAccounts ? AdministrativeSetupInterface.serviceAccountsVersion :
+            let expected = activation ? AdministrativeSetupInterface.activationVersion : runtime ? AdministrativeSetupInterface.runtimeVersion : serviceAccounts ? AdministrativeSetupInterface.serviceAccountsVersion :
                 (accountID == nil ? AdministrativeSetupInterface.enrollmentVersion : AdministrativeSetupInterface.storageVersion)
-            let call: SetupClientCall = runtime ? .runtimeHello : serviceAccounts ? .serviceAccountsHello : (accountID == nil ? .enrollmentHello : .hello)
+            let call: SetupClientCall = activation ? .activationHello : runtime ? .runtimeHello : serviceAccounts ? .serviceAccountsHello : (accountID == nil ? .enrollmentHello : .hello)
             guard case .version(let version) = try await perform(call), version == expected else {
                 throw AdministrativeSetupChannelError.unsupportedVersion
             }
@@ -177,6 +184,30 @@ public actor AdministrativeSetupChannel {
             close(); throw AdministrativeSetupChannelError.invalidMessage
         }
         return result
+    }
+    public func activationProgress() async throws -> SetupActivationProgress? {
+        guard activation, accountID == nil else { throw AdministrativeSetupChannelError.unsupportedVersion }
+        return try decodeActivation(await perform(.activationProgress), expected: nil)
+    }
+    public func activateRuntime(_ expected: SetupActivationProgress, authorization: Data) async throws -> SetupActivationProgress {
+        guard activation, accountID == nil, expected.ownerUID == ownerUID,
+              authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AdministrativeSetupChannelError.invalidMessage }
+        guard let value = try decodeActivation(await perform(.activateRuntime(expected, authorization)), expected: expected) else {
+            close(); throw AdministrativeSetupChannelError.invalidMessage
+        }
+        return value
+    }
+    private func decodeActivation(_ reply: SetupClientReply, expected: SetupActivationProgress?) throws -> SetupActivationProgress? {
+        do {
+            guard case .progress(let bytes) = reply, let bytes, bytes.count <= 384 else { throw AdministrativeSetupChannelError.invalidMessage }
+            if bytes.isEmpty {
+                guard expected == nil else { throw AdministrativeSetupChannelError.invalidMessage }; return nil
+            }
+            let value = try SetupActivationProgress.decode(bytes)
+            guard value.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
+            if let expected { try value.validateCompletion(of: expected) }
+            return value
+        } catch { finish(.invalidMessage); throw AdministrativeSetupChannelError.invalidMessage }
     }
     public func runtimeProgress() async throws -> SetupRuntimeProgress? {
         guard runtime, accountID == nil else { throw AdministrativeSetupChannelError.unsupportedVersion }
@@ -255,8 +286,8 @@ public actor AdministrativeSetupChannel {
         do { try verifyAccount() } catch { close(); throw error }
         try Task.checkCancellation()
         switch call {
-        case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
-        case .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeProgress, .prepareRuntime: guard state == .open else { throw AdministrativeSetupChannelError.closed }
+        case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
+        case .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeProgress, .prepareRuntime, .activationProgress, .activateRuntime: guard state == .open else { throw AdministrativeSetupChannelError.closed }
         }
         guard pending == nil else { throw AdministrativeSetupChannelError.busy }
         let lifetime = lifetime, driver = driver, id = UUID()

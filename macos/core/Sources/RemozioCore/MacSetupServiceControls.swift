@@ -29,7 +29,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
     func inspect() throws -> MacSetupServiceState { try perform(registering: false) }
     func register() throws -> MacSetupServiceState { try perform(registering: true) }
 
-    func enrollmentChannel(serviceAccounts: Bool = false, runtime: Bool = false) throws -> AdministrativeSetupChannel {
+    func enrollmentChannel(serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false) throws -> AdministrativeSetupChannel {
         var channel: AdministrativeSetupChannel?
         let state = try perform(registering: false) { release in
             guard let component = release.manifest.components.first(where: { $0.role == .setupController }),
@@ -39,7 +39,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
             let policy = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
                 approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
             channel = try AdministrativeSetupChannel(serviceName: AdministrativeSetupConfiguration.serviceName,
-                rootPolicy: policy, ownerUID: getuid(), serviceAccounts: serviceAccounts, runtime: runtime, timeoutMilliseconds: 60_000)
+                rootPolicy: policy, ownerUID: getuid(), serviceAccounts: serviceAccounts, runtime: runtime, activation: activation, timeoutMilliseconds: 60_000)
         }
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
@@ -162,7 +162,7 @@ public final class MacSetupServiceControls {
 
 /// Verifies protected placement and the running app before opening a pinned Root setup connection.
 public enum MacAccountSetupConnection {
-    public static func open(serviceAccounts: Bool = false, runtime: Bool = false) async throws -> AdministrativeSetupChannel {
-        try await NativeMacSetupServiceDriver().enrollmentChannel(serviceAccounts: serviceAccounts, runtime: runtime)
+    public static func open(serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false) async throws -> AdministrativeSetupChannel {
+        try await NativeMacSetupServiceDriver().enrollmentChannel(serviceAccounts: serviceAccounts, runtime: runtime, activation: activation)
     }
 }

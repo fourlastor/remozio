@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import RemozioProtocol
 
 public enum AdministrativeSetupPublicationError: Error, Equatable {
     case conflictingConfiguration, changedInventory, invalidArtifact
@@ -45,7 +46,8 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case runtimeRecord, commandConfiguration, elevationPolicy, transportConfiguration
+        case runtimeRecord, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case accountJob(accountID: Data, role: AuthorityCodeRole)
         case transportIdentity(ownerUID: uid_t, groupID: gid_t)
         case presenceClient(ownerUID: uid_t), pairingClient(ownerUID: uid_t), frontendClient(ownerUID: uid_t)
         var name: String {
@@ -55,6 +57,10 @@ public enum AdministrativeSetupPublication {
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .commandConfiguration: "command-runtime.cbor"
+            case .commandHost: "command-host.cbor"
+            case .accountJob(let account, let role):
+                "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
+                    + (role == .authority ? ".authority.plist" : ".transport.plist")
             case .elevationPolicy: "command-policy.cbor"
             case .transportConfiguration: "transport-host.cbor"
             case .transportIdentity: "transport-identity.cbor"
@@ -65,7 +71,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportConfiguration, .presenceClient, .pairingClient, .frontendClient: 0o644
+            case .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob: 0o644
             default: 0o600
             }
         }
@@ -88,6 +94,11 @@ public enum AdministrativeSetupPublication {
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
+            case .accountJob(let account, let role):
+                guard account.count == 16, role == .authority || role == .transport else {
+                    throw AdministrativeSetupPublicationError.invalidArtifact
+                }
+                return
             default: return
             }
             guard uid > 0, uid < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
@@ -171,6 +182,17 @@ public enum AdministrativeSetupPublication {
         }
         if file.requiresSharedDirectory { return try directory.withSharedDirectory(publish) }
         return try directory.withDirectory(publish)
+    }
+
+    // Read-only retention check. Missing established artifacts never become implicit creation here.
+    static func validateRetained(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t,
+                                 verify: () throws -> Void = {}) throws {
+        guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
+              bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        try file.validate(); try verify()
+        if file.requiresSharedDirectory { try directory.withSharedDirectory { _ in try match(bytes, file: file, directory: directory, owner: owner) } }
+        else { try match(bytes, file: file, directory: directory, owner: owner) }
+        try verify(); try directory.validate()
     }
 
     private static func synchronizeRetained(parent: Int32, name: String, bytes: Data, owner: uid_t,

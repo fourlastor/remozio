@@ -318,8 +318,17 @@ private struct AccountSetupSheet: View {
                                         .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
                                 }
                             }
-                            Text("Services have not started. These preparation steps do not pair a phone or enable command execution. Push delivery is not configured.")
-                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            if controls.runtime?.configurationPublished == true {
+                                Label(controls.activation?.jobsRegistered == true ? "Service registration saved" : "Services not registered",
+                                      systemImage: controls.activation?.jobsRegistered == true ? "checkmark.circle" : "circle")
+                                Text("Start the authority and transport services for this account. Restore keeps the saved identity and registers any missing matching jobs.")
+                                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                Text("The main window checks the live authority connection separately. Pair a phone after the services connect. Push delivery is not configured.")
+                                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("Preparation does not start services, pair a phone or enable command execution. Push delivery is not configured.")
+                                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     } else {
                         TextField("Allowed target UIDs", text: $targets).disabled(controls.working || !controls.loaded)
@@ -350,6 +359,12 @@ private struct AccountSetupSheet: View {
                         Button("Prepare runtime files…") { run { await controls.prepareRuntime(fileCustodyAccepted: fileCustodyAccepted) } }
                             .keyboardShortcut(.defaultAction)
                             .disabled(!controls.loaded || controls.working || controls.runtime == nil || !fileCustodyAccepted)
+                    } else {
+                        Button(controls.activation?.jobsRegistered == true ? "Restore services…" : "Start services…") {
+                            run { await controls.activateRuntime() }
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!controls.loaded || controls.working || controls.activation == nil)
                     }
                 } else {
                     Button(controls.progress == nil ? "Prepare account…" : "Continue setup…") {

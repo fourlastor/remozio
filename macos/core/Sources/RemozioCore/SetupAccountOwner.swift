@@ -25,6 +25,22 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 } catch { try? machine.close(); throw error }
             }
         }
+        // Retry only lease acquisition, never an operation body or an unknown commit.
+        func useActivation<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
+            guard case .scoped(let open) = self else { throw AdministrativeSetupError.unavailable }
+            let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+            var next: PreparationIntentStore?
+            while next == nil {
+                do { next = try open() }
+                catch JournalLeaseError.busy {
+                    guard DispatchTime.now().uptimeNanoseconds < deadline else { throw JournalLeaseError.busy }
+                    usleep(50_000)
+                }
+            }
+            let machine = next!
+            do { let value = try body(machine); try machine.close(); return value }
+            catch { try? machine.close(); throw error }
+        }
         func close() throws { if case .retained(let machine) = self { try machine.close() } }
     }
     private let lock = NSRecursiveLock()
@@ -39,6 +55,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let prepareAccount: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent
     private let prepareServices: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State
     private let prepareRuntime: (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState
+    private let activationOperations: RuntimeActivationOperations
     private var closed = false
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
@@ -59,9 +76,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
-         }) throws {
+         }, activationOperations: RuntimeActivationOperations = .native) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -75,9 +92,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
-         }) throws {
+         }, activationOperations: RuntimeActivationOperations = .native) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -85,9 +102,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          accountCodePolicy: AuthorityCodePolicy?, lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity,
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent,
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
-         prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState) throws {
+         prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
+         activationOperations: RuntimeActivationOperations) throws {
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
-        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime
+        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
             installationID = try machines.use { machine in
                 guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
@@ -227,6 +245,89 @@ public final class SetupAccountOwner: @unchecked Sendable {
             try progress.validateCompletion(of: expected)
             return progress
         }
+    }
+    func activationProgress(callerUID: uid_t) throws -> SetupActivationProgress? {
+        try withMachine { machine in
+            _ = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            guard runtime.configurationPublished else { return nil }
+            let result = try SetupActivationProgress(account: account, runtime: runtime,
+                state: machine.runtimeActivation(accountID: account.accountID))
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            return result
+        }
+    }
+    func resumeActivation(callerUID: uid_t, expected: SetupActivationProgress) throws -> SetupActivationProgress {
+        try lock.withLock {
+            guard !closed else { throw AdministrativeSetupError.unavailable }
+            guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+            // No native command runs within this first machine-writer scope.
+            let context = try machines.useActivation { machine -> (AccountPreparationIntent, AuthorityInitializationIntent, RuntimeActivationPlan) in
+                guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                    throw AdministrativeSetupError.wrongAccount
+                }
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                let runtime = try machine.runtimePreparation(accountID: account.accountID)
+                let state = try machine.runtimeActivation(accountID: account.accountID)
+                guard try SetupActivationProgress(account: account, runtime: runtime, state: state) == expected,
+                      let initial = try machine.initialization(accountID: account.accountID), initial.complete else {
+                    throw AdministrativeSetupError.staleProgress
+                }
+                let inventory = try currentInventory(machine)
+                let plan = try state.plan ?? RuntimeActivationPlan(account: account, initialization: initial, runtime: runtime, inventory: inventory)
+                try machine.retainRuntimeActivation(plan); try activationOperations.didStage(.intentRetained)
+                func verify() throws {
+                    _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: false)
+                }
+                try verify()
+                try activationOperations.prepare(plan, account, initial, inventory, verify)
+                try activationOperations.didStage(.filesPublished); try verify()
+                _ = try machine.enrollRuntimeActivation(plan)
+                try activationOperations.didStage(.inventoryEnrolled)
+                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                return (account, initial, plan)
+            }
+            let (account, initial, plan) = context
+            func verifyReady() throws {
+                try machines.useActivation { machine in
+                    let inventory = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                    try activationOperations.validate(plan, account, initial, inventory, {
+                        _ = try self.verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                    })
+                }
+            }
+            try verifyReady()
+            for (index, job) in [plan.authorityJob, plan.transportJob].enumerated() {
+                try activationOperations.register(job, verifyReady)
+                try activationOperations.didStage(index == 0 ? .authorityRegistered : .transportRegistered)
+                try verifyReady()
+            }
+            return try machines.useActivation { machine in
+                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                try machine.markRuntimeJobsRegistered(plan); try activationOperations.didStage(.completed)
+                let value = try SetupActivationProgress(account: account, runtime: machine.runtimePreparation(accountID: account.accountID),
+                    state: machine.runtimeActivation(accountID: account.accountID))
+                try value.validateCompletion(of: expected); return value
+            }
+        }
+    }
+    private func verifyActivation(machine: PreparationIntentStore, account: AccountPreparationIntent,
+                                  initialization: AuthorityInitializationIntent, plan: RuntimeActivationPlan,
+                                  callerUID: uid_t, enrolled: Bool) throws -> InstallationInventory {
+        try verifyEnrollment(account, callerUID: callerUID, machine: machine); try machine.validateAccountPreparation(account)
+        let runtime = try machine.runtimePreparation(accountID: account.accountID)
+        let services = try machine.serviceAccountPlan(accountID: account.accountID)
+        guard services.complete, services.plan == plan.reference.services,
+              runtime.configurationPublished, runtime.reference == plan.reference,
+              try machine.initialization(accountID: account.accountID) == initialization,
+              let retained = try machine.runtimeActivation(accountID: account.accountID).plan,
+              try retained.encoded == plan.encoded else { throw RuntimeActivationError.changedScope }
+        try plan.validate(account: account, reference: plan.reference)
+        let inventory = try currentInventory(machine), desired = try plan.enrolledInventory(inventory)
+        guard !enrolled || desired == inventory else { throw RuntimeActivationError.incomplete }
+        return inventory
     }
     private func verifyEnrollment(_ value: AccountPreparationIntent, callerUID: uid_t, machine: PreparationIntentStore) throws {
         guard value.ownerUID == callerUID else { throw AdministrativeSetupError.wrongAccount }

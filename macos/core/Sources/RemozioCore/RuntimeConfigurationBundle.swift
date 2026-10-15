@@ -38,6 +38,15 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
     let elevationPolicy: CommandElevationPolicy
     var description: String { "RuntimeConfigurationBundle(redacted)" }
 
+    static func initial(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+                        reference: RuntimeMaterialReference, inventory: InstallationInventory) throws -> Self {
+        try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
+            presencePolicy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000),
+            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
+            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
+            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+    }
+
     init(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
          reference: RuntimeMaterialReference, inventory: InstallationInventory,
          presencePolicy: PresenceConfiguration, environment: [CapturedEnvironmentEntry],

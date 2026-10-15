@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client")
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -121,6 +121,12 @@ def experiment(report):
                 ("frame-nil", "nil", trusted, TRUSTED, 0),
                 ("frame-wrong-server", "frame", trusted, OTHER, 3),
                 ("frame-wrong-client", "frame", other, TRUSTED, 3),
+                ("activation-progress", "activation-progress", trusted, TRUSTED, 0),
+                ("activation-bytes", "activation-bytes", trusted, TRUSTED, 0),
+                ("activation-empty", "activation-empty", trusted, TRUSTED, 0),
+                ("activation-nil", "activation-nil", trusted, TRUSTED, 0),
+                ("activation-wrong-server", "activation-bytes", trusted, OTHER, 3),
+                ("activation-wrong-client", "activation-bytes", other, TRUSTED, 3),
                 ("runtime-progress", "runtime-progress", trusted, TRUSTED, 0),
                 ("runtime-bytes", "runtime-bytes", trusted, TRUSTED, 0),
                 ("runtime-empty", "runtime-empty", trusted, TRUSTED, 0),

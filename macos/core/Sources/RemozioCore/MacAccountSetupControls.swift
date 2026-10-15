@@ -2,6 +2,8 @@ import Foundation
 import Observation
 
 protocol MacAccountSetupDriver: Sendable {
+    func activationProgress() async throws -> SetupActivationProgress?
+    func activateRuntime(_ expected: SetupActivationProgress) async throws -> SetupActivationProgress
     func runtimeProgress() async throws -> SetupRuntimeProgress?
     func prepareRuntime(_ expected: SetupRuntimeProgress, fileCustodyAccepted: Bool) async throws -> SetupRuntimeProgress
     func progress() async throws -> SetupAccountEnrollmentProgress?
@@ -10,6 +12,27 @@ protocol MacAccountSetupDriver: Sendable {
     func prepareServiceAccounts(_ expected: SetupServiceAccountProgress) async throws -> SetupServiceAccountProgress
 }
 private actor NativeMacAccountSetupDriver: MacAccountSetupDriver {
+    func activationProgress() async throws -> SetupActivationProgress? {
+        let channel = try await MacAccountSetupConnection.open(activation: true)
+        do {
+            try await channel.start()
+            let value = try await channel.activationProgress()
+            await channel.close(); return value
+        } catch { await channel.close(); throw error }
+    }
+    func activateRuntime(_ expected: SetupActivationProgress) async throws -> SetupActivationProgress {
+        let channel = try await MacAccountSetupConnection.open(activation: true)
+        do {
+            try await channel.start()
+            guard try await channel.activationProgress() == expected else { throw AdministrativeSetupError.staleProgress }
+            try Task.checkCancellation()
+            let session = try SetupAdministratorSession(); defer { session.close() }
+            try session.authorize()
+            try Task.checkCancellation()
+            let value = try await channel.activateRuntime(expected, authorization: session.externalForm())
+            await channel.close(); return value
+        } catch { await channel.close(); throw error }
+    }
     func runtimeProgress() async throws -> SetupRuntimeProgress? {
         let channel = try await MacAccountSetupConnection.open(runtime: true)
         do {
@@ -92,6 +115,7 @@ public final class MacAccountSetupControls {
     public private(set) var progress: SetupAccountEnrollmentProgress?
     public private(set) var services: SetupServiceAccountProgress?
     public private(set) var runtime: SetupRuntimeProgress?
+    public private(set) var activation: SetupActivationProgress?
     public private(set) var loaded = false
     public private(set) var working = false
     public private(set) var failed = false
@@ -111,7 +135,10 @@ public final class MacAccountSetupControls {
             let runtimeState = serviceState?.complete == true ? try await driver.runtimeProgress() : nil
             try checkRuntime(runtimeState, services: serviceState)
             try Task.checkCancellation()
-            progress = value; services = serviceState; runtime = runtimeState; loaded = true
+            let activationState = runtimeState?.configurationPublished == true ? try await driver.activationProgress() : nil
+            try checkActivation(activationState, runtime: runtimeState)
+            try Task.checkCancellation()
+            progress = value; services = serviceState; runtime = runtimeState; activation = activationState; loaded = true
         } catch is CancellationError { }
         catch { loaded = false; failed = true }
     }
@@ -134,6 +161,28 @@ public final class MacAccountSetupControls {
             throw AdministrativeSetupChannelError.invalidMessage
         }
     }
+    private func checkActivation(_ activation: SetupActivationProgress?, runtime: SetupRuntimeProgress?) throws {
+        guard let runtime, runtime.configurationPublished else {
+            guard activation == nil else { throw AdministrativeSetupChannelError.invalidMessage }; return
+        }
+        guard let activation, activation.macID == runtime.macID, activation.accountID == runtime.accountID,
+              activation.setupID == runtime.setupID, activation.accountRevision == runtime.accountRevision,
+              activation.ownerUID == runtime.ownerUID, activation.servicePlanID == runtime.servicePlanID,
+              activation.materialID == runtime.materialID else { throw AdministrativeSetupChannelError.invalidMessage }
+    }
+    /// Explicit Start/Restore action only. Registration completion is not a live health result.
+    public func activateRuntime() async {
+        guard loaded, !working, runtime?.configurationPublished == true, let expected = activation else { return }
+        working = true; failed = false
+        defer { working = false }
+        do {
+            let value = try await driver.activateRuntime(expected)
+            try Task.checkCancellation(); try value.validateCompletion(of: expected)
+            activation = value
+        } catch is CancellationError { loaded = false }
+        catch SetupAdministratorAuthorizationError.cancelled { loaded = false }
+        catch { loaded = false; failed = true }
+    }
     public func prepareRuntime(fileCustodyAccepted: Bool) async {
         guard loaded, !working, services?.complete == true, let expected = runtime,
               !expected.configurationPublished, fileCustodyAccepted else { return }
@@ -142,7 +191,10 @@ public final class MacAccountSetupControls {
         do {
             let value = try await driver.prepareRuntime(expected, fileCustodyAccepted: fileCustodyAccepted)
             try Task.checkCancellation(); try value.validateCompletion(of: expected)
-            runtime = value
+            let activationState = try await driver.activationProgress()
+            try checkActivation(activationState, runtime: value)
+            try Task.checkCancellation()
+            runtime = value; activation = activationState
         } catch is CancellationError { loaded = false }
         catch SetupAdministratorAuthorizationError.cancelled { loaded = false }
         catch { loaded = false; failed = true }
@@ -157,7 +209,10 @@ public final class MacAccountSetupControls {
             let runtimeState = try await driver.runtimeProgress()
             try checkRuntime(runtimeState, services: value)
             try Task.checkCancellation()
-            services = value; runtime = runtimeState
+            let activationState = runtimeState?.configurationPublished == true ? try await driver.activationProgress() : nil
+            try checkActivation(activationState, runtime: runtimeState)
+            try Task.checkCancellation()
+            services = value; runtime = runtimeState; activation = activationState
         } catch is CancellationError { loaded = false }
         catch SetupAdministratorAuthorizationError.cancelled { loaded = false }
         catch { loaded = false; failed = true }
@@ -175,7 +230,10 @@ public final class MacAccountSetupControls {
             let runtimeState = serviceState?.complete == true ? try await driver.runtimeProgress() : nil
             try checkRuntime(runtimeState, services: serviceState)
             try Task.checkCancellation()
-            progress = value; services = serviceState; runtime = runtimeState
+            let activationState = runtimeState?.configurationPublished == true ? try await driver.activationProgress() : nil
+            try checkActivation(activationState, runtime: runtimeState)
+            try Task.checkCancellation()
+            progress = value; services = serviceState; runtime = runtimeState; activation = activationState
         } catch is CancellationError { loaded = false }
         catch SetupAdministratorAuthorizationError.cancelled { loaded = false }
         catch {

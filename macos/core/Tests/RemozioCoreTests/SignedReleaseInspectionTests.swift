@@ -37,6 +37,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             }
             let authority = try XCTUnwrap(evidence.manifest.components.first { $0.role == .authority })
             func formats(_ name: String) throws -> ReleaseFormat { try XCTUnwrap(authority.formats.first { $0.name == name }) }
+            XCTAssertEqual(try formats("authority.command-host-config").readers, InstalledAuthorityCommandConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-execution-config").readers, AuthorityCommandExecutionConfiguration.supportedVersions)
             XCTAssertEqual(try formats("command.capture").readers, CommandCapture.supportedSchemaVersions)

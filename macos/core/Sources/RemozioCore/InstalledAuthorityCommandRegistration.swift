@@ -80,12 +80,22 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             throw InstalledAuthorityCommandError.wrongInstallation
         }
         let component = release.manifest.components.first(where: { $0.role == .authority })!
-        let manifest = try InstallationServiceManifest(declaration: declaration, component: component, configurationPath: path,
-            userName: "root", arguments: [component.relativePath, "--command-configuration", path],
-            machServices: [service.serviceName, configuration.command.presence.endpoint.serviceName, configuration.command.serviceName],
-            runAtLoad: true, keepAlive: true)
-        try manifest.validate(ProtectedServiceConfiguration.readPublic(path: bundle.appendingPathComponent(
-            "Contents/Library/LaunchDaemons/" + configuration.plistName).path), inventory: inventory, release: release)
+        switch configuration.jobPlacement {
+        case .bundled:
+            let manifest = try InstallationServiceManifest(declaration: declaration, component: component, configurationPath: path,
+                userName: "root", arguments: [component.relativePath, "--command-configuration", path],
+                machServices: [service.serviceName, configuration.command.presence.endpoint.serviceName, configuration.command.serviceName],
+                runAtLoad: true, keepAlive: true)
+            try manifest.validate(ProtectedServiceConfiguration.readPublic(path: bundle.appendingPathComponent(
+                "Contents/Library/LaunchDaemons/" + configuration.plistName).path), inventory: inventory, release: release)
+        case .systemAccount:
+            let manifest = try InstalledAccountJobManifest(accountID: configuration.command.accountID, role: .authority,
+                executionUID: 0, userName: "root", bundlePath: bundle.path)
+            guard manifest.declaration == declaration, manifest.configurationPath == path else {
+                throw InstalledAuthorityCommandError.changedConfiguration
+            }
+            try manifest.validate(ProtectedServiceConfiguration.readPublic(path: manifest.path), inventory: inventory, release: release)
+        }
         try placement.validate()
     }
     func takeReceiveRight() throws -> mach_port_t {

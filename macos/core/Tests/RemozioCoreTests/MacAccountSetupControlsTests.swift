@@ -20,6 +20,10 @@ final class MacAccountSetupControlsTests: XCTestCase {
         func prepareServiceAccounts(_ expected: SetupServiceAccountProgress) throws -> SetupServiceAccountProgress {
             XCTFail("No service write without prepared storage and current progress"); throw Failure.lostReply
         }
+        func activationProgress() -> SetupActivationProgress? { nil }
+        func activateRuntime(_ expected: SetupActivationProgress) throws -> SetupActivationProgress {
+            XCTFail("No activation without prepared runtime"); throw Failure.lostReply
+        }
         func runtimeProgress() -> SetupRuntimeProgress? { nil }
         func prepareRuntime(_ expected: SetupRuntimeProgress, fileCustodyAccepted: Bool) throws -> SetupRuntimeProgress {
             XCTFail("No runtime write without completed services"); throw Failure.lostReply
@@ -57,6 +61,7 @@ final class MacAccountSetupControlsTests: XCTestCase {
         let enrollment: SetupAccountEnrollmentProgress
         var services: SetupServiceAccountProgress?
         let completed: SetupServiceAccountProgress
+        let pendingActivation: SetupActivationProgress
         let pendingRuntime: SetupRuntimeProgress
         let completedRuntime: SetupRuntimeProgress
         var runtimeState: SetupRuntimeProgress?
@@ -74,10 +79,16 @@ final class MacAccountSetupControlsTests: XCTestCase {
                 notValidBefore: now.addingTimeInterval(-60), notValidAfter: now.addingTimeInterval(600))
             completedRuntime = try .init(account: account, services: .init(plan: plan, complete: true),
                 state: .init(reference: material.reference, configurationPublished: true))
+            pendingActivation = try .init(account: account, runtime: .init(reference: material.reference, configurationPublished: true),
+                state: .init(plan: nil, jobsRegistered: false))
         }
         func progress() -> SetupAccountEnrollmentProgress? { enrollment }
         func prepare(_ request: AccountEnrollmentRequest) throws -> SetupAccountEnrollmentProgress {
             XCTFail("Do not repeat completed account preparation"); throw Failure.lostReply
+        }
+        func activationProgress() -> SetupActivationProgress? { pendingActivation }
+        func activateRuntime(_ expected: SetupActivationProgress) throws -> SetupActivationProgress {
+            XCTFail("Activation must be a separate explicit action"); throw Failure.lostReply
         }
         func runtimeProgress() -> SetupRuntimeProgress? { runtimeReads += 1; return runtimeState }
         func prepareRuntime(_ expected: SetupRuntimeProgress, fileCustodyAccepted: Bool) throws -> SetupRuntimeProgress {

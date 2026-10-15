@@ -84,3 +84,12 @@ The probe checks runtime hello, progress, preparation, the custody boolean, and 
 Wrong client and server identifiers prevent preparation dispatch after the handshake.
 The selector checks use synthetic bytes. They neither import administrator rights nor publish production files.
 They do not prove installed Root admission, native service ownership or complete Mac–Pixel approval.
+
+## Runtime activation selectors
+
+[The activation evidence](evidence/2026-10-15-runtime-activation-xpc.json) adds six version 5 cases. All 38 cases passed.
+The temporary GUI service was removed.
+The probe checks activation hello, progress and the explicit activation selector, including nonempty, empty and nil replies.
+Wrong client and server identifiers prevent payload dispatch after the harmless handshake.
+The service echoes synthetic bytes. It neither imports administrator rights nor starts production jobs.
+Installed Root and Mac–Pixel behavior remain separate interactive gates.
