@@ -5,6 +5,7 @@ import dev.remozio.phone.enrollment.EnrollmentSnapshot
 import dev.remozio.phone.enrollment.PhoneEnrollment
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.phone.enrollment.EnrollmentPhase
+import dev.remozio.phone.enrollment.EnrollmentKeyReference
 import java.util.concurrent.atomic.AtomicBoolean
 import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.PairingProofPurpose
@@ -85,6 +86,39 @@ internal class StoredPairingHost(
             }
         }
     }
+
+    /** Only a joined fresh setup owner that never submitted its proof may call this operation. */
+    suspend fun abandonUnsubmitted(expected: StoredPhoneEnrollment, retireKeys: () -> Unit) = withContext(dispatcher) {
+        require(expected.phase == EnrollmentPhase.PREPARED)
+        val pairing = requireNotNull(expected.pairing)
+        require(pairing.replacingRecordID == null && expected.enrollment.relayCredential == null)
+        enrollmentAccess.withLock {
+            checkNotNull(openExisting()).use { store ->
+                require(preparedLeases[expected.enrollment.recordID].isNullOrEmpty())
+                val snapshot = store.snapshot()
+                val current = snapshot.entries.singleOrNull { it.enrollment.recordID == expected.enrollment.recordID }
+                if (current != null) {
+                    require(current.phase != EnrollmentPhase.ACTIVE)
+                    require(current.sameConnectionAs(StoredPhoneEnrollment(expected.enrollment, current.phase, expected.pairing)))
+                }
+                val keys = references(expected.enrollment)
+                require(snapshot.entries.none { row ->
+                    row.enrollment.recordID != expected.enrollment.recordID && references(row.enrollment).any { retained ->
+                        keys.any { owned -> retained.alias == owned.alias || retained.keyID == owned.keyID || retained.publicKey == owned.publicKey }
+                    }
+                })
+                val ids = setOf(expected.enrollment.recordID)
+                invalidatePreparedLocked(ids)
+                invalidateLocked(ids)
+                if (current?.phase == EnrollmentPhase.PREPARED) store.remove(current.enrollment.recordID.copyBytes(), snapshot.revision)
+                // Keep reference checks, durable removal and native retirement under the same enrollment lock.
+                retireKeys()
+            }
+        }
+    }
+
+    private fun references(enrollment: PhoneEnrollment): List<EnrollmentKeyReference> =
+        listOf(enrollment.transportKey, enrollment.decisionKey, enrollment.biometricKey)
 
     /** Local removal does not claim that the Mac has revoked the phone. */
     suspend fun remove(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = withContext(dispatcher) {

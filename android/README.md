@@ -136,7 +136,10 @@ Pinned TLS verifies the invitation endpoint. Both screens derive the same compar
 The Android owner creates fresh hardware transport, decision, and biometric keys. It does not replace an existing enrollment silently.
 Explicit code comparison precedes durable PREPARED storage and a fresh biometric operation. A verified Root receipt alone activates the record.
 Cancelled biometrics can be retried after another explicit comparison. Expiry prevents a new comparison operation.
-Rotation retains the setup owner. Leaving setup closes its channel and joins cleanup. A prepared or uncertain record retains its keys.
+Rotation retains the setup owner. Leaving setup closes its channel and joins cleanup. Closing a fresh setup before any biometric proof submission discards only its matching local preparation and unused keys.
+The archive removal commits before native key retirement, under the enrollment lock. Active records, changed data, other key references and other prepared borrowers prevent cleanup.
+A missing or unreadable archive preserves the keys. A key-retirement failure retains the closed owner so Close can retry safely.
+Any proof submission attempt keeps the record and keys, including after a lost reply. A process restart also leaves uncertain setup intact.
 Lost receipt recovery and explicit re-enrollment remain integration work. The current UI preserves incomplete records and states that uncertainty.
 
 The debug-only PairingPreviewActivity renders synthetic layouts with inert callbacks. It never opens enrollment storage or creates a setup owner.

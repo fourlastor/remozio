@@ -42,6 +42,7 @@ internal class AndroidPairingAttempt(
     private var biometricKey: EnrollmentKeyReference? = null
     private var expectedRevision: ULong? = null
     private var enrollment: PhoneEnrollment? = null
+    private var preparedRecord: StoredPhoneEnrollment? = null
     private var prepared = false
     private var preparedAccess: PreparedPairingAccess? = null
     private var biometric: AndroidPairingBiometrics? = null
@@ -100,6 +101,8 @@ internal class AndroidPairingAttempt(
             selected.label, transcript.macAuthorityKey.copyBytes(), p256SPKI(transcript.macTransportKey.copyBytes()),
             checkNotNull(transportKey), checkNotNull(decisionKey), checkNotNull(biometricKey), transcript.enrollmentTag.copyBytes(), null)
         enrollment = row
+        preparedRecord = StoredPhoneEnrollment(row, EnrollmentPhase.PREPARED,
+            PreparedPairing(transcript, null, selected.minimumEnvelopeVersion))
         // Completion may be ambiguous on cancellation or an I/O error. From this boundary onward never delete its keys automatically.
         prepared = true
         store.prepare(row, transcript, checkNotNull(expectedRevision), selected.minimumEnvelopeVersion)
@@ -135,7 +138,7 @@ internal class AndroidPairingAttempt(
             preparedAccess?.lease?.close(); biometric?.close(); channel?.close(); job.cancel()
         }
     }
-    /** Join from outside this owner's job. Only newly created unpublished keys may be removed. */
+    /** Join before cleanup. A proof submission keeps its record and keys even when delivery failed. */
     suspend fun closeAndJoin() {
         close()
         withContext(NonCancellable + Dispatchers.IO) {
@@ -143,16 +146,18 @@ internal class AndroidPairingAttempt(
             operations.withLock {
                 biometric?.close(); identity?.close()
                 preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
-                if (!prepared) {
-                    val keystore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-                    for (ref in ownedKeys) {
-                        val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()
-                        if (point != null && point.contentEquals(ref.publicKey.copyBytes().takeLast(65).toByteArray())) {
-                            keystore.deleteEntry(ref.alias)
-                        }
-                    }
-                }
+                if (!prepared) retireOwnedKeys()
+                else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
                 ownedKeys.clear()
+            }
+        }
+    }
+    private fun retireOwnedKeys() {
+        val keystore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        for (ref in ownedKeys) {
+            val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()
+            if (point != null && point.contentEquals(ref.publicKey.copyBytes().takeLast(65).toByteArray())) {
+                keystore.deleteEntry(ref.alias)
             }
         }
     }

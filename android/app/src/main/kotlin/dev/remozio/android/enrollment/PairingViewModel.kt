@@ -113,6 +113,7 @@ internal class PairingViewModel(private val app: RemozioApplication) : ViewModel
         scope.launch {
             val result = retiring?.await()
             operation?.join()
+            if (result?.isFailure == true) attempt = owner
             mutable.value = if (result?.isFailure == true) mutable.value.copy(phase = PairingPhase.FAILED)
                 else PairingScreenState()
         }

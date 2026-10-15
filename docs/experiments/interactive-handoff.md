@@ -88,7 +88,10 @@ Keep both devices on the same LAN. Keep the Android app open for this initial pa
 4. Confirm matching codes on both devices and complete the phone's biometric prompt.
 5. Require completion on both devices. A Mac-side save alone does not prove that the phone received its receipt.
 
-Preserve an incomplete record after a lost reply. Receipt recovery UI remains unfinished in this candidate.
+Closing a fresh phone setup before a proof submission removes only its unsubmitted local preparation and unused keys.
+The biometric prompt can be retried while that setup remains open. Close can retry a failed cleanup.
+Preserve an incomplete record after any proof submission attempt or process restart.
+Receipt recovery UI remains unfinished; a lost reply does not authorize removing that record.
 Do not discard its keys or silently start another enrollment.
 
 ## Stage 3: first complete approval

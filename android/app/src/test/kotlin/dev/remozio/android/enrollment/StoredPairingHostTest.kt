@@ -17,14 +17,15 @@ class StoredPairingHostTest {
     private fun key() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
     private val authority = key()
     private val biometric = key()
-    private fun record(n: Int): PhoneEnrollment {
+    private fun record(n: Int, mac: Int = 20): PhoneEnrollment {
+        val localBiometric = if (mac == 20) biometric else key()
         fun local(role: EnrollmentKeyRole): EnrollmentKeyReference {
-            val point = (if (role == EnrollmentKeyRole.BIOMETRIC) biometric else key()).public.encoded
+            val point = (if (role == EnrollmentKeyRole.BIOMETRIC) localBiometric else key()).public.encoded
             return EnrollmentKeyReference(role, id(n * 3 + role.ordinal),
                 "remozio.${role.aliasPart}.v1.${"%032x".format(n * 3 + role.ordinal)}",
                 if (role == EnrollmentKeyRole.TRANSPORT) point else point.takeLast(65).toByteArray())
         }
-        return PhoneEnrollment(id(n), id(20), id(21), id(n + 30), id(n + 40), "Synthetic Mac",
+        return PhoneEnrollment(id(n), id(mac), id(21), id(n + 30), id(n + 40), "Synthetic Mac",
             authority.public.encoded.takeLast(65).toByteArray(), key().public.encoded,
             local(EnrollmentKeyRole.TRANSPORT), local(EnrollmentKeyRole.DECISION), local(EnrollmentKeyRole.BIOMETRIC),
             ByteArray(32) { n.toByte() }, null)
@@ -157,6 +158,104 @@ class StoredPairingHostTest {
         assertFalse(first.lease.isCurrent()); assertTrue(second.lease.isCurrent())
         h.release(e.recordID, second.lease)
         assertFalse(second.lease.isCurrent())
+    }
+
+    private fun expected(e: PhoneEnrollment, t: PairingTranscript) =
+        StoredPhoneEnrollment(e, EnrollmentPhase.PREPARED, PreparedPairing(t, null, 1u))
+
+    @Test fun abandonedUnsubmittedSetupCommitsRemovalBeforeKeyRetirementAndPreservesOtherMacs() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val access = h.prepared(e.recordID, t)
+        h.release(e.recordID, access.lease)
+        val other = record(2, mac = 22)
+        h.prepare(other, transcript(other), 1u, 1u)
+        var retired = false
+        h.abandonUnsubmitted(expected(e, t)) {
+            assertTrue(mutex.isLocked)
+            open().use { store ->
+                assertEquals(EnrollmentPhase.REMOVED, store.snapshot().entries.single { it.enrollment.recordID == e.recordID }.phase)
+                assertEquals(EnrollmentPhase.PREPARED, store.snapshot().entries.single { it.enrollment.recordID == other.recordID }.phase)
+            }
+            retired = true
+        }
+        assertTrue(retired)
+        assertEquals(listOf(setOf(e.recordID)), invalidated)
+        assertFalse(access.lease.isCurrent())
+        assertFails { h.activate(e.recordID, receipt(t)) }
+        val retry = record(3)
+        open().use { store -> h.prepare(retry, transcript(retry), store.snapshot().revision, 1u) }
+    }
+
+    @Test fun abandonedSetupRefusesActiveOrChangedRecordsBeforeInvalidationAndKeyRetirement() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val altered = record(1)
+        assertFails { h.abandonUnsubmitted(expected(altered, transcript(altered))) { fail("Changed keys must survive") } }
+        assertTrue(invalidated.isEmpty())
+        h.activate(e.recordID, receipt(t)); invalidated.clear()
+        assertFails { h.abandonUnsubmitted(expected(e, t)) { fail("Active pairing must survive") } }
+        assertTrue(invalidated.isEmpty())
+        open().use { assertEquals(EnrollmentPhase.ACTIVE, it.snapshot().entries.single().phase) }
+    }
+
+    @Test fun abandonmentRequiresEveryOtherPreparedBorrowerToFinish() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        val first = h.prepared(e.recordID, t); val second = h.prepared(e.recordID, t)
+        h.release(e.recordID, first.lease)
+        assertFails { h.abandonUnsubmitted(expected(e, t)) { fail("Another borrower can still be using its keys") } }
+        assertTrue(invalidated.isEmpty()); assertTrue(second.lease.isCurrent())
+        h.release(e.recordID, second.lease)
+        h.abandonUnsubmitted(expected(e, t)) { }
+    }
+
+    @Test fun abandonmentPreservesKeysOnInvalidationOrStorageFailure() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        assertFails { host { error("Synthetic close failure") }.abandonUnsubmitted(expected(e, t)) { fail("Do not retire keys") } }
+        storage.fail = true
+        assertFails { h.abandonUnsubmitted(expected(e, t)) { fail("Unconfirmed removal must keep keys") } }
+        storage.fail = false
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single().phase) }
+    }
+
+    @Test fun confirmedRemovalCanRetryKeyRetirementWithoutAnotherArchiveWrite() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u)
+        assertFails { h.abandonUnsubmitted(expected(e, t)) { error("Synthetic key failure") } }
+        val revision = open().use { store ->
+            assertEquals(EnrollmentPhase.REMOVED, store.snapshot().entries.single().phase)
+            store.snapshot().revision
+        }
+        storage.fail = true
+        var retired = false
+        h.abandonUnsubmitted(expected(e, t)) { retired = true }
+        assertTrue(retired)
+        open().use { assertEquals(revision, it.snapshot().revision) }
+    }
+
+    @Test fun healthyArchiveWithoutTheUnsubmittedRowAllowsOnlyOwnedKeyRetirement() = runBlocking<Unit> {
+        val e = record(1); val t = transcript(e)
+        var retired = false
+        host().abandonUnsubmitted(expected(e, t)) { assertTrue(mutex.isLocked); retired = true }
+        assertTrue(retired)
+        open().use { assertEquals(0uL, it.snapshot().revision); assertTrue(it.snapshot().entries.isEmpty()) }
+        val unavailable = StoredPairingHost({ error("Never create during cleanup") }, { null }, mutex, {}, {}, Dispatchers.Unconfined)
+        assertFails { unavailable.abandonUnsubmitted(expected(e, t)) { fail("Unknown archive must keep keys") } }
+    }
+
+    @Test fun anotherRecordReferencingTheKeysPreventsRetirementEvenAfterLocalRemoval() = runBlocking<Unit> {
+        val h = host(); val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u); h.remove(e.recordID, 1u); invalidated.clear()
+        val other = record(2)
+        val reused = PhoneEnrollment(other.recordID.copyBytes(), other.macID.copyBytes(), other.accountID.copyBytes(),
+            other.phoneID.copyBytes(), other.epoch.copyBytes(), other.label, other.authorityPublicKey.copyBytes(),
+            other.transportPublicKey.copyBytes(), e.transportKey, e.decisionKey, e.biometricKey, other.enrollmentTag.copyBytes(), null)
+        h.prepare(reused, transcript(reused), 2u, 1u)
+        assertFails { h.abandonUnsubmitted(expected(e, t)) { fail("Referenced keys must survive") } }
+        assertTrue(invalidated.isEmpty())
+        open().use { assertEquals(EnrollmentPhase.PREPARED, it.snapshot().entries.single { it.enrollment.recordID == reused.recordID }.phase) }
     }
 
     @Test fun preparedLeasesAreBoundedAndReleasedCapacityCanBeReused() = runBlocking<Unit> {
