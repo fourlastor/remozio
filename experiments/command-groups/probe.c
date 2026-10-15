@@ -53,6 +53,29 @@ static double monotonic(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
     return (double)now.tv_sec + (double)now.tv_nsec / 1000000000.0;
 }
+/* The caller keeps children waitable until this process reaps them. */
+static int wait_for_owned_child(pid_t pid, int *status, double timeout) {
+    double began = monotonic();
+    bool completed = false, owned = true;
+    while (began >= 0) {
+        pid_t waited = waitpid(pid, status, WNOHANG);
+        if (waited == pid) { completed = true; owned = false; break; }
+        if (waited < 0 && errno != EINTR) { if (errno == ECHILD) owned = false; break; }
+        double now = monotonic();
+        if (now < began || now - began >= timeout) break;
+        struct timespec pause = {0, 10000000}; nanosleep(&pause, NULL);
+    }
+    if (completed) return 0;
+    if (owned) {
+        pid_t waited;
+        do { waited = waitpid(pid, status, WNOHANG); } while (waited < 0 && errno == EINTR);
+        if (waited == 0) {
+            kill(pid, SIGKILL);
+            while (waitpid(pid, status, 0) < 0 && errno == EINTR) {}
+        }
+    }
+    return -1;
+}
 /* Only forked children alter credentials. The parent owns the bounded wait and fixture cleanup. */
 static int trial(const struct account *target, bool dynamic, const gid_t *groups, int count,
                  const char *fixture, struct result *result) {
@@ -79,18 +102,8 @@ static int trial(const struct account *target, bool dynamic, const gid_t *groups
         close(descriptors[1]); _exit(sent == sizeof(observed) ? 0 : 1);
     }
     close(descriptors[1]);
-    double began = monotonic(); int status = 0;
-    bool completed = false;
-    while (began >= 0 && monotonic() - began < 20.0) {
-        pid_t waited = waitpid(pid, &status, WNOHANG);
-        if (waited == pid) { completed = true; break; }
-        if (waited < 0 && errno != EINTR) break;
-        struct timespec pause = {0, 10000000}; nanosleep(&pause, NULL);
-    }
-    if (!completed) {
-        kill(pid, SIGKILL); while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-        close(descriptors[0]); return -1;
-    }
+    int status = 0;
+    if (wait_for_owned_child(pid, &status, 20.0) != 0) { close(descriptors[0]); return -1; }
     ssize_t bytes;
     do { bytes = read(descriptors[0], result, sizeof(*result)); } while (bytes < 0 && errno == EINTR);
     close(descriptors[0]);
@@ -113,6 +126,9 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (getuid() != 0 || geteuid() != 0 || target.uid == 0) return 77;
+    struct sigaction child_action;
+    memset(&child_action, 0, sizeof(child_action)); child_action.sa_handler = SIG_DFL;
+    if (sigemptyset(&child_action.sa_mask) != 0 || sigaction(SIGCHLD, &child_action, NULL) != 0) return 70;
     if (limit < 1 || limit >= CAPACITY || target.count <= limit) return 78;
     gid_t initial[CAPACITY]; int initial_count = getgroups(CAPACITY, initial);
     if (initial_count < 0) return 70;

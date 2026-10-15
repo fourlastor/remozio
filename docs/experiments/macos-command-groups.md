@@ -10,6 +10,8 @@ The strict C probe reports 16 current process groups. A build with the SDK’s `
 The selected SDK header maps these variants to different exported `getgroups` symbols.
 These values alone do not establish the effective directory-membership behavior of a privileged child.
 The ordinary account cannot invoke the privileged controls. Invalid target UIDs are refused.
+Seven ordinary-process controls also check completion, timeout, lost child ownership, clock failure and clock rollback.
+They confirm that their children are reaped. They do not change credentials or establish privileged behavior.
 The probe compiles for Apple Silicon and macOS 26 with warnings treated as errors.
 
 ## Privileged controls: unrun
@@ -18,7 +20,10 @@ Each control runs in a separate child. The parent retains its credentials and re
 The controls compare the full root group list, full ordinary-account group list, a bounded static subset, and native `initgroups`.
 For the ordinary target, a Root-owned file tests access through a group outside the bounded subset.
 The result records credential API errors, observed group count, and file-access success or failure. It does not assume the membership result.
-Child waits are bounded. The parent checks its unchanged UID and group list after reaping the children.
+Child waits are bounded. Failed or reversed clock readings end the wait.
+The parent never signals a reaped child and checks ownership again before timeout cleanup.
+Privileged mode restores the default child signal disposition before forking, so children remain waitable.
+The parent checks its unchanged UID and group list after reaping the children.
 These controls require the approved interactive privileged test stage. They remain unrun in CI and this evidence.
 
 ## Why counts are insufficient
@@ -35,7 +40,9 @@ Resolve [issue #298](https://github.com/rock3r/remozio/issues/298) before activa
 Run `python3 scripts/run-command-groups-experiment.py` as the ordinary Mac account.
 The runner compiles POSIX and Darwin extended variants in a disposable directory. It never executes a privileged control.
 It verifies that the ordinary account receives a refusal for privileged mode and invalid UIDs.
-The JSON evidence records the source hash, host version and measured group counts.
+The JSON evidence records both source hashes, the owned-child results, host version and measured group counts.
+[The latest ordinary evidence](evidence/2026-10-15-command-groups-owned-wait.json) includes all seven passing controls.
+The privileged credential and file-access results remain unrun.
 
 ## Prepare the interactive controls
 

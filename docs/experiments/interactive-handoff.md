@@ -1,110 +1,156 @@
-# Interactive experiment handoff
+# First Mac–Pixel integration session
 
-Remozio is not ready for a production approval or a complete end-to-end test. This session tests platform assumptions with disposable fixtures. It does not enable the unfinished approval stack.
+The app now includes account setup, service activation, pairing and a foreground command inbox.
+Installed behavior remains untested. This candidate is not ready for Root command approval.
 
-## Where we are
+[Issue #298](https://github.com/rock3r/remozio/issues/298) is a known blocker.
+The Mac reports 24 directory groups for root. The command launcher accepts at most 16.
+Run the native credential experiment first. Fix and review the production contract before the durable installation and Root execution tests.
+Do not truncate groups or omit this gate to obtain a successful demo.
+
+## What exists
+
+| Surface | Connected in source | Still needs evidence or integration |
+| --- | --- | --- |
+| Mac app | Protected setup controls, target grants, service accounts, runtime files, Start/Restore and pairing | Native installation, hardware keys, service credentials, live IPC and network access |
+| Android app | Hardware enrollment, code comparison, biometric confirmation, saved Macs and foreground command actions | Actual Pixel enrollment and approval with this installed Mac |
+| Command path | Real CLI, capture, authority, journal, transport and executor | Root credentials in #298 and the complete installed path |
+| Push | Sender and notification components | Credentials, application integration and real background delivery |
+| Other product work | Adapter, relay, ADB and updater components or experiments | Their remaining integration and end-to-end tests |
+
+Green component tests do not establish an installed approval flow.
+A foreground LAN test does not establish push, relay operation or background recovery.
+The complete approved product scope remains open.
+
+## Prepare before the user returns
+
+- Use an Apple Silicon Mac and a Pixel with Android 17 or later.
+- Record the actual OS versions. A macOS 27 result does not prove macOS 26 behavior.
+- Choose artifacts from the same reviewed source. Retain their hashes and signing mode.
+- Build the Mac candidate through the [initial package procedure](../macos-initial-package.md).
+- Build the debug APK through the [Android guide](../../android/README.md). Preserve its existing signing identity when updating.
+- Run the repository gate before selecting artifacts. Do not install a package or contact the phone as part of that gate.
+
+The developer candidate contains a Developer ID signed app inside an unsigned local package.
+It has no notarization result. Archive checks do not prove native installation.
+All persistent executables remain inside the app.
+
+## Stage 1: standalone native credentials
+
+### 1. Resolve the credential gate
+
+Follow the [target-group experiment](macos-command-groups.md).
+Ordinary inspection and owned-child controls are prepared. The privileged credential controls remain unrun.
+
+With the user present, prepare a protected temporary copy of the fixed probe and obtain native administrator consent.
+The probe uses isolated children and a disposable file. It does not install a service or execute an arbitrary target command.
+Compare full group assignment, the static subset and native directory membership through actual file access.
+Record failures as results. Do not infer effective access from a group count.
+
+Use that evidence to implement and review the production credential fix.
+The standalone experiment needs no persistent Remozio installation.
+
+## Stage 2: installation and pairing
+
+First complete the credential fix and verify the intended update or recovery route.
+The initial package supports fresh installation and same-build recovery. It refuses a different installed release.
+Do not install an intermediate candidate that needs a known code fix, then assume a later package can replace it.
+Do not erase the installation to bypass this protection.
+Sparkle remains later product work; an initial package is not an updater.
+
+### 1. Install and prepare this Mac
+
+Use the [initial package](../macos-initial-package.md) and [account setup](../macos-account-preparation.md) procedures.
+
+1. Run the local package with the user present. Validate protected placement and the Applications shortcut.
+2. Open Remozio. Use its setup service control and complete the required macOS consent.
+3. Choose **Set up command approvals…**. Select the intended target UIDs and accept the separate Remozio policy. `0` means root.
+4. Choose **Prepare account…**. Verify hardware key creation and restoration without a software fallback.
+5. Choose **Prepare service accounts…**. Verify the dedicated users, groups and protected file access.
+6. Accept the private-file TLS disclosure, then choose **Prepare runtime files…**.
+7. Choose **Start services…**. Check the authenticated authority connection in the main window separately from saved registration progress.
+
+Validate actual service credentials and signed IPC admission before relying on these services.
+[Issue #286](https://github.com/rock3r/remozio/issues/286) tracks the installed boundary checks.
+A matching plist or saved registration marker does not prove service health.
+
+If installation or setup fails, retain the existing state and read its progress.
+A same-build retry must preserve identity. Do not erase protected files or recreate keys to make the test pass.
+**Restore services…** reconciles matching jobs; it does not replace a conflicting registration.
+
+### 2. Pair the Pixel
+
+Keep both devices on the same LAN. Keep the Android app open for this initial path.
+
+1. On the Mac, choose **Pair a phone…**.
+2. On Android, choose **Pair a Mac**. Scan or paste the Mac invitation and grant local network access.
+3. Select the requesting phone on the Mac. Compare the complete code on both screens.
+4. Confirm matching codes on both devices and complete the phone's biometric prompt.
+5. Require completion on both devices. A Mac-side save alone does not prove that the phone received its receipt.
+
+Preserve an incomplete record after a lost reply. Receipt recovery UI remains unfinished in this candidate.
+Do not discard its keys or silently start another enrollment.
+
+## Stage 3: first complete approval
+
+Start this stage only after the native gates and the production credential fix pass.
+Use the actual reviewed app, not a synthetic harness or software production keys.
 
 ```mermaid
-flowchart LR
-    C[Shared protocol and state machines] --> H[Synthetic Swift / Kotlin harnesses]
-    H --> T[Native transport components]
-    T --> I[Production integration: pending]
-    P[Pixel hardware experiments] --> I
-    M[Mac protected installation and key lifecycle] --> I
-    W[Protected local checkpoint and recovery: pending] --> I
-    I --> E[Real approval end-to-end tests: later]
+sequenceDiagram
+    participant CLI as Real CLI
+    participant Root as Root authority
+    participant Phone as Paired Pixel
+    participant Child as Command child
+    CLI->>Root: Submit command and input/output claims
+    Root->>Root: Capture and validate the actual context
+    Root->>Phone: Signed request through the pinned transport
+    Phone->>Phone: Inspect details and use fresh biometrics
+    Phone->>Root: Request-bound signed decision
+    Root->>Root: Durably accept the first valid decision
+    Root->>Child: Recheck credentials and dispatch once
+    Child-->>CLI: Command output and observed result
+    Root-->>Phone: Verified terminal status
 ```
 
-Arrows show dependencies, not completed connections. Passing a component test does not establish the next stage.
+Set **Away** from the Mac menu while testing.
+Active Mac use otherwise suppresses phone routing. Open this Mac's command inbox on the phone.
 
-| Surface | Available now | Still missing |
-| --- | --- | --- |
-| Mac app | Window, menu, Settings, encrypted setup preview | Setup application, protected services, pairing and live approval routing |
-| Android app | Saved Mac list, cached audit navigation, notification setup, update controls, debug previews and probes | Enrollment flow, live inventory, request actions and audit synchronization |
-| Transport | Native byte channels, pinned TLS, negotiation and synthetic relay checks | Production listeners, enrolled hardware peers and configured Cloudflare path |
-| Authority | Verified decisions and durable journal components | Protected host, local checkpoint recovery and real executor |
-| Push | Sender, delivery and phone notification components | App integration, configured credentials and physical delivery evidence |
-| Prompt adapters | Design contracts | Authorized UI fixtures, presence observations and live adapters |
-| ADB | Debug discovery and loopback probe | Hardware feasibility, foreground lifetime and the bridge itself |
+From an ordinary Mac terminal, run the embedded CLI with a disposable command:
 
-The [Mac app guide](../../macos/app/README.md), [Android guide](../../android/README.md) and [experiment index](README.md) describe each component's limits.
-
-## Before the session
-
-- Use an Apple Silicon Mac and a Pixel with Android 17 or later. Record the actual OS versions; macOS 27 results do not prove macOS 26 compatibility.
-- Keep the same debug signing identity for Android update-continuity tests. A debug APK is not a production release candidate.
-- Run the repository gate before choosing artifacts. The [build guide](../../android/README.md) names the SDK and APK path. The [Mac guide](../../macos/app/README.md) names its build outputs.
-- Agree on each device-setting change before making it. Biometric enrollment changes, debugging configuration and service registration are explicit test steps.
-- Use synthetic commands and disposable keys. Never submit a real 1Password, Little Snitch or sudo approval to exercise a fixture.
-
-Do not start with production Root service installation. The packaging fixture remains read-only. The separate [lifecycle harness](service-lifecycle.md) has guarded experiment operations for a later authorized session; its manifests are not production service definitions.
-
-## First session: prepared checks
-
-On 2026-10-03 the user selected Pixel checks first and Mac service, lock/logout/restart, and remote-desktop tests last. The table groups the prepared procedures; it does not override that order.
-
-Run each detailed procedure linked below. Record a failed or unavailable case separately from an expected rejection.
-
-| Order | Check | What to establish | Stop condition |
-| --- | --- | --- | --- |
-| 1 | App surfaces | Mac window/menu/Settings; Android large text, TalkBack, sheets, dialogs and notification setup | Inaccessible controls or misleading action/status text |
-| 2 | [Biometric probe](android-biometric-key.md) | Hardware policy, a fresh prompt per signature, cancellation and key continuity | A fresh signature succeeds without required authentication, or stale completion reports success |
-| 3 | [ADB endpoint probe](android-adb-endpoint.md) | Own-phone discovery, IPv4/IPv6 reachability, Wi-Fi-off behavior and cancellation | Unexpected destination, traffic beyond a connection attempt, or stale completion |
-| 4 | [XPC experiment](macos-xpc.md) | Six synthetic cases on the tested OS; temporary agent cleanup | Payload dispatch despite the handshake control, or cleanup failure |
-| 5 | [Presence signals](macos-presence.md) | One-shot idle/display observations and their limits in the target GUI session | A candidate signal is treated as proof of human or remote presence |
-| 6 | [Enclave signing](macos-key-custody.md) and [TLS](macos-enclave-tls.md) | Disposable hardware signatures and pinned loopback TLS on the tested OS | Unexpected authentication UI, software fallback or a wrong pin accepted |
-
-The XPC test registers a temporary **per-user** LaunchAgent. Follow its cleanup procedure if interrupted. It does not register the root authority.
-
-The ADB probe cannot enable a legacy listener. Test that path only after the user has explicitly provisioned one through an authorized ADB connection. Record listener exposure separately; loopback reachability does not prove that other interfaces are closed.
-
-Biometric enrollment changes and device reboots can follow the basic checks. Preserve the existing probe key for continuity checks. Do not recreate it to turn a failed continuity result into a pass.
-
-## Later sessions: fixtures or integration still needed
-
-These are not runnable product tests yet. Prepare the relevant implementation and procedure before changing the machine.
-
-| Work | Required evidence before relying on it |
-| --- | --- |
-| Protected Mac services | [Lifecycle harness](service-lifecycle.md): Developer ID and notarization, protected placement, actual registration/removal, reboot, lock/logout and replacement. The dedicated transport and [enclave lifecycle](enclave-lifecycle.md) probes are prepared; actual account behavior and pre-login key access remain untested. |
-| Authority continuity | Protected local checkpoint, interrupted transitions, partial-state replacement, stale floors and offline recovery |
-| UI adapters and presence | Sanitized authorized dialog captures; local input, CRD, Screen Sharing, dark display, manual Away and offline states |
-| Cloudflare and FCM | Per-Mac configuration, scoped credentials, real delivery, reconnect, offline reconciliation and independent Mac operation |
-| Android enrollment | Hardware transport/decision keys, biometric key policy, removal, re-enrollment and retained pairing across updates |
-| ADB bridge | Peer authentication, listener exposure, foreground-service eligibility, idle/network/update recovery, explicit Stop and per-pair isolation |
-| Release updates | Real signing identities, retained keys, interrupted activation/install outcomes and safe recovery |
-
-The user excluded whole-Mac backup rollback from the guarantee on 2026-10-03. A matching journal and checkpoint backup still restores without detection, as the [journal experiment](macos-authority-journal.md) demonstrates. An independent witness is no longer a blocker for that threat; protected storage and ordinary crash/replay recovery remain required.
-
-Do not substitute an online startup check, recurring authorization, forced re-pairing or physical recovery without consulting the user. Those changes alter the agreed UX. The current enclave probes also use after-first-unlock access; they do not establish pre-login availability.
-
-The user accepted pathname execution with a final identity/content recheck and its remaining race. The [command execution experiment](macos-execution-binding.md) records the evidence. Production command execution remains unimplemented. See the [accepted limits](../design-decisions.md) for both amendments.
-
-## Evidence record
-
-Keep one small raw record per case under the ignored `experiment-results/` directory. After review and redaction, copy the sanitized result to `docs/experiments/evidence/` with a date and case name. Commit that reviewed copy; do not force-add the ignored raw record.
-
-```text
-Case:
-Commit and build variant:
-Device family; OS/API version:
-Starting state:
-User action:
-Expected observation:
-Actual observation:
-Result: passed / failed / unavailable / not run
-Cleanup completed:
-Limitations and next step:
+```sh
+"/Library/Application Support/Remozio/Applications/Remozio.app/Contents/Helpers/remozio" run --pipes --uid 0 -- /usr/bin/id
 ```
 
-Record public fingerprints only when needed for continuity. Exclude passwords, private keys, tokens, device serials, network addresses, real command contents and ADB payloads. Screenshots of real prompts need separate inspection and redaction.
+Inspect the exact command and target on the phone, then approve with fresh biometrics.
+Check the caller result, the verified phone result and the durable audit evidence.
+Also test explicit decline and configured authorization expiry. Neither may dispatch the command.
 
-A timeout is an unknown result unless a separate observation establishes the expected rejection. A disconnected Mac has unknown current presence. An expired estimate does not prove that its target prompt expired.
+Then test connection loss, competing phone decisions, stale requests, revoked enrollment and restart recovery.
+Keep Unknown outcomes distinct from success, denial and confirmed expiry.
+Do not automatically retry an uncertain external action.
 
-## Integration exit criteria
+## Timing and later checks
 
-After the platform gates pass, integrate one vertical path at a time. Start with enrollment and authenticated request delivery, then explicit declines, then biometric decisions and guarded dispatch. Preserve the existing requirement that the first valid decision wins across phones.
+The first Mac session can start with the standalone credential experiment.
+Its results determine the production fix, which needs a separate implementation and review cycle.
+Reserve 60–90 minutes for installation and pairing after that fix and the update/recovery gate pass.
+Do not promise Root approval in the current candidate or a calendar date before that evidence.
 
-Each path needs failure cases: lost connection, stale request, expiry, competing decisions, revoked enrollment and restart. Keep Unknown outcomes distinct from success, denial and confirmed expiry; never retry an uncertain external action automatically.
+Keep lock, logout, restart, Chrome Remote Desktop and Screen Sharing checks last, as requested.
+Do not change 1Password, Little Snitch or PAM during these initial tests.
+Background push, remote relay, ADB, prompt adapters and updater integration remain required later work.
 
-Real approvals, credential insertion, durable Little Snitch rules and deployment through the ADB bridge remain later end-to-end tests. This handoff does not mark the design implemented or those tests passed.
+## Record the evidence
+
+Keep raw results under the ignored `experiment-results/` directory.
+Commit only a reviewed, sanitized record under `docs/experiments/evidence/`.
+Record the commit, artifact hashes, OS versions, starting state, user action, observed result, cleanup and limitations.
+
+Exclude passwords, private keys, provider tokens, device serials, network addresses and real approval payloads.
+Record public fingerprints only when needed for continuity.
+A timeout remains Unknown unless an independent observation establishes the outcome.
+
+Whole-Mac backup rollback and the final pathname execution race remain the user's accepted limits.
+They do not waive ordinary crash recovery, signature checks, replay protection or target credential validation.
+See the [accepted decisions](../design-decisions.md).

@@ -18,13 +18,20 @@ def run():
     if os.getuid() == 0 or os.geteuid() == 0:
         raise RuntimeError("Run inspection as an ordinary account; privileged controls are a separate interactive gate")
     with tempfile.TemporaryDirectory(prefix="remozio-command-groups-") as directory:
-        def build(name, flags):
+        def build(name, flags, source=SOURCE):
             binary = pathlib.Path(directory) / name
             subprocess.run(["xcrun", "clang", "-target", "arm64-apple-macos26.0", "-std=c11", *flags,
-                            "-Wall", "-Wextra", "-Werror", str(SOURCE), "-o", str(binary)], check=True, timeout=120)
+                            "-Wall", "-Wextra", "-Werror", str(source), "-o", str(binary)], check=True, timeout=120)
             return binary
         binary = build("posix-probe", [])
         unlimited = build("darwin-probe", ["-D_DARWIN_UNLIMITED_GETGROUPS"])
+        wait_source = SOURCE.with_name("wait-tests.c")
+        wait_binary = build("owned-wait-controls", [], wait_source)
+        wait_result = subprocess.run([str(wait_binary)], check=True, capture_output=True, text=True, timeout=30)
+        wait_controls = json.loads(wait_result.stdout)
+        if wait_controls != {"schemaVersion": 1, "passed": True, "cases": 7,
+                             "privilegedControlsRun": False, "unreapedChildren": 0}:
+            raise RuntimeError("Invalid owned-child wait evidence")
         def inspect(binary, uid, interface):
             result = subprocess.run([str(binary), "--inspect", str(uid)], check=True, capture_output=True, text=True, timeout=30)
             value = json.loads(result.stdout)
@@ -45,7 +52,9 @@ def run():
                 "darwinUnlimitedInspection": {"root": darwin_root, "ordinaryAccount": darwin_ordinary},
                 "ordinaryPrivilegedModeRefused": True,
                 "invalidUIDRefused": True, "privilegedControlsRun": False, "productionCredentialsChanged": False,
-                "productionExecutionTested": False, "sourceSHA256": hashlib.sha256(SOURCE.read_bytes()).hexdigest()}
+                "productionExecutionTested": False, "ownedWaitControls": wait_controls,
+                "waitControlsSHA256": hashlib.sha256(wait_source.read_bytes()).hexdigest(),
+                "sourceSHA256": hashlib.sha256(SOURCE.read_bytes()).hexdigest()}
 
 
 if __name__ == "__main__":
