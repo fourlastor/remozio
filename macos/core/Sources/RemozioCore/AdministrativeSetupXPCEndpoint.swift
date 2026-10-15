@@ -5,12 +5,16 @@ import Security
 public enum AdministrativeSetupInterface {
     public static let storageVersion: UInt64 = 1
     public static let enrollmentVersion: UInt64 = 2
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion]
+    public static let serviceAccountsVersion: UInt64 = 3
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol AdministrativeSetupXPCProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
+    func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func prepareServiceAccounts(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void)
     func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void)
     func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -31,6 +35,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private let onHandshake: @Sendable () -> Void
     private var ready = false
     private var enrollmentReady = false
+    private var serviceAccountsReady = false
     private var closed = false
     private var busy = false
 
@@ -68,6 +73,37 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
             onHandshake()
             send { reply(AdministrativeSetupInterface.storageVersion) }
         } catch { close(); reply(0) }
+    }
+    public func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); ready = true; enrollmentReady = true; serviceAccountsReady = true
+            }
+            onHandshake(); send { reply(AdministrativeSetupInterface.serviceAccountsVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard serviceAccountsReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.serviceAccountsProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func prepareServiceAccounts(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard serviceAccountsReady, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.invalidConfiguration
+                }
+                let progress = try SetupServiceAccountProgress.decode(expected)
+                guard progress.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                try authorize(authorization)
+                return try owner.resumeServiceAccounts(callerUID: uid, expected: progress).bytes
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
     }
     public func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {

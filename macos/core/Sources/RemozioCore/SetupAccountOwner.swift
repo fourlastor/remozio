@@ -37,6 +37,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let accountCodePolicy: AuthorityCodePolicy?
     private let lookupAccount: (uid_t) throws -> LocalAccountIdentity
     private let prepareAccount: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent
+    private let prepareServices: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State
     private var closed = false
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
@@ -53,9 +54,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
          lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity = LocalAccountDirectory.lookup,
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent = {
              try AccountPreparationController.resume(machine: $0, expected: $1, verifyCurrent: $2)
+         }, prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State = {
+             try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -65,17 +68,20 @@ public final class SetupAccountOwner: @unchecked Sendable {
          lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity = LocalAccountDirectory.lookup,
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent = {
              try AccountPreparationController.resume(machine: $0, expected: $1, verifyCurrent: $2)
+         }, prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State = {
+             try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
          verifyHost: @escaping (InstallationInventory) throws -> Void,
          accountCodePolicy: AuthorityCodePolicy?, lookupAccount: @escaping (uid_t) throws -> LocalAccountIdentity,
-         prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent) throws {
+         prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent,
+         prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State) throws {
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
-        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount
+        self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices
         do {
             installationID = try machines.use { machine in
                 guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
@@ -153,6 +159,33 @@ public final class SetupAccountOwner: @unchecked Sendable {
             try verifyEnrollment(expected, callerUID: callerUID, machine: machine)
             let result = try prepareAccount(machine, expected, { try self.verifyEnrollment(expected, callerUID: callerUID, machine: machine) })
             try verifyEnrollment(result, callerUID: callerUID, machine: machine)
+            return result
+        }
+    }
+    func serviceAccountsProgress(callerUID: uid_t) throws -> SetupServiceAccountProgress? {
+        try withMachine { machine in
+            _ = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard account.storagePrepared else { return nil }
+            let result = try SetupServiceAccountProgress(account: account, state: machine.serviceAccountPlan(accountID: account.accountID))
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            return result
+        }
+    }
+    func resumeServiceAccounts(callerUID: uid_t, expected: SetupServiceAccountProgress) throws -> SetupServiceAccountProgress {
+        try withMachine { machine in
+            guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard try SetupServiceAccountProgress(account: account, state: machine.serviceAccountPlan(accountID: account.accountID)) == expected else {
+                throw AdministrativeSetupError.staleProgress
+            }
+            let state = try prepareServices(machine, account, { try self.verifyEnrollment(account, callerUID: callerUID, machine: machine) })
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let result = try SetupServiceAccountProgress(account: account, state: state)
+            try result.validateCompletion(of: expected)
             return result
         }
     }

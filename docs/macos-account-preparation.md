@@ -50,7 +50,7 @@ Refresh never opens administrator UI or retries a mutation.
 ## Storage and protocol versions
 
 Explicit account preparation upgrades the machine store to schema 4.
-Normal opening and progress reads preserve schemas 1 through 4 without upgrading them.
+Normal opening and progress reads preserve schemas 1 through 5 without upgrading them.
 The added table retains the account reservation independently of the installed-service inventory.
 Prepared storage can exist before account service declarations are installed.
 It grants no service registration, pairing or command admission.
@@ -60,7 +60,7 @@ The existing storage interface keeps its version 1 hello and operations.
 New enrollment operations require a separate version 2 hello.
 The app verifies the Root peer before it exports native administrator rights.
 Each mutation rechecks native rights, caller scope, current protected release and retained progress.
-Signed manifests declare both local interface versions and machine schema 4.
+Signed manifests declare local interface versions 1, 2 and 3, and machine schemas 1 through 5.
 
 ## Evidence and remaining gates
 
@@ -73,5 +73,54 @@ These controls do not prove Root hardware key provisioning, native XPC admission
 Actual privileged installation and service tests remain in issues [#363](https://github.com/rock3r/remozio/issues/363) and
 [#374](https://github.com/rock3r/remozio/issues/374).
 The app reports storage preparation separately from service readiness.
-Dedicated service accounts, protected command policy publication and runtime configuration remain the next integration steps.
+Service account creation still needs the native installation test.
+Protected command policy publication and runtime configuration remain the next integration steps.
 Real device and end-to-end checks still require the user's interactive session.
+
+## Dedicated service accounts
+
+After storage preparation, an explicit app action creates separate transport and gateway accounts.
+The app discloses this action before native administrator authorization.
+These accounts cannot log in. They have separate primary groups and no home directory with user data.
+
+```mermaid
+sequenceDiagram
+    participant App as Installed app
+    participant Setup as Root setup helper
+    participant DB as Machine database
+    participant OD as Local directory
+    App->>Setup: Version 3 hello, then read progress
+    Note over App: User selects Prepare service accounts
+    App->>Setup: Exact progress and current administrator rights
+    Setup->>OD: Check names, IDs and UUIDs
+    Setup->>DB: Reserve both numeric IDs in one transaction
+    DB-->>Setup: Retained claims and UUIDs
+    Setup->>OD: Create disabled group/user records for each role
+    Setup->>OD: Check exact identity and isolation
+    Setup->>DB: Retain completion
+    Setup-->>App: Accounts prepared, runtime still unconfigured
+```
+
+The allocator checks random candidates between 20000 and 60000, with at most 128 attempts for each role.
+It excludes the interactive owner, retained reservations and existing directory records.
+Native checks use both the local directory and POSIX lookups.
+The database checks both roles together before it reserves either number.
+This database belongs to one Mac. It does not introduce a shared registry or a special Mac.
+
+An explicit reservation upgrades the machine database to schema 5.
+The saved plan binds the account, release, installation, authority pin and directory UUIDs.
+A restart keeps the plan, including partial group or user creation.
+The helper reconciles exact records after an unknown write result. It never adopts an unclaimed record or deletes a conflicting record.
+Completed setup does not recreate missing accounts or groups.
+A lost reply requires Refresh before another action.
+
+The native driver submits disabled authentication, a false shell, an empty home and hidden status in the user creation call.
+It checks exact names, numbers and UUIDs before reading the claimed record's authentication policy.
+It also checks primary groups, POSIX identity, and administrator and wheel membership.
+No account creation runs during ordinary tests.
+The [live XPC experiment](experiments/macos-xpc.md#service-account-setup-selectors) also checks the new selectors across separate ordinary-user processes.
+
+The tests use real SQLite transactions and a logical directory fixture.
+They cover cross-account reservations, lost commits, malformed records, every controller interruption and rejected administrator rights.
+They do not prove native account creation, disabled login, installed XPC or process isolation.
+Those checks remain part of the interactive installation gate.

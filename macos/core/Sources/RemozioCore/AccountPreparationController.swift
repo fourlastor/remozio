@@ -4,12 +4,17 @@ import Foundation
 // Setup only. The authenticated endpoint must validate administrator rights before calling its owner.
 // Prepared storage is not an installed account or a running service.
 enum AccountPreparationController {
+    static let accountsDirectory = "/Library/Application Support/Remozio/Accounts"
+    static func authorityDirectory(accountID: Data) throws -> String {
+        guard accountID.count == 16 else { throw AccountPreparationError.invalidRecord }
+        return accountsDirectory + "/" + accountID.map { String(format: "%02x", $0) }.joined() + "/Authority"
+    }
     static func resume(machine: PreparationIntentStore, expected: AccountPreparationIntent,
                        verifyCurrent: () throws -> Void) throws -> AccountPreparationIntent {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let accounts = "/Library/Application Support/Remozio/Accounts"
-        let account = accounts + "/" + expected.accountID.map { String(format: "%02x", $0) }.joined()
-        let authority = account + "/Authority"
+        let accounts = accountsDirectory
+        let authority = try authorityDirectory(accountID: expected.accountID)
+        let account = (authority as NSString).deletingLastPathComponent
         let key = authority + "/Key"
         let journal = authority + "/Journal/journal.sqlite"
         let continuity = authority + "/Continuity/continuity.sqlite"

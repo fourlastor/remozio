@@ -154,6 +154,104 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    func serviceAccountPlan(accountID: Data) throws -> ServiceAccountPlanStorage.State {
+        guard accountID.count == 16 else { throw ServiceAccountProvisioningError.invalidPlan }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 5 { return .init(plan: nil, complete: false) }
+            return try loadServiceAccountPlan(accountID: accountID)
+        }
+    }
+    func reservedServiceAccountNumbers() throws -> Set<UInt32> {
+        try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 5 { return [] }
+            return try statement("SELECT account FROM service_accounts_v1 ORDER BY account LIMIT 65") { row in
+                var numbers = Set<UInt32>(), count = 0
+                while try step(row) == SQLITE_ROW {
+                    guard count < 64 else { throw PreparationStoreError.corruptRecord }; count += 1
+                    let account = try blob(row, column: 0, maximum: 16)
+                    guard let plan = try loadServiceAccountPlan(accountID: account).plan else { throw PreparationStoreError.corruptRecord }
+                    for claim in plan.claims {
+                        guard numbers.insert(claim.number).inserted else { throw PreparationStoreError.corruptRecord }
+                    }
+                }
+                return numbers
+            }
+        }
+    }
+    func retainServiceAccountPlan(_ plan: ServiceAccountPlan) throws {
+        try transaction(write: true) {
+            try requireInventorySchema(); try requireServiceAccountScope(plan)
+            if try scalar("PRAGMA user_version") == 4 {
+                try exec("CREATE TABLE service_accounts_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),transport INTEGER NOT NULL UNIQUE CHECK(transport>0 AND transport<4294967295),gateway INTEGER NOT NULL UNIQUE CHECK(gateway>0 AND gateway<4294967295 AND gateway!=transport),complete INTEGER NOT NULL CHECK(complete IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=5")
+            }
+            let current = try loadServiceAccountPlan(accountID: plan.accountID)
+            if let retained = current.plan {
+                guard retained == plan else { throw ServiceAccountProvisioningError.conflictingRecord }
+                return
+            }
+            guard try scalar("SELECT COUNT(*) FROM service_accounts_v1") < 64 else { throw ServiceAccountProvisioningError.exhausted }
+            let transport = try serviceAccountNumber(plan, role: .transport), gateway = try serviceAccountNumber(plan, role: .gateway)
+            // BEGIN IMMEDIATE covers this cross-column check and insertion. Two pending plans cannot reserve overlapping IDs.
+            try statement("SELECT COUNT(*) FROM service_accounts_v1 WHERE transport IN (?,?) OR gateway IN (?,?)") { row in
+                for (index, number) in [transport, gateway, transport, gateway].enumerated() {
+                    guard sqlite3_bind_int64(row, Int32(index + 1), Int64(number)) == SQLITE_OK else { throw PreparationStoreError.corruptRecord }
+                }
+                guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 0 else { throw ServiceAccountProvisioningError.conflictingRecord }
+            }
+            try statement("INSERT INTO service_accounts_v1 VALUES(?,?,?,0,?)") { row in
+                try bind(plan.accountID, column: 1, row: row)
+                guard sqlite3_bind_int64(row, 2, Int64(transport)) == SQLITE_OK,
+                      sqlite3_bind_int64(row, 3, Int64(gateway)) == SQLITE_OK else { throw PreparationStoreError.corruptRecord }
+                try bind(plan.encoded, column: 4, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    func completeServiceAccountPlan(_ plan: ServiceAccountPlan) throws {
+        try transaction(write: true) {
+            try identity(macID); try requireServiceAccountScope(plan)
+            guard try scalar("PRAGMA user_version") >= 5 else { throw ServiceAccountProvisioningError.missingRecord }
+            let current = try loadServiceAccountPlan(accountID: plan.accountID)
+            guard current.plan == plan else { throw ServiceAccountProvisioningError.conflictingRecord }
+            if current.complete { return }
+            try statement("UPDATE service_accounts_v1 SET complete=1 WHERE account=? AND record=? AND complete=0") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.encoded, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw ServiceAccountProvisioningError.conflictingRecord }
+            }
+        }
+    }
+    private func requireServiceAccountScope(_ plan: ServiceAccountPlan) throws {
+        guard plan.macID == macID, try scalar("PRAGMA user_version") >= 4,
+              let account = try loadAccountPreparation(ownerUID: plan.ownerUID),
+              let inventory = try loadInventoryRecord(), inventory.installationID == plan.installationID,
+              inventory.releaseDigest == plan.releaseDigest else { throw ServiceAccountProvisioningError.changedScope }
+        try plan.validate(account: account)
+    }
+    private func serviceAccountNumber(_ plan: ServiceAccountPlan, role: ServiceAccountRole) throws -> UInt32 {
+        guard let claim = plan.claims.first(where: { $0.role == role }) else { throw PreparationStoreError.corruptRecord }
+        return claim.number
+    }
+    private func loadServiceAccountPlan(accountID: Data) throws -> ServiceAccountPlanStorage.State {
+        try statement("SELECT transport,gateway,complete,record FROM service_accounts_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return .init(plan: nil, complete: false) }
+            let plan: ServiceAccountPlan
+            do { plan = try .decode(blob(row, column: 3, maximum: 4096)) } catch { throw PreparationStoreError.corruptRecord }
+            guard plan.macID == macID, plan.accountID == accountID,
+                  sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_type(row, 1) == SQLITE_INTEGER,
+                  sqlite3_column_type(row, 2) == SQLITE_INTEGER,
+                  sqlite3_column_int64(row, 0) == Int64(try serviceAccountNumber(plan, role: .transport)),
+                  sqlite3_column_int64(row, 1) == Int64(try serviceAccountNumber(plan, role: .gateway)),
+                  [0, 1].contains(sqlite3_column_int64(row, 2)) else { throw PreparationStoreError.corruptRecord }
+            let complete = sqlite3_column_int64(row, 2) == 1
+            guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return .init(plan: plan, complete: complete)
+        }
+    }
     // Account reservation precedes any key, journal or service creation. Only the authenticated setup owner calls this.
     func beginAccountPreparation(owner: LocalAccountIdentity, allowedTargetUIDs: Set<UInt32>,
                                  disclosureAccepted: Bool, expectedInventoryRevision: Data,
@@ -484,24 +582,26 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4].contains(version),
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5].contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 5, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 6, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
             }
             return names
         }
-        let expected = version == 1 ? ["installation_identity_v1", "preparation_intents_v1"] :
-            (version == 2 ? ["installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"] :
-                (version == 3 ? ["authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"] :
-                    ["account_preparation_v1", "authority_initialization_v1", "installation_identity_v1", "installation_inventory_v1", "preparation_intents_v1"]))
+        var expected = ["installation_identity_v1", "preparation_intents_v1"]
+        if version >= 2 { expected.append("installation_inventory_v1") }
+        if version >= 3 { expected.append("authority_initialization_v1") }
+        if version >= 4 { expected.append("account_preparation_v1") }
+        if version >= 5 { expected.append("service_accounts_v1") }
+        expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }

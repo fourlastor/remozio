@@ -57,3 +57,21 @@ The probe is experiment code, not the production IPC layer. Its hello method has
 ## State and decision exchange selector
 
 [The exchange evidence](evidence/2026-10-06-request-exchange-xpc.json) adds five cases to the discovery baseline. All 19 passed. The probe negotiates the production exchange selector and tests nonempty, empty, and nil Data replies. Wrong client and server identifiers prevent query dispatch. Synthetic echo bytes do not establish decision verification, durable consumption, or signed-status delivery. Native root tests cover those component checks separately.
+
+
+## Service account setup selectors
+
+[The October 15 evidence](evidence/2026-10-15-service-accounts-xpc.json) adds six setup cases. All 25 cases passed on macOS 27.0.1, targeting macOS 26.
+The temporary per-user service was removed.
+
+The probe inherits the production `AdministrativeSetupXPCProtocol`.
+It negotiates the version 3 service-account hello before reading progress or sending synthetic request and authorization bytes.
+The preparation selector preserves nonempty, empty and nil Data replies across separate processes.
+Wrong client and server identifiers prevent the synthetic request from reaching the service.
+The progress selector has no nonce input and returns an empty result.
+
+This tests native Objective-C selectors and NSXPC value bridging in a supported GUI session.
+It uses a synthetic service with ad-hoc identifier requirements. It never imports administrator rights or creates accounts.
+It does not test the production Root endpoint, installed placement, Developer ID admission, or disabled login.
+The owner deferred installed Root and device tests to the interactive installation session.
+Those gates remain open; this wire evidence does not close them.

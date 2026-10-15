@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client")
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -121,6 +121,12 @@ def experiment(report):
                 ("frame-nil", "nil", trusted, TRUSTED, 0),
                 ("frame-wrong-server", "frame", trusted, OTHER, 3),
                 ("frame-wrong-client", "frame", other, TRUSTED, 3),
+                ("setup-progress", "setup-progress", trusted, TRUSTED, 0),
+                ("setup-bytes", "setup-bytes", trusted, TRUSTED, 0),
+                ("setup-empty", "setup-empty", trusted, TRUSTED, 0),
+                ("setup-nil", "setup-nil", trusted, TRUSTED, 0),
+                ("setup-wrong-server", "setup-bytes", trusted, OTHER, 3),
+                ("setup-wrong-client", "setup-bytes", other, TRUSTED, 3),
             ]
             for name, mode, binary, expected_peer, expected_code in cases:
                 nonce = uuid.uuid4().hex

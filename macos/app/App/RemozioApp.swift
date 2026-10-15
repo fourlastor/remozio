@@ -301,8 +301,12 @@ private struct AccountSetupSheet: View {
                           systemImage: progress.storagePrepared ? "checkmark.circle" : "circle")
                 }
                 if progress.storagePrepared {
-                    Text("Approval services are not configured yet. This step does not pair a phone or enable command execution.")
-                        .foregroundStyle(.secondary)
+                    Label(controls.services?.complete == true ? "Service accounts prepared" : "Service accounts pending",
+                          systemImage: controls.services?.complete == true ? "checkmark.circle" : "circle")
+                    Text("Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery.")
+                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text("Runtime services are not configured yet. This step does not pair a phone or enable command execution.")
+                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 TextField("Allowed target UIDs", text: $targets).disabled(controls.working || !controls.loaded)
@@ -320,7 +324,13 @@ private struct AccountSetupSheet: View {
                 Button("Refresh") { run { await controls.refresh() } }.disabled(controls.working)
                 Spacer()
                 Button("Close") { work?.cancel(); dismiss() }.keyboardShortcut(.cancelAction)
-                if controls.progress?.storagePrepared != true {
+                if controls.progress?.storagePrepared == true {
+                    if controls.services?.complete != true {
+                        Button("Prepare service accounts…") { run { await controls.prepareServiceAccounts() } }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(!controls.loaded || controls.working || controls.services == nil)
+                    }
+                } else {
                     Button(controls.progress == nil ? "Prepare account…" : "Continue setup…") {
                         if let request { run { await controls.prepare(request) } }
                     }

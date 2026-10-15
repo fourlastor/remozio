@@ -1,12 +1,32 @@
 import Foundation
 import RemozioCore
 
-@objc protocol ProbeProtocol: TransportAuthorityXPCProtocol {
+@objc protocol ProbeProtocol: TransportAuthorityXPCProtocol, AdministrativeSetupXPCProtocol {
     func ping(_ nonce: String, reply: @escaping (String) -> Void)
 }
 
 final class ProbeService: NSObject, ProbeProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    // Synthetic selector checks only. These methods cannot provision accounts or import administrator rights.
+    func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
+    func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.serviceAccountsVersion) }
+    func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func resumeAccountEnrollment(_ setupID: Data, expectedRevision: Data, authorization: Data,
+                                 reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func accountStorageProgress(_ accountID: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func resumeAccountStorage(_ accountID: Data, setupID: Data, expectedRevision: Data, authorization: Data,
+                              reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(Data()) }
+    func prepareServiceAccounts(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        print("SETUP_RECEIVED \(String(decoding: expected, as: UTF8.self))")
+        fflush(stdout)
+        switch String(decoding: authorization, as: UTF8.self) {
+        case "setup-bytes": reply(expected)
+        case "setup-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
     func requestWakeVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
     func wakeDeliveryHints(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func requestDeliveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
@@ -98,7 +118,8 @@ final class Completion: @unchecked Sendable {
             listener.delegate = delegate
             listener.activate()
             withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
-        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "exchange", "exchange-empty", "exchange-nil":
+        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "exchange", "exchange-empty", "exchange-nil",
+             "setup-progress", "setup-bytes", "setup-empty", "setup-nil":
             guard args.count == 4 else { exit(2) }
             let nonce = args[3]
             let completion = Completion()
@@ -113,8 +134,14 @@ final class Completion: @unchecked Sendable {
                     let error = error as NSError
                     handshake.finish("rejected:\(error.domain):\(error.code)")
                 }) as? ProbeProtocol else { exit(2) }
-                helloProxy.hello { @Sendable accepted in
-                    handshake.finish(accepted == 1 ? "accepted" : "wrong-reply")
+                if args[0].hasPrefix("setup-") {
+                    helloProxy.serviceAccountsHello { @Sendable accepted in
+                        handshake.finish(accepted == AdministrativeSetupInterface.serviceAccountsVersion ? "accepted" : "wrong-reply")
+                    }
+                } else {
+                    helloProxy.hello { @Sendable accepted in
+                        handshake.finish(accepted == 1 ? "accepted" : "wrong-reply")
+                    }
                 }
                 guard handshake.signal.wait(timeout: .now() + 10) == .success else {
                     print("timeout")
@@ -132,6 +159,16 @@ final class Completion: @unchecked Sendable {
             if args[0] == "ping" || args[0] == "guarded-ping" {
                 proxy.ping(nonce) { @Sendable returned in
                     completion.finish(returned == nonce ? "accepted" : "wrong-reply")
+                }
+            } else if args[0] == "setup-progress" {
+                proxy.serviceAccountsProgress { @Sendable returned in
+                    completion.finish(returned == Data() ? "accepted" : "wrong-reply")
+                }
+            } else if args[0].hasPrefix("setup-") {
+                let mode = args[0], bytes = Data(nonce.utf8)
+                let expected: Data? = mode == "setup-bytes" ? bytes : mode == "setup-empty" ? Data() : nil
+                proxy.prepareServiceAccounts(bytes, authorization: Data(mode.utf8)) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else if args[0].hasPrefix("exchange") {
                 let version = Completion()

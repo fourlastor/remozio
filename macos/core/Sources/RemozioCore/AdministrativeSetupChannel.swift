@@ -7,8 +7,9 @@ public enum AdministrativeSetupChannelError: Error, Equatable {
 }
 enum SetupClientCall: Sendable {
     case hello, progress(Data), resume(SetupAccountProgress, Data)
+    case serviceAccountsHello, serviceAccountsProgress, prepareServiceAccounts(SetupServiceAccountProgress, Data)
     case enrollmentHello, enrollmentProgress, beginEnrollment(Data, Data), resumeEnrollment(SetupAccountEnrollmentProgress, Data)
-    var handshake: Bool { switch self { case .hello, .enrollmentHello: true; default: false } }
+    var handshake: Bool { switch self { case .hello, .enrollmentHello, .serviceAccountsHello: true; default: false } }
 }
 enum SetupClientReply: Sendable { case version(UInt64), progress(Data?), failed }
 protocol SetupClientDriver: Sendable {
@@ -37,6 +38,11 @@ private final class NativeSetupClientDriver: SetupClientDriver, @unchecked Senda
             reply(.failed); return
         }
         switch call {
+        case .serviceAccountsHello: proxy.serviceAccountsHello { [self] in checked(.version($0), reply: reply) }
+        case .serviceAccountsProgress: proxy.serviceAccountsProgress { [self] in checked(.progress($0), reply: reply) }
+        case .prepareServiceAccounts(let expected, let form):
+            do { proxy.prepareServiceAccounts(try expected.bytes, authorization: form) { [self] in checked(.progress($0), reply: reply) } }
+            catch { reply(.failed) }
         case .enrollmentHello: proxy.enrollmentHello { [self] in checked(.version($0), reply: reply) }
         case .enrollmentProgress: proxy.accountEnrollmentProgress { [self] in checked(.progress($0), reply: reply) }
         case .beginEnrollment(let bytes, let form):
@@ -70,6 +76,7 @@ public actor AdministrativeSetupChannel {
     private let driver: any SetupClientDriver
     private let accountID: Data?
     private let ownerUID: uid_t
+    private let serviceAccounts: Bool
     private let timeout: UInt64
     private let verifyAccount: @Sendable () throws -> Void
     private let onClose: @Sendable () -> Void
@@ -78,16 +85,16 @@ public actor AdministrativeSetupChannel {
     private var pending: (id: UUID, continuation: CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
-    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t,
+    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false,
                 timeoutMilliseconds: UInt64 = 5000, onClose: @escaping @Sendable () -> Void = {}) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
-              rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
+              (!serviceAccounts || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
               (1...60_000).contains(timeoutMilliseconds) else { throw AdministrativeSetupChannelError.invalidConfiguration }
         guard getuid() == ownerUID, geteuid() == ownerUID else { throw AdministrativeSetupChannelError.wrongAccount }
         let processID = getpid()
         driver = NativeSetupClientDriver(serviceName: serviceName, policy: rootPolicy)
-        self.accountID = accountID; self.ownerUID = ownerUID; timeout = timeoutMilliseconds; self.onClose = onClose
+        self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts; timeout = timeoutMilliseconds; self.onClose = onClose
         verifyAccount = {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else {
                 throw AdministrativeSetupChannelError.wrongAccount
@@ -95,9 +102,9 @@ public actor AdministrativeSetupChannel {
         }
     }
     // Logical lifecycle controls do not prove native signing, service registration or administrator consent.
-    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), timeoutMilliseconds: UInt64 = 5000,
+    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), serviceAccounts: Bool = false, timeoutMilliseconds: UInt64 = 5000,
          verifyAccount: @escaping @Sendable () throws -> Void = {}, onClose: @escaping @Sendable () -> Void = {}) {
-        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; timeout = timeoutMilliseconds
+        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts; timeout = timeoutMilliseconds
         self.verifyAccount = verifyAccount; self.onClose = onClose
     }
     deinit { timer?.cancel(); driver.close() }
@@ -105,8 +112,10 @@ public actor AdministrativeSetupChannel {
         guard state == .new else { throw AdministrativeSetupChannelError.closed }
         state = .opening
         do {
-            let expected = accountID == nil ? AdministrativeSetupInterface.enrollmentVersion : AdministrativeSetupInterface.storageVersion
-            guard case .version(let version) = try await perform(accountID == nil ? .enrollmentHello : .hello), version == expected else {
+            let expected = serviceAccounts ? AdministrativeSetupInterface.serviceAccountsVersion :
+                (accountID == nil ? AdministrativeSetupInterface.enrollmentVersion : AdministrativeSetupInterface.storageVersion)
+            let call: SetupClientCall = serviceAccounts ? .serviceAccountsHello : (accountID == nil ? .enrollmentHello : .hello)
+            guard case .version(let version) = try await perform(call), version == expected else {
                 throw AdministrativeSetupChannelError.unsupportedVersion
             }
             state = .open
@@ -150,6 +159,30 @@ public actor AdministrativeSetupChannel {
         }
         return result
     }
+    public func serviceAccountsProgress() async throws -> SetupServiceAccountProgress? {
+        guard serviceAccounts, accountID == nil else { throw AdministrativeSetupChannelError.unsupportedVersion }
+        return try decodeServices(await perform(.serviceAccountsProgress), expected: nil)
+    }
+    public func prepareServiceAccounts(_ expected: SetupServiceAccountProgress, authorization: Data) async throws -> SetupServiceAccountProgress {
+        guard serviceAccounts, accountID == nil, expected.ownerUID == ownerUID,
+              authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AdministrativeSetupChannelError.invalidMessage }
+        guard let result = try decodeServices(await perform(.prepareServiceAccounts(expected, authorization)), expected: expected) else {
+            close(); throw AdministrativeSetupChannelError.invalidMessage
+        }
+        return result
+    }
+    private func decodeServices(_ reply: SetupClientReply, expected: SetupServiceAccountProgress?) throws -> SetupServiceAccountProgress? {
+        do {
+            guard case .progress(let bytes) = reply, let bytes, bytes.count <= 384 else { throw AdministrativeSetupChannelError.invalidMessage }
+            if bytes.isEmpty {
+                guard expected == nil else { throw AdministrativeSetupChannelError.invalidMessage }; return nil
+            }
+            let value = try SetupServiceAccountProgress.decode(bytes)
+            guard value.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
+            if let expected { try value.validateCompletion(of: expected) }
+            return value
+        } catch { finish(.invalidMessage); throw AdministrativeSetupChannelError.invalidMessage }
+    }
     private func decodeEnrollment(_ reply: SetupClientReply, expected: SetupAccountEnrollmentProgress?) throws -> SetupAccountEnrollmentProgress? {
         do {
             guard case .progress(let bytes) = reply, let bytes, bytes.count <= 1024 else { throw AdministrativeSetupChannelError.invalidMessage }
@@ -191,8 +224,8 @@ public actor AdministrativeSetupChannel {
         do { try verifyAccount() } catch { close(); throw error }
         try Task.checkCancellation()
         switch call {
-        case .hello, .enrollmentHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
-        case .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment: guard state == .open else { throw AdministrativeSetupChannelError.closed }
+        case .hello, .enrollmentHello, .serviceAccountsHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
+        case .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsProgress, .prepareServiceAccounts: guard state == .open else { throw AdministrativeSetupChannelError.closed }
         }
         guard pending == nil else { throw AdministrativeSetupChannelError.busy }
         let lifetime = lifetime, driver = driver, id = UUID()

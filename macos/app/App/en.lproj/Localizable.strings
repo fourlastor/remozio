@@ -139,3 +139,8 @@
 "Could not confirm setup. Refresh to read retained progress before trying again." = "Could not confirm setup. Refresh to read retained progress before trying again.";
 "Prepare account…" = "Prepare account…";
 "Continue setup…" = "Continue setup…";
+"Service accounts prepared" = "Service accounts prepared";
+"Service accounts pending" = "Service accounts pending";
+"Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery." = "Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery.";
+"Runtime services are not configured yet. This step does not pair a phone or enable command execution." = "Runtime services are not configured yet. This step does not pair a phone or enable command execution.";
+"Prepare service accounts…" = "Prepare service accounts…";
