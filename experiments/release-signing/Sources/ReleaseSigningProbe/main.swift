@@ -5,7 +5,11 @@ let args = CommandLine.arguments
 guard args.count == 4, args[1].hasPrefix("/") else { exit(64) }
 do {
     let evidence = try SignedReleaseInspection.inspect(URL(fileURLWithPath: args[1]), teamID: args[2], appIdentifier: args[3])
-    let result: [String: Any] = ["result": "accepted", "components": evidence.manifest.components.count, "hashes": evidence.codeDirectoryHashes.count, "roles": evidence.manifest.components.map { $0.role.rawValue }.sorted(), "release": evidence.manifest.release, "build": evidence.manifest.build, "absentRoles": evidence.manifest.absentRoles.map(\.rawValue).sorted()]
+    var result: [String: Any] = ["result": "accepted", "components": evidence.manifest.components.count, "hashes": evidence.codeDirectoryHashes.count, "roles": evidence.manifest.components.map { $0.role.rawValue }.sorted(), "release": evidence.manifest.release, "build": evidence.manifest.build, "absentRoles": evidence.manifest.absentRoles.map(\.rawValue).sorted()]
+    if let hash = evidence.codeDirectoryHashes[.setupController] {
+        result["packageProfile"] = try PackageBootstrapProfile(teamID: args[2], setupHash: hash,
+            releaseDigest: InstallationInventory.digest(evidence)).argument
+    }
     let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys])
     print(String(decoding: data, as: UTF8.self))
 } catch {

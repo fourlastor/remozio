@@ -6,10 +6,21 @@ import RemozioCore
 struct SetupMain {
     static func main() async {
         guard CommandLine.arguments.count == 3,
-              ["--configuration", "--bootstrap-installation"].contains(CommandLine.arguments[1]) else {
-            fail("Usage: RemozioSetup --configuration /absolute/protected/setup.cbor | --bootstrap-installation PUBLISHER_TEAM_ID", code: EX_USAGE)
+              ["--configuration", "--bootstrap-installation", "--prepare-package", "--inspect-package", "--ensure-app-entry"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioSetup --configuration /absolute/protected/setup.cbor | --bootstrap-installation PUBLISHER_TEAM_ID | --prepare-package|--inspect-package|--ensure-app-entry PINNED_PROFILE", code: EX_USAGE)
         }
         guard getuid() == 0, geteuid() == 0 else { fail("Setup startup requires the Root account.", code: EX_NOPERM) }
+        if ["--prepare-package", "--inspect-package", "--ensure-app-entry"].contains(CommandLine.arguments[1]) {
+            do {
+                let profile = try PackageBootstrapProfile(argument: CommandLine.arguments[2])
+                switch CommandLine.arguments[1] {
+                case "--prepare-package": try PackageBootstrap.preparePayload(profile)
+                case "--inspect-package": print(try PackageBootstrap.inspectInstalled(profile).rawValue)
+                default: try PackageBootstrap.ensureApplicationEntry(profile)
+                }
+                return
+            } catch { fail("Package preparation refused or failed. Existing code and setup state were not replaced.", code: EX_CONFIG) }
+        }
         if CommandLine.arguments[1] == "--bootstrap-installation" {
             do {
                 _ = try MachineBootstrap.run(teamID: CommandLine.arguments[2])

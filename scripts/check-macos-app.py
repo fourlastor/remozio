@@ -46,7 +46,9 @@ def check(configuration):
             'Embedding changed the signed setup executable')
     for arguments, status in (([], 64), (['--unknown', '/private/test-path'], 64),
                               *([(['--configuration', '/private/test-path'], 77),
-                                 (['--bootstrap-installation', 'ABCDEFGHIJ'], 77)] if os.geteuid() != 0 else [])):
+                                 (['--bootstrap-installation', 'ABCDEFGHIJ'], 77),
+                                 *[([mode, 'ABCDEFGHIJ:' + '00' * 20 + ':' + '00' * 32], 77)
+                                   for mode in ('--prepare-package', '--inspect-package', '--ensure-app-entry')]] if os.geteuid() != 0 else [])):
         read_descriptor, write_descriptor = os.pipe()
         try:
             original_input = b'unread setup input\x00\xff'

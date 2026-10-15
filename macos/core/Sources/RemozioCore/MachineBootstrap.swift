@@ -180,7 +180,7 @@ public enum MachineBootstrap {
         return result
     }
 
-    private static func read(_ file: AdministrativeSetupPublication.File, directory: ProtectedSetupDirectory, owner: uid_t) throws -> Data? {
+    static func read(_ file: AdministrativeSetupPublication.File, directory: ProtectedSetupDirectory, owner: uid_t) throws -> Data? {
         try directory.validate()
         do {
             let result = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: file.name, owner: owner)

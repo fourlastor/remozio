@@ -72,6 +72,7 @@ They cover every interruption stage, lost acknowledgment, schema recovery, chang
 The public API and both app configurations reject an ordinary user before protected operations.
 These controls do not prove privileged installation, power-loss recovery, native administrator consent or service activation.
 
-The `.pkg` build driver and its payload replacement, resume and visible app placement controls remain pending in issue #363.
+The [initial package builder](macos-initial-package.md) now prepares a guarded archive candidate.
+Its privileged installation, native resume and visible app behavior remain test gates in issue #363.
 Account enrollment, dedicated service accounts, authority keys, runtime configuration and production registration also remain pending.
 Do not treat this entry point as a complete first installation or a working Mac–Pixel flow.
