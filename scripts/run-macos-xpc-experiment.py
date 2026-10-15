@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client")
+    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -121,6 +121,13 @@ def experiment(report):
                 ("frame-nil", "nil", trusted, TRUSTED, 0),
                 ("frame-wrong-server", "frame", trusted, OTHER, 3),
                 ("frame-wrong-client", "frame", other, TRUSTED, 3),
+                ("runtime-progress", "runtime-progress", trusted, TRUSTED, 0),
+                ("runtime-bytes", "runtime-bytes", trusted, TRUSTED, 0),
+                ("runtime-empty", "runtime-empty", trusted, TRUSTED, 0),
+                ("runtime-nil", "runtime-nil", trusted, TRUSTED, 0),
+                ("runtime-no-consent", "runtime-no-consent", trusted, TRUSTED, 0),
+                ("runtime-wrong-server", "runtime-bytes", trusted, OTHER, 3),
+                ("runtime-wrong-client", "runtime-bytes", other, TRUSTED, 3),
                 ("setup-progress", "setup-progress", trusted, TRUSTED, 0),
                 ("setup-bytes", "setup-bytes", trusted, TRUSTED, 0),
                 ("setup-empty", "setup-empty", trusted, TRUSTED, 0),

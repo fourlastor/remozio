@@ -75,3 +75,12 @@ It uses a synthetic service with ad-hoc identifier requirements. It never import
 It does not test the production Root endpoint, installed placement, Developer ID admission, or disabled login.
 The owner deferred installed Root and device tests to the interactive installation session.
 Those gates remain open; this wire evidence does not close them.
+
+## Runtime preparation selectors
+
+[The runtime publication evidence](evidence/2026-10-15-runtime-publication-xpc.json) adds seven version 4 cases. All 32 cases passed.
+The temporary GUI service was removed.
+The probe checks runtime hello, progress, preparation, the custody boolean, and nonempty, empty and nil Data replies.
+Wrong client and server identifiers prevent preparation dispatch after the handshake.
+The selector checks use synthetic bytes. They neither import administrator rights nor publish production files.
+They do not prove installed Root admission, native service ownership or complete Mac–Pixel approval.

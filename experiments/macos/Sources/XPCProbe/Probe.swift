@@ -10,6 +10,18 @@ final class ProbeService: NSObject, ProbeProtocol {
     // Synthetic selector checks only. These methods cannot provision accounts or import administrator rights.
     func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
     func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.serviceAccountsVersion) }
+    func runtimeHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.runtimeVersion) }
+    func runtimeProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(Data()) }
+    func prepareRuntime(_ expected: Data, fileCustodyAccepted: Bool, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        print("RUNTIME_RECEIVED \(String(decoding: expected, as: UTF8.self))")
+        fflush(stdout)
+        guard fileCustodyAccepted else { reply(nil); return }
+        switch String(decoding: authorization, as: UTF8.self) {
+        case "runtime-bytes": reply(expected)
+        case "runtime-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
     func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func resumeAccountEnrollment(_ setupID: Data, expectedRevision: Data, authorization: Data,
@@ -119,7 +131,8 @@ final class Completion: @unchecked Sendable {
             listener.activate()
             withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
         case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "exchange", "exchange-empty", "exchange-nil",
-             "setup-progress", "setup-bytes", "setup-empty", "setup-nil":
+             "setup-progress", "setup-bytes", "setup-empty", "setup-nil",
+             "runtime-progress", "runtime-bytes", "runtime-empty", "runtime-nil", "runtime-no-consent":
             guard args.count == 4 else { exit(2) }
             let nonce = args[3]
             let completion = Completion()
@@ -134,7 +147,11 @@ final class Completion: @unchecked Sendable {
                     let error = error as NSError
                     handshake.finish("rejected:\(error.domain):\(error.code)")
                 }) as? ProbeProtocol else { exit(2) }
-                if args[0].hasPrefix("setup-") {
+                if args[0].hasPrefix("runtime-") {
+                    helloProxy.runtimeHello { @Sendable accepted in
+                        handshake.finish(accepted == AdministrativeSetupInterface.runtimeVersion ? "accepted" : "wrong-reply")
+                    }
+                } else if args[0].hasPrefix("setup-") {
                     helloProxy.serviceAccountsHello { @Sendable accepted in
                         handshake.finish(accepted == AdministrativeSetupInterface.serviceAccountsVersion ? "accepted" : "wrong-reply")
                     }
@@ -159,6 +176,16 @@ final class Completion: @unchecked Sendable {
             if args[0] == "ping" || args[0] == "guarded-ping" {
                 proxy.ping(nonce) { @Sendable returned in
                     completion.finish(returned == nonce ? "accepted" : "wrong-reply")
+                }
+            } else if args[0] == "runtime-progress" {
+                proxy.runtimeProgress { @Sendable returned in
+                    completion.finish(returned == Data() ? "accepted" : "wrong-reply")
+                }
+            } else if args[0].hasPrefix("runtime-") {
+                let mode = args[0], bytes = Data(nonce.utf8)
+                let expected: Data? = mode == "runtime-bytes" ? bytes : mode == "runtime-empty" ? Data() : nil
+                proxy.prepareRuntime(bytes, fileCustodyAccepted: mode != "runtime-no-consent", authorization: Data(mode.utf8)) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else if args[0] == "setup-progress" {
                 proxy.serviceAccountsProgress { @Sendable returned in

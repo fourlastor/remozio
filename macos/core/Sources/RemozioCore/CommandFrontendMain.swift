@@ -40,7 +40,8 @@ public enum CommandFrontendMain {
             // Validate syntax before reading setup or touching any stream. Actual defaults are applied below.
             _ = try CommandFrontendInvocation(arguments: arguments, defaultIOMode: .pty,
                 defaultDisconnectBehavior: .terminate, limits: ceiling)
-            let configuration = try CommandFrontendConfiguration.load(path: configurationPath)
+            let selected = try CommandFrontendConfigurationSelection.load(ownerUID: getuid())
+            let configuration = selected.configuration
             guard let defaults = UserDefaults(suiteName: preferencesDomain) else {
                 throw CommandFrontendCallerSettingsError.invalidPreferences
             }
@@ -50,7 +51,7 @@ public enum CommandFrontendMain {
                 defaultReadiness: configuration.readiness)
             let invocation = try CommandFrontendInvocation(arguments: arguments, defaultIOMode: settings.ioMode,
                 defaultDisconnectBehavior: settings.disconnectBehavior, limits: configuration.submissionLimits)
-            return try execute(invocation, configuration: configuration, settings: settings)
+            return try execute(invocation, configuration: configuration, configurationPath: selected.path, settings: settings)
         } catch CommandFrontendLocalError.signal(let number) { return .signal(number) }
         catch let error as CommandFrontendInvocationError {
             if error == .oversized { log("The command exceeds the configured submission size."); return .status(EX_DATAERR) }
@@ -78,7 +79,7 @@ public enum CommandFrontendMain {
     }
 
     private static func execute(_ invocation: CommandFrontendInvocation, configuration: CommandFrontendConfiguration,
-                                settings: CommandFrontendCallerSettings) throws -> CommandFrontendExit {
+                                configurationPath: String, settings: CommandFrontendCallerSettings) throws -> CommandFrontendExit {
         var cleanupFailed = false
         let report: (Int32) -> Void = { _ in
             cleanupFailed = true; log("Command caller cleanup failed. Terminal settings may require recovery.")

@@ -128,6 +128,11 @@ public final class ProtectedSetupDirectory: CustomStringConvertible {
         guard visibility == .privateState else { throw JournalLeaseError.unsafeMetadata }
         return try withDirectory(body)
     }
+    // Service-readable artifacts require traversable ancestors, not only a readable final file.
+    func withSharedDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
+        guard visibility == .sharedMetadata else { throw JournalLeaseError.unsafeMetadata }
+        return try withDirectory(body)
+    }
     // Internal typed publication can borrow shared metadata directories. No descriptor becomes public.
     func withDirectory<Value>(_ body: (Int32) throws -> Value) throws -> Value {
         try validate()

@@ -16,10 +16,13 @@ final class AccountPreparationFixture {
     let key = P256.Signing.PrivateKey().publicKey.x963Representation
     let policy: AuthorityCodePolicy
     let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
-    init() throws {
+    init(policy suppliedPolicy: AuthorityCodePolicy? = nil) throws {
         root = URL(fileURLWithPath: "/private/tmp/remozio-account-preparation-" + UUID().uuidString)
-        policy = try .init(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
-            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
+        if let suppliedPolicy { policy = suppliedPolicy }
+        else {
+            policy = try .init(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
+        }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         guard chmod(root.path, 0o700) == 0 else { throw JournalLeaseError.system(errno) }
         try prepare("machine", .installation)

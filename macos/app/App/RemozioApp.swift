@@ -270,6 +270,7 @@ private struct SetupServiceSection: View {
 private struct AccountSetupSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var controls = MacAccountSetupControls()
+    @State private var fileCustodyAccepted = false
     @State private var targets = "0"
     @State private var accepted = false
     @State private var work: Task<Void, Never>?
@@ -285,41 +286,57 @@ private struct AccountSetupSheet: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Set up command approvals").font(.title2).accessibilityAddTraits(.isHeader)
-            Text("Remozio uses its own command policy. It does not inherit sudoers restrictions.")
-            Text("A paired phone can approve commands for this Mac account as the target users selected below.")
-                .foregroundStyle(.secondary)
-            if let progress = controls.progress {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Saved target UIDs").font(.headline)
-                    Text(verbatim: progress.allowedTargetUIDs.sorted().map(String.init).joined(separator: ", "))
-                        .textSelection(.enabled)
-                    Label("Command permissions saved", systemImage: "checkmark.circle")
-                    Label(progress.keyPrepared ? "Authority key prepared" : "Authority key pending",
-                          systemImage: progress.keyPrepared ? "checkmark.circle" : "circle")
-                    Label(progress.storagePrepared ? "Account storage prepared" : "Account storage pending",
-                          systemImage: progress.storagePrepared ? "checkmark.circle" : "circle")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Set up command approvals").font(.title2).accessibilityAddTraits(.isHeader)
+                    Text("Remozio uses its own command policy. It does not inherit sudoers restrictions.")
+                    Text("A paired phone can approve commands for this Mac account as the target users selected below.")
+                        .foregroundStyle(.secondary)
+                    if let progress = controls.progress {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Saved target UIDs").font(.headline)
+                            Text(verbatim: progress.allowedTargetUIDs.sorted().map(String.init).joined(separator: ", "))
+                                .textSelection(.enabled)
+                            Label("Command permissions saved", systemImage: "checkmark.circle")
+                            Label(progress.keyPrepared ? "Authority key prepared" : "Authority key pending",
+                                  systemImage: progress.keyPrepared ? "checkmark.circle" : "circle")
+                            Label(progress.storagePrepared ? "Account storage prepared" : "Account storage pending",
+                                  systemImage: progress.storagePrepared ? "checkmark.circle" : "circle")
+                        }
+                        if progress.storagePrepared {
+                            Label(controls.services?.complete == true ? "Service accounts prepared" : "Service accounts pending",
+                                  systemImage: controls.services?.complete == true ? "checkmark.circle" : "circle")
+                            Text("Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery.")
+                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            if controls.services?.complete == true {
+                                Label(controls.runtime?.configurationPublished == true ? "Runtime files prepared" : "Runtime files pending",
+                                      systemImage: controls.runtime?.configurationPublished == true ? "checkmark.circle" : "circle")
+                                if controls.runtime?.configurationPublished != true {
+                                    Text("The transport TLS key will use a private file. Remozio keeps the authority key in hardware. File access can expose the transport key.")
+                                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                    Toggle("I accept private file storage for the transport TLS key", isOn: $fileCustodyAccepted)
+                                        .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
+                                }
+                            }
+                            Text("Services have not started. These preparation steps do not pair a phone or enable command execution. Push delivery is not configured.")
+                                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else {
+                        TextField("Allowed target UIDs", text: $targets).disabled(controls.working || !controls.loaded)
+                        Text("0 is root. Separate multiple UIDs with commas.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Toggle("I accept the separate Remozio command policy for these target users", isOn: $accepted)
+                            .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
+                    }
+                    if controls.working { ProgressView("Preparing account setup…").controlSize(.small) }
+                    if controls.failed {
+                        Label("Could not confirm setup. Refresh to read retained progress before trying again.", systemImage: "exclamationmark.triangle")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
-                if progress.storagePrepared {
-                    Label(controls.services?.complete == true ? "Service accounts prepared" : "Service accounts pending",
-                          systemImage: controls.services?.complete == true ? "checkmark.circle" : "circle")
-                    Text("Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery.")
-                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Text("Runtime services are not configured yet. This step does not pair a phone or enable command execution.")
-                        .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                TextField("Allowed target UIDs", text: $targets).disabled(controls.working || !controls.loaded)
-                Text("0 is root. Separate multiple UIDs with commas.")
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Toggle("I accept the separate Remozio command policy for these target users", isOn: $accepted)
-                    .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            if controls.working { ProgressView("Preparing account setup…").controlSize(.small) }
-            if controls.failed {
-                Label("Could not confirm setup. Refresh to read retained progress before trying again.", systemImage: "exclamationmark.triangle")
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            .frame(maxHeight: 620)
             HStack {
                 Button("Refresh") { run { await controls.refresh() } }.disabled(controls.working)
                 Spacer()
@@ -329,6 +346,10 @@ private struct AccountSetupSheet: View {
                         Button("Prepare service accounts…") { run { await controls.prepareServiceAccounts() } }
                             .keyboardShortcut(.defaultAction)
                             .disabled(!controls.loaded || controls.working || controls.services == nil)
+                    } else if controls.runtime?.configurationPublished != true {
+                        Button("Prepare runtime files…") { run { await controls.prepareRuntime(fileCustodyAccepted: fileCustodyAccepted) } }
+                            .keyboardShortcut(.defaultAction)
+                            .disabled(!controls.loaded || controls.working || controls.runtime == nil || !fileCustodyAccepted)
                     }
                 } else {
                     Button(controls.progress == nil ? "Prepare account…" : "Continue setup…") {

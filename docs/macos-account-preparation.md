@@ -50,7 +50,7 @@ Refresh never opens administrator UI or retries a mutation.
 ## Storage and protocol versions
 
 Explicit account preparation upgrades the machine store to schema 4.
-Normal opening and progress reads preserve schemas 1 through 5 without upgrading them.
+Normal opening and progress reads preserve schemas 1 through 6 without upgrading them.
 The added table retains the account reservation independently of the installed-service inventory.
 Prepared storage can exist before account service declarations are installed.
 It grants no service registration, pairing or command admission.
@@ -60,7 +60,7 @@ The existing storage interface keeps its version 1 hello and operations.
 New enrollment operations require a separate version 2 hello.
 The app verifies the Root peer before it exports native administrator rights.
 Each mutation rechecks native rights, caller scope, current protected release and retained progress.
-Signed manifests declare local interface versions 1, 2 and 3, and machine schemas 1 through 5.
+Signed manifests declare local interface versions 1 through 4, and machine schemas 1 through 6.
 
 ## Evidence and remaining gates
 
@@ -74,7 +74,7 @@ Actual privileged installation and service tests remain in issues [#363](https:/
 [#374](https://github.com/rock3r/remozio/issues/374).
 The app reports storage preparation separately from service readiness.
 Service account creation still needs the native installation test.
-Protected command policy publication and runtime configuration remain the next integration steps.
+Runtime file publication is available after service account preparation. Service activation remains the next integration step.
 Real device and end-to-end checks still require the user's interactive session.
 
 ## Dedicated service accounts
@@ -124,3 +124,51 @@ The tests use real SQLite transactions and a logical directory fixture.
 They cover cross-account reservations, lost commits, malformed records, every controller interruption and rejected administrator rights.
 They do not prove native account creation, disabled login, installed XPC or process isolation.
 Those checks remain part of the interactive installation gate.
+
+## Runtime file preparation
+
+After service accounts are prepared, the user selects **Prepare runtime files** and accepts private-file custody for the transport TLS key.
+The helper requires fresh administrator rights. The authority key remains hardware-backed.
+This step prepares files. It does not start services, activate pairing or enable command execution.
+
+```mermaid
+sequenceDiagram
+    participant App as Installed app
+    participant Setup as Root setup helper
+    participant Material as Private identity record
+    participant DB as Machine database
+    participant Files as Runtime and client files
+    App->>Setup: Version 4 hello, then read progress
+    Note over App: User accepts transport file custody and authorizes preparation
+    App->>Setup: Exact retained progress, custody acceptance, native rights
+    Setup->>Setup: Verify caller, signed release, service accounts and authority key
+    Setup->>Material: Restore or create scoped TLS identity and local gateway IDs
+    Setup->>DB: Retain immutable identity reference
+    Setup->>Files: Publish matching policy, runtime and client configurations
+    Setup->>Material: Confirm retained identity still matches
+    Setup->>DB: Record publication completion
+    Setup-->>App: Files prepared, no runtime health assertion
+```
+
+The machine database advances to schema 6 only when it retains the identity reference.
+The reference includes a digest and public TLS pin. It contains no private transport key.
+The private identity record also preserves local gateway identifiers. It does not invent FCM credentials or configure push delivery.
+The initial TLS certificate lasts one year. Renewal requires a separate protected transition; setup never replaces an established identity automatically.
+
+Private command and policy files stay under the account's Root-owned runtime directory.
+Service-readable files stay outside the private Accounts tree, under a Root-owned directory for that account.
+The transport key file has mode 0600 and belongs to the reserved transport user and group.
+Transport configuration and app/CLI metadata have mode 0644 and remain Root-owned.
+The CLI selects `frontend-UID.cbor`. It uses the legacy shared configuration only when the scoped file does not exist.
+Invalid or unreadable scoped configuration never triggers that fallback.
+
+Exclusive publication refuses conflicting bytes, unsafe metadata and links. It never overwrites an existing conflict.
+A retry after a lost reply restores the same identity and local gateway IDs.
+A retained identity reference prevents regeneration if private material disappears.
+Completed progress is historical. Reading it does not repair files, recreate keys or claim that services are healthy.
+The command runtime file is a blueprint, not an installed service declaration.
+Per-account service registration and the installed command-host wrapper remain required before activation.
+
+Tests cover actual SQLite and owned-file recovery, four interrupted composition stages, authorization refusal, stale progress and explicit app consent.
+The [live selector evidence](experiments/macos-xpc.md#runtime-preparation-selectors) covers separate ordinary-user processes.
+Native Root ownership, real service account access, activation and Mac–Pixel approval remain interactive gates.

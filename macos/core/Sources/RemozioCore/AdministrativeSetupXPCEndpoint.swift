@@ -6,11 +6,15 @@ public enum AdministrativeSetupInterface {
     public static let storageVersion: UInt64 = 1
     public static let enrollmentVersion: UInt64 = 2
     public static let serviceAccountsVersion: UInt64 = 3
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion]
+    public static let runtimeVersion: UInt64 = 4
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol AdministrativeSetupXPCProtocol {
+    func runtimeHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func runtimeProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func prepareRuntime(_ expected: Data, fileCustodyAccepted: Bool, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void)
     func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void)
@@ -36,6 +40,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var ready = false
     private var enrollmentReady = false
     private var serviceAccountsReady = false
+    private var runtimeReady = false
     private var closed = false
     private var busy = false
 
@@ -101,6 +106,38 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
                 guard progress.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
                 try authorize(authorization)
                 return try owner.resumeServiceAccounts(callerUID: uid, expected: progress).bytes
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func runtimeHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); ready = true; enrollmentReady = true; serviceAccountsReady = true; runtimeReady = true
+            }
+            onHandshake(); send { reply(AdministrativeSetupInterface.runtimeVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func runtimeProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard runtimeReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.runtimeProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
+    }
+    public func prepareRuntime(_ expected: Data, fileCustodyAccepted: Bool, authorization: Data,
+                               reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try operation { uid in
+                guard runtimeReady, fileCustodyAccepted, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.invalidConfiguration
+                }
+                let progress = try SetupRuntimeProgress.decode(expected)
+                guard progress.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                try authorize(authorization)
+                return try owner.resumeRuntime(callerUID: uid, expected: progress, fileCustodyAccepted: fileCustodyAccepted).bytes
             }
             send { reply(bytes) }
         } catch { close(); reply(nil) }

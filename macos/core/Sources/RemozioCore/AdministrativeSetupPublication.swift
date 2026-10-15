@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public enum AdministrativeSetupPublicationError: Error, Equatable {
-    case conflictingConfiguration, changedInventory
+    case conflictingConfiguration, changedInventory, invalidArtifact
 }
 
 /// Publication evidence only. It proves no service registration, account enrollment or runtime health.
@@ -45,12 +45,52 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
+        case runtimeRecord, commandConfiguration, elevationPolicy, transportConfiguration
+        case transportIdentity(ownerUID: uid_t, groupID: gid_t)
+        case presenceClient(ownerUID: uid_t), pairingClient(ownerUID: uid_t), frontendClient(ownerUID: uid_t)
         var name: String {
             switch self {
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
+            case .runtimeRecord: "runtime-material.cbor"
+            case .commandConfiguration: "command-runtime.cbor"
+            case .elevationPolicy: "command-policy.cbor"
+            case .transportConfiguration: "transport-host.cbor"
+            case .transportIdentity: "transport-identity.cbor"
+            case .presenceClient(let uid): "presence-client-\(uid).cbor"
+            case .pairingClient(let uid): "pairing-client-\(uid).cbor"
+            case .frontendClient(let uid): "frontend-\(uid).cbor"
             }
+        }
+        var mode: mode_t {
+            switch self {
+            case .transportConfiguration, .presenceClient, .pairingClient, .frontendClient: 0o644
+            default: 0o600
+            }
+        }
+        var requiresSharedDirectory: Bool {
+            if case .transportIdentity = self { return true }
+            return mode == 0o644
+        }
+        func fileOwner(processOwner: uid_t) -> uid_t {
+            if case .transportIdentity(let uid, _) = self { return uid }
+            return processOwner
+        }
+        var groupID: gid_t? {
+            if case .transportIdentity(_, let gid) = self { return gid }
+            return nil
+        }
+        func validate() throws {
+            let uid: uid_t
+            switch self {
+            case .transportIdentity(let value, let group):
+                guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
+                uid = value
+            case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
+            default: return
+            }
+            guard uid > 0, uid < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
         }
     }
     // Only typed setup operations select these fixed names. No public arbitrary-file publisher exists.
@@ -58,15 +98,16 @@ public enum AdministrativeSetupPublication {
                         verify: () throws -> Void = {}, didStage: (Stage) throws -> Void = { _ in }) throws -> AdministrativeSetupPublicationResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
-        let name = file.name
-        return try directory.withDirectory { parent in
+        try file.validate()
+        let name = file.name, fileOwner = file.fileOwner(processOwner: owner)
+        let publish: (Int32) throws -> AdministrativeSetupPublicationResult = { parent in
             try verify()
             var existing = stat()
             if fstatat(parent, name, &existing, AT_SYMLINK_NOFOLLOW) == 0 {
-                try match(bytes, name: name, directory: directory, owner: owner)
-                try synchronizeRetained(parent: parent, name: name, bytes: bytes, owner: owner)
+                try match(bytes, file: file, directory: directory, owner: owner)
+                try synchronizeRetained(parent: parent, name: name, bytes: bytes, owner: fileOwner, mode: file.mode, group: file.groupID)
                 guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-                try match(bytes, name: name, directory: directory, owner: owner)
+                try match(bytes, file: file, directory: directory, owner: owner)
                 try verify(); try directory.validate()
                 return .retained
             }
@@ -98,45 +139,60 @@ public enum AdministrativeSetupPublication {
                 guard count > 0 else { throw JournalLeaseError.system(count == 0 ? EIO : errno) }
                 offset += count
             }
-            guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+            if let group = file.groupID {
+                var current = stat()
+                guard fstat(fd, &current) == 0 else { throw JournalLeaseError.system(errno) }
+                if current.st_uid != fileOwner || current.st_gid != group {
+                    guard fchown(fd, fileOwner, group) == 0 else { throw JournalLeaseError.system(errno) }
+                }
+            }
+            guard fchmod(fd, file.mode) == 0, fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
             var staged = stat(), named = stat()
             guard fstat(fd, &staged) == 0, fstatat(parent, staging, &named, AT_SYMLINK_NOFOLLOW) == 0 else {
                 throw JournalLeaseError.system(errno)
             }
             guard staged.st_dev == named.st_dev, staged.st_ino == named.st_ino,
                   staged.st_size == bytes.count else { throw JournalLeaseError.identityChanged }
-            try ProtectedStorageMetadata.validate(fd, staged, directory: false, privateObject: true, owner: owner, ancestorOwner: owner)
+            guard staged.st_uid == fileOwner, staged.st_mode & 0o777 == file.mode,
+                  file.groupID == nil || staged.st_gid == file.groupID else { throw JournalLeaseError.unsafeMetadata }
+            try ProtectedStorageMetadata.validate(fd, staged, directory: false, privateObject: file.mode == 0o600,
+                owner: fileOwner, ancestorOwner: owner)
             try directory.validate(); try didStage(.staged); try verify(); try directory.validate()
-            try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner)
+            try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: fileOwner, mode: file.mode, group: file.groupID)
             guard renameatx_np(parent, staging, parent, name, UInt32(RENAME_EXCL)) == 0 else {
                 throw JournalLeaseError.system(errno)
             }
             published = true
             try didStage(.published)
             guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-            try match(bytes, name: name, directory: directory, owner: owner)
+            try match(bytes, file: file, directory: directory, owner: owner)
             try verify(); try directory.validate()
             return .created
         }
+        if file.requiresSharedDirectory { return try directory.withSharedDirectory(publish) }
+        return try directory.withDirectory(publish)
     }
 
-    private static func synchronizeRetained(parent: Int32, name: String, bytes: Data, owner: uid_t) throws {
+    private static func synchronizeRetained(parent: Int32, name: String, bytes: Data, owner: uid_t,
+                                            mode: mode_t, group: gid_t?) throws {
         let fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw JournalLeaseError.system(errno) }
         defer { _ = Darwin.close(fd) }
-        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner)
+        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner, mode: mode, group: group)
         guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
-        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner)
+        try validateNamedFile(fd: fd, parent: parent, name: name, bytes: bytes, owner: owner, mode: mode, group: group)
     }
 
-    private static func validateNamedFile(fd: Int32, parent: Int32, name: String, bytes: Data, owner: uid_t) throws {
+    private static func validateNamedFile(fd: Int32, parent: Int32, name: String, bytes: Data, owner: uid_t,
+                                          mode: mode_t, group: gid_t?) throws {
         var before = stat(), named = stat()
         guard fstat(fd, &before) == 0, fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0 else {
             throw JournalLeaseError.system(errno)
         }
         guard before.st_dev == named.st_dev, before.st_ino == named.st_ino,
               before.st_size == bytes.count else { throw JournalLeaseError.identityChanged }
-        try ProtectedStorageMetadata.validate(fd, before, directory: false, privateObject: true, owner: owner, ancestorOwner: owner)
+        guard before.st_mode & 0o777 == mode, group == nil || before.st_gid == group else { throw JournalLeaseError.unsafeMetadata }
+        try ProtectedStorageMetadata.validate(fd, before, directory: false, privateObject: mode == 0o600, owner: owner, ancestorOwner: owner)
         var retained = Data(count: bytes.count), offset = 0
         while offset < retained.count {
             let count = retained.withUnsafeMutableBytes { pread(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset, off_t(offset)) }
@@ -153,13 +209,22 @@ public enum AdministrativeSetupPublication {
         }
         guard fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
               named.st_dev == after.st_dev, named.st_ino == after.st_ino else { throw JournalLeaseError.identityChanged }
-        try ProtectedStorageMetadata.validate(fd, after, directory: false, privateObject: true, owner: owner, ancestorOwner: owner)
+        guard after.st_mode & 0o777 == mode, group == nil || after.st_gid == group else { throw JournalLeaseError.unsafeMetadata }
+        try ProtectedStorageMetadata.validate(fd, after, directory: false, privateObject: mode == 0o600, owner: owner, ancestorOwner: owner)
     }
 
-    private static func match(_ bytes: Data, name: String, directory: ProtectedSetupDirectory, owner: uid_t) throws {
+    private static func match(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t) throws {
         try directory.validate()
-        let retained = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: name, owner: owner)
+        let retained = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: file.name,
+            owner: file.fileOwner(processOwner: owner), privateFile: file.mode == 0o600, ancestorOwner: owner)
         guard retained == bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+        try directory.withDirectory { parent in
+            let fd = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+            defer { _ = Darwin.close(fd) }
+            try validateNamedFile(fd: fd, parent: parent, name: file.name, bytes: bytes,
+                owner: file.fileOwner(processOwner: owner), mode: file.mode, group: file.groupID)
+        }
         try directory.validate()
     }
 }

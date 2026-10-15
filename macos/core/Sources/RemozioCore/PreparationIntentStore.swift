@@ -154,6 +154,81 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    func runtimePreparation(accountID: Data) throws -> RuntimePreparationState {
+        guard accountID.count == 16 else { throw RuntimePreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 6 { return .init(reference: nil, configurationPublished: false) }
+            let state = try loadRuntimePreparation(accountID: accountID)
+            if let reference = state.reference { try requireRuntimeMaterialScope(reference) }
+            return state
+        }
+    }
+    // Retain the secret-file digest and public identities before any service-readable publication.
+    func retainRuntimeMaterial(_ reference: RuntimeMaterialReference) throws {
+        try transaction(write: true) {
+            try identity(macID); try requireRuntimeMaterialScope(reference)
+            if try scalar("PRAGMA user_version") == 5 {
+                try exec("CREATE TABLE runtime_preparation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),material BLOB NOT NULL UNIQUE CHECK(length(material)=16),pin BLOB NOT NULL UNIQUE CHECK(length(pin)=91),digest BLOB NOT NULL CHECK(length(digest)=32),complete INTEGER NOT NULL CHECK(complete IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 8192)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=6")
+            }
+            let current = try loadRuntimePreparation(accountID: reference.services.accountID)
+            if let retained = current.reference {
+                guard retained == reference else { throw RuntimePreparationError.conflictingMaterial }
+                return
+            }
+            guard try scalar("SELECT COUNT(*) FROM runtime_preparation_v1") < 64 else { throw RuntimePreparationError.exhausted }
+            try statement("SELECT COUNT(*) FROM runtime_preparation_v1 WHERE material=? OR pin=?") { row in
+                try bind(reference.materialID, column: 1, row: row); try bind(reference.transportPublicKeyInfo, column: 2, row: row)
+                guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 0 else { throw RuntimePreparationError.conflictingMaterial }
+            }
+            try statement("INSERT INTO runtime_preparation_v1 VALUES(?,?,?,?,0,?)") { row in
+                try bind(reference.services.accountID, column: 1, row: row); try bind(reference.materialID, column: 2, row: row)
+                try bind(reference.transportPublicKeyInfo, column: 3, row: row); try bind(reference.materialDigest, column: 4, row: row)
+                try bind(reference.encoded, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    // The typed controller verifies all fixed artifacts first. This marker grants no registration or execution authority.
+    func completeRuntimePublication(_ reference: RuntimeMaterialReference) throws {
+        try transaction(write: true) {
+            try identity(macID); try requireRuntimeMaterialScope(reference)
+            guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimePreparationError.incomplete }
+            let current = try loadRuntimePreparation(accountID: reference.services.accountID)
+            guard current.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
+            if current.configurationPublished { return }
+            try statement("UPDATE runtime_preparation_v1 SET complete=1 WHERE account=? AND record=? AND complete=0") { row in
+                try bind(reference.services.accountID, column: 1, row: row); try bind(reference.encoded, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw RuntimePreparationError.conflictingMaterial }
+            }
+        }
+    }
+    private func requireRuntimeMaterialScope(_ reference: RuntimeMaterialReference) throws {
+        try requireServiceAccountScope(reference.services)
+        guard try scalar("PRAGMA user_version") >= 5 else { throw RuntimePreparationError.incomplete }
+        let current = try loadServiceAccountPlan(accountID: reference.services.accountID)
+        guard current.plan == reference.services, current.complete else { throw RuntimePreparationError.incomplete }
+    }
+    private func loadRuntimePreparation(accountID: Data) throws -> RuntimePreparationState {
+        try statement("SELECT material,pin,digest,complete,record FROM runtime_preparation_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return .init(reference: nil, configurationPublished: false) }
+            let reference: RuntimeMaterialReference
+            do { reference = try .decode(blob(row, column: 4, maximum: 8192)) }
+            catch { throw PreparationStoreError.corruptRecord }
+            guard reference.services.accountID == accountID, reference.services.macID == macID,
+                  try blob(row, column: 0, maximum: 16) == reference.materialID,
+                  try blob(row, column: 1, maximum: 91) == reference.transportPublicKeyInfo,
+                  try blob(row, column: 2, maximum: 32) == reference.materialDigest,
+                  sqlite3_column_type(row, 3) == SQLITE_INTEGER,
+                  [0, 1].contains(sqlite3_column_int64(row, 3)) else { throw PreparationStoreError.corruptRecord }
+            let complete = sqlite3_column_int64(row, 3) == 1
+            guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return .init(reference: reference, configurationPublished: complete)
+        }
+    }
     func serviceAccountPlan(accountID: Data) throws -> ServiceAccountPlanStorage.State {
         guard accountID.count == 16 else { throw ServiceAccountProvisioningError.invalidPlan }
         return try transaction(write: false) {
@@ -582,14 +657,14 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5].contains(version),
+        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5, 6].contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 6, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 7, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -601,6 +676,7 @@ public final class PreparationIntentStore {
         if version >= 3 { expected.append("authority_initialization_v1") }
         if version >= 4 { expected.append("account_preparation_v1") }
         if version >= 5 { expected.append("service_accounts_v1") }
+        if version >= 6 { expected.append("runtime_preparation_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in

@@ -80,7 +80,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5], 2: [1, 2, 3, 4, 5], 3: {1: 2}})
+        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6], 2: [1, 2, 3, 4, 5, 6], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -89,8 +89,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3], [1, 2, 3]))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5])
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4], [1, 2, 3, 4]))
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
