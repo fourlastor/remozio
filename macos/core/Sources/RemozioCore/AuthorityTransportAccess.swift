@@ -84,6 +84,20 @@ final class AuthorityTransportAccess: Sendable {
             }, body: { try handler($0, binding, requestID, decisionFrame) }, onCommandAuthorized: onCommandAuthorized)
     }
 
+    func pairingReceipt(binding: AuthorityPeerBinding, setupID: Data,
+                        handler: AuthorityPairingReceiptProvider) throws -> Data? {
+        guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }
+        return try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { owner in
+            try handler(owner, binding, setupID, { transaction in
+                try self.requireCurrent(transaction)
+                try transaction.requireDirectApprovalBinding(binding)
+            })
+        })
+    }
+
     private func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {

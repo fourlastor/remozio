@@ -63,6 +63,7 @@ dependencies {
     testImplementation("org.xerial:sqlite-jdbc:3.53.4.0")
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
 }
 
 val commandCaptureFixture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")

@@ -2,12 +2,18 @@ import CryptoKit
 import Foundation
 import RemozioProtocol
 
+/// The transaction validator binds both receipt reads to the current transport policy.
+public typealias AuthorityPairingReceiptProvider = @Sendable (
+    ApprovalRequestCoordinator, AuthorityPeerBinding, Data, @Sendable (JournalTransaction) throws -> Void
+) throws -> Data?
+
 /// A single configured signer, clock contract, and payload budget for all root request operations.
 public struct AuthorityRequestProviders: Sendable {
     let configurationBytes: Data
     let requestFrame: AuthorityRequestFrameProvider
     let pendingRequestIDs: AuthorityPendingRequestsProvider
     let exchangeRequest: AuthorityRequestExchangeProvider
+    let pairingReceipt: AuthorityPairingReceiptProvider
     let receiptTime: @Sendable () -> UInt64?
 
     /// Production requires a restored device-bound key. Callbacks must not reenter the service, journal, or request owner.
@@ -18,7 +24,8 @@ public struct AuthorityRequestProviders: Sendable {
             throw AuthorityRequestSignerError.wrongIdentity
         }
         try self.init(configuration: configuration, publicKey: signer.publicKey,
-            signing: { try signer.sign($0) }, routing: routing, receiptTime: receiptTime)
+            signing: { try signer.sign($0) }, routing: routing, receiptTime: receiptTime,
+            receiptValidation: AuthoritySelfValidation.validate)
     }
 
     /// The presence runtime reads the durable mode through each serialized request operation.
@@ -30,7 +37,7 @@ public struct AuthorityRequestProviders: Sendable {
         }
         try self.init(configuration: configuration, publicKey: signer.publicKey, signing: { try signer.sign($0) },
             routing: { throw AuthorityPresenceError.unavailable }, receiptTime: receiptTime,
-            presence: presence)
+            presence: presence, receiptValidation: AuthoritySelfValidation.validate)
     }
 
     /// Software signing exists only in internal component fixtures, never as a public custody fallback.
@@ -38,7 +45,8 @@ public struct AuthorityRequestProviders: Sendable {
          signing: @escaping @Sendable (Data) throws -> Data,
          routing: @escaping @Sendable () throws -> PresenceRouting,
          receiptTime: @escaping @Sendable () -> UInt64? = { nil },
-         presence: AuthorityPresenceRuntime? = nil) throws {
+         presence: AuthorityPresenceRuntime? = nil,
+         receiptValidation: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in }) throws {
         guard publicKey.count == 65, publicKey.first == 4,
               (try? P256.Signing.PublicKey(x963Representation: publicKey)) != nil,
               configuration.maximumPayloadBytes > ApprovalMessage.overheadBytes else {
@@ -68,6 +76,15 @@ public struct AuthorityRequestProviders: Sendable {
             try Self.requireScope(binding, configuration: configuration)
             return try owner.exchangeRequest(binding: binding, requestID: id, decisionFrame: decision, authorityPublicKey: publicKey,
                 maximumBodyBytes: statusBudget, now: clock, receiptTimeMs: receiptTime(), signer: signing)
+        }
+        pairingReceipt = { owner, binding, setupID, validateTransport in
+            try Self.requireScope(binding, configuration: configuration)
+            guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }
+            return try owner.pairingReceipt(setupID: setupID, binding: binding, authorityPublicKey: publicKey,
+                verifyHost: { transaction in
+                    try receiptValidation(transaction)
+                    try validateTransport(transaction)
+                }, sign: signing)
         }
     }
     func expirePending(_ owner: ApprovalRequestCoordinator, clock: @Sendable () throws -> AuthorityMoment) throws -> [ApprovalRequestState] {

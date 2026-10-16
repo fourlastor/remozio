@@ -2,6 +2,24 @@ import Foundation
 import Security
 import RemozioProtocol
 
+/// Selected by the enrolled TLS handshake, not by an application payload.
+public enum EnrolledChannelPurpose: Sendable {
+    case approvals, pairingReceipt
+    var applicationProtocol: String {
+        switch self {
+        case .approvals: "remozio/1"
+        case .pairingReceipt: PairingReceiptFrame.applicationProtocol
+        }
+    }
+    init?(applicationProtocol: String) {
+        switch applicationProtocol {
+        case "remozio/1": self = .approvals
+        case PairingReceiptFrame.applicationProtocol: self = .pairingReceipt
+        default: return nil
+        }
+    }
+}
+
 public enum ApprovalChannelError: Error { case closed, invalidInput, timedOut, concurrentOperation }
 
 protocol ApprovalByteStream: Sendable {
@@ -24,6 +42,7 @@ private struct NetworkApprovalStream: ApprovalByteStream {
 /// Owns framing, negotiation, and sequences for one enrolled TLS connection. No action authority is granted.
 public actor NegotiatedNetworkChannel {
     private enum State { case negotiating, open, closed }
+    public nonisolated let purpose: EnrolledChannelPurpose
     private let stream: any ApprovalByteStream
     private let maximumPayloadBytes: Int
     private let cancellation = ChannelCancellation()
@@ -36,8 +55,8 @@ public actor NegotiatedNetworkChannel {
     private var incoming: UInt64? = 0
     private var outgoing: UInt64? = 0
 
-    private init(stream: any ApprovalByteStream, maximumPayloadBytes: Int) {
-        self.stream = stream; self.maximumPayloadBytes = maximumPayloadBytes
+    private init(stream: any ApprovalByteStream, maximumPayloadBytes: Int, purpose: EnrolledChannelPurpose) {
+        self.stream = stream; self.maximumPayloadBytes = maximumPayloadBytes; self.purpose = purpose
     }
     public func negotiated() throws -> NegotiatedChannel {
         try active(); guard state == .open, let metadata else { throw ApprovalChannelError.closed }; return metadata
@@ -45,23 +64,26 @@ public actor NegotiatedNetworkChannel {
     /// Takes exclusive ownership, including on failure. The caller configures enrolled TLS pins and admission.
     public static func accept(channel: NetworkByteChannel, scope: ChannelScope, requests: [ChannelRequestCapability],
                               auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
-                              trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000) async throws -> NegotiatedNetworkChannel {
+                              trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000,
+                              purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
         try await accept(stream: NetworkApprovalStream(channel: channel), scope: scope, requests: requests, auditVersions: auditVersions,
-            maximumPayloadBytes: maximumPayloadBytes, trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
+            maximumPayloadBytes: maximumPayloadBytes, trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds, purpose: purpose)
     }
     // Used only after the listener verifies the native TLS session and selects its enrolled peer.
     static func acceptStarted(channel: NetworkByteChannel, scope: ChannelScope, requests: [ChannelRequestCapability],
                               auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
-                              trustedMinimum: UInt64, timeoutMilliseconds: UInt64) async throws -> NegotiatedNetworkChannel {
+                              trustedMinimum: UInt64, timeoutMilliseconds: UInt64,
+                              purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
         try await accept(stream: NetworkApprovalStream(channel: channel, alreadyStarted: true), scope: scope,
             requests: requests, auditVersions: auditVersions, maximumPayloadBytes: maximumPayloadBytes,
-            trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
+            trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds, purpose: purpose)
     }
 
     static func accept(stream: any ApprovalByteStream, scope: ChannelScope, requests: [ChannelRequestCapability],
                        auditVersions: Set<UInt64>, maximumPayloadBytes: Int,
-                       trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000) async throws -> NegotiatedNetworkChannel {
-        let owner = NegotiatedNetworkChannel(stream: stream, maximumPayloadBytes: maximumPayloadBytes)
+                       trustedMinimum: UInt64 = 1, timeoutMilliseconds: UInt64 = 15_000,
+                              purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
+        let owner = NegotiatedNetworkChannel(stream: stream, maximumPayloadBytes: maximumPayloadBytes, purpose: purpose)
         try await owner.negotiate(scope: scope, requests: requests, auditVersions: auditVersions,
             trustedMinimum: trustedMinimum, timeoutMilliseconds: timeoutMilliseconds)
         return owner

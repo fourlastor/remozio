@@ -65,13 +65,17 @@ struct DirectPeerSnapshot: Sendable {
         guard accessible, let leaf else { return nil }
         return peer(certificate: SecCertificateCopyData(leaf) as Data)
     }
-    func peer(connection: NWConnection) -> DirectApprovalPeer? {
+    func purpose(connection: NWConnection) -> EnrolledChannelPurpose? {
         guard let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata,
               let name = sec_protocol_metadata_copy_negotiated_protocol(tls.securityProtocolMetadata) else { return nil }
         defer { free(UnsafeMutableRawPointer(mutating: name)) }
-        guard String(cString: name) == "remozio/1",
-              sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13,
+        guard sec_protocol_metadata_get_negotiated_tls_protocol_version(tls.securityProtocolMetadata) == .TLSv13,
               !sec_protocol_metadata_get_early_data_accepted(tls.securityProtocolMetadata) else { return nil }
+        return EnrolledChannelPurpose(applicationProtocol: String(cString: name))
+    }
+    func peer(connection: NWConnection) -> DirectApprovalPeer? {
+        guard purpose(connection: connection) != nil,
+              let tls = connection.metadata(definition: NWProtocolTLS.definition) as? NWProtocolTLS.Metadata else { return nil }
         return peer(metadata: tls.securityProtocolMetadata)
     }
 }
@@ -117,7 +121,9 @@ public final class DirectApprovalListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        sec_protocol_options_add_tls_application_protocol(options, "remozio/1")
+        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt] {
+            sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
+        }
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
             complete(snapshot.peer(metadata: metadata) != nil)
         }, queue)
@@ -180,10 +186,12 @@ public final class DirectApprovalListener: @unchecked Sendable {
             do {
                 try await channel.start(timeoutMilliseconds: timeout)
                 try Task.checkCancellation()
-                guard let peer = snapshot.peer(connection: connection) else { throw DirectListenerError.invalidIdentity }
+                guard let peer = snapshot.peer(connection: connection), let purpose = snapshot.purpose(connection: connection) else {
+                    throw DirectListenerError.invalidIdentity
+                }
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
                     requests: peer.requests, auditVersions: peer.auditVersions, maximumPayloadBytes: peer.maximumPayloadBytes,
-                    trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout)
+                    trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
                 do { try Task.checkCancellation(); try await handler(peer, framed) }
                 catch { await framed.closeAndWait(); throw error }
                 await framed.closeAndWait()

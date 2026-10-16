@@ -93,3 +93,12 @@ The probe checks activation hello, progress and the explicit activation selector
 Wrong client and server identifiers prevent payload dispatch after the harmless handshake.
 The service echoes synthetic bytes. It neither imports administrator rights nor starts production jobs.
 Installed Root and Mac–Pixel behavior remain separate interactive gates.
+
+## Pairing receipt selectors
+
+[The receipt evidence](evidence/2026-10-16-pairing-receipt-xpc.json) adds five receipt cases. All 43 cases passed on macOS 27.0.1, targeting macOS 26.
+The temporary GUI service was removed.
+The probe negotiates the production receipt extension after the harmless hello. It preserves nonempty, empty and nil Data replies.
+Wrong client and server identifiers prevent receipt payload dispatch.
+The service echoes synthetic bytes. It has no committed enrollment, Root journal or authority key.
+These results establish native selector bridging. Installed Root behavior and Pixel receipt recovery remain interactive checks.

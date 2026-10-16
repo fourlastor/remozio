@@ -2,10 +2,15 @@ package dev.remozio.phone.transport
 
 import dev.remozio.protocol.ChannelRequestCapability
 import dev.remozio.protocol.ChannelScope
+import dev.remozio.protocol.PairingReceiptFrame
 import java.io.IOException
 import javax.net.ssl.KeyManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+
+enum class EnrolledChannelPurpose(val applicationProtocol: String) {
+    APPROVALS("remozio/1"), PAIRING_RECEIPT(PairingReceiptFrame.APPLICATION_PROTOCOL),
+}
 
 /** Supplies ciphertext only. All routes use the same enrolled identity and peer pin. */
 fun interface ApprovalCarrierRoute {
@@ -18,6 +23,7 @@ class ApprovalChannelConnector(
     private val scope: ChannelScope,
     requests: List<ChannelRequestCapability>, auditVersions: Set<ULong>,
     private val maximumPayloadBytes: Int, private val trustedMinimum: ULong = 1u,
+    private val purpose: EnrolledChannelPurpose = EnrolledChannelPurpose.APPROVALS,
 ) {
     private val keys = localKeys.copyOf()
     private val pin = peerPublicKey.copyOf()
@@ -36,9 +42,9 @@ class ApprovalChannelConnector(
         try {
             carrier = route.open(parent)
             currentCoroutineContext().ensureActive()
-            engine = PinnedTLSClient(keys, pin, "remozio/1", 1_048_576)
+            engine = PinnedTLSClient(keys, pin, purpose.applicationProtocol, 1_048_576)
             session = TLSRecordSession(parent, engine, carrier)
-            channel = NegotiatedTLSChannel.connect(session, scope, requests, auditVersions, maximumPayloadBytes, trustedMinimum)
+            channel = NegotiatedTLSChannel.connect(session, scope, requests, auditVersions, maximumPayloadBytes, trustedMinimum, purpose = purpose)
             currentCoroutineContext().ensureActive()
             return channel
         } catch (failure: Throwable) {

@@ -10,6 +10,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -30,12 +33,14 @@ import androidx.lifecycle.repeatOnLifecycle
 import dev.remozio.android.R
 import dev.remozio.android.RemozioApplication
 import kotlinx.coroutines.awaitCancellation
+import dev.remozio.protocol.CborValue
 
 @Composable
 internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
     val reader = (LocalContext.current.applicationContext as RemozioApplication).macs
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var retry by remember { mutableIntStateOf(0) }
+    val receiptStates = remember { mutableMapOf<CborValue.Bytes, MutableState<ReceiptCheckState>>() }
     val state by produceState<MacInventoryState>(MacInventoryState.Loading, reader, lifecycle, retry) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             value = MacInventoryState.Loading
@@ -59,6 +64,7 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
             TextButton(onClick = { retry++ }) { Text(stringResource(R.string.macs_retry)) }
         }
         is MacInventoryState.Ready -> {
+            SideEffect { receiptStates.keys.retainAll(current.macs.filter { it.setupIncomplete }.map { it.recordID }.toSet()) }
             if (current.macs.isEmpty()) InventoryCard {
                 Text(stringResource(R.string.no_macs_paired), style = MaterialTheme.typography.titleLarge)
                 Text(stringResource(R.string.pairing_empty_description), style = MaterialTheme.typography.bodyLarge)
@@ -71,7 +77,12 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete else R.string.macs_not_connected),
                             style = MaterialTheme.typography.titleMedium)
                         Text(stringResource(if (mac.setupIncomplete) R.string.macs_setup_incomplete_description else R.string.macs_unknown_status))
-                        if (!mac.setupIncomplete) TextButton(onClick = { onOpen(mac) }) {
+                        if (mac.setupIncomplete) PairingReceiptControl(mac,
+                            status = remember(receiptStates, mac.recordID) {
+                                receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
+                            },
+                            onChecked = { retry++ })
+                        else TextButton(onClick = { onOpen(mac) }) {
                             Text(stringResource(R.string.commands_open))
                         }
                     }

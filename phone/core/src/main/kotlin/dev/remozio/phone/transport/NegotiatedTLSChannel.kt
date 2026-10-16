@@ -24,7 +24,8 @@ private class TLSApprovalStream(private val session: TLSRecordSession) : Approva
 }
 
 /** Owns framing, negotiation, and sequences for one enrolled TLS session. It grants no action authority. */
-class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteStream, internal val maximumPayloadBytes: Int) : AutoCloseable {
+class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteStream, internal val maximumPayloadBytes: Int,
+    val purpose: EnrolledChannelPurpose) : AutoCloseable {
     private val closed = AtomicBoolean(false)
     private val readLock = Mutex()
     private val writeLock = Mutex()
@@ -127,12 +128,14 @@ class NegotiatedTLSChannel private constructor(private val stream: ApprovalByteS
     companion object {
         /** Takes exclusive ownership of the session, including on negotiation failure. The caller already verified enrollment pins. */
         suspend fun connect(session: TLSRecordSession, scope: ChannelScope, requests: List<ChannelRequestCapability>, auditVersions: Set<ULong>,
-                            maximumPayloadBytes: Int, trustedMinimum: ULong = 1u, timeoutMillis: Long = 15_000): NegotiatedTLSChannel =
-            connect(TLSApprovalStream(session), scope, requests, auditVersions, maximumPayloadBytes, trustedMinimum, timeoutMillis)
+                            maximumPayloadBytes: Int, trustedMinimum: ULong = 1u, timeoutMillis: Long = 15_000,
+                            purpose: EnrolledChannelPurpose = EnrolledChannelPurpose.APPROVALS): NegotiatedTLSChannel =
+            connect(TLSApprovalStream(session), scope, requests, auditVersions, maximumPayloadBytes, trustedMinimum, timeoutMillis, purpose)
 
         internal suspend fun connect(stream: ApprovalByteStream, scope: ChannelScope, requests: List<ChannelRequestCapability>, auditVersions: Set<ULong>,
-                                     maximumPayloadBytes: Int, trustedMinimum: ULong = 1u, timeoutMillis: Long = 15_000): NegotiatedTLSChannel {
-            val owner = NegotiatedTLSChannel(stream, maximumPayloadBytes)
+                                     maximumPayloadBytes: Int, trustedMinimum: ULong = 1u, timeoutMillis: Long = 15_000,
+                            purpose: EnrolledChannelPurpose = EnrolledChannelPurpose.APPROVALS): NegotiatedTLSChannel {
+            val owner = NegotiatedTLSChannel(stream, maximumPayloadBytes, purpose)
             owner.negotiate(scope, requests, auditVersions, trustedMinimum, timeoutMillis)
             return owner
         }

@@ -57,7 +57,12 @@ public actor DirectApprovalTransportService {
                 let timeout = requestDeliveryTimeoutMilliseconds, refresh = requestRefreshMilliseconds
                 try await host.configureHandler { [weak self] session, channel in
                     guard let self else { throw DirectHostError.stopped }
-                    try await self.runRequestExchange(for: session, over: channel, timeoutMilliseconds: timeout, refreshMilliseconds: refresh)
+                    switch channel.purpose {
+                    case .approvals:
+                        try await self.runRequestExchange(for: session, over: channel, timeoutMilliseconds: timeout, refreshMilliseconds: refresh)
+                    case .pairingReceipt:
+                        try await self.runPairingReceiptRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
+                    }
                 }
             }
             try await feed.start(host: host)
@@ -173,6 +178,50 @@ public actor DirectApprovalTransportService {
                 await channel.closeAndWait()
                 throw error
             }
+        } onCancel: { channel.close() }
+    }
+
+    /// Returns only the existing commit proof for this admitted phone and retained setup ID.
+    public func pairingReceipt(for session: DirectApprovalSession, setupID: Data) async throws -> Data? {
+        try await validate(session)
+        let signature = try await feed.pairingReceipt(session.peer, revision: session.revision, setupID: setupID)
+        try await validate(session)
+        return signature
+    }
+
+    /// One bounded read-only exchange. An unavailable receipt cannot establish an absent enrollment.
+    public func runPairingReceiptRecovery(for session: DirectApprovalSession, over channel: NegotiatedNetworkChannel,
+                                         timeoutMilliseconds: UInt64 = 30_000) async throws {
+        try await withTaskCancellationHandler {
+            do {
+                guard (1...60_000).contains(timeoutMilliseconds), channel.purpose == .pairingReceipt else {
+                    throw ApprovalChannelError.invalidInput
+                }
+                try await validate(session)
+                let metadata = try await channel.negotiated()
+                guard metadata.peer.role == .phone, metadata.peer.scope == session.peer.scope,
+                      metadata.envelopeVersion == 1 else { throw ApprovalChannelError.invalidInput }
+                let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int64(timeoutMilliseconds)))
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        guard let bytes = try await channel.receive(maximumBytes: min(session.peer.maximumPayloadBytes, PairingReceiptFrame.maximumBytes)),
+                              case .query(let setupID) = try PairingReceiptFrame.decode(bytes) else { throw ApprovalChannelError.invalidInput }
+                        let signature = try await self.pairingReceipt(for: session, setupID: setupID)
+                        let response = try PairingReceiptFrame.response(setupID: setupID, signature: signature).encode()
+                        guard response.count <= session.peer.maximumPayloadBytes else { throw ApprovalChannelError.invalidInput }
+                        try await self.validate(session)
+                        try await Self.send(response, over: channel, deadline: deadline)
+                    }
+                    group.addTask {
+                        try await ContinuousClock().sleep(until: deadline)
+                        channel.close()
+                        throw ApprovalChannelError.timedOut
+                    }
+                    defer { group.cancelAll() }
+                    _ = try await group.next()
+                }
+                await channel.closeAndWait()
+            } catch { await channel.closeAndWait(); throw error }
         } onCancel: { channel.close() }
     }
 

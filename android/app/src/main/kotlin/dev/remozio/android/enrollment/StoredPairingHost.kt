@@ -48,6 +48,16 @@ internal class StoredPairingHost(
         }
     }
 
+    /** Reconstruct the retained attempt before acquiring its ordinary prepared-record lease. */
+    suspend fun recoverable(recordID: CborValue.Bytes): PreparedPairingAccess {
+        val transcript = withContext(dispatcher) {
+            enrollmentAccess.withLock {
+                checkNotNull(openExisting()).use { it.recoverPairing(recordID.copyBytes()).transcript }
+            }
+        }
+        return prepared(recordID, transcript)
+    }
+
     suspend fun release(recordID: CborValue.Bytes, lease: PreparedPairingLease) = withContext(dispatcher) {
         lease.close()
         enrollmentAccess.withLock {
@@ -72,11 +82,16 @@ internal class StoredPairingHost(
         }
 
     /** Reconstructs the pending attempt from storage; network input cannot supply a replacement transcript. */
-    suspend fun activate(recordID: CborValue.Bytes, receipt: CborValue.Bytes): EnrollmentSnapshot = withContext(dispatcher) {
+    suspend fun activate(recordID: CborValue.Bytes, receipt: CborValue.Bytes,
+        expected: PreparedPairingAccess? = null): EnrollmentSnapshot = withContext(dispatcher) {
         enrollmentAccess.withLock {
             checkNotNull(openExisting()).use { store ->
                 val attempt = store.recoverPairing(recordID.copyBytes())
                 val row = store.snapshot().entries.single { it.enrollment.recordID == recordID }
+                if (expected != null) {
+                    require(expected.lease.isCurrent() && expected.record.enrollment.recordID == recordID)
+                    require(row.sameConnectionAs(expected.record))
+                }
                 require(attempt.transcript.verify(receipt.copyBytes(), row.enrollment.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
                 validateKeys(row.enrollment)
                 val affected = setOfNotNull(recordID, row.pairing?.replacingRecordID)

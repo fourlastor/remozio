@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -111,6 +111,11 @@ def experiment(report):
                 ("discovery-bytes", "discovery", trusted, TRUSTED, 0),
                 ("discovery-wrong-server", "discovery", trusted, OTHER, 3),
                 ("discovery-wrong-client", "discovery", other, TRUSTED, 3),
+                ("receipt-bytes", "receipt", trusted, TRUSTED, 0),
+                ("receipt-empty", "receipt-empty", trusted, TRUSTED, 0),
+                ("receipt-nil", "receipt-nil", trusted, TRUSTED, 0),
+                ("receipt-wrong-server", "receipt", trusted, OTHER, 3),
+                ("receipt-wrong-client", "receipt", other, TRUSTED, 3),
                 ("exchange-bytes", "exchange", trusted, TRUSTED, 0),
                 ("exchange-empty", "exchange-empty", trusted, TRUSTED, 0),
                 ("exchange-nil", "exchange-nil", trusted, TRUSTED, 0),

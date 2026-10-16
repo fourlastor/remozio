@@ -444,4 +444,7 @@
     <string name="pairing_setup_scan">Scan Mac code</string>
     <string name="pairing_setup_scan_failed">Could not read a Remozio invitation. Try again or paste the pairing text. The scanner may need a Google Play services download.</string>
     <string name="pairing_setup_preview">Synthetic preview. No keys, enrollment, or approval.</string>
+    <string name="pairing_receipt_check">Check pairing</string>
+    <string name="pairing_receipt_checking">Checking the saved pairing…</string>
+    <string name="pairing_receipt_unavailable">Could not confirm pairing. Keep this setup and try again when the Mac is available and up to date.</string>
 </resources>

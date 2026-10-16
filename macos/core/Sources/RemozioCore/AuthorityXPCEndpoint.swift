@@ -31,7 +31,9 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let frame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let pendingRequests: (@Sendable (AuthorityPeerBinding) throws -> [Data])?
     private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
+    private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let wakeHints: (@Sendable () throws -> AuthorityWakeHints)?
+    private var receiptReady = false
     private var wakeReady = false
     private var exchangeReady = false
     private var discoveryReady = false
@@ -50,14 +52,15 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                             requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
                             pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
                             exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
-                            wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
+                            pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
+         wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
         guard peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
         _ = try peerPolicy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: peerPolicy)
         self.init(macID: macID, accountID: accountID, budget: budget,
             verify: { _ = try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs,
-            exchangeRequest: exchangeRequest, wakeHints: wakeHints)
+            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, wakeHints: wakeHints)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
         connection.exportedObject = self
@@ -72,10 +75,11 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          requestFrame: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          pendingRequestIDs: (@Sendable (AuthorityPeerBinding) throws -> [Data])? = nil,
          exchangeRequest: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)? = nil,
+         pairingReceipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) {
         self.macID = macID; self.accountID = accountID; self.budget = budget
         self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
-        self.wakeHints = wakeHints
+        self.wakeHints = wakeHints; self.receipt = pairingReceipt
     }
     public func close() {
         let notify = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
@@ -147,6 +151,30 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
             }
             send { reply(version) }
         } catch { close(); reply(0) }
+    }
+    public func pairingReceiptVersion(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let version: UInt64 = try work {
+                let supported = receipt != nil
+                lock.withLock { receiptReady = supported }
+                return supported ? 1 : 0
+            }
+            send { reply(version) }
+        } catch { close(); reply(0) }
+    }
+    public func pairingReceipt(_ binding: Data, setupID: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let bytes = try work {
+                guard lock.withLock({ receiptReady }), let receipt, setupID.count == 16 else {
+                    throw AuthorityXPCEndpointError.unavailable
+                }
+                let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
+                guard let signature = try receipt(peer, setupID) else { return Data() }
+                guard signature.count == 64 else { throw AuthorityXPCError.invalidMessage }
+                return signature
+            }
+            send { reply(bytes) }
+        } catch { close(); reply(nil) }
     }
     public func requestWakeVersion(reply: @escaping @Sendable (UInt64) -> Void) {
         do {

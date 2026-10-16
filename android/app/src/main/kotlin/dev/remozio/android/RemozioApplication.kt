@@ -7,6 +7,8 @@ import dev.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.remozio.android.enrollment.validatePairingKeys
 import dev.remozio.android.enrollment.StoredPairingHost
 import dev.remozio.android.enrollment.StoredMacReader
+import dev.remozio.android.enrollment.PairingReceiptRecovery
+import dev.remozio.android.enrollment.androidPairingReceiptWire
 import dev.remozio.android.updates.androidUpdateHost
 import dev.remozio.android.requests.StoredCommandConnections
 import dev.remozio.android.requests.androidCommandConnection
@@ -37,6 +39,9 @@ class RemozioApplication : Application() {
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, { commands.invalidateRecordsLocked(it) }, ::validatePairingKeys,
         )
+    }
+    internal val pairingReceipts by lazy {
+        PairingReceiptRecovery(pairing, { parent, record -> androidPairingReceiptWire(this, parent, record) })
     }
     internal fun retirePairing(attempt: AndroidPairingAttempt): kotlinx.coroutines.Deferred<Result<Unit>> {
         attempt.close()

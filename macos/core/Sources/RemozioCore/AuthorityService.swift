@@ -173,7 +173,8 @@ public final class AuthorityService: @unchecked Sendable {
                 maximumConnections: configuration.maximumConnections,
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
-                exchangeRequest: exchangeHandler, wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
+                exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
+                wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let requestProviders, let reconcileExpired {

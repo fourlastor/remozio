@@ -59,6 +59,16 @@ final class ProbeService: NSObject, ProbeProtocol {
         fflush(stdout)
         reply(binding)
     }
+    func pairingReceiptVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    func pairingReceipt(_ binding: Data, setupID: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        print("RECEIPT_RECEIVED \(String(decoding: setupID, as: UTF8.self))")
+        fflush(stdout)
+        switch String(decoding: binding, as: UTF8.self) {
+        case "receipt": reply(setupID)
+        case "receipt-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
     func requestExchangeVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func exchangeRequest(_ binding: Data, query: Data, reply: @escaping @Sendable (Data?) -> Void) {
         print("EXCHANGE_RECEIVED \(String(decoding: query, as: UTF8.self))")
@@ -141,7 +151,7 @@ final class Completion: @unchecked Sendable {
             listener.delegate = delegate
             listener.activate()
             withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
-        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "exchange", "exchange-empty", "exchange-nil",
+        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "receipt", "receipt-empty", "receipt-nil", "exchange", "exchange-empty", "exchange-nil",
              "setup-progress", "setup-bytes", "setup-empty", "setup-nil",
              "runtime-progress", "runtime-bytes", "runtime-empty", "runtime-nil", "runtime-no-consent",
              "activation-progress", "activation-bytes", "activation-empty", "activation-nil":
@@ -221,6 +231,16 @@ final class Completion: @unchecked Sendable {
                 let mode = args[0], bytes = Data(nonce.utf8)
                 let expected: Data? = mode == "setup-bytes" ? bytes : mode == "setup-empty" ? Data() : nil
                 proxy.prepareServiceAccounts(bytes, authorization: Data(mode.utf8)) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
+                }
+            } else if args[0].hasPrefix("receipt") {
+                let version = Completion()
+                proxy.pairingReceiptVersion { @Sendable value in version.finish(value == 1 ? "accepted" : "wrong-version") }
+                guard version.signal.wait(timeout: .now() + 10) == .success,
+                      version.value() == "accepted" else { print("version-failed"); exit(4) }
+                let mode = args[0], setupID = Data(nonce.utf8)
+                let expected: Data? = mode == "receipt" ? setupID : mode == "receipt-empty" ? Data() : nil
+                proxy.pairingReceipt(Data(mode.utf8), setupID: setupID) { @Sendable returned in
                     completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else if args[0].hasPrefix("exchange") {

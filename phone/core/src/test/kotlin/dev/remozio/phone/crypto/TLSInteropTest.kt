@@ -8,6 +8,13 @@ import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import kotlinx.coroutines.flow.first
+import dev.remozio.phone.transport.ApprovalChannelConnector
+import dev.remozio.phone.transport.ApprovalCarrierRoute
+import dev.remozio.phone.transport.DirectTCPConnector
+import dev.remozio.phone.transport.EnrolledChannelPurpose
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
+import java.net.InetSocketAddress
 import dev.remozio.phone.transport.NegotiatedTLSChannel
 import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.EncryptedRecordTransport
@@ -367,6 +374,37 @@ class TLSInteropTest {
         }
     }
 
+    @Test fun receiptPurposeCrossesNativeTlsDirectlyAndThroughTheRelay(): Unit =
+        Fixture(negotiate = true, receiptRecovery = true).use { f ->
+            WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                runBlocking {
+                    withTimeout(20_000) {
+                        for (useRelay in listOf(false, true)) {
+                            val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                            val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                                scope, emptyList(), emptySet(), PairingReceiptFrame.MAXIMUM_BYTES,
+                                purpose = EnrolledChannelPurpose.PAIRING_RECEIPT)
+                            val channel = connector.connect(this,
+                                if (useRelay) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+                                    DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                                }), if (!useRelay) null else ApprovalCarrierRoute { owner ->
+                                    relay.connector.connect(owner, relay.endpoint,
+                                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                                })
+                            try {
+                                assertEquals(EnrolledChannelPurpose.PAIRING_RECEIPT, channel.purpose)
+                                val setupID = ByteArray(16) { 31 }
+                                channel.send(PairingReceiptFrame.Query(setupID).encode())
+                                val response = PairingReceiptFrame.decode(requireNotNull(channel.receive())) as PairingReceiptFrame.Response
+                                assertArrayEquals(setupID, response.setupID.copyBytes())
+                                assertArrayEquals(ByteArray(64) { 8 }, requireNotNull(response.signature).copyBytes())
+                            } finally { channel.closeAndJoin() }
+                        }
+                    }
+                }
+            }
+        }
+
     @Test fun signedMessagesReachTheInboxThroughTheNegotiatedHttpsRelay(): Unit = Fixture(negotiate = true, commandMessages = true).use { f ->
         val limits = CborLimits(32768, 32, 4096)
         val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
@@ -579,7 +617,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -597,7 +635,7 @@ class TLSInteropTest {
                 process = child
                 process.outputStream.bufferedWriter().also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + second + "}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + second + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

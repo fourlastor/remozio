@@ -58,6 +58,33 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         private var hold = false
         private var queries: [Data] = []
         private var discoveries = 0
+        private var receiptQueries: [Data] = []
+        private var receiptReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var holdReceiptReply = false
+        let receiptRequested = XCTestExpectation(description: "receipt requested")
+        private var receiptValue = Data(repeating: 8, count: 64)
+        var receiptBytes: Data {
+            get { lock.withLock { receiptValue } }
+            set { lock.withLock { receiptValue = newValue } }
+        }
+        var receiptIDs: [Data] { lock.withLock { receiptQueries } }
+        func holdReceipt() { lock.withLock { holdReceiptReply = true } }
+        func finishReceipt() {
+            let callback = lock.withLock { let value = receiptReply; receiptReply = nil; return value }
+            callback?(.receipt(receiptBytes))
+        }
+        func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            reply(.receiptVersion(1))
+        }
+        func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            let held = lock.withLock {
+                receiptQueries.append(setupID)
+                if holdReceiptReply { receiptReply = reply; return true }
+                return false
+            }
+            receiptRequested.fulfill()
+            if !held { reply(.receipt(receiptBytes)) }
+        }
         let requested = XCTestExpectation(description: "frame requested")
         init(trust: DirectApprovalTrust, ids: [Data], frames: [Data: Data], exchangeSupported: Bool = false,
              statuses: [Data: Data] = [:], decisions: [Data: Data] = [:]) {
@@ -235,9 +262,10 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         try await service.start()
         return (service, host, driver, factory, peer)
     }
-    private func connect(_ phone: Phone, _ peer: DirectApprovalPeer) async throws -> NegotiatedNetworkChannel {
+    private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
+                         purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
         try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: peer.requests, auditVersions: [],
-            maximumPayloadBytes: peer.maximumPayloadBytes)
+            maximumPayloadBytes: peer.maximumPayloadBytes, purpose: purpose)
     }
     func testDefaultHandlerWritesExactSignedFramesAndSkipsAbsentRequests() async throws {
         let (first, key) = try Self.frame(8), second = try Self.frame(10).0
@@ -362,6 +390,107 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     func testHandlerCannotChangeAfterHostStarts() async throws {
         let (service, host, _, _, _) = try await setup(ids: [], frames: [:])
         do { try await host.configureHandler { _, _ in }; XCTFail("Live handler replaced") } catch { }
+        await service.close()
+    }
+
+    func testReceiptHandlerReturnsOneReceiptWithoutDiscoveringCommands() async throws {
+        for available in [false, true] {
+            let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [:])
+            if !available { driver.receiptBytes = Data() }
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pairingReceipt)
+            try await phone.submit(PairingReceiptFrame.query(setupID: Self.id(31)).encode())
+            try await phone.submit(PairingReceiptFrame.query(setupID: Self.id(32)).encode())
+            try await factory.run(peer, channel)
+            let payloads = await phone.payloads, closed = await phone.closed
+            XCTAssertEqual(payloads, [try PairingReceiptFrame.response(setupID: Self.id(31),
+                signature: available ? driver.receiptBytes : nil).encode()])
+            XCTAssertEqual(driver.receiptIDs, [Self.id(31)])
+            XCTAssertEqual(driver.discoveryCount, 0); XCTAssertTrue(driver.frameIDs.isEmpty)
+            XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+
+    func testReceiptHandlerRejectsInvalidQueriesBeforeAuthorityAccess() async throws {
+        let invalid = [Data([0xa0]), try PairingReceiptFrame.response(setupID: Self.id(31), signature: nil).encode(),
+                       Data(repeating: 0, count: PairingReceiptFrame.maximumBytes + 1)]
+        for query in invalid {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:])
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pairingReceipt)
+            try await phone.submit(query)
+            do { try await factory.run(peer, channel); XCTFail("Invalid receipt query accepted") } catch { }
+            let closed = await phone.closed, payloads = await phone.payloads
+            XCTAssertTrue(closed); XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(driver.receiptIDs.isEmpty)
+            XCTAssertEqual(driver.discoveryCount, 0)
+            await service.close()
+        }
+    }
+
+    func testReceiptHandlerRejectsWrongPurposeAndScopeBeforeAuthorityAccess() async throws {
+        for wrongPurpose in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:])
+            let session = try await host.admit(peer, generation: factory.generation)
+            let scope = try Self.scope(phone: wrongPurpose ? 3 : 5)
+            let phone = try Phone(scope: scope, requests: [], persistent: true)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope,
+                requests: [], auditVersions: [], maximumPayloadBytes: 4096,
+                purpose: wrongPurpose ? .approvals : .pairingReceipt)
+            do { try await service.runPairingReceiptRecovery(for: session, over: channel); XCTFail("Unbound receipt accepted") } catch { }
+            let closed = await phone.closed
+            XCTAssertTrue(closed); XCTAssertTrue(driver.receiptIDs.isEmpty); XCTAssertEqual(driver.discoveryCount, 0)
+            await service.close()
+        }
+    }
+
+    func testReceiptCannotBeSentAfterTransportSessionRetires() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:])
+        driver.holdReceipt()
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pairingReceipt)
+        try await phone.submit(PairingReceiptFrame.query(setupID: Self.id(31)).encode())
+        let recovery = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.receiptRequested], timeout: 2)
+        try await host.replaceTrust(driver.trust)
+        driver.finishReceipt()
+        do { try await recovery.value; XCTFail("Retired receipt sent") } catch { }
+        let payloads = await phone.payloads, closed = await phone.closed
+        XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(closed)
+        XCTAssertEqual(driver.receiptIDs, [Self.id(31)]); XCTAssertEqual(driver.discoveryCount, 0)
+        await service.close()
+    }
+
+    func testReceiptDeadlineAndCancellationClosePendingRead() async throws {
+        for cancelled in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:])
+            let session = try await host.admit(peer, generation: factory.generation)
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pairingReceipt)
+            let recovery = Task { try await service.runPairingReceiptRecovery(for: session, over: channel,
+                timeoutMilliseconds: cancelled ? 5000 : 100) }
+            if cancelled { recovery.cancel() }
+            do { try await recovery.value; XCTFail("Pending read completed") } catch { }
+            let payloads = await phone.payloads, closed = await phone.closed
+            XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(closed)
+            XCTAssertTrue(driver.receiptIDs.isEmpty); XCTAssertEqual(driver.discoveryCount, 0)
+            await service.close()
+        }
+    }
+
+    func testReceiptDeadlineClosesBlockedResponseWrite() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:])
+        let session = try await host.admit(peer, generation: factory.generation)
+        let phone = try Phone(scope: peer.scope, requests: [], holdWrite: true, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pairingReceipt)
+        try await phone.submit(PairingReceiptFrame.query(setupID: Self.id(31)).encode())
+        do {
+            try await service.runPairingReceiptRecovery(for: session, over: channel, timeoutMilliseconds: 100)
+            XCTFail("Blocked receipt write exceeded deadline")
+        } catch { }
+        let payloads = await phone.payloads, closed = await phone.closed
+        XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(closed)
+        XCTAssertEqual(driver.receiptIDs, [Self.id(31)]); XCTAssertEqual(driver.discoveryCount, 0)
         await service.close()
     }
 

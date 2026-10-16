@@ -2062,3 +2062,90 @@ extension ApprovalRequestCoordinatorTests {
         }
     }
 }
+
+
+extension ApprovalRequestCoordinatorTests {
+    func testReceiptProviderReturnsOnlyTheCommittedTranscriptWithoutAnotherEnrollment() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+        let requests = try owner(db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+        defer { try? db.close() }
+        _ = try commitPairing(requests, attempt, proof: proof, authority: authority)
+        let binding = try pairingBinding(db), before = try events(db, writer), route = try routing()
+        let signs = Mutex(0), validations = Mutex(0)
+        let providers = try AuthorityRequestProviders(configuration: providerConfiguration(fixture),
+            publicKey: authority.publicKey.x963Representation, signing: { input in
+                signs.withLock { $0 += 1 }
+                return try authority.signature(for: input).rawRepresentation
+            }, routing: { route })
+        let signature = try XCTUnwrap(providers.pairingReceipt(requests, binding, attempt.transcript.setupID, { _ in
+            validations.withLock { $0 += 1 }
+        }))
+        XCTAssertTrue(try attempt.transcript.verify(signature: signature, publicKey: authority.publicKey.x963Representation, purpose: .macCommit))
+        XCTAssertEqual(signs.withLock { $0 }, 1); XCTAssertEqual(validations.withLock { $0 }, 2)
+        XCTAssertNil(try providers.pairingReceipt(requests, binding, id(99), { _ in }))
+        XCTAssertEqual(signs.withLock { $0 }, 1)
+        let stale = try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID())
+        XCTAssertThrowsError(try providers.pairingReceipt(requests, stale, attempt.transcript.setupID, { _ in }))
+        XCTAssertEqual(signs.withLock { $0 }, 1)
+        XCTAssertEqual(try events(db, writer), before)
+    }
+
+    func testReceiptProviderRechecksBothHostAndTransportAfterSigning() throws {
+        for invalidateHost in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), authority = P256.Signing.PrivateKey()
+            let requests = try owner(db, writer), (attempt, proof) = try pairingAttempt(db, authority: authority)
+            defer { try? db.close() }
+            _ = try commitPairing(requests, attempt, proof: proof, authority: authority)
+            let binding = try pairingBinding(db), before = try events(db, writer), route = try routing()
+            let allowed = Mutex(true), signs = Mutex(0), checks = Mutex(0)
+            let providers = try AuthorityRequestProviders(configuration: providerConfiguration(fixture),
+                publicKey: authority.publicKey.x963Representation, signing: { input in
+                    signs.withLock { $0 += 1 }
+                    let signature = try authority.signature(for: input).rawRepresentation
+                    allowed.withLock { $0 = false }
+                    return signature
+                }, routing: { route }, receiptValidation: { _ in
+                    if invalidateHost {
+                        checks.withLock { $0 += 1 }
+                        guard allowed.withLock({ $0 }) else { throw Failure.fixture }
+                    }
+                })
+            let validateTransport: @Sendable (JournalTransaction) throws -> Void = { _ in
+                if !invalidateHost {
+                    checks.withLock { $0 += 1 }
+                    guard allowed.withLock({ $0 }) else { throw Failure.fixture }
+                }
+            }
+            XCTAssertThrowsError(try providers.pairingReceipt(requests, binding, attempt.transcript.setupID, validateTransport))
+            XCTAssertEqual(signs.withLock { $0 }, 1); XCTAssertEqual(checks.withLock { $0 }, 2)
+            XCTAssertThrowsError(try providers.pairingReceipt(requests, binding, attempt.transcript.setupID, validateTransport))
+            XCTAssertEqual(signs.withLock { $0 }, 1)
+            XCTAssertEqual(try events(db, writer), before)
+        }
+    }
+
+    func testReceiptAccessRejectsChangedTransportPolicyBeforeCallingProvider() throws {
+        let fixture = try Fixture()
+        let enrollment = try StoredApprovalEnrollment(epoch: id(9), notificationTag: id(10, 32),
+            identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+            approval: ApprovalEnrollment(phoneID: id(5), active: true, capabilities: capabilities, keys: [
+                EnrolledApprovalKey(id: id(6), keyClass: .biometric, publicKey: key.publicKey.x963Representation),
+                EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
+        let journal = try journalOwner(fixture, enrollment: enrollment)
+        defer { try? journal.close() }
+        let (access, binding) = try noticeAccess(journal)
+        let policy = try XCTUnwrap(journal.read { try $0.codePolicy() }), setupID = id(31)
+        let disabled = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+            installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: false)
+        let next = try AuthorityCodePolicy(entries: [disabled]), calls = Mutex(0)
+        let handler: AuthorityPairingReceiptProvider = { _, _, _, _ in
+            calls.withLock { $0 += 1 }
+            return Data(repeating: 8, count: 64)
+        }
+        XCTAssertNotNil(try access.pairingReceipt(binding: binding, setupID: setupID, handler: handler))
+        XCTAssertEqual(calls.withLock { $0 }, 1)
+        _ = try journal.write { try $0.installCodePolicy(next, expectedRevision: policy.revision) }
+        XCTAssertThrowsError(try access.pairingReceipt(binding: binding, setupID: setupID, handler: handler))
+        XCTAssertEqual(calls.withLock { $0 }, 1)
+    }
+}

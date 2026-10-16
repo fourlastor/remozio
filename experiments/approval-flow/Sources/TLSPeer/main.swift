@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -199,6 +199,14 @@ if setup.negotiate == true {
             case .stopped: break
             }
         }, handler: { _, channel in
+            if setup.receiptRecovery == true {
+                guard channel.purpose == .pairingReceipt,
+                      let payload = try await channel.receive(maximumBytes: PairingReceiptFrame.maximumBytes),
+                      case .query(let setupID) = try PairingReceiptFrame.decode(payload) else { throw ProbeError.invalidInput }
+                // Synthetic wire bytes only. This fixture has no committed enrollment or Root signer.
+                try await channel.send(PairingReceiptFrame.response(setupID: setupID, signature: Data(repeating: 8, count: 64)).encode())
+                return
+            }
             while let payload = try await channel.receive() { try await channel.send(payload) }
         })
     try direct.start()

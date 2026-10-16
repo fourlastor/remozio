@@ -160,6 +160,22 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedRequestExchange
         } catch { await close(); throw error }
     }
+    /// Receipt recovery shares the same ordered authority connection and current trust revision.
+    public func pairingReceipt(_ peer: DirectApprovalPeer, revision: UUID, setupID: Data) async throws -> Data? {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID, setupID.count == 16 else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        try await acquire()
+        defer { release() }
+        do {
+            let receipt = try await activeChannel().pairingReceipt(binding: AuthorityPeerBinding(peer: peer, revision: revision), setupID: setupID)
+            try requireActive()
+            return receipt
+        } catch AuthorityXPCError.unsupportedPairingReceipt {
+            try requireActive()
+            throw AuthorityXPCError.unsupportedPairingReceipt
+        } catch { await close(); throw error }
+    }
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
