@@ -5,7 +5,7 @@ Installed behavior remains untested. This candidate is not ready for Root comman
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) is a known blocker.
 The Mac reports 24 directory groups for root. Full static assignment fails at the OS limit of 16.
-The native API experiment passed. The [production credential path](../macos-native-account-credentials.md) still needs review and a privileged child measurement before installation.
+The native API experiment passed. The [production credential path](../macos-native-account-credentials.md) merged in PR #395. Its actual privileged child measurement remains required before installation.
 Do not truncate groups or omit this gate to obtain a successful demo.
 
 ## What exists
@@ -44,7 +44,7 @@ The privileged API controls completed on macOS 27.0.1 with native administrator 
 Full static assignment failed. The bounded subset lost extra-group file access; native initialization preserved access.
 Root initialization also succeeded. Parent credentials stayed unchanged and all disposable fixtures were removed.
 
-Review the production credential integration, then measure its actual child with disposable targets before installing a service.
+Use the [actual-child experiment](macos-production-child.md) after its review. Measure the production child with disposable targets before installing a service.
 The API probe does not prove production execution or macOS 26 behavior. Do not infer effective access from a group count.
 
 ## Stage 2: installation and pairing

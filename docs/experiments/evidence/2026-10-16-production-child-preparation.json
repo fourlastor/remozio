@@ -1,0 +1,72 @@
+{
+  "administratorCommandSHA256": "614e26ce72dfba532206cc2b92a3b975a1afa636cf0337eca6d73f06257ce691",
+  "descriptorControls": {
+    "descriptorControls": 3,
+    "privilegedControlsRun": false,
+    "schemaVersion": 1
+  },
+  "executables": {
+    "child": {
+      "bytes": 36568,
+      "sha256": "355f5fea48a16d9e57d378c8fb4ec944ebcf12f7ae83a9f927f34ce7661952af"
+    },
+    "monitor": {
+      "bytes": 55640,
+      "sha256": "534585e545705a757217169f00196241569e80ab6b44ca6c5e940a0140612adc"
+    },
+    "probe": {
+      "bytes": 56760,
+      "sha256": "c452fab2106703200d83c60b55b6419bc0c03b3aa298d27ee5248913e4c8936d"
+    },
+    "target": {
+      "bytes": 34632,
+      "sha256": "9b2c5a95516f3a070b11065fb7762efac55fdc0282adf8db1581b6ca46700a51"
+    }
+  },
+  "hostArchitecture": "arm64",
+  "hostMacOS": "27.0.1",
+  "installedRemozio": false,
+  "invalidUIDRefused": true,
+  "ordinaryControls": {
+    "codecControls": 6,
+    "privilegedControlsRun": false,
+    "schemaVersion": 1
+  },
+  "ordinaryPrivilegedModeRefused": true,
+  "ownerControls": {
+    "ownerControls": 28,
+    "privilegedControlsRun": false,
+    "realProcessesSpawned": 0,
+    "schemaVersion": 1
+  },
+  "privilegedControlsRun": false,
+  "productionExecutionTested": false,
+  "schemaVersion": 1,
+  "sourceHashes": {
+    "experiments/production-child/owner-controls.c": "8ee8aa8c511918a9d1b3e1976d13d000e4e983da3620319273e7ea7b5af8b376",
+    "experiments/production-child/probe.c": "2623f9971115e65d6072457eb2c4ec1dcc06379fb44e7cae2754c694283eda5f",
+    "experiments/production-child/result.h": "302c79a1b4fc3f72f85f3f8dd530960632e17605d8f8b11939d8ea6812e61a56",
+    "experiments/production-child/target.c": "dba41f3d71e2648399d3159ca021d95e5067ba49632c1e682b68eee6c3f60a80",
+    "macos/app/CommandChild/ChildMain.c": "afb030191c3ea04a861de5457f8ab9303c31a88a19134831cf31e80130613225",
+    "macos/app/CommandMonitor/MonitorMain.c": "fbcd405aaf2e974dbfafe93f160437ba591b6261d5c9f6a98f339aabc61dfc6f",
+    "macos/core/Sources/RemozioMach/CommandAccountCredentials.c": "f05273ed25954b999e1bb9ded4d787f066992d80e070b104024fa973db389807",
+    "macos/core/Sources/RemozioMach/CommandChildSpecification.c": "3588da7a80a0c4b41f7fd094c9b5b93d43e7123276600c9ee82ea93df0ad6388",
+    "macos/core/Sources/RemozioMach/CommandMonitor.c": "13bfd32cfb7d8df096e9c81f7161e32ca61b2c4ba31f6a328ac9ef2666c0c34c",
+    "macos/core/Sources/RemozioMach/CommandMonitorProtocol.c": "41aa6dcf26c32b7cb317de0d1c90fff3dc9efabd2d71f4ca53aae0da43220e1b",
+    "macos/core/Sources/RemozioMach/CommandProcess.c": "e0f77b6ccb7364e0cb3896acd7d3d3e11783865023ae22ae288bcd5eb1010ff8",
+    "macos/core/Sources/RemozioMach/include/RemozioAuthorityBootstrap.h": "11411925c05e6ac4e747e26bdf2677d14e4d99202630fe57f9bef80a634c442c",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandCaller.h": "7a1e1918900d5413077585c4990ffa7d85ecbec929329365ec3a3c0b5f406585",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandChild.h": "258a25cb4deb000d9b9314101ba2fafe76daf685f10bdc6cd61802566a9f77f8",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandCredentials.h": "65b7d48b184b5469e1af6314c58cfb73a2314be774496fa90293b29edbf167a7",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandMonitor.h": "f28db27003b1dd8ffc881a3877185155da611316a6a27f297fc0c16035dfc8e9",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandMonitorProtocol.h": "55cceff119c4bdd625105b810ea91055db47cb1669f2bff327d36f1f1738c0f6",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandPTY.h": "364dd05f1bfe232bcd1218057ce5bc3262522236c06bb8ad32645c293dd5e6c0",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandProcess.h": "b93fdde48db5cb86e9e4d8e13414d2fee83a37690ff4fde1457dd600a8022eb7",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandStreamSource.h": "6c738bec9631a63e42328eb24411688a60bd0b5b120d65b31e4f1ecb28782f5c",
+    "macos/core/Sources/RemozioMach/include/RemozioCommandTerminalContext.h": "d2d3768018262099ce335934623ed3499b451c9e6eda0101f792b2e4e4fc8d54",
+    "macos/core/Sources/RemozioMach/include/RemozioFrontendRuntime.h": "3be30d389b8b7a64369532c64c69fe53177da643dbdc889ee98b5b8f656b2c9d",
+    "macos/core/Sources/RemozioMach/include/RemozioFrontendTerminal.h": "4b7e2cc2681ff7ad29621ab27e50215104146d60fe7fa71df71fd176b2445902",
+    "macos/core/Sources/RemozioMach/include/RemozioMach.h": "e7b31e1453ab034bfffc851ae5e5fe570f8de811a383841d1a59d843439d9dcf",
+    "scripts/run-production-child-experiment.py": "b5bb37374d3c3b10e2489a5c440b69c7cba7af85e9dda975766c0883f042e02a"
+  }
+}
