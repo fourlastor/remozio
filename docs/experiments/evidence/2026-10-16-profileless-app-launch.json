@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "kind": "macos-profileless-app-launch",
+  "sourceAppBuildCommit": "fe99464ab42e2afa3e14d1694b52ae7bb0860de5",
+  "host": {
+    "macOS": "27.0.1",
+    "architecture": "arm64"
+  },
+  "formerCandidate": {
+    "strictSignatureAccepted": true,
+    "releaseInspectorAccepted": true,
+    "nativeLaunchAccepted": false,
+    "amfiReason": "No matching profile found; restricted entitlements",
+    "profileDependentIdentityClaims": true
+  },
+  "disposableControl": {
+    "onlyEnclosingAppResigned": true,
+    "sameDeveloperIDPublisher": true,
+    "hardenedRuntimeRetained": true,
+    "entitlements": {},
+    "strictSignatureAccepted": true,
+    "releaseInspectorAccepted": true,
+    "nativeLaunchAccepted": true,
+    "exactRunningExecutableObserved": true,
+    "mainWindowObserved": true,
+    "outsideInstalledPlacementNoticeObserved": true,
+    "quitConfirmed": true
+  },
+  "protectedAppChanged": false,
+  "machineStateChangedByLaunchControl": false,
+  "setupActionsPerformed": false,
+  "servicesRegisteredByControl": false,
+  "notarizationTested": false,
+  "limits": [
+    "The disposable copy is not the installed app.",
+    "The signing change needs a verified transition from initialized machine state.",
+    "No installed service, hardware-key, pairing or Mac-Pixel approval result.",
+    "No macOS 26 native launch result."
+  ]
+}

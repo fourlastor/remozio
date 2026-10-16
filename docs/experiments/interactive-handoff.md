@@ -3,8 +3,11 @@
 The app includes account setup, service activation, pairing and a foreground command inbox.
 The native credential gate passed on macOS 26.6.2.
 The first native installation on macOS 27.0.1 failed before bootstrap because of an OS access label.
-The [metadata fix](macos-installed-access-metadata.md) retains that failed result and its scoped native controls.
-A corrected reviewed artifact and verified recovery step remain required before another installation attempt.
+The [metadata fix](macos-installed-access-metadata.md) passed review, CI and actual installed-tree inspection.
+A second native package attempt failed before bootstrap. Direct supervised bootstrap then completed with the same signed helper.
+The installed app cannot launch because its enclosing signature claims restricted entitlements without a profile.
+A [disposable signing control](macos-release-signing.md#native-launch-control-16-october-2026) opened the app without those claims.
+The initialized machine still pins the former signature. A verified transition remains required.
 Installed service behavior and production Root approval remain unproven.
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) records the six passing actual-child controls.
@@ -55,10 +58,21 @@ The earlier API probe and group counts alone do not establish this result.
 ## Stage 2: installation and pairing
 
 The credential fix and actual-child gate passed.
-The first native installation left an intact signed app, with no machine identity, bootstrap state, services or pairing.
-Follow [#402](https://github.com/rock3r/remozio/issues/402) for the corrected artifact and exact recovery step.
-Do not retry the failed package or strip its OS label. Preserve the partial app.
-Verify corrected initial installation and same-build recovery next.
+The original uninitialized app was archived intact through a verified same-parent move.
+The corrected app passed installed-tree and Root inspection, but its native package postinstall still failed.
+Direct supervised bootstrap created the machine files. The machine now has retained identity and release pins.
+
+| Current boundary | Result |
+| --- | --- |
+| Native package installation | Failed; [#402](https://github.com/rock3r/remozio/issues/402) remains open |
+| Direct signed-helper bootstrap | Completed; follow-up inspection returned `retained` |
+| Installed app launch | Refused; [#404](https://github.com/rock3r/remozio/issues/404) tracks profileless signing |
+| Disposable corrected signature | Main window opened; no setup action ran |
+| Applications shortcut | Root-only mode; [#405](https://github.com/rock3r/remozio/issues/405) tracks user access |
+| Account setup, services and Pixel pairing | Not started |
+
+Do not retry the failed package, strip its OS label or overwrite the initialized installation.
+Preserve both signed apps and all machine state. Prepare a verified transition before further installed setup.
 The initial package supports fresh installation and same-build recovery. It refuses a different installed release.
 Do not install an intermediate candidate that needs a known code fix, then assume a later package can replace it.
 Do not erase the installation to bypass this protection.
@@ -146,7 +160,7 @@ Do not automatically retry an uncertain external action.
 The standalone credential experiment is complete.
 The production fix passed review, all five CI checks and the actual privileged child measurement.
 The first session found the native metadata blocker in #402.
-The product fix, reviewed artifact and concrete recovery step must pass before installation can continue.
+The signing fix, verified machine transition and remaining native installation controls must pass before installed setup can continue.
 After that gate, reserve 60–90 minutes for installed boundaries, pairing and approval/decline/expiry.
 A native failure can require further code work. This allowance does not promise a successful complete flow.
 The [hosted package experiment](macos-native-package.md) can reduce installer uncertainty while the user is away.

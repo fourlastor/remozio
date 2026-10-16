@@ -167,11 +167,12 @@ def measure(probe, *, identity=None, team=None, export_app=None):
                     'CURRENT_PROJECT_VERSION': info['CFBundleVersion']}))
                 info_path.write_bytes(plistlib.dumps(info))
                 entitlements = directory / 'identity.plist'
-                def sign_app(bundle, entitlement_identifier=APP_IDENTIFIER):
+                def sign_app(bundle, entitlement_identifier=None):
                     fingerprint(bundle)
-                    entitlements.write_bytes(plistlib.dumps({
+                    claims = {} if entitlement_identifier is None else {
                         'com.apple.application-identifier': team + '.' + entitlement_identifier,
-                        'com.apple.developer.team-identifier': team}))
+                        'com.apple.developer.team-identifier': team}
+                    entitlements.write_bytes(plistlib.dumps(claims))
                     run(['/usr/bin/codesign', '--force', '--sign', identity, '--timestamp=none',
                          '--options', 'runtime', '--identifier', APP_IDENTIFIER,
                          '--entitlements', entitlements, bundle])

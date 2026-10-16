@@ -114,6 +114,36 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
             self.assertTrue(all(not path.exists() for path in owned))
             self.assertEqual(RUNNER.fingerprint(app), before)
 
+    def test_profileless_export_omits_identity_claims_and_keeps_the_foreign_identity_control(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); app = root / RUNNER.APP
+            helper = app / 'Contents/Helpers/RemozioCommandChild'
+            helper.parent.mkdir(parents=True); helper.write_bytes(b'owned helper')
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
+                'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1'}))
+            before = RUNNER.fingerprint(app)
+            claims = []
+            def command(arguments, **kwargs):
+                if '--sign' in arguments and Path(arguments[-1]).is_dir():
+                    path = Path(arguments[arguments.index('--entitlements') + 1])
+                    claims.append((Path(arguments[-1]).name, plistlib.loads(path.read_bytes())))
+                return subprocess.CompletedProcess([], 0, '', 'Signature=adhoc\nTeamIdentifier=not set\n')
+            manifest = SimpleNamespace(COMPONENTS=[(11, 'command-child',
+                'Contents/Helpers/RemozioCommandChild', 'RemozioCommandChild', 'CommandChild')],
+                generate=lambda _: {})
+            def inspect(_probe, _bundle, _team, expected, *_):
+                return {'result': 'accepted' if expected else 'rejected'}
+            with patch.object(RUNNER, 'ROOT', root), patch.object(RUNNER, 'run', side_effect=command), \
+                 patch.object(RUNNER, 'load_manifest', return_value=manifest), \
+                 patch.object(RUNNER, 'inspect', side_effect=inspect):
+                result = RUNNER.measure(Path('/unused'), identity='A' * 40, team='ABCDEFGHIJ')
+            self.assertEqual(claims, [('Remozio.app', {}), ('Extra.app', {}),
+                ('WrongEntitlement.app', {'com.apple.application-identifier': 'ABCDEFGHIJ.dev.remozio.other',
+                                         'com.apple.developer.team-identifier': 'ABCDEFGHIJ'})])
+            self.assertEqual(result['cases']['foreignApplicationIdentifierEntitlement'], {'result': 'rejected'})
+            self.assertFalse(result['appLaunched'])
+            self.assertEqual(RUNNER.fingerprint(app), before)
+
     def test_rejected_probe_mutation_does_not_claim_the_original_was_preserved(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary); app = root / RUNNER.APP; app.mkdir(parents=True)
