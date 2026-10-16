@@ -2,7 +2,9 @@
 
 This experiment prepares the actual product monitor and command child without credential substitution.
 Ordinary preparation compiles the helpers and checks refusal and frame handling. It never requests elevation.
-The privileged run remains a separate gate. The first hosted run failed its cleanup check; no successful privileged result is recorded.
+The six privileged controls passed on hosted macOS 26.6.2 after PR #399 merged.
+The [sanitized record](evidence/production-child-native-macos26.json) matches source `2bbda9cfa6b029bce202ef8e758369b1821fed17`.
+The first hosted attempt remains failed.
 
 ```mermaid
 flowchart TD
@@ -89,7 +91,9 @@ The preparation script provides no elevation switch. Routine CI runs ordinary ch
 The [manual workflow](../../.github/workflows/production-child-native.yml) runs only from this repository's `main` branch.
 It does not accept a command, account or source-ref input. Its token can read repository contents only.
 [GitHub documents](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#administrative-privileges) passwordless sudo on its disposable hosted Macs.
-The workflow still requires actual noninteractive permission and complete native results. No privileged result is recorded yet.
+The workflow requires actual noninteractive permission and complete native results.
+[Run 38932672157](https://github.com/rock3r/remozio/actions/runs/38932672157/job/117080301853) passed all six controls.
+Parent credentials stayed unchanged. Owned cleanup was confirmed and the fixture was removed.
 
 After the workflow passes review and merges, dispatch it once:
 
@@ -132,7 +136,8 @@ A failed run must not be reported as a successful experiment.
 The [first hosted attempt](https://github.com/rock3r/remozio/actions/runs/38907371790) failed control 4, the legacy refusal, at cleanup stage 11.
 Preparation and source verification passed. The native summary was not retained, so parent credentials and target cleanup remain unconfirmed.
 The harness could stop polling before reading a pending target-reaping record. Controlled delayed-record tests reproduce that harness failure.
-This does not establish the cause of the hosted failure. A fresh reviewed run must establish the complete native result.
+This does not establish the cause of the hosted failure. The later reviewed run established the complete native result on macOS 26.6.2.
+Its success does not establish the original failure's cause.
 
 ## Evidence still required
 
@@ -140,4 +145,6 @@ Commit only sanitized results, source/helper hashes, host versions and explicit 
 No secret, account name, UID, device address or real approval payload belongs in the retained record.
 Actual privileged macOS 26 behavior remains separate from local macOS 27 results.
 This experiment does not prove signed service admission, installed startup, pairing or the complete Mac–Pixel approval flow.
-Keep [#298](https://github.com/rock3r/remozio/issues/298) open until the actual path passes.
+[#298](https://github.com/rock3r/remozio/issues/298) is closed for this credential component.
+Installed account/code/IPC checks remain in [#286](https://github.com/rock3r/remozio/issues/286).
+The complete approval flow remains in [#348](https://github.com/rock3r/remozio/issues/348).

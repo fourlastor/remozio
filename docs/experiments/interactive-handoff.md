@@ -1,12 +1,12 @@
 # First Mac–Pixel integration session
 
 The app includes account setup, service activation, pairing and a foreground command inbox.
-Installed behavior remains untested. This candidate is not ready for Root command approval.
+The native credential gate passed on macOS 26.6.2. Installed behavior remains untested.
+This candidate is ready for supervised installation testing, not production Root approval.
 
-[Issue #298](https://github.com/rock3r/remozio/issues/298) is a known blocker.
-The Mac reports 24 directory groups for root. Full static assignment fails at the OS limit of 16.
-The native API experiment passed. The [production credential path](../macos-native-account-credentials.md) merged in PR #395. Its actual privileged child measurement remains required before installation.
-Do not truncate groups or omit this gate to obtain a successful demo.
+[Issue #298](https://github.com/rock3r/remozio/issues/298) records the six passing actual-child controls.
+The [production credential path](../macos-native-account-credentials.md) uses native account initialization and retains the complete captured identity.
+Installed account/code/IPC checks and the complete Mac–Pixel flow remain separate gates.
 
 ## What exists
 
@@ -14,7 +14,7 @@ Do not truncate groups or omit this gate to obtain a successful demo.
 | --- | --- | --- |
 | Mac app | Protected setup controls, target grants, service accounts, runtime files, Start/Restore and pairing | Native installation, hardware keys, service credentials, live IPC and network access |
 | Android app | Hardware enrollment, code comparison, biometric confirmation, saved Macs and foreground command actions | Actual Pixel enrollment and approval with this installed Mac |
-| Command path | Real CLI, capture, authority, journal, transport and executor | Root credentials in #298 and the complete installed path |
+| Command path | Real CLI, capture, authority, journal, transport and executor | Installed service admission and the complete approval path |
 | Push | Sender and notification components | Credentials, application integration and real background delivery |
 | Other product work | Adapter, relay, ADB and updater components or experiments | Their remaining integration and end-to-end tests |
 
@@ -44,12 +44,14 @@ The privileged API controls completed on macOS 27.0.1 with native administrator 
 Full static assignment failed. The bounded subset lost extra-group file access; native initialization preserved access.
 Root initialization also succeeded. Parent credentials stayed unchanged and all disposable fixtures were removed.
 
-Use the [actual-child experiment](macos-production-child.md) after its review. Measure the production child with disposable targets before installing a service.
-The API probe does not prove production execution or macOS 26 behavior. Do not infer effective access from a group count.
+The [actual-child experiment](macos-production-child.md) passed on hosted macOS 26.6.2 at source `2bbda9c`.
+It measured the real monitor and child with disposable targets. All six privileged controls passed.
+Parent credentials stayed unchanged, owned cleanup was confirmed and the fixture was removed.
+The earlier API probe and group counts alone do not establish this result.
 
 ## Stage 2: installation and pairing
 
-First complete the credential fix and verify the intended update or recovery route.
+The credential fix and actual-child gate passed. Verify initial installation and same-build recovery next.
 The initial package supports fresh installation and same-build recovery. It refuses a different installed release.
 Do not install an intermediate candidate that needs a known code fix, then assume a later package can replace it.
 Do not erase the installation to bypass this protection.
@@ -121,7 +123,7 @@ Active Mac use otherwise suppresses phone routing. Open this Mac's command inbox
 From an ordinary Mac terminal, run the embedded CLI with a disposable command:
 
 ```sh
-"/Library/Application Support/Remozio/Applications/Remozio.app/Contents/Helpers/remozio" run --pipes --uid 0 -- /usr/bin/id
+"/Library/Application Support/Remozio/Applications/Remozio.app/Contents/Helpers/remozio" run --pipes --uid 0 -- /usr/bin/id < /dev/null
 ```
 
 Inspect the exact command and target on the phone, then approve with fresh biometrics.
@@ -135,9 +137,11 @@ Do not automatically retry an uncertain external action.
 ## Timing and later checks
 
 The standalone credential experiment is complete.
-The production fix needs review and an actual privileged child measurement.
-Reserve 60–90 minutes for installation and pairing after that fix and the update/recovery gate pass.
-Do not promise Root approval in the current candidate or a calendar date before that evidence.
+The production fix passed review, all five CI checks and the actual privileged child measurement.
+Reserve 60–90 minutes with the user for installation, installed boundaries, pairing and approval/decline/expiry.
+A native failure can require further code work. This allowance does not promise a successful complete flow.
+The [hosted package experiment](macos-native-package.md) can reduce installer uncertainty while the user is away.
+It does not replace administrator consent, service checks or Pixel evidence.
 
 Keep lock, logout, restart, Chrome Remote Desktop and Screen Sharing checks last, as requested.
 Do not change 1Password, Little Snitch or PAM during these initial tests.

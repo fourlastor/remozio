@@ -1,0 +1,61 @@
+name: Native package installation experiment
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact unpublished experiment draft ID
+        required: true
+        type: string
+      asset_id:
+        description: Exact Remozio-native-installer.pkg asset ID
+        required: true
+        type: string
+      package_sha256:
+        description: Independently verified package SHA256
+        required: true
+        type: string
+      trusted_team:
+        description: Independently trusted publisher Team ID
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: native-package-installation-experiment
+  cancel-in-progress: false
+jobs:
+  native-package-installation:
+    name: Disposable native installation
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'rock3r/remozio' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+      TRUSTED_TEAM: ${{ inputs.trusted_team }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download the exact unpublished package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ inputs.release_id }}
+          ASSET_ID: ${{ inputs.asset_id }}
+        run: |
+          python3 scripts/run-native-package-ci-experiment.py fetch \
+            --release-id "$RELEASE_ID" --asset-id "$ASSET_ID" \
+            --package "$RUNNER_TEMP/Remozio-native-installer.pkg" \
+            --package-sha256 "$PACKAGE_SHA256" --trusted-team "$TRUSTED_TEAM"
+      - name: Install and inspect only this disposable VM
+        run: |
+          python3 scripts/run-native-package-ci-experiment.py run \
+            --package "$RUNNER_TEMP/Remozio-native-installer.pkg" \
+            --package-sha256 "$PACKAGE_SHA256" --trusted-team "$TRUSTED_TEAM" \
+            --output "$RUNNER_TEMP/native-package-evidence.json"
+      - name: Retain only the sanitized result
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-package-installation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-package-evidence.json
+          if-no-files-found: error
+          retention-days: 7
