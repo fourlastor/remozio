@@ -153,6 +153,75 @@ final class PackageBootstrapTests: XCTestCase {
             XCTAssertNoThrow(try good.validate(f.release)); XCTAssertThrowsError(try profile().validate(f.release))
         }
     }
+    func testApplicationEntryIsReadableUnderRestrictiveUmask() throws {
+        try fixture { f in
+            let previous = umask(0o077)
+            defer { _ = umask(previous) }
+            try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid())
+            let path = f.apps.path + "/Remozio.app"
+            var info = stat(); XCTAssertEqual(lstat(path, &info), 0)
+            XCTAssertEqual(info.st_mode & S_IFMT, S_IFLNK)
+            XCTAssertEqual(info.st_mode & 0o777, 0o755)
+            XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: path), MachineBootstrap.bundlePath)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), ["Remozio.app"])
+        }
+    }
+    func testProtectedStagingSupportsAnAdministratorWritableApplicationsDirectory() throws {
+        try fixture { f in
+            let destination = f.root.appendingPathComponent("Applications")
+            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+            XCTAssertEqual(chmod(destination.path, 0o775), 0)
+            let staging = try ReleaseDestinationLease(anchor: f.root.path, relativeDirectory: "Apps", owner: getuid())
+            defer { staging.close() }
+            let previous = umask(0o077)
+            defer { _ = umask(previous) }
+            try PackageBootstrap.publishEntry(parent: destination.path, owner: getuid(), staging: staging)
+            let path = destination.appendingPathComponent("Remozio.app").path
+            var info = stat(); XCTAssertEqual(lstat(path, &info), 0)
+            XCTAssertEqual(info.st_mode & 0o777, 0o755)
+            XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: path), MachineBootstrap.bundlePath)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), [])
+        }
+    }
+    func testExistingMatchingEntryKeepsItsIdentityAndMode() throws {
+        try fixture { f in
+            let path = f.apps.path + "/Remozio.app"
+            let previous = umask(0o077)
+            let result = symlink(MachineBootstrap.bundlePath, path)
+            _ = umask(previous)
+            XCTAssertEqual(result, 0)
+            var before = stat(), after = stat(); XCTAssertEqual(lstat(path, &before), 0)
+            XCTAssertEqual(before.st_mode & 0o777, 0o700)
+            try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid())
+            XCTAssertEqual(lstat(path, &after), 0)
+            XCTAssertEqual(before.st_dev, after.st_dev); XCTAssertEqual(before.st_ino, after.st_ino)
+            XCTAssertEqual(before.st_mode, after.st_mode)
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), ["Remozio.app"])
+        }
+    }
+    func testForeignEntryRemainsUnchangedAndNoTemporaryLinkSurvives() throws {
+        for link in [false, true] { try fixture { f in
+            let path = f.apps.path + "/Remozio.app"
+            if link { XCTAssertEqual(symlink("/another/app", path), 0) }
+            else { try Data("foreign bytes".utf8).write(to: URL(fileURLWithPath: path)) }
+            var before = stat(), after = stat(); XCTAssertEqual(lstat(path, &before), 0)
+            XCTAssertThrowsError(try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid()))
+            XCTAssertEqual(lstat(path, &after), 0)
+            XCTAssertEqual(before.st_dev, after.st_dev); XCTAssertEqual(before.st_ino, after.st_ino)
+            XCTAssertEqual(before.st_mode, after.st_mode)
+            if link { XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: path), "/another/app") }
+            else { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), Data("foreign bytes".utf8)) }
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), ["Remozio.app"])
+        } }
+    }
+    func testApplicationEntryRefusesWritableStagingWithoutChangingIt() throws {
+        try fixture { f in
+            XCTAssertEqual(chmod(f.apps.path, 0o775), 0)
+            defer { _ = chmod(f.apps.path, 0o755) }
+            XCTAssertThrowsError(try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid()))
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.apps.path), [])
+        }
+    }
     func testApplicationEntryCreationIsExclusiveAndRepeatable() throws {
         try fixture { f in
             try PackageBootstrap.publishEntry(parent: f.apps.path, owner: getuid())

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "kind": "application-shortcut-publication",
+  "sourceBaseCommit": "52403c9a5ff7fca600f8bfaa36b5b57b7d2c637d",
+  "host": {
+    "macOS": "27.0.1",
+    "architecture": "arm64"
+  },
+  "regression": {
+    "oldProducerRunBeforeImplementation": true,
+    "testsExecuted": 18,
+    "assertionFailures": 3,
+    "failingTests": [
+      "testApplicationEntryIsReadableUnderRestrictiveUmask",
+      "testApplicationEntryRefusesWritableStagingWithoutChangingIt"
+    ],
+    "newLinkActualMode": "0700",
+    "newLinkExpectedMode": "0755"
+  },
+  "correctedProducer": {
+    "owningTestsExecuted": 19,
+    "failures": 0,
+    "newLinkMode": "0755",
+    "restrictiveUmask": "077",
+    "protectedStagingWithAdministratorWritableDestination": true,
+    "existingMatchingEntryIdentityAndModePreserved": true,
+    "foreignEntriesPreserved": true,
+    "temporaryLinksAbsentAfterOrdinaryFixtureOperations": true
+  },
+  "protectedInstallationChanged": false,
+  "rootExecutionTested": false,
+  "nativeInstallerTested": false,
+  "crossUserReadabilityTested": false,
+  "limits": [
+    "Ordinary-owner fixtures exercise the production publisher on the recorded host.",
+    "No installed Root shortcut, native Installer, service registration or Mac-Pixel result.",
+    "No macOS 26 runtime result for these new controls."
+  ]
+}

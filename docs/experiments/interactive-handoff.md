@@ -71,6 +71,9 @@ Direct supervised bootstrap created the machine files. The machine now has retai
 | Applications shortcut | Root-only mode; [#405](https://github.com/rock3r/remozio/issues/405) tracks user access |
 | Account setup, services and Pixel pairing | Not started |
 
+The shortcut producer fix passes its ordinary-owner tests, including the restrictive umask control.
+This does not prove that the installed shortcut is readable. The installed entry remains unchanged.
+
 Do not retry the failed package, strip its OS label or overwrite the initialized installation.
 Preserve both signed apps and all machine state. Prepare a verified transition before further installed setup.
 The initial package supports fresh installation and same-build recovery. It refuses a different installed release.

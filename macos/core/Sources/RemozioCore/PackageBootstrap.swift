@@ -85,13 +85,13 @@ public enum PackageBootstrap {
     public static func inspectInstalled(_ profile: PackageBootstrapProfile) throws -> Plan {
         try verifyCaller(profile)
         try inspectEntry(parent: "/Applications", owner: 0)
-        return try withInstalled(profile) { shared, release in
+        return try withInstalled(profile) { shared, release, _ in
             try inspectState(shared: shared, owner: 0, bundlePath: MachineBootstrap.bundlePath,
                 machinePath: MachineBootstrap.machineDirectory, release: release)
         }
     }
     private static func withInstalled<T>(_ profile: PackageBootstrapProfile,
-                                        body: (ProtectedSetupDirectory, SignedReleaseEvidence) throws -> T) throws -> T {
+                                        body: (ProtectedSetupDirectory, SignedReleaseEvidence, ReleaseDestinationLease) throws -> T) throws -> T {
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
         defer { placement.close() }
@@ -101,7 +101,7 @@ public enum PackageBootstrap {
         let shared = try ProtectedSetupDirectory(anchor: "/", relativePath: String(sharedPath.dropFirst()), owner: 0,
             visibility: .sharedMetadata, createIfMissing: false)
         defer { shared.close() }
-        let value = try body(shared, release)
+        let value = try body(shared, release, placement)
         try shared.validate(); try placement.validate()
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         try profile.validate(SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.remozio.mac"))
@@ -154,20 +154,30 @@ public enum PackageBootstrap {
     /// Creates a non-authoritative Applications shortcut without replacing any existing entry.
     public static func ensureApplicationEntry(_ profile: PackageBootstrapProfile) throws {
         try verifyCaller(profile)
-        try withInstalled(profile) { shared, release in
+        try withInstalled(profile) { shared, release, placement in
             guard try inspectState(shared: shared, owner: 0, bundlePath: MachineBootstrap.bundlePath,
                 machinePath: MachineBootstrap.machineDirectory, release: release) == .retained else { throw PackageBootstrapError.invalidState }
-            try publishEntry(parent: "/Applications", owner: 0)
+            try publishEntry(parent: "/Applications", owner: 0, staging: placement)
         }
     }
-    // The UI entry is not an authority boundary. Its directory may allow administrator-group writes.
+    // Ordinary-owner fixtures use their protected destination as the staging directory.
     static func publishEntry(parent: String, owner: uid_t) throws {
-        try applicationEntry(parent: parent, owner: owner, createIfMissing: true)
+        guard owner > 0, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
+        let destination = URL(fileURLWithPath: parent)
+        let staging = try ReleaseDestinationLease(anchor: destination.deletingLastPathComponent().path,
+            relativeDirectory: destination.lastPathComponent, owner: owner)
+        defer { staging.close() }
+        try publishEntry(parent: parent, owner: owner, staging: staging)
+    }
+    static func publishEntry(parent: String, owner: uid_t, staging: ReleaseDestinationLease) throws {
+        try applicationEntry(parent: parent, owner: owner, createIfMissing: true, staging: staging)
     }
     static func inspectEntry(parent: String, owner: uid_t) throws {
         try applicationEntry(parent: parent, owner: owner, createIfMissing: false)
     }
-    private static func applicationEntry(parent: String, owner: uid_t, createIfMissing: Bool) throws {
+    // The UI entry conveys no authority. Its destination can permit administrator-group writes.
+    private static func applicationEntry(parent: String, owner: uid_t, createIfMissing: Bool,
+                                         staging: ReleaseDestinationLease? = nil) throws {
         guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
         let fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { throw JournalLeaseError.system(errno) }
@@ -192,8 +202,45 @@ public enum PackageBootstrap {
             guard Data(bytes.prefix(Int(count))) == Data(MachineBootstrap.bundlePath.utf8) else { throw PackageBootstrapError.shortcutConflict }
         }
         try validate()
-        if createIfMissing, symlinkat(MachineBootstrap.bundlePath, fd, "Remozio.app") != 0 {
-            guard errno == EEXIST else { throw JournalLeaseError.system(errno) }
+        if createIfMissing {
+            var existing = stat()
+            if fstatat(fd, "Remozio.app", &existing, AT_SYMLINK_NOFOLLOW) == 0 {
+                try matches(); try validate(); try matches(); return
+            }
+            guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
+            guard let staging else { throw PackageBootstrapError.invalidState }
+            try staging.withDirectory { source in
+                let temporary = ".remozio-app-entry-" + UUID().uuidString
+                guard symlinkat(MachineBootstrap.bundlePath, source, temporary) == 0 else { throw JournalLeaseError.system(errno) }
+                var created = stat()
+                guard fstatat(source, temporary, &created, AT_SYMLINK_NOFOLLOW) == 0 else { throw JournalLeaseError.system(errno) }
+                guard created.st_mode & S_IFMT == S_IFLNK, created.st_uid == owner, created.st_nlink == 1 else {
+                    throw JournalLeaseError.unsafeMetadata
+                }
+                defer {
+                    var current = stat()
+                    if fstatat(source, temporary, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                       current.st_dev == created.st_dev, current.st_ino == created.st_ino {
+                        _ = unlinkat(source, temporary, 0)
+                    }
+                }
+                let link = openat(source, temporary, O_RDONLY | O_SYMLINK | O_CLOEXEC)
+                guard link >= 0 else { throw JournalLeaseError.system(errno) }
+                defer { _ = Darwin.close(link) }
+                var held = stat(), named = stat()
+                guard fstat(link, &held) == 0 else { throw JournalLeaseError.system(errno) }
+                guard held.st_dev == created.st_dev, held.st_ino == created.st_ino else { throw JournalLeaseError.identityChanged }
+                guard fchmod(link, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
+                try validate()
+                if renameatx_np(source, temporary, fd, "Remozio.app", UInt32(RENAME_EXCL)) != 0 {
+                    guard errno == EEXIST else { throw JournalLeaseError.system(errno) }
+                } else {
+                    guard fstatat(fd, "Remozio.app", &named, AT_SYMLINK_NOFOLLOW) == 0 else { throw JournalLeaseError.system(errno) }
+                    guard named.st_dev == held.st_dev, named.st_ino == held.st_ino,
+                          named.st_mode & 0o777 == 0o755 else { throw JournalLeaseError.identityChanged }
+                    guard fsync(source) == 0 else { throw JournalLeaseError.system(errno) }
+                }
+            }
         }
         try matches()
         if createIfMissing {

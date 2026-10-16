@@ -53,8 +53,10 @@ It does not resolve the setup and command hosts' lease handoff in issue #374.
 A different installed release is refused. This package is not the update mechanism.
 
 The final step creates `/Applications/Remozio.app` as a shortcut to the protected app.
-It uses exclusive creation and accepts only an existing shortcut to that exact path.
-It never replaces a foreign file, app or shortcut.
+It prepares each new shortcut in the protected application directory and sets its mode through a held link descriptor.
+Exclusive publication places the readable shortcut in Applications. A restrictive process umask does not restrict the new shortcut.
+It accepts an existing shortcut to that exact path without changing its inode or mode.
+It never replaces a foreign file, app or shortcut. It does not repair an existing unreadable entry.
 The Applications directory can permit administrator writes because this entry conveys no authority.
 Service startup always uses the protected app path.
 Native Finder, LaunchServices and menu bar behavior remain interactive test gates.
