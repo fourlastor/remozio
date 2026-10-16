@@ -19,6 +19,8 @@ enum InstalledCommandMachineHandoff {
 /// Every operation on the machine store uses this lock. The receive host owns a transferred right.
 final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     let configuration: InstalledAuthorityCommandConfiguration
+    let releaseActivity: ReleaseActivityBarrier
+    private var startupActivity: ReleaseActivityToken?
     private let lock = NSLock()
     private let path: String
     private let selfPath: String
@@ -48,15 +50,19 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try config.validateRelease(SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier), bundlePath: bundle.path)
             let machine = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
             store = machine
-            let owner = InstalledAuthorityCommandRegistration(configuration: config, path: path, selfPath: selfPath,
+            let activity = try ReleaseActivityBarrier.open(machineDirectory: config.machineDirectory)
+            let startup = try activity.acquireShared()
+            let owner = InstalledAuthorityCommandRegistration(configuration: config, activity: activity, startup: startup, path: path, selfPath: selfPath,
                 bundle: bundle, requirement: requirement, placement: placement, machine: machine)
             try owner.validate()
             return owner
         } catch { try? store?.close(); placement.close(); throw error }
     }
-    private init(configuration: InstalledAuthorityCommandConfiguration, path: String, selfPath: String,
+    private init(configuration: InstalledAuthorityCommandConfiguration, activity: ReleaseActivityBarrier, startup: ReleaseActivityToken,
+                 path: String, selfPath: String,
                  bundle: URL, requirement: String, placement: ReleaseDestinationLease, machine: PreparationIntentStore) {
-        self.configuration = configuration; self.path = path; self.selfPath = selfPath; self.bundle = bundle
+        self.configuration = configuration; releaseActivity = activity; startupActivity = startup
+        self.path = path; self.selfPath = selfPath; self.bundle = bundle
         self.requirement = requirement; self.placement = placement; self.machine = machine
     }
     private func validate() throws {
@@ -97,6 +103,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try manifest.validate(ProtectedServiceConfiguration.readPublic(path: manifest.path), inventory: inventory, release: release)
         }
         try placement.validate()
+        try startupActivity?.validate()
     }
     func takeReceiveRight() throws -> mach_port_t {
         try lock.withLock {
@@ -109,13 +116,14 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
                 return port
             }
             taken = true
+            startupActivity?.close(); startupActivity = nil
             return port
         }
     }
     func close() throws {
         try lock.withLock {
             guard !closed else { return }
-            try machine.close(); placement.close(); closed = true
+            try machine.close(); placement.close(); startupActivity?.close(); startupActivity = nil; closed = true
         }
     }
     deinit { try? machine.close(); placement.close() }
@@ -132,6 +140,7 @@ extension AuthorityRuntimeRunner {
                 do {
                     let service = try AuthorityWakeService.open(configuration: registration.configuration.command,
                         takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
+                        releaseActivity: registration.releaseActivity,
                         reconcileExpired: Self.reconcileCoordinatorExpiration)
                     return AuthorityRuntimeInstance(start: { try await service.start() }, close: {
                         try await service.close(); try registration.close()

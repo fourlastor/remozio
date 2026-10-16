@@ -87,6 +87,7 @@ public final class ApprovalRequestCoordinator {
     private let auditLimits: CBORLimits
     private var lastTime: UInt64?
     private var stopped = false
+    private var releaseActivity: ReleaseActivityBarrier?
     var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
@@ -102,6 +103,7 @@ public final class ApprovalRequestCoordinator {
         var statusRevision: UInt64 = 0
         var retained: RetainedApprovalRequest?
         var command: RetainedCommandCapture?
+        var activity: ReleaseActivityToken?
         let category: AuditCategory
         var byteCount: Int
         var delivery: PendingRequestDelivery?
@@ -143,6 +145,13 @@ public final class ApprovalRequestCoordinator {
         let commits = CheckpointedJournal(journal: database, continuity: continuity)
         try commits.read { _ in () }
         checkpointed = commits
+    }
+
+    func attachReleaseActivityBarrier(_ barrier: ReleaseActivityBarrier) throws {
+        try running()
+        guard entries.isEmpty, releaseActivity == nil else { throw ApprovalCoordinatorError.invalidConfiguration }
+        try barrier.validate()
+        releaseActivity = barrier
     }
 
     /// Product pairing requires the independent store. Unpaired owners remain internal component fixtures only.
@@ -216,6 +225,7 @@ public final class ApprovalRequestCoordinator {
         for entry in entries.values {
             notifyCommandTerminal(entry, outcome: .unknown)
             entry.command?.close()
+            entry.activity?.close()
         }
         entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
         wakePublication.close()
@@ -285,6 +295,7 @@ public final class ApprovalRequestCoordinator {
 
     private static func admissionRejection(_ error: Error) -> CommandAdmissionRejectionReason? {
         switch error {
+        case ReleaseActivityError.busy: .updateInstalling
         case ApprovalCoordinatorError.invalidDraft, IssuedRequestError.invalidTimes: .invalidRequest
         case ApprovalCoordinatorError.capacityExceeded, CommandSubmissionReplayError.capacityExceeded: .capacityExceeded
         case DecisionVerificationError.unsupportedContract, IssuedRequestError.unsupportedContract: .unsupported
@@ -318,7 +329,13 @@ public final class ApprovalRequestCoordinator {
                 return try tx.commandSubmissionReserved(submission)
             }
             guard !reserved else { return .uncertain(.duplicateSubmission) }
-            return .notAdmitted(rejection, rejection == .storageUnavailable ? .storageUnavailable : .never)
+            let retry: CommandAdmissionRetryClass
+            switch rejection {
+            case .updateInstalling: retry = .updateInstalling
+            case .storageUnavailable: retry = .storageUnavailable
+            default: retry = .never
+            }
+            return .notAdmitted(rejection, retry)
         } catch { return .uncertain(.storageFailure) }
     }
 
@@ -367,6 +384,9 @@ public final class ApprovalRequestCoordinator {
             deadlineMilliseconds: draft.deadlineMilliseconds)
         let category = category(payload.contract.requestKind)
         let observationID = try draft.observationID ?? random(16)
+        let activity = try releaseActivity?.acquireShared()
+        var transferred = false
+        defer { if !transferred { activity?.close() } }
         try write { tx in
             let trust = try tx.approvalTrustSnapshot()
             guard trust.allowedContracts.contains(payload.contract), let features = trust.authorityCapabilities.contracts[payload.contract],
@@ -385,7 +405,8 @@ public final class ApprovalRequestCoordinator {
             revision: 1, firstObservedAt: draft.firstObservedAt, deadlineMilliseconds: draft.deadlineMilliseconds),
             contract: payload.contract, permittedActions: Set(payload.permittedActions), observationID: observationID,
             estimatedLifetimeMilliseconds: draft.estimatedLifetimeMilliseconds, lateObservation: draft.lateObservation,
-            retained: retained, command: command, category: category, byteCount: bytes)
+            retained: retained, command: command, activity: activity, category: category, byteCount: bytes)
+        transferred = true
         retainedBytes += bytes
         return payload
     }
@@ -905,6 +926,7 @@ public final class ApprovalRequestCoordinator {
             }
             notifyCommandTerminal(entry, outcome: terminal)
             entry.command?.close(); entry.command = nil
+            entry.activity?.close(); entry.activity = nil
             entry.retained = nil
             retainedBytes -= entry.byteCount
             entry.byteCount = 0
@@ -959,6 +981,8 @@ public final class ApprovalRequestCoordinator {
     private func running() throws {
         if checkpointed?.retired == true { close() }
         if stopped { throw ApprovalCoordinatorError.unavailable }
+        do { try releaseActivity?.validate() }
+        catch { close(); throw error }
     }
     private func checkClock(_ now: AuthorityMoment) throws {
         try running()

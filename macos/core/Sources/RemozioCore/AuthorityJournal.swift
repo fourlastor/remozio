@@ -15,6 +15,8 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requestStartupAttempted = false
     private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
+    private var releaseActivity: ReleaseActivityBarrier?
+    private var commandActivity: [Data: ReleaseActivityToken] = [:]
     private var commandCleanupTimer: DispatchSourceTimer?
     private var commandPollIntervalMilliseconds: Int?
     private var commandRuntimeChecks: [Data: () throws -> Void] = [:]
@@ -125,6 +127,18 @@ public final class AuthorityJournal: @unchecked Sendable {
     public init(requests: sending ApprovalRequestCoordinator) {
         database = requests.database
         self.requests = requests
+    }
+
+    /// Attach before listeners start. Existing requests cannot be retroactively covered by this barrier.
+    func attachReleaseActivityBarrier(_ barrier: ReleaseActivityBarrier) throws {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard releaseActivity == nil, commandExecutions.isEmpty, let requests else {
+                throw ApprovalCoordinatorError.invalidConfiguration
+            }
+            try requests.attachReleaseActivityBarrier(barrier)
+            releaseActivity = barrier
+        }
     }
 
     /// Authorized local setup uses the existing request owner, audit writer and independent checkpoint.
@@ -607,6 +621,9 @@ extension AuthorityJournal {
             requestOperationActive = true
             defer { requestOperationActive = false }
             let approval = try requests.authorizedCommandApproval(requestID: requestID, now: clock())
+            let activity = try releaseActivity?.acquireShared()
+            var transferredActivity = false
+            defer { if !transferredActivity { activity?.close() } }
             let resources = try requests.takeAuthorizedCommandExecution(requestID: requestID, now: clock())
             let capture = resources.capture
             let context: CommandExecutionRuntime
@@ -617,6 +634,7 @@ extension AuthorityJournal {
             } catch {
                 let execution = CommandExecution(resources: resources, approval: approval, clock: clock, receiptTime: receiptTime)
                 commandExecutions[requestID] = execution
+                commandActivity[requestID] = activity; transferredActivity = true
                 startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
                 finishCommandExecution(requestID, execution: execution, observedOutcome: .failedBeforeStart)
                 throw error
@@ -625,6 +643,7 @@ extension AuthorityJournal {
                 callerExpression: context.callerExpression, callerUserID: context.userID, callerSessionID: context.sessionID,
                 validateLauncher: checkLauncher, validateElevation: validateElevation)
             commandExecutions[requestID] = execution
+            commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
             do { try execution.prepare(monitorPath: monitorPath, childPath: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
             catch { execution.cancelBeforeRelease(); throw error }
@@ -639,6 +658,7 @@ extension AuthorityJournal {
                 }
             }
             commandRuntimeChecks[requestID] = {
+                try self.commandActivity[requestID]?.validate()
                 let current = try self.validatedRead { try runtime($0, approval, capture) }
                 guard current == context else { throw CommandExecutionError.policyChanged }
                 try execution.validateLauncher(); try execution.validateElevation(resources.capture)
@@ -667,6 +687,7 @@ extension AuthorityJournal {
                         execution.dispatchRevision = 1
                         try execution.validateLauncher(); try execution.validateElevation(execution.resources.capture)
                         try execution.recheck()
+                        try commandActivity[id]?.validate()
                         try execution.release()
                     } catch { execution.cancelBeforeRelease() }
                 case .terminal(let nativeOutcome):
@@ -703,7 +724,10 @@ extension AuthorityJournal {
             }
         }
         execution.deliverTerminal(delivered)
-        if execution.dispose() { commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id); commandStreamChecks.removeValue(forKey: id) }
+        if execution.dispose() {
+            commandExecutions.removeValue(forKey: id); commandRuntimeChecks.removeValue(forKey: id); commandStreamChecks.removeValue(forKey: id)
+            commandActivity.removeValue(forKey: id)?.close()
+        }
         if commandExecutions.isEmpty { commandCleanupTimer?.cancel(); commandCleanupTimer = nil; commandPollIntervalMilliseconds = nil }
     }
 

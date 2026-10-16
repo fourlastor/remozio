@@ -4905,9 +4905,10 @@ extension MachCommandCallerReceiverTests {
     }
     private func nativeDispatchFixture(checkpointed: Bool = false, path: String = "/usr/bin/true",
                                        arguments: [Data]? = nil, retiredEnrollmentEpoch: UInt8? = nil,
-                                       inputDescriptor: Int32? = nil) throws -> NativeDispatchFixture {
+                                       inputDescriptor: Int32? = nil, releaseActivity: ReleaseActivityBarrier? = nil) throws -> NativeDispatchFixture {
         let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true, retiredEnrollmentEpoch: retiredEnrollmentEpoch)
         let authority = try XCTUnwrap(fixture.authority), launcher = try dispatchLauncher(fixture)
+        if let releaseActivity { try authority.attachReleaseActivityBarrier(releaseActivity) }
         let admissionPort = try Endpoint(), terminal = try Endpoint()
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
             inputDescriptor: inputDescriptor, executablePath: path, arguments: arguments)
@@ -5054,6 +5055,88 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
+    func testReleaseActivityRefusesAdmissionDuringInstallationWithoutReservingTheSubmission() throws {
+        let activity = try ReleaseActivityFixture(), authority = try activity.open(), installer = try activity.open()
+        let fixture = try CommandRequestFixture(), reply = try Endpoint()
+        try fixture.requests.attachReleaseActivityBarrier(authority)
+        let update = try installer.acquireExclusive()
+        let (command, submission, profile) = try typedRequestCommand(reply: reply)
+        let before = try fixture.auditRecordCount
+        XCTAssertThrowsError(try admitCommand(command, fixture: fixture)) {
+            XCTAssertEqual($0 as? ReleaseActivityError, .busy)
+        }
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.updateInstalling, .updateInstalling))
+        XCTAssertEqual(try fixture.auditRecordCount, before)
+        XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+        update.close()
+        let retryReply = try Endpoint(), (retry, repeated, retryProfile) = try typedRequestCommand(reply: retryReply, binding: submission.binding)
+        let request = try admitCommand(retry, fixture: fixture)
+        guard case .admitted = try typedOutcome(retryReply, submission: repeated, profile: retryProfile) else { return XCTFail("Retry was not admitted") }
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        _ = try fixture.requests.retirePending(requestID: request.requestID, reason: .cancelled,
+            now: fixture.now(130), receiptTimeMs: nil)
+        let nextUpdate = try installer.acquireExclusive(); defer { nextUpdate.close() }
+        // A later installation refusal cannot contradict the already reserved submission.
+        let duplicateReply = try Endpoint(), (duplicate, again, duplicateProfile) = try typedRequestCommand(reply: duplicateReply, binding: submission.binding)
+        XCTAssertThrowsError(try admitCommand(duplicate, fixture: fixture, nowMilliseconds: 140)) {
+            XCTAssertEqual($0 as? ReleaseActivityError, .busy)
+        }
+        XCTAssertEqual(try typedOutcome(duplicateReply, submission: again, profile: duplicateProfile), .uncertain(.duplicateSubmission))
+    }
+    func testReleaseActivityRejectedJournalWriteReleasesTheProvisionalReference() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), fixture = try CommandRequestFixture()
+        try fixture.requests.attachReleaseActivityBarrier(activity.open())
+        try fixture.sql("CREATE TRIGGER reject_activity_admission BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        let reply = try Endpoint(), (command, submission, profile) = try typedRequestCommand(reply: reply)
+        XCTAssertThrowsError(try admitCommand(command, fixture: fixture))
+        XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.storageUnavailable, .storageUnavailable))
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertFalse(try fixture.db.read { try $0.commandSubmissionReserved(submission.binding) })
+    }
+    func testReleaseActivityChangedFileBlocksDispatchAndReleasesAfterNativeCleanup() throws {
+        let activity = try ReleaseActivityFixture()
+        let marker = activity.root.appendingPathComponent("never-executed")
+        let test = try nativeDispatchFixture(path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)],
+            releaseActivity: activity.open())
+        let path = activity.directory.appendingPathComponent("activity.lock").path
+        let observer = Darwin.open(path, O_RDWR | O_CLOEXEC)
+        XCTAssertGreaterThanOrEqual(observer, 0); defer { _ = Darwin.close(observer) }
+        try Data([1]).write(to: URL(fileURLWithPath: path))
+        XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher))
+        try awaitDispatchCleanup(test.authority)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertEqual(flock(observer, LOCK_EX | LOCK_NB), 0)
+        let id = test.request.requestID
+        XCTAssertThrowsError(try test.authority.withRequests { try $0.state(requestID: id) })
+    }
+
+    func testReleaseActivityRequestRetirementKeepsNativeCleanupOwnedAfterJournalClose() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open()
+        let test = try nativeDispatchFixture(path: "/bin/sleep", arguments: [Data("sleep".utf8), Data("0.3".utf8)],
+            releaseActivity: activity.open())
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+        let deadline = Date().addingTimeInterval(5), id = test.request.requestID
+        while try test.authority.withRequests({ try $0.state(requestID: id).phase }) != .executing {
+            if Date() >= deadline { throw CommandExecutionError.unavailable }; usleep(1000)
+        }
+        try test.authority.close()
+        XCTAssertGreaterThan(test.authority.activeCommandCount, 0)
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        try awaitDispatchCleanup(test.authority)
+        let update = try installer.acquireExclusive(); try update.validate(); update.close()
+        XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
+    }
+    func testReleaseActivityFailedSpawnReleasesOnlyAfterTerminalCleanup() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open()
+        let test = try nativeDispatchFixture(releaseActivity: activity.open())
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        XCTAssertThrowsError(try beginDispatch(test.fixture, request: test.request, launcher: test.launcher, runtimeFailure: true))
+        try awaitDispatchCleanup(test.authority)
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertEqual(try nativeDispatchOutcome(test), .failedBeforeStart)
+    }
+
     func testNativeDispatchCleanupSurvivesJournalClosureWithoutKillingReleasedWork() throws {
         let test = try nativeDispatchFixture(path: "/bin/sleep", arguments: [Data("sleep".utf8), Data("0.3".utf8)])
         try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)

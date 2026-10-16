@@ -7,6 +7,7 @@ extension AuthorityWakeService {
     /// The installer must independently validate the registration before supplying a receive right.
     public static func open(configuration: AuthorityCommandStartupConfiguration,
         takingRegisteredReceiveRight: @escaping @Sendable () throws -> mach_port_t,
+        releaseActivity: ReleaseActivityBarrier? = nil,
         reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
         onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
         reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
@@ -16,7 +17,10 @@ extension AuthorityWakeService {
             onAdmission: onAdmission, report: reportReceiver)
         let executionFactory = try configuration.executionFactory(report: reportExecution)
         return try open(configuration: configuration.presence, reconcileExpired: reconcileExpired,
-            commandReceiverFactory: factory, commandExecutionFactory: executionFactory, onCommandAuthorized: onCommandAuthorized)
+            commandReceiverFactory: { journal, clock in
+                if let releaseActivity { try journal.attachReleaseActivityBarrier(releaseActivity) }
+                return try factory(journal, clock)
+            }, commandExecutionFactory: executionFactory, onCommandAuthorized: onCommandAuthorized)
     }
 }
 

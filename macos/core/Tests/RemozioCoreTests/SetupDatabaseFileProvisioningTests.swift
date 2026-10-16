@@ -49,7 +49,7 @@ final class SetupDatabaseFileProvisioningTests: XCTestCase {
     }
     func testFreshFilesSupportActualInstallationStoreInitialization() throws {
         try fixture { root, directory in
-            XCTAssertEqual(try prepare(directory, kind: .installation).createdFileNames, ["writer.lock", "installation.sqlite"])
+            XCTAssertEqual(try prepare(directory, kind: .installation).createdFileNames, ["writer.lock", "activity.lock", "installation.sqlite"])
             let store = try PreparationIntentStore(lease: InstallationStorageLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: Data(repeating: 1, count: 16), maximumRecords: 64, initialize: true)
             try store.upgradeInventoryStorage(); XCTAssertNil(try store.inventory()); try store.close()
@@ -59,6 +59,38 @@ final class SetupDatabaseFileProvisioningTests: XCTestCase {
             defer { try? restored.close() }; XCTAssertNil(try restored.inventory())
         }
     }
+    func testMissingInstallationActivityFileIsNotRecreated() throws {
+        try fixture { _, directory in
+            _ = try prepare(directory, kind: .installation)
+            let path = directory.path + "/activity.lock"
+            XCTAssertEqual(unlink(path), 0)
+            XCTAssertThrowsError(try prepare(directory, kind: .installation)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .system(ENOENT))
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+    }
+    func testInterruptedActivityPublicationRecoversBeforeDatabaseCreation() throws {
+        try fixture { _, directory in
+            XCTAssertThrowsError(try prepare(directory, kind: .installation) { stage in
+                if stage == .published("activity.lock") { throw Fault.interrupted }
+            })
+            let path = directory.path + "/activity.lock", identity = try inode(path)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path + "/installation.sqlite"))
+            XCTAssertEqual(try prepare(directory, kind: .installation).createdFileNames, ["installation.sqlite"])
+            XCTAssertEqual(try inode(path), identity)
+        }
+    }
+    func testNonemptyInstallationActivityFileIsNotRepaired() throws {
+        try fixture { _, directory in
+            try place(directory, name: "activity.lock", bytes: Data([1]))
+            XCTAssertThrowsError(try prepare(directory, kind: .installation)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .identityChanged)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path + "/installation.sqlite"))
+        }
+    }
+
     func testContinuityFilesSatisfyTheIndependentProtectedLease() throws {
         try fixture { root, directory in
             XCTAssertEqual(try prepare(directory, kind: .continuity).createdFileNames, ["writer.lock", "continuity.sqlite"])

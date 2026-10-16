@@ -1,11 +1,12 @@
 # Release activity barrier experiment
 
-Nine ordinary-account controls passed on Apple Silicon macOS 27.0.1.
-All ten owned children were reaped. No Root operation, service registration or production update ran.
+Nine ordinary-account controls passed on Apple Silicon macOS 26.6.2 and 27.0.1.
+All ten owned children were reaped on each host. No Root operation, service registration or production update ran.
 The [sanitized result](evidence/2026-10-16-release-activity.json) retains the source hashes.
 
-This tests a candidate coordination mechanism. The app does not use this barrier yet.
-It does not establish macOS 26 runtime behavior or protected update activation.
+This tests a coordination mechanism. The [macOS 26 CI record](evidence/2026-10-16-release-activity-ci.json) retains the exact source and job.
+The [installed command authority](../macos-authority-release-activity.md) now uses the mechanism for request and execution ownership.
+Protected update activation remains untested.
 
 ## Candidate boundary
 
@@ -23,7 +24,7 @@ flowchart TD
 ```
 
 The diagram describes the intended use of the measured lock behavior.
-Its request ownership, replacement and recovery steps remain implementation work.
+Request and execution ownership now have an authority implementation. Other role ownership, replacement and recovery remain implementation work.
 A failed automatic attempt must leave normal admission available.
 
 ## Measured controls

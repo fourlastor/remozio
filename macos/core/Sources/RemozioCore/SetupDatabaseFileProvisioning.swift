@@ -47,6 +47,19 @@ public enum SetupDatabaseFileProvisioning {
             }
             _ = try inspect(lock.fd, parent: parent, name: "writer.lock", owner: owner)
             try directory.validate()
+            if kind == .installation {
+                var existing = stat()
+                let databaseExists = fstatat(parent, kind.fileName, &existing, AT_SYMLINK_NOFOLLOW) == 0
+                if !databaseExists, errno != ENOENT { throw JournalLeaseError.system(errno) }
+                // Publish before the database. A restart can retain it, but cannot recreate a lost live inode.
+                let activity = try openOrCreate(parent: parent, name: ReleaseActivityBarrier.fileName, owner: owner,
+                    validateDirectory: directory.validate, didStage: didStage, createIfMissing: !databaseExists)
+                defer { _ = Darwin.close(activity.fd) }
+                guard try inspect(activity.fd, parent: parent, name: ReleaseActivityBarrier.fileName, owner: owner).st_size == 0 else {
+                    throw JournalLeaseError.identityChanged
+                }
+                if activity.created { created.insert(ReleaseActivityBarrier.fileName) }
+            }
             let database = try openOrCreate(parent: parent, name: kind.fileName, owner: owner,
                 validateDirectory: directory.validate, didStage: didStage)
             defer { _ = Darwin.close(database.fd) }
@@ -74,7 +87,8 @@ public enum SetupDatabaseFileProvisioning {
         guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
     }
     private static func openOrCreate(parent: Int32, name: String, owner: uid_t,
-        validateDirectory: () throws -> Void, didStage: (Stage) throws -> Void) throws -> (fd: Int32, created: Bool) {
+        validateDirectory: () throws -> Void, didStage: (Stage) throws -> Void,
+        createIfMissing: Bool = true) throws -> (fd: Int32, created: Bool) {
         try validateDirectory()
         let existing = openat(parent, name, O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         if existing >= 0 {
@@ -84,7 +98,7 @@ public enum SetupDatabaseFileProvisioning {
                 return (existing, false)
             } catch { _ = Darwin.close(existing); throw error }
         }
-        guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
+        guard errno == ENOENT, createIfMissing else { throw JournalLeaseError.system(errno) }
         let staging = ".remozio-file-" + UUID().uuidString
         let fd = openat(parent, staging, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw JournalLeaseError.system(errno) }
