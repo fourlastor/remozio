@@ -1,7 +1,8 @@
 # Native file operations for protected bootstrap
 
-This experiment tests a possible first-install building block. It selects no product installer or setup UX.
-The app needs a protected bundle before the configured administrative host can serve.
+This experiment tests native file operations that a first-install flow could use.
+It does not select the product installer or setup interface.
+The app needs a protected bundle before the configured administrative host can serve requests.
 Apple exposes authorization for atomic replacement and limited ownership and permission changes through NSWorkspace and FileManager.
 Its authorization does not enable general privileged directory creation or copying.
 

@@ -1,7 +1,8 @@
 # Fresh command job queries
 
-The command channel now supports a fresh query on explicit local wires 10 and 11.
-Wire 10 uses mapped PTY routing. Wire 11 keeps separate stdio and private controls.
+The command channel supports fresh job queries when peers explicitly select local wires 10 or 11.
+Wire 10 uses mapped pseudoterminal (PTY) routing.
+Wire 11 keeps separate stdio and private controls.
 Both use submission schema 1 and input carrier 5. Capture schema 3 remains a separate contract.
 Historical wires 1 through 9 retain their meanings and reject the new frames.
 The existing mapped caller entry point defaults to wires 8 and 9.

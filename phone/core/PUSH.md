@@ -1,6 +1,7 @@
 # Phone wake routing
 
-Push data selects a locally enrolled Mac/account through its opaque notification tag. It cannot install an endpoint, key, enrollment, or request.
+The phone uses the push message's opaque notification tag to find a locally enrolled Mac/account.
+Push data cannot install an endpoint, key, enrollment, or request.
 
 ```mermaid
 sequenceDiagram

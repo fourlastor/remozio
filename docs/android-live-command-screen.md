@@ -1,6 +1,9 @@
 # Android live command screen
 
-An active Mac card now opens its command inbox. The screen acquires the application-owned connection and runs it while the screen is started. Leaving the screen cancels network delivery. The registry retains the authenticated request owners for a later visit.
+An active Mac card opens its command inbox.
+The screen uses the application-owned connection while the screen is started.
+Leaving the screen cancels network delivery.
+The registry keeps the authenticated request owners for a later visit.
 
 ```mermaid
 flowchart TD

@@ -1,10 +1,15 @@
 # Audit page receipt
 
-`AuditPageReceiver` owns bounded, one-use history queries for one enrolled Mac/account. Construct it with trusted enrollment identities and the authority public key. The enrollment owner must close it when enrollment is revoked or the authority key changes.
+`AuditPageReceiver` limits and tracks one-use history queries for one enrolled Mac/account.
+Construct it with trusted enrollment identities and the authority public key.
+The enrollment owner must close the receiver when enrollment is revoked or the authority key changes.
 
 Begin a query with an authenticated journal epoch, its immutable creation generation, and the exclusive sequence cursor. These values must come from trusted history state. Do not derive them from the page being checked. History status can authenticate the descriptor under the current trusted authority key. Authority migration and cache conflict checks remain separate work.
 
-The receiver generates a fresh 32-byte nonce and retains each query by object identity. Use the query fields in the authenticated history request. The caller supplies a query lifetime and a maximum pending count; these are resource controls, not retention settings.
+The receiver generates a fresh 32-byte nonce and retains each query by object identity.
+Use the query fields in the authenticated history request.
+The caller supplies a query lifetime and maximum pending count to limit resource use.
+Those limits do not select history retention settings.
 
 The elapsed clock must include sleep and use a new epoch whenever its origin changes. An expired query, a changed clock epoch, or observed clock regression invalidates the query permanently. Beginning another query releases expired slots. The receiver rechecks the clock after signature and schema validation.
 

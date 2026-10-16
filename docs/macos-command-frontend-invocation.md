@@ -1,7 +1,7 @@
 # Command frontend invocation
 
-`CommandFrontendInvocation` builds the untrusted claims for the command frontend.
-It copies C argv bytes and creates a canonical `CommandSubmission` for the existing authenticated transport.
+`CommandFrontendInvocation` copies the command frontend's C argv bytes into a canonical `CommandSubmission`.
+The authenticated transport carries these untrusted claims.
 It does not authenticate the caller, approve a command, or execute a target.
 
 ```mermaid

@@ -4,7 +4,8 @@
 
 The approved hashes must come from protected activation metadata. They are not supplied by a connecting process. Activation must verify protected placement, hardened runtime, acceptable entitlements, and the installed build floor before admitting a hash. This module does not implement activation or derive an allowlist from a peer's self-reported build number.
 
-The requirement rejects enabled debugging, library-validation exceptions, DYLD environment exceptions, unsigned executable memory, and JIT entitlements. This is not a substitute for verifying the hardened-runtime signing flag during activation.
+The requirement rejects enabled debugging, library-validation exceptions, DYLD environment exceptions, unsigned executable memory, and JIT entitlements.
+Activation must also verify the hardened-runtime signing flag.
 
 ```mermaid
 flowchart LR

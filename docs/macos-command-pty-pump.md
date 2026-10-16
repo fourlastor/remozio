@@ -1,7 +1,8 @@
 # Connected command terminal
 
-Wire 4 now connects the authenticated command stream to a private PTY and the retained native execution owner.
-The journal still commits dispatch before the one release attempt. Stream messages grant no execution authority.
+Wire 4 connects the authenticated command stream to a private pseudoterminal (PTY) and the retained native execution owner.
+The journal commits dispatch before the single release attempt.
+Stream messages grant no execution authority.
 
 ```mermaid
 flowchart LR

@@ -1,6 +1,9 @@
 # Phone enrollment storage
 
-`EncryptedEnrollmentStore` owns local enrollment records across app restarts. Trusted setup code prepares them; `PhonePairingAttempt` verifies a Mac receipt before activation. Network input cannot select this store as an enrollment endpoint.
+`EncryptedEnrollmentStore` keeps local enrollment records across app restarts.
+Trusted setup code prepares the records.
+`PhonePairingAttempt` verifies a Mac receipt before activation.
+Network input cannot select this store as an enrollment endpoint.
 
 ```mermaid
 stateDiagram-v2

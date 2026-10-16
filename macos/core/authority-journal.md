@@ -1,6 +1,9 @@
 # Serialized authority journal
 
-`AuthorityJournal` takes exclusive ownership of one `JournalDatabase` through a Swift `sending` parameter. It serializes reads, writes, and closure. Transaction callbacks are synchronous and `@Sendable`; only `Sendable` results can leave them. Database handles and audit writers remain non-Sendable.
+`AuthorityJournal` takes exclusive ownership of one `JournalDatabase` through a Swift `sending` parameter.
+It serializes reads, writes, and closure.
+Transaction callbacks run synchronously and are `@Sendable`.
+Only `Sendable` results can leave a callback; database handles and audit writers remain non-Sendable.
 
 ```mermaid
 flowchart LR

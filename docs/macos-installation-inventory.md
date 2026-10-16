@@ -2,7 +2,8 @@
 
 One installed bundle can serve several account contexts.
 Update planning must retain those owners and their service domains separately from request journals.
-The inventory now defines that bounded record, a guarded Root reader and durable storage under the machine writer lock.
+The inventory defines limits for those records and provides a guarded Root reader.
+It stores the records durably under the machine writer lock.
 It does not install services or prove that the recorded inventory is complete.
 
 ```mermaid

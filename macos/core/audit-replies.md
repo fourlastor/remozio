@@ -1,6 +1,8 @@
 # Native audit replies
 
-`AuditReplyBuilder` creates signed page and history-status replies for one fixed Mac/account. The service supplies that scope and the authority public key from local trusted state. Request data cannot select a different account or signing domain.
+`AuditReplyBuilder` creates signed page and history-status replies for one fixed Mac/account.
+The service supplies the scope and authority public key from trusted local state.
+Request data cannot select another account or signing domain.
 
 ```mermaid
 flowchart LR

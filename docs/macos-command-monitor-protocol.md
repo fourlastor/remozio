@@ -1,8 +1,9 @@
 # Private command monitor status
 
 The native codec defines the status stream for the [embedded command monitor](macos-command-monitor.md).
-It grants no approval, authenticates no executable, and does not establish kernel process ownership.
-The embedded monitor uses it. The product authority does not consume it yet.
+The embedded monitor uses this stream.
+The codec cannot approve a command, authenticate an executable, or establish kernel process ownership.
+The product authority does not consume it yet.
 
 The monitor must own the target's final wait result. Root must own the monitor's final wait result.
 Root must register separate target exec and exit observations before releasing execution.

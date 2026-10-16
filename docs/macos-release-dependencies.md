@@ -3,7 +3,8 @@
 A release can include signed frameworks, applications, XPC services and tools without granting them an authority role.
 Schema 2 binds these dependencies to an existing component. The enclosing signature seals the declaration.
 Schema 1 retains its original bytes and rejects undeclared executable code.
-The current product build still emits schema 1. Schema 3 adds request features and retains the schema 2 dependency layout.
+The current product build emits schema 1.
+Schema 3 adds request features and keeps the schema 2 dependency layout.
 
 | Declaration | Reader check |
 | --- | --- |

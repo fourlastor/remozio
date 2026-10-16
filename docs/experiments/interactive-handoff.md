@@ -1,6 +1,6 @@
 # First Mac–Pixel integration session
 
-The app now includes account setup, service activation, pairing and a foreground command inbox.
+The app includes account setup, service activation, pairing and a foreground command inbox.
 Installed behavior remains untested. This candidate is not ready for Root command approval.
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) is a known blocker.

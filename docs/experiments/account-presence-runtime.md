@@ -1,6 +1,8 @@
 # Account presence runtime
 
-This slice connects durable routing modes to request discovery, signed delivery and wake publication. It adds a separate app control interface and Mac menu/settings controls. It does not install or activate a service on the test host.
+The account presence runtime connects durable routing modes to request discovery, signed delivery and wake publication.
+The Mac app uses a separate control interface through its menu and Settings controls.
+The experiment does not install or activate a service on the test host.
 
 ```mermaid
 flowchart LR

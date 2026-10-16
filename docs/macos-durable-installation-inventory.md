@@ -2,7 +2,8 @@
 
 Preparation records and inventory share `installation.sqlite`, one retained lease and one exclusive machine writer lock.
 They use the same transaction owner and storage retirement rules.
-This removes a separate-writer race while leaving account request journals separate.
+A shared writer prevents races between preparation and inventory writes.
+Account request journals remain separate.
 
 ```mermaid
 flowchart TD

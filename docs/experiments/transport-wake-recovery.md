@@ -1,6 +1,7 @@
 # Transport wake recovery
 
-A starting or restarting gateway must not permanently disable wake delivery. The embedded transport now owns a recovery runner beside the direct approval service.
+The embedded transport owns a wake recovery runner alongside the direct approval service.
+A starting or restarting gateway must not permanently disable wake delivery.
 
 ```mermaid
 flowchart TD

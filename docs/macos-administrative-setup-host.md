@@ -1,7 +1,8 @@
 # Bundled administrative setup host
 
-The app now contains `RemozioSetup` and its fixed daemon declaration.
-The executable owns the existing setup listener and opens the machine store for each owner operation. It exposes no network listener or approval authority.
+The app contains `RemozioSetup` and its fixed daemon declaration.
+The executable owns the setup listener and opens the machine store for each owner operation.
+It exposes no network listener or approval authority.
 It accepts only `--configuration` with the fixed protected setup path.
 Ordinary users fail before any configuration read. Invalid arguments never consume stdin or disclose private paths.
 

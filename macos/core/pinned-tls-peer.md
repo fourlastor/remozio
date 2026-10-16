@@ -4,7 +4,9 @@
 
 The policy accepts a renewed certificate with the same public key. It checks the leaf validity interval, including both endpoints. Empty, malformed, oversized, wrong-key, wrong-curve, expired, and future certificates fail. A nonfinite verification time also fails.
 
-The Security framework parses the certificate and extracts its public key and dates. The policy uses the presented leaf. It does not evaluate system CA trust, match DNS names, fetch certificates, or fall back to another authority. This is a pinned peer policy, not a web server policy. The caller must keep ordinary CA and hostname checks for an outer HTTPS relay.
+The Security framework parses the presented leaf certificate and extracts its public key and dates.
+The policy does not evaluate system certificate authority (CA) trust, match DNS names, fetch certificates, or fall back to another authority.
+An outer HTTPS relay still requires ordinary CA and hostname checks.
 
 A successful result is only the certificate check. The TLS implementation must still prove possession of the corresponding private key. It must enforce TLS 1.3, mutual authentication, the expected ALPN, and the early-data and resumption restrictions. The owner must separately check current enrollment, account, role, protocol compatibility, and request authority. A pin does not authorize an approval or survive revocation by itself.
 

@@ -1,6 +1,7 @@
 # Retained wake runtime
 
-The request owner now feeds an owned Root publisher and a separate transport wake runtime. Protected startup metadata binds both runtimes to their installed accounts, keys, and gateway scope.
+The request owner supplies an owned Root publisher and a separate transport wake runtime.
+Protected startup metadata binds both runtimes to their installed accounts, keys, and gateway scope.
 
 ```mermaid
 flowchart LR

@@ -1,6 +1,8 @@
 # Negotiated TLS message hosts
 
-`NegotiatedTLSChannel` on the phone and `NegotiatedNetworkChannel` on the Mac own one connection from TLS admission through application delivery. They use the shared [negotiation contract](channel-negotiation.md). They do not authorize a request, decision, audit update, or routing change.
+The phone's `NegotiatedTLSChannel` and the Mac's `NegotiatedNetworkChannel` each own one connection from TLS admission through application delivery.
+Both use the shared [negotiation contract](channel-negotiation.md).
+Neither can authorize a request, decision, audit update, or routing change.
 
 ```mermaid
 flowchart LR

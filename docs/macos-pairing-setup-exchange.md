@@ -1,7 +1,8 @@
 # Mac pairing setup exchange
 
 The transport component can accept an unpaired phone without admitting it to the approval listener.
-Its handler receives a proposal bound to the actual TLS client key. Only the signed app can authorize enrollment through its authenticated Root channel.
+Its handler receives a proposal bound to the actual TLS client key.
+Only the signed app can authorize enrollment through its authenticated Root channel.
 
 ```mermaid
 flowchart LR

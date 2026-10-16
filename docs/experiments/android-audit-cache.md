@@ -1,6 +1,8 @@
 # Android audit cache checks
 
-The encrypted archive and repository pass host tests with disposable keys and a simulated storage backend. The Android Keystore and AtomicFile adapter has not run on a real device. Run these checks on a supported Pixel with Android 17 when the user is present.
+Host tests cover the encrypted archive and repository with disposable keys and simulated storage.
+The Android Keystore and AtomicFile adapter has not run on a real device.
+Run these checks on a supported Pixel with Android 17 while the user is present.
 
 - Create a cache for a synthetic Mac/account. Confirm a hardware-backed, non-exportable AES-256 key and a ciphertext-only file under backup-excluded private storage.
 - Read history without an extra biometric prompt. Confirm background metadata persistence while the screen is locked after first unlock.

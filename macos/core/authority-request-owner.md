@@ -21,7 +21,10 @@ Contention cannot preserve an already retired database or continuity connection.
 
 `AuthorityService` accepts this prepared journal owner. Its listener uses the same owner for trust queries, and service closure retires request access and releases storage.
 
-This establishes an ownership boundary, not an admission or execution gate. Target validation, capacity reservations, recovery, authenticated RPC dispatch, and daemon composition remain required. Tests use a disposable protected journal and synthetic request data. No real action or device is used.
+This owner serializes access to request state.
+Admission and execution still require target validation, capacity reservations, recovery, authenticated remote procedure call (RPC) dispatch, and daemon integration.
+Tests use a disposable protected journal and synthetic request data.
+They use no real action or device.
 
 ## Native command ownership
 

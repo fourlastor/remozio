@@ -1,6 +1,9 @@
 # Android local ADB endpoint experiment
 
-The debug app has a **Local ADB endpoint experiment** entry. The release source set excludes the screen and its network probe. The [Pixel observations](evidence/2026-10-03-pixel-platform.md) record own-phone discovery and IPv4/IPv6 loopback reachability. Wi-Fi-off operation and bridge lifetime remain untested.
+The debug app has a **Local ADB endpoint experiment** entry.
+Release builds exclude the screen and its network probe.
+The [Pixel observations](evidence/2026-10-03-pixel-platform.md) record discovery on the same phone and IPv4/IPv6 loopback reachability.
+Wi-Fi-off operation and bridge lifetime remain untested.
 
 This prepares the first section-19 feasibility check: discovery and loopback reachability from an ordinary app targeting Android 17. It does not implement the deployment bridge.
 

@@ -1,6 +1,8 @@
 # Atomic decision consumption
 
-`JournalTransaction.consume` verifies a signed phone decision, stores an immutable receipt, and appends its generated audit event within the owner's write transaction. It returns evidence, never permission to dispatch.
+`JournalTransaction.consume` verifies a signed phone decision within the owner's write transaction.
+It stores an immutable receipt and appends the generated audit event in that transaction.
+Its result records consumption and grants no dispatch permission.
 
 ```mermaid
 sequenceDiagram

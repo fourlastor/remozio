@@ -2,8 +2,8 @@
 
 `JournalDatabase.open` accepts an optional `AuthorityJournalInitialization` during explicit initialization.
 The public authority path requires both process identities to be Root.
-The setup host must already validate administrator authorization, signed code, placement, fresh-installation intent and scope.
-The declaration supplies none of those proofs.
+Before calling it, the setup host must validate administrator authorization, signed code, placement, fresh-installation intent and scope.
+The declaration cannot prove those requirements.
 
 ```mermaid
 flowchart LR

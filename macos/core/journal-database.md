@@ -1,6 +1,9 @@
 # Owned journal connection
 
-`JournalDatabase` combines the protected storage lease with one private SQLite connection for a Mac/account scope. It owns their lifetimes. All calls must be serialized by the authority owner. It exposes bounded audit operations through synchronous transaction callbacks, without exposing a connection or arbitrary SQL.
+`JournalDatabase` owns a protected storage lease and one private SQLite connection for a Mac/account scope.
+The authority owner must serialize all calls.
+Synchronous transaction callbacks expose audit operations with explicit limits.
+They expose neither the connection nor arbitrary SQL.
 
 ```mermaid
 flowchart TD
@@ -23,7 +26,23 @@ flowchart TD
 
 The public factory requires the existing root-owned layout described in [the lease contract](journal-lease.md). It does not provision files or install a service. Existing stores require application ID `0x524D5A4F`, schema version 12, one matching Mac/account identity, and the required audit, consumption, outcome and gateway-control columns. These checks precede changes to persistent journal mode.
 
-Explicit `initialize: true` is setup only. It requires an empty preprovisioned file and creates all tables atomically. Wrong scope, unknown versions, missing tables, and malformed stores fail without reset. Explicit migration accepts source versions 1 through 11 and advances to version 12 in one transaction. It adds only tables absent from that source schema: consumption, outcomes, gateway authority, revocations, enrollment, routing, acknowledgments, recovered controls, recovered revocations, unknown trust restrictions, and pairing commit transcripts. Existing data remains intact. Migration grants no authority continuity and derives no trust from audit history. Setup and migration cannot be combined; the supplied source version must match the store.
+Use `initialize: true` only during setup.
+It requires an empty preprovisioned file and creates all tables atomically.
+Wrong scope, unknown versions, missing tables, and malformed stores fail without reset.
+
+Explicit migration accepts source versions 1 through 11 and advances to version 12 in one transaction.
+It adds only tables absent from the source schema:
+
+- consumption and outcomes;
+- gateway authority and revocations;
+- enrollment and routing;
+- acknowledgments and recovered controls;
+- recovered revocations and unknown trust restrictions;
+- pairing commit transcripts.
+
+Migration preserves existing data but grants no authority continuity and derives no trust from audit history.
+Setup and migration cannot be combined.
+The supplied source version must match the store.
 
 The connection uses the system SQLite with extension loading omitted. It disables attached databases and trusted schema, enables foreign keys, bounds SQLite values from the supplied CBOR limits, and verifies DELETE journal mode, EXTRA synchronization and fullfsync. The caller supplies a busy timeout of at most 60 seconds. No product timeout default is selected.
 

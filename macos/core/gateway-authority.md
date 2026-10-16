@@ -1,7 +1,8 @@
 # Authority token proofs and control outbox
 
-The root journal now retains token candidates, desired token choices, consumed proofs, and signed gateway controls.
-The gateway still owns provider delivery. The root decides whether an authenticated phone proof permits a mapping activation.
+The root journal stores token candidates, desired token choices, consumed proofs, and signed gateway controls.
+The gateway owns provider delivery.
+The root decides whether an authenticated phone proof permits mapping activation.
 
 ```mermaid
 flowchart LR

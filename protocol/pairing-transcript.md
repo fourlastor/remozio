@@ -1,6 +1,9 @@
 # Pairing transcript version 1
 
-The transcript binds public setup claims before either host activates an enrollment. It does not create trust. The Mac host must verify administrator authorization, the retained setup attempt, expiry, and the phone biometric proof. The phone must independently authenticate the Mac and verify the committed result.
+The transcript binds public setup claims before either host activates an enrollment.
+It does not create trust.
+The Mac host must verify administrator authorization, the retained setup attempt, expiry, and the phone biometric proof.
+The phone must independently authenticate the Mac and verify the committed result.
 
 ```mermaid
 sequenceDiagram

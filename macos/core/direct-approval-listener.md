@@ -1,6 +1,10 @@
 # Direct approval listener
 
-`DirectApprovalListener` owns a native TLS listener and its accepted channels. The protected host supplies a `SecIdentity` and an immutable array of trusted `DirectApprovalPeer` records. Each record binds a transport pin to a Mac, account, phone, enrollment epoch, protocol floor, capabilities, and payload limit. The listener rejects duplicate phone IDs, duplicate transport keys, mixed authorities, empty snapshots, and more than 1024 peers.
+`DirectApprovalListener` owns a native TLS listener and its accepted channels.
+The protected host supplies a `SecIdentity` and an immutable array of trusted `DirectApprovalPeer` records.
+Each record binds a transport pin to a Mac, account, phone, enrollment epoch, protocol floor, capabilities, and payload limit.
+
+The listener rejects duplicate phone IDs, duplicate transport keys, mixed authorities, empty snapshots, and more than 1024 peers.
 
 ```mermaid
 sequenceDiagram

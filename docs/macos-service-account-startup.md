@@ -1,8 +1,8 @@
 # Dedicated service startup
 
-Transport and push startup must check more than two matching UIDs.
+The native transport and push loaders inspect the directory account and current process before opening private credentials.
+Matching real and effective UIDs alone cannot establish account isolation.
 A configured UID can still belong to an interactive account or inherit administrative groups.
-The native loaders now inspect the directory account and current process before opening private credentials.
 
 ```mermaid
 flowchart TD

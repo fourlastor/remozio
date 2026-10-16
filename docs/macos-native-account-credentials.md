@@ -1,6 +1,7 @@
 # Native account credentials
 
-The command child initializes the approved directory account through the native `initgroups` API. It preserves normal account membership beyond the static group limit.
+The command child uses the native `initgroups` API to initialize the approved directory account.
+This preserves normal account membership beyond the static group limit.
 The signed capture still retains the full account name, UID, primary GID and sorted directory groups. No group is removed from the capture.
 
 ## Measured choice

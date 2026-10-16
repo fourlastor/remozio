@@ -1,6 +1,7 @@
 # Mac command filesystem capture
 
-The Mac core now captures an executable's identity and SHA-256 digest, plus the working directory's identity. It preserves each original path as bytes.
+The Mac core captures the executable's identity and SHA-256 digest.
+It also captures the working directory's identity and keeps each original path as bytes.
 
 ```mermaid
 sequenceDiagram

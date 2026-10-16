@@ -1,6 +1,9 @@
 # Authority maintenance
 
-`AuthorityService` can own a serial maintenance timer. It starts only after listener startup and stops before journal closure. Explicit closure waits for any active maintenance callback. A callback failure retires the timer and closes the service; it cannot continue serving after a failed sweep or reconciliation.
+`AuthorityService` can run a serial maintenance timer after the listener starts.
+The timer stops before the journal closes.
+Explicit closure waits for any active maintenance callback.
+If a sweep or reconciliation fails, the service retires the timer and closes instead of continuing to serve.
 
 The expiry initializer samples the supplied authority clock inside `AuthorityJournal.withRequests`, calls `expirePending`, and reconciles the committed results before releasing the journal lock. The receipt time is optional audit metadata and never controls expiry.
 

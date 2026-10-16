@@ -1,6 +1,10 @@
 # Authority IPC trust data
 
-`AuthorityTrustCodec` encodes version-1 deterministic CBOR for the local XPC boundary. It does not authenticate bytes. The transport must use the authenticated authority connection and supply the expected Mac and account IDs from its local configuration. `AuthorityXPCChannel.fetchTrust` closes the connection if decoding fails, including a scope mismatch.
+`AuthorityTrustCodec` encodes version-1 deterministic CBOR for local XPC calls.
+It does not authenticate bytes.
+The transport must use the authenticated authority connection.
+It must supply the expected Mac and account IDs from local configuration.
+`AuthorityXPCChannel.fetchTrust` closes the connection on decoding failure, including a scope mismatch.
 
 ```mermaid
 flowchart LR

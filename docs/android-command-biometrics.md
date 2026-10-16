@@ -1,6 +1,9 @@
 # Android command biometric authorization
 
-`AndroidCommandBiometrics` owns one enrolled biometric key and one authenticated command session. The native `CommandBiometricPrompt` owns that identity for the screen. The integration must create it for the exact session whose command is displayed, then invoke it only from that command's execute control.
+`AndroidCommandBiometrics` owns one enrolled biometric key and one authenticated command session.
+The screen's native `CommandBiometricPrompt` retains that identity.
+Create the prompt for the session whose command the screen displays.
+Invoke it only from that command's execute control.
 
 Preparation builds a decision from retained Mac, account, request, digest, challenge, phone, and key identities. The only action is execute for the current request. Preparation requires a signed pending status, a usable elapsed clock, and nonzero remaining authorization time. These checks do not prove delivery freshness. The Mac remains authoritative for expiry, first-arrival selection, enrollment validity, and the final target check.
 

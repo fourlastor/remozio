@@ -1,8 +1,9 @@
 # Authenticated gateway head replies
 
-The gateway can now sign its stored head and retained root receipt for a fresh root-side query.
+The gateway signs its stored head and retained root receipt for a fresh root-side query.
 The root verifies two signatures: the gateway reply and the retained root control.
-This provides evidence for reconciliation. It does not change counters, enroll phones, restore mappings, or authorize delivery.
+The reply supplies reconciliation evidence.
+It does not change counters, enroll phones, restore mappings, or authorize delivery.
 
 ```mermaid
 sequenceDiagram

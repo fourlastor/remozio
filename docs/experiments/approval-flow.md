@@ -1,6 +1,9 @@
 # Synthetic approval flow
 
-This harness joins the native Swift request coordinator with the Kotlin request owner used by Android. It exchanges real canonical request, decision, and status bodies with P-256 signatures. It uses child-process pipes, synthetic identities, and an invented command capture. It never executes the captured command.
+This harness connects the native Swift request coordinator to Android's Kotlin request owner.
+The peers exchange canonical request, decision, and status bodies with P-256 signatures over child-process pipes.
+They use synthetic identities and a synthetic command capture.
+The harness never executes the captured command.
 
 ```mermaid
 sequenceDiagram

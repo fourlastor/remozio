@@ -1,6 +1,10 @@
 # Protocol foundations
 
-This directory contains the deterministic encoding subset and shared conformance vectors. Swift and Kotlin implementations use the same vectors. The [action policy](action-policy.md) and [compatibility policy](compatibility-policy.md) also have Swift and Kotlin implementations. The [command capture](command-capture.md) has matching typed parsers. Prompt capture schemas, authenticated negotiation, and durable consumption remain separate deliverables. A parsed value does not authorize an action.
+Swift and Kotlin use the same conformance vectors for this directory's deterministic encoding subset.
+Both languages also implement the [action policy](action-policy.md), [compatibility policy](compatibility-policy.md), and typed [command capture parsers](command-capture.md).
+
+Prompt capture schemas, authenticated negotiation, and durable consumption remain separate deliverables.
+Parsing a value does not authorize an action.
 
 ## Deterministic CBOR subset 1
 

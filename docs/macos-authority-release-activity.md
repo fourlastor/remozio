@@ -1,6 +1,6 @@
 # Authority release activity
 
-The installed command authority now retains machine activity for each admitted request.
+The installed command authority holds a machine activity reference for each admitted request.
 Native execution retains a separate reference until the child and its I/O resources finish cleanup.
 Closing the journal cannot release that execution reference early.
 

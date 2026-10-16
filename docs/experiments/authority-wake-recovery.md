@@ -1,6 +1,7 @@
 # Authority wake recovery
 
-A missing or restarting local gateway must not close direct approvals. The authority now starts request listeners before it attempts wake publication.
+The authority starts request listeners before attempting wake publication.
+A missing or restarting local gateway must not close direct approvals.
 
 ```mermaid
 flowchart TD

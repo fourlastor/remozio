@@ -1,6 +1,12 @@
 # Root authority transport endpoint
 
-`AuthorityXPCEndpoint` exports the three operations used by the transport client: harmless version-1 hello, trust snapshot retrieval, and peer-binding validation. It has no approval, execution, signing, or credential-release method.
+`AuthorityXPCEndpoint` exports three operations for the transport client:
+
+- a harmless version-1 hello;
+- trust snapshot retrieval;
+- peer-binding validation.
+
+It has no approval, execution, signing, or credential-release method.
 
 The root listener supplies an accepted connection and a protected release peer policy for the dedicated transport account. The endpoint rejects UID zero as that transport identity. It checks the accepted peer credentials, applies the signing requirement before activation, and binds the exported object to `XPCInvocationGuard`. Every invocation verifies the current connection and credentials synchronously before any handler runs. A successful earlier hello does not bypass later identity checks.
 

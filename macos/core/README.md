@@ -1,6 +1,10 @@
 # Mac core
 
-This package contains Mac policies, audit storage primitives, and the authority storage lease. It has no presence observers or action executor. `PresenceRouter` implements the delivery rules from design section 14. [Decision verification](decision-verification.md) binds signed phone decisions to retained requests and current trusted enrollment before durable consumption. [Audit replies](audit-replies.md) build bounded signed history responses for an already authorized Mac/account scope.
+This package contains Mac policies, audit storage primitives, and the authority storage lease.
+It has no presence observers or action executor.
+`PresenceRouter` implements the delivery rules from design section 14.
+[Decision verification](decision-verification.md) checks signed phone decisions against retained requests and current trusted enrollment before durable consumption.
+[Audit replies](audit-replies.md) build signed history responses within explicit limits for an already authorized Mac/account scope.
 
 ```mermaid
 flowchart TD
@@ -21,7 +25,14 @@ Use one router per Mac/account and serialize evaluations. Supply observations fr
 
 Every observation carries an epoch and a sleep-inclusive monotonic timestamp. Reject future timestamps, expired observations, and observations from another epoch. A changed epoch or clock regression clears the cached destination. A regression also makes the current automatic evaluation Unknown. Do not reuse this state across reboot or detector-clock replacement.
 
-The idle default is 120 seconds. Observation lifetime and detector-unavailable grace must be provided explicitly; their product values remain feasibility decisions. No hidden grace default is selected here. Grace starts no later than the expiry of the observations that supported the cached destination. Delayed or repeated Unknown evaluations do not renew it. Manual modes have no timeout. They clear the automatic route cache; returning to Automatic requires detector evidence for local routing.
+The idle default is 120 seconds.
+Callers must supply observation lifetime and detector-unavailable grace; product values remain undecided.
+There is no hidden grace default.
+Grace starts no later than the expiry of the observations that supported the cached destination.
+Delayed or repeated Unknown evaluations do not renew it.
+
+Manual modes have no timeout and clear the automatic route cache.
+After returning to Automatic, local routing requires detector evidence.
 
 Display observations cover the account's usable displays. One readable external display keeps the workspace usable when the internal display is dark or asleep. Unknown brightness on an awake display does not mean zero brightness. An unknown display prevents a claim that all displays are off or dark. An empty, successfully observed display list means no usable display is awake; a failed query must instead produce a missing/unknown observation.
 

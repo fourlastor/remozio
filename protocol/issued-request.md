@@ -1,6 +1,8 @@
 # Issued-request wrapper, version 1
 
-`IssuedRequestPayload` constructs and parses the common request body. It checks the capture digest, action policy, and explicit local capability set. It does not authenticate the Mac or validate the meaning of a command or prompt capture.
+`IssuedRequestPayload` constructs and parses the common request body.
+It checks the capture digest, action policy, and explicit local capability set.
+It cannot authenticate the Mac or validate what a command or prompt capture means.
 
 The body belongs to approval wire version 1, message type Request, purpose Issued request. The wrapper version and the per-kind action schema are separate fields. Transport envelope negotiation remains separate from both.
 

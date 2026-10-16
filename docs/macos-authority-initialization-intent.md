@@ -2,8 +2,9 @@
 
 The machine store retains account setup progress before the account journal initializes.
 It uses the existing installation writer lock and transaction owner.
-The explicit begin operation upgrades storage from version 2 to version 3 atomically with its first intent.
-Ordinary reads do not upgrade storage. Preparation records and inventory remain available after the upgrade.
+The explicit begin operation commits its first intent and the storage upgrade from version 2 to version 3 in one transaction.
+Ordinary reads do not upgrade storage.
+Preparation records and inventory remain available after the upgrade.
 
 ```mermaid
 flowchart TD

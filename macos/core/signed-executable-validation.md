@@ -1,6 +1,11 @@
 # Signed executable validation
 
-`SignedExecutableValidation` combines a retained protected path with Security.framework signature checks. Its public entry point requires `XPCPeerPolicy`, which binds the Developer ID chain, team, component identifier, permitted code hashes, and forbidden entitlements. The expected UID is a separate live IPC condition; static validation does not prove a running process identity.
+`SignedExecutableValidation` checks a retained protected path and its signature through Security.framework.
+Its public entry point requires `XPCPeerPolicy`.
+That policy binds the Developer ID chain, team, component identifier, permitted code hashes, and forbidden entitlements.
+
+Live IPC must separately check the expected UID.
+Static validation cannot prove the identity of a running process.
 
 ```mermaid
 flowchart LR

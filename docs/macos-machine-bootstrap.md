@@ -1,6 +1,6 @@
 # Resumable machine bootstrap
 
-The explicit installer entry point now prepares the machine store and the fixed setup configuration.
+The explicit installer entry point prepares the machine store and fixed setup configuration.
 It retains one installation identity across interrupted attempts.
 It does not enroll an account, create a key, grant command access or register a service.
 

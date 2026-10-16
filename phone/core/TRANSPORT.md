@@ -1,6 +1,7 @@
 # Phone TLS engine
 
-`PinnedTLSClient` wraps a fresh TLS 1.3 `SSLEngine`. The host feeds ciphertext into `receive` and sends returned ciphertext in order. The component performs no socket I/O.
+`PinnedTLSClient` manages a fresh TLS 1.3 `SSLEngine` without socket I/O.
+The host passes incoming ciphertext to `receive` and sends returned ciphertext in order.
 
 ```mermaid
 flowchart LR

@@ -1,6 +1,8 @@
 # Protected executable placement
 
-`ProtectedExecutablePath.acquire(path:)` retains descriptors for an existing executable and every parent directory. Production acquisition starts at `/` and requires UID 0. The owner must serialize calls; this type is deliberately not Sendable.
+`ProtectedExecutablePath.acquire(path:)` holds descriptors for an existing executable and every parent directory.
+Production acquisition starts at `/` and requires UID 0.
+The type is not Sendable. Its owner must serialize calls.
 
 ```mermaid
 flowchart LR

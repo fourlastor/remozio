@@ -1,7 +1,7 @@
 # Authenticated gateway control history
 
-A latest receipt cannot explain every revision missing from local history.
-The gateway now provides bounded pages of retained root-signed controls for an explicit revision range.
+The gateway returns pages of retained root-signed controls for an explicit revision range, within configured limits.
+The latest receipt alone cannot explain every missing local revision.
 The root's existing query owner authenticates each page with a fresh nonce and the pinned gateway key.
 It also verifies every retained root signature independently.
 

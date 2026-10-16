@@ -1,6 +1,9 @@
 # Compatibility selection
 
-Envelope selection and request selection answer different questions. The shared policies operate only on already-authenticated capability records. They do not implement or authenticate a handshake. The [channel negotiation owner](channel-negotiation.md) binds offers and confirms their transcript over an enrolled TLS connection; its native host integration remains pending.
+The shared policies select envelopes and request contracts from already-authenticated capability records.
+They neither implement nor authenticate a handshake.
+The [channel negotiation owner](channel-negotiation.md) binds offers and confirms their transcript over an enrolled TLS connection.
+Native host integration remains unfinished.
 
 | Selection | Rule |
 | --- | --- |

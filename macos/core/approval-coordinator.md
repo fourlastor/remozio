@@ -1,6 +1,6 @@
 # Approval request owner
 
-`ApprovalRequestCoordinator` owns the live request states for one Mac/account. Signed phone decisions select an owned request by ID; they cannot supply its retained payload, phase, deadline, or trust snapshot.
+`ApprovalRequestCoordinator` owns live request state for one Mac/account. A signed phone decision selects an owned request by ID. It cannot supply the retained payload, phase, deadline, or trust snapshot.
 
 ```mermaid
 sequenceDiagram
@@ -24,42 +24,71 @@ sequenceDiagram
 
 ## Service contract
 
-The coordinator is deliberately non-Sendable. The root service must isolate it and its journal on one executor. Serialize admission, adapter observations, enrollment changes, routing, consumption, and outcome recording there. Do not consume or transition its requests through a second journal caller.
+The coordinator is non-Sendable. The root service must keep the coordinator and its journal on one executor.
+That executor must serialize admission, adapter observations, enrollment changes, routing, consumption, and outcome recording.
+A second journal caller must not consume or transition these requests.
 
-Construct it only after protected writer ownership, authority continuity, startup recovery, and admission storage reserves are established. It does not establish those gates. Its memory limits and the ledger count limit do not reserve physical disk space or guarantee a complete lifecycle budget.
+The host must establish protected writer ownership, authority continuity, startup recovery, and admission storage reserves before constructing the coordinator.
+The coordinator does not establish these requirements. Its memory limits and ledger count limit reserve no disk space. They do not guarantee storage for a complete request lifecycle.
 
-A draft is trusted, validated adapter output, not a decoded remote submission. The adapter checks capture semantics and target identity. The owner uses the journal's Mac/account identity, generates random IDs and challenges, and preserves the draft's original observation times. The caller supplies time from the configured sleep-inclusive authority clock, never from phone messages.
+The coordinator accepts drafts only from a trusted adapter that has checked capture semantics and target identity.
+A decoded remote submission is not a validated draft.
+The owner uses the journal's Mac/account identity and generates random IDs and challenges. It preserves the draft's original observation times.
 
-Before consuming a phone decision, the service rechecks the target under the same serialization boundary. A known timeout or disappearance must retire the request first. The channel supplies its authenticated phone identity and enrollment epoch independently of the decision bytes. The owner checks that identity and epoch against current durable enrollment in the consumption transaction.
+The caller must supply time from the configured authority clock, which includes sleep. Phone messages cannot supply authority time.
 
-Invalid signatures, unknown requests, and wrong channels do not allocate audit events. Rejection aggregation and its rate limits remain separate work. Creation, pending retirement, consumption, and post-consumption outcomes use the existing journal.
+Before consuming a phone decision, the service must recheck the target within the same serialization boundary.
+It must retire a request with a known timeout or disappearance before consumption.
+
+The channel supplies its authenticated phone identity and enrollment epoch independently of the decision bytes.
+The owner checks both values against current durable enrollment within the consumption transaction.
+
+The owner creates no audit event for an invalid signature, unknown request, or wrong channel.
+Rejection aggregation and rate limits remain unimplemented.
+The owner uses the existing journal for creation, pending retirement, consumption, and post-consumption outcomes.
 
 ## State and capture lifetime
 
-Admission publishes the payload only after creation metadata commits. It does not publish a provisional in-memory entry on a write failure. Consumption and outcomes update memory only after their journal transaction succeeds. A failed retirement keeps the prior state and reports an error; it cannot claim a result that was not recorded.
+Admission publishes the payload only after the journal commits creation metadata. A failed write publishes no provisional in-memory entry.
+Consumption and outcome recording update memory only after their journal transaction succeeds.
+A failed retirement keeps the previous state and reports an error. It cannot claim an unrecorded result.
 
-`pendingRequest` returns only a current queued or presented request. It checks the storage lease and expires an elapsed authorization deadline before returning. `markPresented` is idempotent. Dismissing a phone sheet does not call retirement or change the request.
+`pendingRequest` returns only a current queued or presented request.
+It checks the storage lease and expires a request whose authorization deadline has elapsed before returning.
+Repeated `markPresented` calls have the same effect as one call. Dismissing a phone sheet neither retires nor changes the request.
 
-`consumedRequest` retains the original binding while the phase is Authorized or Executing. It is data for the executor's separate target and checkpoint checks, never permission to dispatch. Expiry cannot rewrite an already consumed action. Terminal transitions release the coordinator's capture reference. The host must also release any copies held by adapters or transport queues.
+`consumedRequest` retains the original binding while the phase is Authorized or Executing.
+The executor uses this data for its separate target and checkpoint checks. The data grants no dispatch permission.
+Expiry cannot rewrite an already consumed action.
 
-`state` returns local observed metadata with a positive revision suitable for a status payload. It retains the reason, terminal time, deciding phone, and request bindings after capture release. Reconciliation can construct status without retaining a separate outcome description.
+Terminal transitions release the coordinator's capture reference. The host must also release copies held by adapters or transport queues.
 
-Terminal time stays fixed. The wire terminal age equals terminal time minus first-observed time. This value measures time until completion. The metadata alone carries no signature and guarantees no freshness.
+`state` returns locally observed metadata with a positive revision that a status payload can use.
+It retains the reason, terminal time, deciding phone, and request bindings after capture release.
+Reconciliation can construct status without a separate retained outcome description.
+
+Terminal time stays fixed. The wire terminal age equals terminal time minus first-observed time, so it measures time until completion.
+The metadata carries no signature and cannot establish freshness.
 
 The host must:
 
-- Drive deadline evaluation even without phone traffic.
-- Reconcile terminal state to all devices and withdraw queued work.
-- Call `reconcileDelivery` after every owner transition and before transport work. It reads current owner state, commits elapsed expiry, and closes deliveries after capture release.
-- Apply its withdrawals to queued and started retry tasks before discarding a closed delivery owner.
-- Call it before `forgetTerminal`; forgotten requests cannot be reconciled.
+- Evaluate deadlines even without phone traffic.
+- Reconcile terminal state with all devices and withdraw queued work.
+- Call `reconcileDelivery` after every owner transition and before transport work.
+- Apply its withdrawals to queued tasks and started retry tasks before discarding a closed delivery owner.
+- Call `reconcileDelivery` before `forgetTerminal`, because reconciliation cannot find forgotten requests.
 
-Storage or clock errors prohibit transport work. The host must stop affected delivery tasks.
+`reconcileDelivery` reads current owner state, commits elapsed expiry, and closes deliveries after capture release.
 
-Before the first transport write, call `handoffDelivery` under the root owner's serialization boundary.
-Prepare asynchronous resources first. The method rereads current owner state and protected journal trust, then calls the synchronous transport callback.
-A resolved request returns withdrawals from retained metadata, even after capture release. Elapsed expiry must commit before it can return those withdrawals.
-Storage or clock failure prevents the callback from running. A stale caller snapshot cannot substitute for this read.
+The host must stop affected delivery tasks after a storage or clock error. These errors prohibit transport work.
+
+The host must prepare asynchronous resources before calling `handoffDelivery`.
+It must call this method within the root owner's serialization boundary before the first transport write.
+The method rereads current owner state and protected journal trust, then calls the synchronous transport callback.
+
+For a resolved request, the method returns withdrawals from retained metadata, even after capture release.
+It must commit elapsed expiry before returning those withdrawals.
+A storage or clock failure prevents the callback from running. A stale caller snapshot cannot replace the current read.
 
 ```mermaid
 sequenceDiagram
@@ -84,15 +113,29 @@ sequenceDiagram
 ```
 
 The callback must not await, reenter either owner, or mutate authority state.
-Return false only when no bytes or work were accepted. After accepting ownership, return true even if later delivery fails.
-A refused handoff can retry with the original identity and deadline. An accepted identity cannot start a second first handoff.
-The receiving queue then owns bounded retries and must receive subsequent withdrawals and routing changes.
-Always apply the returned update, including when `delivery` is nil. Acceptance is not provider acceptance, phone receipt, or action authorization.
-This method does not install an IPC endpoint, invoke the asynchronous gateway actor, or replace target validation by the host.
+It must return false only when it has accepted no bytes or work.
+After accepting ownership, it must return true even if delivery later fails.
 
-`ApprovalRequestState.statusPayload` preserves the v1 wire contract. Internal Unknown with target disappearance projects to Cancelled/target-disappeared, which existing phones render as “No longer available · reason unknown.” The owner remains Unknown. The host supplies a separate increasing observation revision, original observation ID, and current authority time, then authenticates the response. Reusing the lifecycle revision for a changed time sample is not valid. A future different wire form requires capability or schema negotiation.
+The host can retry a refused handoff with the original identity and deadline.
+An accepted identity cannot start another first handoff.
+The receiving queue owns bounded retries. The host must send subsequent withdrawals and routing changes to that queue.
 
-The configured request count includes terminal metadata until `forgetTerminal` removes it. The capture byte limit includes Authorized and Executing requests until their terminal outcome. Forgetting cannot remove a live request or its durable consumption receipt. New admission always creates a new ID and challenge.
+The host must apply every returned update, including when `delivery` is nil.
+Queue acceptance proves neither provider acceptance nor phone receipt. It grants no action authorization.
+`handoffDelivery` does not install an interprocess communication (IPC) endpoint or invoke the asynchronous gateway actor.
+The host must still validate the target.
+
+`ApprovalRequestState.statusPayload` preserves the v1 wire contract.
+It maps internal Unknown with target disappearance to Cancelled/target-disappeared.
+Existing phones display this as “No longer available · reason unknown.” The owner's state remains Unknown.
+
+The host supplies a separate increasing observation revision, the original observation ID, and current authority time. It then authenticates the response.
+The host must not reuse a lifecycle revision for a changed time sample.
+A different wire form requires capability or schema negotiation.
+
+The configured request count includes terminal metadata until `forgetTerminal` removes it.
+The capture byte limit includes Authorized and Executing requests until they reach a terminal outcome.
+Forgetting cannot remove a live request or its durable consumption receipt. Every new admission creates a new ID and challenge.
 
 ## Unknown, expiry, and restart
 
@@ -106,24 +149,44 @@ Pending retirement uses distinct reasons:
 | Target disappears without an established result | Unknown with target-disappearance metadata |
 | Authority restarts before consumption | Cancelled; fresh submission or recapture required |
 
-A 1Password expiry estimate alone is not an observed timeout. The shared `loseTarget` transition permits Unknown only for queued or presented requests. Consumed actions use the existing outcome transitions. Unknown stays terminal, even if late evidence arrives.
+A 1Password expiry estimate does not establish an observed timeout.
+The shared `loseTarget` transition permits Unknown only for queued or presented requests.
+Consumed actions use the existing outcome transitions. Unknown stays terminal even if evidence arrives later.
 
-Clock regression or an epoch change retires the live coordinator and drops its captures. The host closes delivery and performs the normal recovery path. Storage closure blocks live snapshots. Errors are not authenticated no-admission responses and must never trigger automatic action replay.
+A clock regression or epoch change retires the live coordinator and releases its captures.
+The host closes delivery and follows the normal recovery path. Closed storage blocks live snapshots.
+Errors do not authenticate a no-admission result. They must never trigger automatic action replay.
 
-A new coordinator starts empty. Journal history and old consumption receipts cannot reconstruct a live request or execution binding. `historicalOutcome` supplies retained winner evidence for Already handled responses. Startup recovery must still classify unresolved historical actions; this component does not retry them or invent outcomes.
+A new coordinator starts empty. Journal history and old consumption receipts cannot reconstruct a live request or execution binding.
+`historicalOutcome` supplies retained evidence of the winning decision for Already handled responses.
+Startup recovery must still classify unresolved historical actions. The coordinator neither retries those actions nor invents outcomes.
 
 ## Evidence and remaining gates
 
-Sixteen normal-user tests use the real protected journal and disposable P-256 keys. They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, decline, deadline enforcement, target loss, journal failures, outcome retention, memory limits, and restart.
+Sixteen normal-user tests use the real protected journal and disposable P-256 keys.
+They cover fresh bindings, metadata privacy, presentation, first-decision ownership, current enrollment, and decline.
+They also cover deadlines, target loss, journal failures, outcome retention, memory limits, and restart.
 
-Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss. No action is executed and no real credential, provider, or phone is used.
+Swift and Kotlin test every lifecycle state/event pair against the same fixture, including pending target loss.
+The tests execute no action and use no real credential, provider, or phone.
 
-Protected service hosting, authenticated transport, actual adapter validation, protected checkpoint recovery, lifecycle storage reservations, deadline scheduling, and physical-device checks remain required before production admission or dispatch.
+Production admission or dispatch still requires protected service hosting, authenticated transport, actual adapter validation, and protected checkpoint recovery.
+It also requires lifecycle storage reservations, deadline scheduling, and physical-device checks.
 
 ## Expiry without phone traffic
 
-`expirePending` scans the bounded live request set at one authority time sample. It selects elapsed queued or presented requests and commits their expiry events in one journal transaction. Only a successful commit changes live state and releases captures. A failure on any audit insert leaves the whole selected set unchanged. Authorized and executing requests retain their original state.
+`expirePending` scans the bounded live request set using one authority time sample.
+It selects queued or presented requests whose deadlines have elapsed. It commits their expiry events in one journal transaction.
+Only a successful commit changes live state and releases captures.
 
-Run the sweep under `AuthorityJournal.withRequests`. Reconcile each returned state with its delivery owner and withdraw queued work. A failed sweep is an authority error; stop affected delivery work instead of reporting expiry. The host must supply its own timer and sleep-inclusive clock. This API does not install that timer or emit a network status message.
+A failure on any audit insert leaves the entire selected set unchanged. Authorized and executing requests keep their original state.
 
-Tests cover exact deadlines, future deadlines, presented requests, already consumed requests, repeated sweeps, closed storage, and rollback after the second audit insert fails.
+The host must run the sweep under `AuthorityJournal.withRequests`.
+It must reconcile each returned state with its delivery owner and withdraw queued work.
+A failed sweep is an authority error. The host must stop affected delivery work without reporting expiry.
+
+The host must supply its own timer and a clock that includes sleep.
+`expirePending` neither installs that timer nor sends a network status message.
+
+Tests cover exact and future deadlines, presented requests, consumed requests, repeated sweeps, and closed storage.
+They also check rollback after the second audit insert fails.

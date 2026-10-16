@@ -1,6 +1,9 @@
 # Android request-window retention
 
-The live inbox retains active requests and recent completed results. At capacity, a new authenticated request can replace the oldest retained terminal result. A nonterminal request is never removed to make room. A terminal unknown outcome stays unknown when its handle is retired.
+The live inbox keeps active requests and recent completed results.
+When full, it can replace the oldest terminal result with a new authenticated request.
+It never removes a nonterminal request to make room.
+Retiring a handle leaves a terminal unknown outcome unknown.
 
 ```mermaid
 flowchart LR

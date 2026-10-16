@@ -1,6 +1,8 @@
 # Signed approval messages
 
-`ApprovalMessage` carries an existing signed body through the negotiated channel. Swift and Kotlin preserve the exact body and detached signature. Carrier parsing grants no authority and does not canonicalize the enclosed body.
+`ApprovalMessage` carries a signed body through the negotiated channel.
+Swift and Kotlin preserve the exact body and detached signature.
+Parsing the carrier neither grants authority nor canonicalizes the enclosed body.
 
 ```mermaid
 flowchart LR

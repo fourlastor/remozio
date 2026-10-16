@@ -1,7 +1,7 @@
 # Mac account preparation
 
-The installed app can prepare command approval storage for its authenticated local Mac account.
-The user selects target UIDs and accepts the separate Remozio command policy before administrator authorization.
+The installed app prepares command approval storage for its authenticated local Mac account.
+The user selects target user IDs (UIDs) and accepts the separate Remozio command policy before administrator authorization.
 This policy does not inherit sudoers restrictions.
 
 ```mermaid

@@ -1,6 +1,8 @@
 # Push token ownership
 
-`FCMTokenSource` owns one provider configuration's in-memory OAuth cache. Concurrent callers share one refresh. Each caller receives a grant that belongs to this source and its current credential generation.
+`FCMTokenSource` caches OAuth tokens in memory for one provider configuration.
+Concurrent callers share one refresh.
+Each caller receives a grant bound to this source and its current credential generation.
 
 ```mermaid
 flowchart TD

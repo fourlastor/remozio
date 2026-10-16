@@ -1,7 +1,8 @@
 # Bounded administrative setup listener
 
-The Root Mach listener retains accepted connections through a shared reservation registry.
-A reservation covers construction and handshake. It does not wait for a free connection slot.
+The Root Mach listener tracks accepted connections in a shared reservation registry.
+Each reservation covers connection construction and the handshake.
+The listener refuses a connection when no slot is free.
 
 ```mermaid
 flowchart TD

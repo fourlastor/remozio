@@ -1,7 +1,8 @@
 # Native command process owner
 
 The native owner prepares the embedded command child through public `posix_spawn` and private pipes.
-It preserves captured bytes and observes real process events. These mechanics grant no dispatch permission.
+It preserves captured bytes and observes real process events.
+The caller still needs separate dispatch permission.
 The authority service does not call this API yet.
 
 ```mermaid

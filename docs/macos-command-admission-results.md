@@ -1,6 +1,8 @@
 # Typed command admission results
 
-The frontend can explicitly negotiate local wire version 2, submission schema 1, and input carrier 3. This contract defines typed results on the authenticated private reply channel. Wire version 1 remains unchanged and grants no typed result meaning.
+The frontend can negotiate typed results on the authenticated private reply channel.
+It must explicitly select local wire version 2, submission schema 1, and input carrier 3.
+Wire version 1 keeps its existing behavior and does not define typed results.
 
 The public `submitWithResult` method authenticates the actual replying Root process against the retained handshake incarnation. It then checks the exact submission and canonical result before the same continuous deadline ends. Product callers cannot construct `VerifiedCommandAdmissionResult` themselves.
 

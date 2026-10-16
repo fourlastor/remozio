@@ -2,7 +2,10 @@
 
 `CommandCapture` supports approval wire 1 with command capture schemas 1, 2, and 3. Swift and Kotlin retain typed fields and exact canonical bytes.
 
-The caller supplies the expected schema from the authenticated request contract. The default is schema 1 for existing callers. The inner version must match exactly. Parsing establishes structure, not OS provenance.
+The caller supplies the expected schema from the authenticated request contract.
+Existing callers default to schema 1.
+The inner version must match exactly.
+Parsing checks structure but cannot prove that the operating system supplied the capture.
 
 ```mermaid
 flowchart LR

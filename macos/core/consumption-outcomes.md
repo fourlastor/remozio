@@ -1,6 +1,8 @@
 # Durable consumption outcomes
 
-`JournalTransaction.transitionConsumption` records an outcome observation and its audit event in the same transaction. The original winning decision remains immutable. A returned state is historical evidence, not an action permit.
+`JournalTransaction.transitionConsumption` records an outcome observation and its audit event in one transaction.
+It never changes the original winning decision.
+The returned state describes history and grants no action permit.
 
 ```mermaid
 stateDiagram-v2

@@ -1,7 +1,8 @@
 # Authority key provisioning
 
-`AuthorityKeyProvisioning.restoreOrCreate` gives privileged setup a hardware-only authority identity for one Mac/account context.
-The public API requires real and effective Root identity. It creates no parent directory, account, service or enrollment.
+`AuthorityKeyProvisioning.restoreOrCreate` restores or creates a hardware-only authority identity for one Mac/account during privileged setup.
+The public API requires real and effective Root identity.
+It creates no parent directory, account, service or enrollment.
 The setup host must first verify administrator authorization, its code and the protected installation.
 An established identity must supply its retained public-key pin. A missing pinned record never creates a replacement.
 

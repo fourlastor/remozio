@@ -1,7 +1,8 @@
 # Command caller lifetime
 
 The native observer watches the original authenticated caller. It never signals or reaps that process.
-The serialized command owner uses confirmed exit evidence to distinguish Requester exited before execution from other preparation failures.
+The serialized command owner reports Requester exited before execution only after confirming exit.
+It keeps other preparation failures separate.
 
 ```mermaid
 flowchart TD

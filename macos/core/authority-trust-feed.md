@@ -1,6 +1,9 @@
 # Authority trust feed
 
-The dedicated transport service retains an `AuthorityTrustFeed` and its `DirectApprovalTransportHost`. Construct the host with a validator that calls `feed.validatePeer(peer, revision:)`. Start the feed with that host before starting the host's listener. Close both during service shutdown.
+The dedicated transport service owns an `AuthorityTrustFeed` and its `DirectApprovalTransportHost`.
+Construct the host with a validator that calls `feed.validatePeer(peer, revision:)`.
+Start the feed with that host before starting the host's listener.
+Close both during service shutdown.
 
 ```mermaid
 sequenceDiagram

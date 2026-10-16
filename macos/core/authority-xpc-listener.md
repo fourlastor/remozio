@@ -1,6 +1,9 @@
 # Authority listener ownership
 
-`AuthorityXPCListener` owns the root Mach listener, accepted connections, exported endpoints, handshake deadlines, and one shared work budget. Its name and scope come from protected local configuration. Starting requires effective UID zero. This check does not install or register the Mach service and does not replace protected deployment.
+`AuthorityXPCListener` owns the root Mach listener, accepted connections, exported endpoints, handshake deadlines, and one shared work budget.
+Protected local configuration supplies its name and scope.
+Starting requires effective UID zero.
+The caller must still install and register the Mach service through protected deployment.
 
 The release peer policy is configured on the listener before activation. The delegate rejects calls for another listener and reserves capacity before creating an endpoint. The endpoint checks peer credentials and configures the accepted connection's signing policy before activation. All endpoints use the same handler budget.
 

@@ -1,6 +1,7 @@
 # Phone relay connector
 
-`RelayConnector` opens outer HTTPS for a trusted relay endpoint. It returns an `EncryptedRecordTransport` for `TLSRecordSession`.
+`RelayConnector` opens an HTTPS connection to a trusted relay endpoint.
+It returns an `EncryptedRecordTransport` for the inner TLS connection managed by `TLSRecordSession`.
 
 ```mermaid
 sequenceDiagram

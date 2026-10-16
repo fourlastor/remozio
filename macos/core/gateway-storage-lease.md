@@ -1,7 +1,8 @@
 # Protected gateway storage
 
 `ProtectedGatewayLease` holds the dedicated push service's existing directory, writer lock and database file identities.
-It provides exclusive local ownership for a future gateway database connection. It does not install a service or create storage.
+It gives a future gateway database connection exclusive local ownership of those files.
+It does not install a service or create storage.
 
 ```mermaid
 flowchart TD

@@ -1,10 +1,15 @@
 # Phone request core
 
-This Kotlin/JVM module owns authenticated command sessions and signed status tracking. The Android app uses these classes directly. They contain no Android platform APIs, approval controls, or embedded private keys. The transport package owns the optional relay socket connection. The audit core owns encrypted storage through caller-supplied adapters.
+The Android app uses this Kotlin/JVM module for authenticated command sessions and signed status tracking.
+The classes contain no Android platform APIs, approval controls, or embedded private keys.
+The transport package owns the optional relay socket connection.
+The audit core manages encrypted storage through caller-supplied adapters.
 
 A session verifies a command against caller-supplied trusted enrollment identity. It retains the typed capture until a verified terminal status clears it. The status tracker preserves request bindings, revision ordering, outcome continuity, and elapsed-time bounds. The caller still owns enrollment invalidation and clock sampling.
 
-Run `:phone-core:test` for the portable unit tests. They reuse the invented command fixture from the Android debug source set. The fixture is a declared test input, not a runtime dependency or production resource.
+Run `:phone-core:test` for the portable unit tests.
+They reuse the synthetic command fixture from the Android debug source set.
+Production resources and runtime code do not depend on that fixture.
 
 ## Swift/Kotlin flow checks
 
@@ -20,7 +25,13 @@ Request keys contain Mac, account, and request IDs. Every delivery authenticates
 
 Closed sessions clear their capture, expose a local closed signal, and reject later status input. This is not a fabricated signed expiry or action outcome. Android removes the inspection and dismisses it when that signal arrives. Already copied snapshots cannot be erased by closing the owner.
 
-Limits are explicit caller-supplied window bounds, not selected product defaults. Terminal handles remain as tombstones during the window. Capacity fails explicitly; it never silently evicts a visible request or forgets a terminal result. Durable history, authenticated reconnect-window rotation, enrollment persistence, and product retention settings remain to be implemented. This layer provides neither freshness nor durable replay protection and exposes no approval control.
+Callers supply request-window limits. Product defaults remain undecided.
+Terminal handles remain as tombstones during the window.
+When capacity is exhausted, the inbox fails explicitly without evicting a visible request or forgetting a terminal result.
+
+Durable history, authenticated reconnect-window rotation, enrollment persistence, and product retention settings remain unfinished.
+This layer does not establish freshness or durable replay protection.
+It exposes no approval control.
 
 The [wake router](PUSH.md) coalesces opaque hints per trusted enrollment and tracks bounded fetch demand.
 

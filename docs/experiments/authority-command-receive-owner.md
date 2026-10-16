@@ -1,6 +1,8 @@
 # Authority command receive owner
 
-The shared Root runtime now has a command receive worker. The worker creates, polls, and closes one Mach host on a dedicated serial queue. It uses the existing journal and clock. Blocking Mach receives do not occupy Swift's cooperative executor.
+The shared Root runtime uses a command receive worker on a dedicated serial queue.
+The worker creates, polls, and closes one Mach host with the runtime's journal and clock.
+Blocking Mach receives therefore do not occupy Swift's cooperative executor.
 
 ```mermaid
 flowchart LR

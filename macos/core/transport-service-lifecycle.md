@@ -1,6 +1,8 @@
 # Transport service lifetime
 
-`DirectApprovalTransportService` connects the direct listener host to its authenticated authority feed. Its production constructor supplies the feed as the host's live peer validator. It owns no journal or authority key.
+`DirectApprovalTransportService` connects the direct listener host to its authenticated authority feed.
+The production constructor uses the feed to validate the host's peers against live authority state.
+The service owns no journal or authority key.
 
 ```mermaid
 sequenceDiagram

@@ -1,8 +1,20 @@
 # Native FCM wake sender
 
-`FCMWakeSender` makes one authenticated HTTPS attempt to Firebase for one registered Android app instance. Each Mac can use this client independently. It has no central service dependency beyond Firebase itself.
+`FCMWakeSender` makes one authenticated HTTPS attempt to Firebase Cloud Messaging (FCM) for one registered Android app instance.
+Each Mac can use the client independently.
+Firebase is its only central service dependency.
 
-The data payload has two fields: `wake_v1` and `enrollment_v1`. Each is a base64-encoded, opaque 32-byte identifier supplied by the delivery owner. The enrollment tag selects one pinned Mac/account enrollment on a phone shared by several Macs. Allocate it randomly during authenticated enrollment and reject duplicate tags there. It is only a routing hint; the phone must ignore unknown or retired tags and never follow a push-supplied endpoint. Never derive it from command text or other sensitive content. The message contains no request details, account names, credentials or approval decisions. The phone must resolve the wake and fetch authoritative state over its separately authenticated channel.
+The data payload has two fields: `wake_v1` and `enrollment_v1`.
+The delivery owner supplies both as base64-encoded, opaque 32-byte identifiers.
+The enrollment tag selects one pinned Mac/account enrollment on a phone shared by several Macs.
+Allocate it randomly during authenticated enrollment and reject duplicate tags there.
+
+The tag only hints where to route the wake.
+The phone must ignore unknown or retired tags and never follow a push-supplied endpoint.
+Never derive a tag from command text or other sensitive content.
+
+The message contains no request details, account names, credentials or approval decisions.
+The phone must resolve the wake and fetch authoritative state over its separately authenticated channel.
 
 ```mermaid
 flowchart LR

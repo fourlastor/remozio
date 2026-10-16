@@ -1,6 +1,6 @@
 # Resumable account storage setup
 
-`AuthorityAccountInitialization.resume` composes the retained setup stages into one serialized Root operation.
+`AuthorityAccountInitialization.resume` runs the saved setup stages as one serialized Root operation.
 The host must first verify administrator consent, signed code, protected account scope and the current installation.
 The operation does not register services, enroll phones or grant command admission.
 

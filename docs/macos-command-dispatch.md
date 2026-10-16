@@ -1,7 +1,9 @@
 # Durable command dispatch
 
 The journal retains each command's original resources and native process owner under one lock.
-The pending request table does not own active children. Closing storage cancels unreleased helpers and leaves released work under native supervision.
+The pending request table does not own active children.
+Closing storage cancels unreleased helpers.
+The native supervisor continues to own work that has already been released.
 
 ```mermaid
 sequenceDiagram

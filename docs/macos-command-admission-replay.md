@@ -1,6 +1,8 @@
 # Command admission replay transaction
 
-`admitCommand` reserves the original submission ID and nonce when it creates the approval request. It uses the configured Mac/account scope and SHA-256 of the retained canonical capture. Callers cannot supply a substitute digest to this admission path.
+`admitCommand` reserves the original submission ID and nonce when it creates the approval request.
+It computes SHA-256 from the retained canonical capture and uses the configured Mac/account scope.
+Callers cannot substitute another digest during admission.
 
 ```mermaid
 flowchart TD

@@ -1,6 +1,7 @@
 # Native Mac application
 
-The Xcode target builds `Remozio.app` for macOS 26 and Apple Silicon. This is the product app scaffold, separate from the disposable packaging experiment.
+The Xcode target builds `Remozio.app` for macOS 26 and Apple Silicon.
+The product app is separate from the disposable packaging experiment.
 
 The SwiftUI app has a main window, a menu bar entry, and a native Settings window. The menu can reopen the main window and quit the app. Settings can hide the menu entry; the Dock and Applications remain available. That preference uses the current user's defaults. It carries no enrollment or approval authority.
 
@@ -9,7 +10,13 @@ The form reports invalid durations and contradictory backoff values.
 These preferences apply to new CLI invocations and carry no authority pins or installation identity.
 CLI integration is still in progress. These settings do not activate a command service or change approval expiry.
 
-The app shows an explicit unconfigured state until protected metadata is available. The Pair a phone sheet now connects the existing local pairing channels when protected service metadata is available. It does not provision those services or complete the approval UI integration by itself. It does not load the experiment's service manifests, request permissions, or start privileged background services. Login registration applies only to the main app. Privileged services still need the protected installation and identity gates before integration.
+The app shows an unconfigured state until protected metadata is available.
+With protected service metadata, the Pair a phone sheet connects the local pairing channels.
+The sheet does not provision services or complete approval UI integration.
+
+The app does not load experiment service manifests, request permissions, or start privileged background services.
+Login registration applies only to the main app.
+Privileged services still require protected installation and identity checks before integration.
 
 ## Build checks
 
@@ -21,7 +28,12 @@ python3 scripts/check-macos-app.py
 
 The script builds Debug and Release, verifies their signatures and hardened runtime, and checks arm64 architecture, deployment targets, localization resources, and bundle contents. It does not launch either app. The repository gate runs this check on macOS.
 
-Build outputs are under `.build/macos-app/DerivedData/Build/Products/`. Debug uses `dev.remozio.mac.debug`; Release uses `dev.remozio.mac`. Both currently use ad-hoc signing for local build validation. The project explicitly enables the runtime signing option and disables the debug injection library. Release configuration is not a distributable release: Developer ID signing, notarization, updater integration, and trusted service identities remain outstanding.
+Build outputs are under `.build/macos-app/DerivedData/Build/Products/`.
+Debug uses `dev.remozio.mac.debug`; Release uses `dev.remozio.mac`.
+Both use ad-hoc signing for local build validation.
+The project enables the runtime signing option and disables the debug injection library.
+
+Distribution still requires Developer ID signing, notarization, updater integration, and trusted service identities.
 
 Logs are `.build/macos-app/xcodebuild-debug.log` and `.build/macos-app/xcodebuild-release.log`. The shared Xcode scheme is available at `macos/app/Remozio.xcodeproj`.
 
@@ -45,7 +57,9 @@ The main window can open an encrypted setup file in a native sheet. The file pic
 
 The password entry clears when opening starts and when the sheet closes. Derivation retains a temporary password copy until it finishes; this does not promise memory erasure. Cancellation prevents a late result from replacing the view. The UI receives only category and scope metadata, never the decrypted configuration or credentials. Closing the sheet does not change setup state.
 
-This is a preview, not an import command. Provider access is unverified; protected application and provisioning remain pending. The UI says this before and after opening a file.
+Opening a file shows its scope without importing it.
+Provider access is unverified, and protected application and provisioning remain unfinished.
+The UI states these limits before and after opening a file.
 
 For synthetic offscreen renders of the actual SwiftUI view:
 

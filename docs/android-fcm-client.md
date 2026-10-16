@@ -1,7 +1,8 @@
 # Android Firebase client
 
 The app can import public Firebase client options at runtime. It does not need a project-specific build.
-Mac delivery registration and authenticated background request fetching remain follow-up work. Client registration alone does not enable remote approval alerts.
+Mac delivery registration and authenticated background request fetching remain unfinished.
+Remote approval alerts require both, in addition to client registration.
 
 ## Setup and ownership
 

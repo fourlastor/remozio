@@ -1,9 +1,10 @@
 # Configured command runtime
 
-The command startup record now composes with the existing Root runtime.
+The Root runtime uses the command startup record to configure command handling.
 The factory uses one request journal, one clock and the existing presence and wake owners.
 Version 2 also attaches an owned scheduler to the existing native executor.
-It creates no second authority. Installed activation remains gated.
+It creates no second authority.
+Installed activation still requires the remaining integration checks.
 
 ```mermaid
 flowchart TD

@@ -1,6 +1,8 @@
 # Opaque push data
 
-`PushData` defines the provider's string-to-string data map in Swift and Kotlin. A parsed message is an untrusted hint, never approval authority.
+`PushData` defines the provider's string-to-string data map in Swift and Kotlin.
+The phone treats a parsed message as an untrusted hint.
+It grants no approval authority.
 
 | Message | Exact keys | Decoded byte lengths |
 | --- | --- | --- |

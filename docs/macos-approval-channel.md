@@ -1,6 +1,7 @@
 # Persistent approval channel
 
-An enrolled phone keeps one authenticated channel open during foreground request review. The default Mac handler now connects request delivery and decision/status exchange.
+An enrolled phone keeps one authenticated channel open while the user reviews requests in the foreground.
+The default Mac handler uses that channel to deliver requests and exchange decisions and statuses.
 
 ```mermaid
 sequenceDiagram

@@ -1,7 +1,7 @@
 # Machine inventory before account enrollment
 
+Inventory format 2 describes an installation before account enrollment.
 First installation must not infer an account or grant command execution.
-Inventory format 2 can now describe that earlier state.
 The package installer and account enrollment flow remain unfinished.
 
 ```mermaid

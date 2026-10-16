@@ -1,6 +1,8 @@
 # Audit tables in the authority journal
 
-`AuditJournalTables` stores the closed audit metadata schema in the authority's existing SQLite connection. It does not open a second database, own a consumption ledger, commit an outer transaction, or issue a dispatch permit.
+`AuditJournalTables` stores the closed audit metadata schema through the authority's existing SQLite connection.
+The authority continues to own the consumption ledger and outer transaction.
+The table layer opens no second database and issues no dispatch permit.
 
 ```mermaid
 sequenceDiagram

@@ -1,6 +1,7 @@
 # Gateway history collection
 
-A valid history page can omit a revision. Counter recovery therefore needs a complete sequence anchored to an authenticated gateway head.
+Counter recovery requires a complete revision sequence anchored to an authenticated gateway head.
+A valid history page alone can omit a revision.
 
 ```mermaid
 sequenceDiagram

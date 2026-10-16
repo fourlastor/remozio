@@ -1,7 +1,8 @@
 # Signed Mac release declarations
 
 The app contains a canonical CBOR declaration in its signed `Info.plist`.
-The key is `RemozioReleaseManifest`. The current build emits schema 1; the reader supports schemas 1, 2 and 3.
+The key is `RemozioReleaseManifest`.
+The current build emits schema 1. The reader supports schemas 1, 2 and 3.
 The build generates the plist input after signing the six helpers, before signing the app.
 It does not modify a processed plist or an existing signature.
 

@@ -1,6 +1,8 @@
 # Root request provider assembly
 
-`AuthorityRequestProviders` composes discovery, signed request delivery, and decision/status exchange for a provisioned root service. Its public constructor requires an `EnclaveAuthorityRequestSigner`. Software signing is an internal test seam.
+`AuthorityRequestProviders` combines discovery, signed request delivery, and decision/status exchange for a provisioned root service.
+Its public constructor requires an `EnclaveAuthorityRequestSigner`.
+Only internal tests can supply a software signer.
 
 ```mermaid
 flowchart TD

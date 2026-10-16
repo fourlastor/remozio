@@ -1,6 +1,9 @@
 # Channel negotiation version 1
 
-The Swift and Kotlin `ChannelNegotiation` owners bind capability offers to one fresh, mutually authenticated TLS connection. The host must authenticate both enrolled transport keys and retain the expected Mac, account, phone, and enrollment epoch before creating an owner. This protocol does not enroll devices or authenticate an untrusted transport.
+The Swift and Kotlin `ChannelNegotiation` owners bind capability offers to one fresh, mutually authenticated TLS connection.
+Before creating an owner, the host must authenticate both enrolled transport keys.
+It must retain the expected Mac, account, phone, and enrollment epoch.
+This protocol does not enroll devices or authenticate an untrusted transport.
 
 ```mermaid
 sequenceDiagram

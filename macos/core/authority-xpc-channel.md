@@ -1,6 +1,8 @@
 # Transport-to-authority XPC client
 
-`AuthorityXPCChannel` owns one connection from the dedicated transport service to a root Mach service. It configures the release [peer policy](xpc-peer-policy.md) before activation and requires an expected root user ID. It has no authority key or journal access.
+`AuthorityXPCChannel` owns one connection from the dedicated transport service to a root Mach service.
+Before activation, it configures the release [peer policy](xpc-peer-policy.md).
+It requires an expected root user ID and has no authority key or journal access.
 
 The first operation is a harmless `hello` with no request data. A version-1 reply and verified server credentials open the channel. Snapshot and peer-validation calls are unavailable before this step. Every native reply also checks the connection credentials; Foundation enforces the configured signing requirement on incoming messages.
 

@@ -1,6 +1,8 @@
 # Native FCM OAuth
 
-`FCMOAuthClient` obtains a short-lived Google access token from an explicitly supplied service account. It uses Foundation and Security.framework inside the Mac app bundle. Production code needs no subprocess, additional runtime, or external credential helper.
+`FCMOAuthClient` gets a short-lived Google access token from an explicitly supplied service account.
+It uses Foundation and Security.framework inside the Mac app bundle.
+Production code needs no subprocess, additional runtime, or external credential helper.
 
 ```mermaid
 sequenceDiagram

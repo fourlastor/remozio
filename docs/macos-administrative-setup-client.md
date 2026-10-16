@@ -1,6 +1,6 @@
 # App connection for administrative setup
 
-The app uses one bounded connection to the Root setup service.
+The app limits its Root setup connection to one pending operation.
 Its service name, code policy, account and owner UID must come from verified protected installation metadata.
 The client does not accept these values from a phone or the network.
 

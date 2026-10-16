@@ -1,6 +1,9 @@
 # Protected request-service startup
 
-`AuthorityServiceRunner(requestConfigurationPath:routing:reconcileExpired:report:)` opens the request service from provisioned local state. It requires current presence and target-cleanup callbacks from the runtime owner. Neither callback has a default. They run synchronously and must not reenter the runner, service, or journal.
+`AuthorityServiceRunner(requestConfigurationPath:routing:reconcileExpired:report:)` opens the request service from provisioned local state.
+The runtime owner must supply callbacks for current presence and target cleanup.
+Neither callback has a default.
+Both run synchronously and must not reenter the runner, service, or journal.
 
 ```mermaid
 flowchart TD

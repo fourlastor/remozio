@@ -1,6 +1,6 @@
 # Local administrative setup IPC
 
-The version 1 interface exposes a harmless handshake, scoped storage progress and account storage resume.
+The version 1 interprocess communication (IPC) interface supports a harmless handshake, scoped storage progress and account storage resume.
 It has no signing, password release, command execution or cloud management method.
 
 ```mermaid

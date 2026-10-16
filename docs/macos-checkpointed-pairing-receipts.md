@@ -1,6 +1,7 @@
 # Checkpointed pairing and commit receipts
 
-An Android pairing stays prepared until the Mac confirms its durable commit. The configured authority now provides that confirmation through its existing journal owner.
+An Android pairing stays prepared until the Mac confirms its durable commit.
+The configured authority provides that confirmation through its journal owner.
 
 ```mermaid
 sequenceDiagram

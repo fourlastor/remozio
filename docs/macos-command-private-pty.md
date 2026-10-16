@@ -1,7 +1,8 @@
 # Private command terminal
 
-The command controller can own a fresh private PTY without exposing its master descriptor.
-Its slave belongs only to the spawned command. No real user terminal is attached or changed by this owner.
+The command controller owns a fresh private pseudoterminal (PTY) and keeps its master descriptor private.
+Only the spawned command uses the slave.
+This owner does not attach or change a real user terminal.
 
 ```mermaid
 flowchart LR

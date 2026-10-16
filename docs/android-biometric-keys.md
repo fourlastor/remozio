@@ -1,6 +1,8 @@
 # Android biometric key custody
 
-The Android app can create and inspect a distinct P-256 biometric key for an enrollment. Creation returns a reference for the authorized enrollment flow to persist and register. It does not enroll a phone or approve a request.
+The Android app creates and inspects a separate P-256 biometric key for each enrollment.
+The authorized enrollment flow must save and register the returned key reference.
+Creating a key does not enroll a phone or approve a request.
 
 Keys require strong biometrics for each operation, hardware-enforced authentication, and an unlocked device. Creation requests StrongBox first. Only explicit StrongBox unavailability permits a TEE retry, and only while the alias remains absent. Existing aliases are never overwritten. If generation succeeds but validation fails, the unpublished key is deleted under the creation lock. A generation failure has uncertain ownership and does not trigger deletion. Provider cleanup failures and process crashes can still leave orphaned keys; there is no automatic retry loop.
 

@@ -1,6 +1,7 @@
 # Authority runtime entrypoint
 
-The embedded authority accepts `--presence-configuration /absolute/protected/configuration.cbor`. This selects the presence and request runtime. The explicit `--configuration` mode retains the earlier trust-only runtime.
+Pass `--presence-configuration /absolute/protected/configuration.cbor` to select the embedded authority's presence and request runtime.
+The explicit `--configuration` mode selects the earlier trust-only runtime.
 
 Both modes require real and effective Root identity before reading configuration. Selecting the request mode never falls back to the trust-only service.
 

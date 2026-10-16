@@ -1,6 +1,6 @@
 # Mac setup service controls
 
-The app replaces its setup placeholder with an explicit setup-service control.
+The app lets the user explicitly enable the setup service.
 The user enables only the bundled Root setup helper.
 macOS retains control over registration and administrator approval.
 This step does not register the approval service or grant command access.

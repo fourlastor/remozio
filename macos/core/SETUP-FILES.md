@@ -1,6 +1,8 @@
 # Encrypted setup files
 
-`SetupFileEncryption` implements the encrypted container for portable setup exports. It does not export configuration, read credentials, install services, or apply imported settings. The protected setup host must supply an allowed payload and validate its schema before preview or import.
+`SetupFileEncryption` encrypts and decrypts the container for portable setup exports.
+The protected setup host must supply an allowed payload and validate its schema before preview or import.
+The codec does not export configuration, read credentials, install services, or apply imported settings.
 
 ## Version 1 container
 
@@ -19,9 +21,21 @@ The file uses [JWE compact serialization](https://www.rfc-editor.org/rfc/rfc7516
 
 The work factor follows the current [OWASP PBKDF2-HMAC-SHA512 guidance](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html). It replaces the library's 1,000-round default. Password strength still matters against offline guessing. The setup UI must explain this and offer a strong password; this codec does not estimate entropy.
 
-The profile accepts exactly the five protected header fields above, with compact sorted-key JSON and canonical unpadded base64url. Canonical reserialization rejects duplicate keys and alternative representations before the library parses them. Compression, extra headers, other algorithms, and unknown type versions are rejected. This is a restricted setup-file profile, not a general JWE importer.
+The profile accepts exactly the five protected header fields above.
+It requires compact sorted-key JSON and canonical unpadded base64url.
+Canonical reserialization rejects duplicate keys and alternative representations before the library parses them.
+The importer rejects compression, extra headers, other algorithms, and unknown type versions.
+It accepts only this setup-file profile.
 
-All lengths and the iteration range are checked before password derivation. Authentication must succeed before plaintext is returned. Errors contain no input, password, decrypted content, or provider error details. No plaintext staging file is created. Swift and provider copies cannot be reliably erased; callers must avoid retaining or logging secrets. Derivation is synchronous and belongs off the UI thread. The host must serialize imports to bound concurrent resource use.
+The codec checks all lengths and the iteration range before password derivation.
+It returns plaintext only after successful authentication.
+Errors contain no input, password, decrypted content, or provider error details.
+The codec creates no plaintext staging file.
+
+Swift and provider copies cannot be reliably erased.
+Callers must avoid retaining or logging secrets.
+Derivation runs synchronously and must stay off the UI thread.
+The host must serialize imports to limit concurrent resource use.
 
 ## Integration boundary
 

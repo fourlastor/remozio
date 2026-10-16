@@ -1,6 +1,8 @@
 # Android command connection ownership
 
-`StoredCommandConnections` owns one command connection per active enrollment. The application host must retain this registry across screen recreation. The launcher integration will supply the native factory and the shared enrollment mutex.
+`StoredCommandConnections` keeps one command connection for each active enrollment.
+The application host must retain this registry when Android recreates a screen.
+Launcher integration still needs to supply the native factory and shared enrollment mutex.
 
 ```mermaid
 flowchart TD

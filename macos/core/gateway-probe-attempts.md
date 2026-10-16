@@ -1,7 +1,8 @@
 # Durable gateway probe attempts
 
-`GatewayDatabase` now owns probe reservations and their outcomes alongside candidate and recipient state.
-These methods perform no network requests. They provide the durable handoff that the service coordinator must use before each provider attempt.
+`GatewayDatabase` stores probe reservations and outcomes alongside candidate and recipient state.
+The service coordinator must use these durable reservations before each provider attempt.
+The database methods make no network requests.
 
 ```mermaid
 stateDiagram-v2

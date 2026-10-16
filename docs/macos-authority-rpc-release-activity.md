@@ -1,6 +1,6 @@
 # Authority RPC release activity
 
-The installed authority retains shared machine activity for each presence and transport operation.
+The installed authority holds a shared machine activity reference for each presence and transport operation.
 It keeps the reference until its reply callback returns, including a nested callback.
 An idle connection retains no activity reference.
 

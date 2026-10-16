@@ -1,6 +1,8 @@
 # Android command connection owner
 
-`CommandConnection` owns one active, trusted Mac enrollment and its in-memory request inbox. The setup owner must close it before replacing or removing that enrollment. It cannot promote a prepared enrollment or change a peer pin.
+`CommandConnection` owns the in-memory request inbox for one active, trusted Mac enrollment.
+The setup owner must close the connection before replacing or removing the enrollment.
+The connection cannot activate a prepared enrollment or change a peer pin.
 
 ```mermaid
 flowchart LR

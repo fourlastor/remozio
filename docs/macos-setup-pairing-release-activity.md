@@ -1,7 +1,7 @@
 # Setup and pairing release activity
 
-The installed setup host and Root pairing endpoint participate in the existing machine activity barrier.
-This prevents their active operations from appearing idle to a future installer.
+The installed setup host and Root pairing endpoint hold references in the machine activity barrier.
+A future installer can use this barrier to detect their active operations.
 It does not enable update activation.
 
 ## Administrative setup

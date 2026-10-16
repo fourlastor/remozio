@@ -1,6 +1,9 @@
 # Decision payload, schema 1
 
-`DecisionPayload` parses and encodes the phone's decision claim. The Swift and Kotlin implementations use the same byte fixtures. This is an approval-wire-version-1 body for the existing `decision` signature domain. It does not implement enrollment, request verification, biometric signing, consumption, or dispatch.
+`DecisionPayload` parses and encodes the phone's decision claim.
+Swift and Kotlin use the same byte fixtures.
+The body uses approval wire version 1 and the existing `decision` signature domain.
+The codec does not implement enrollment, request verification, biometric signing, consumption, or dispatch.
 
 ```mermaid
 flowchart LR

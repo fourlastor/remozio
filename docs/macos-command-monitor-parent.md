@@ -1,7 +1,8 @@
 # Native monitor parent
 
 `CommandMonitor.c` gives the serialized Root owner a native monitor API.
-The authority and Swift executor now use this API. Both helpers pass protected-path and installed-code checks before preparation and release.
+The authority and Swift executor use this API.
+Both helpers must pass protected-path and installed-code checks before preparation and release.
 The host service and command frontend remain disconnected until their installation and selected elevation policy are ready.
 
 ```mermaid

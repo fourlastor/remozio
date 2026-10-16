@@ -1,6 +1,8 @@
 # Owned native byte channel
 
-`NetworkByteChannel` owns one unstarted `NWConnection`. After construction, the caller must not start or operate that connection separately. The channel starts it once and runs a caller-supplied admission check at readiness before exposing byte operations.
+`NetworkByteChannel` takes ownership of one unstarted `NWConnection` and starts it once.
+The caller must not start or operate that connection separately after construction.
+When ready, the channel runs the caller's admission check before exposing byte operations.
 
 This owner does not select TLS identities or authorize application requests. Its caller configures the connection with authenticated peer pins and the required TLS restrictions. Admission verifies the negotiated profile. The callback must be short, synchronous, and free of network access. The synthetic TLS listener checks TLS 1.3, ALPN, and rejected early data after the pinned mutual handshake.
 

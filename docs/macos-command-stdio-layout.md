@@ -2,7 +2,8 @@
 
 Schema 3 records each original stream and the original caller terminal separately.
 Root derives the routing mask from retained kernel objects before encoding approval bytes.
-Capture, native mapped execution, and Android inspection support all eight masks. Production frontend integration remains a separate gate.
+Capture, native mapped execution, and Android inspection support all eight masks.
+Production frontend integration remains unfinished.
 
 ```mermaid
 flowchart TD

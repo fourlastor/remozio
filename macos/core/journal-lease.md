@@ -1,6 +1,8 @@
 # Protected authority journal lease
 
-`ProtectedJournalLease` holds the existing storage directory, `writer.lock`, and `journal.sqlite` for the authority process. It creates no file, changes no permission, installs no service, and does not open SQLite.
+`ProtectedJournalLease` holds the existing storage directory, `writer.lock`, and `journal.sqlite` for the authority process.
+It creates no file and changes no permission.
+It neither installs a service nor opens SQLite.
 
 ```mermaid
 flowchart TD

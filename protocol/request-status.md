@@ -1,6 +1,8 @@
 # Request status, version 1
 
-`RequestStatusPayload` encodes a Mac status claim for an existing issued request. It separates an authoritative outcome from timing information. Parsing does not authenticate the claim or establish freshness.
+`RequestStatusPayload` encodes a Mac status claim for an existing issued request.
+It keeps the authoritative outcome separate from timing information.
+Parsing cannot authenticate the claim or establish freshness.
 
 The body uses approval wire version 1, message type Status, purpose Status. Use the [signature input](signing-input.md) and the current, trusted Mac authority key. A phone decision key cannot issue Mac status.
 

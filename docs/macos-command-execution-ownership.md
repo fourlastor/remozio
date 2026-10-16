@@ -1,8 +1,9 @@
 # Original command execution resources
 
 The request owner can transfer a command's original OS resources once, after a matching execute decision commits.
-The internal resource owner is non-Sendable. It remains inside the same serialized Root boundary.
-Transfer grants no permission to spawn, release or repeat an approved program.
+The internal resource owner is non-Sendable and stays inside the serialized Root boundary.
+The receiver still needs permission to spawn or release the approved program.
+Transfer does not permit repeat execution.
 
 ```mermaid
 sequenceDiagram

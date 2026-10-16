@@ -1,6 +1,8 @@
 # Accepted implementation limits
 
-The user approved these amendments on 2026-10-03. They supersede the earlier requirements for an independent whole-backup witness and a pending command-execution decision. They do not claim that production integration or platform tests are complete.
+The user approved these changes on 2026-10-03.
+They replace the earlier requirements for an independent whole-backup witness and a pending command-execution decision.
+Production integration and platform tests remain incomplete.
 
 ## Whole-Mac backup rollback
 

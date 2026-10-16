@@ -1,7 +1,7 @@
 # Protected setup configuration publication
 
-The installer needs the fixed private setup file before the bundled host can start.
-`AdministrativeSetupPublication.publish` now provides that publication step.
+`AdministrativeSetupPublication.publish` writes the fixed private setup file required by the bundled host.
+The installer must publish this file before the host can start.
 It requires an existing machine store and grants no installation, enrollment or execution authority.
 
 ```mermaid

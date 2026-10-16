@@ -1,6 +1,9 @@
 # Authority service lifetime
 
-`AuthorityService` transfers a journal connection into one owner and binds the configured XPC listener to it. The listener verifies the journal's Mac and account scope before activation. An unconfigured journal fails construction; service recovery never initializes it.
+`AuthorityService` transfers a journal connection into one owner and connects the configured XPC listener to that owner.
+Before activation, the listener verifies the journal's Mac and account scope.
+Construction fails for an unconfigured journal.
+Service recovery never initializes the journal.
 
 ```mermaid
 flowchart TD

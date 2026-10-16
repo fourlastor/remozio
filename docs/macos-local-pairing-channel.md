@@ -1,6 +1,7 @@
 # Local pairing setup channel
 
-The configured authority now stages phone enrollment through the signed Mac app channel. It shares the request journal, audit writer, checkpoint and existing Secure Enclave signer.
+The configured authority stages phone enrollment through the signed Mac app channel.
+Pairing uses the same request journal, audit writer, checkpoint and Secure Enclave signer.
 
 ```mermaid
 sequenceDiagram

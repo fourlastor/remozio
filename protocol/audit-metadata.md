@@ -1,6 +1,7 @@
 # Audit event metadata, schema 1
 
-This contract provides metadata for the authoritative journal and phone history. It does not authenticate events, commit them, prove their truth, or grant approval authority.
+This contract defines metadata for the authoritative journal and phone history.
+Encoding metadata does not authenticate or commit an event, prove that it happened, or grant approval authority.
 
 ```mermaid
 flowchart LR

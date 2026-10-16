@@ -1,6 +1,8 @@
 # WebSocket carrier experiment
 
-This extends the [TLS channel experiment](tls-channel.md) with an independent HTTPS WebSocket carrier. All listeners bind to IPv4 loopback. No Cloudflare account, phone, provider credential, or production service is involved.
+The [TLS channel experiment](tls-channel.md) also tests an independent HTTPS WebSocket carrier.
+All listeners bind to IPv4 loopback.
+The experiment uses no Cloudflare account, phone, provider credential, or production service.
 
 ```mermaid
 flowchart LR

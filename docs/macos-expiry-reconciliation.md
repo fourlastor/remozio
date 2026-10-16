@@ -1,6 +1,8 @@
 # Request expiry reconciliation
 
-Both authority service constructors use the same coordinator expiry batch. A request can expire during frame retrieval, status exchange, decision verification, a local pending check, or periodic maintenance. Every committed expiry retains a cleanup notification before another serialized operation can observe it.
+Both authority service constructors use the coordinator's expiry batch.
+A request can expire during frame retrieval, status exchange, decision verification, a local pending check, or periodic maintenance.
+Each committed expiry keeps a cleanup notification before the next serialized operation can observe it.
 
 ```mermaid
 flowchart LR

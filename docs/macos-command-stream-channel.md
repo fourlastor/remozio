@@ -1,6 +1,8 @@
 # Authenticated local command streams
 
-Wire version 4 adds ordered command IO to input carrier 4. Both peers must offer version 4 explicitly. Legacy offers stay unchanged.
+Wire version 4 carries ordered command input and output through input carrier 4.
+Both peers must offer version 4 explicitly.
+Legacy offers keep their existing behavior.
 
 The CLI retains the original Root handshake and admitted request. A new private control queue belongs to that request alone.
 
