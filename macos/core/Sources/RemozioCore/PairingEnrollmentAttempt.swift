@@ -50,6 +50,14 @@ public final class PairingEnrollmentAttempt: Sendable {
         self.started = started; self.deadline = started.milliseconds + lifetime
     }
 
+    /// Retained setup cleanup uses the same bounded monotonic lifetime as enrollment commit.
+    func remainingMilliseconds(at current: AuthorityMoment) throws -> UInt64 {
+        guard current.epoch == started.epoch, current.milliseconds >= started.milliseconds else {
+            throw PairingEnrollmentError.expired
+        }
+        return current.milliseconds < deadline ? deadline - current.milliseconds : 0
+    }
+
     static func capabilities(_ transcript: PairingTranscript) throws -> ContractCapabilities {
         var contracts: [RequestContract: Set<UInt64>] = [:]
         for capability in transcript.phone.requests {

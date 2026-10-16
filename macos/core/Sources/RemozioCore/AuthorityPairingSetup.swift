@@ -97,6 +97,11 @@ final class AuthorityPairingSetupAccess: Sendable {
         self.now = now; self.unixMilliseconds = unixMilliseconds; self.random = random; self.validateSelf = validateSelf; self.commitPairing = commit
     }
 
+    func acquireReleaseActivity() throws -> ReleaseActivityToken? { try journal.acquireReleaseActivity() }
+    func isExpired(_ attempt: PairingEnrollmentAttempt) throws -> Bool {
+        try attempt.remainingMilliseconds(at: now()) == 0
+    }
+
     func verifyCurrent() throws { try journal.read { try self.requireCurrent($0) } }
     func context() throws -> Data {
         try verifyCurrent()

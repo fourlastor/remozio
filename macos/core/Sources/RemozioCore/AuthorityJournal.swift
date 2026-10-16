@@ -141,6 +141,15 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Pairing and management work use the installed authority's existing machine barrier.
+    /// The optional result belongs only to raw component fixtures without an installed registration.
+    func acquireReleaseActivity() throws -> ReleaseActivityToken? {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            return try releaseActivity?.acquireShared()
+        }
+    }
+
     /// Authorized local setup uses the existing request owner, audit writer and independent checkpoint.
     /// The host authenticates the human transcript first and rechecks native administrator consent in the callback.
     /// Callbacks must not await or reenter this owner. A lost receipt requires reconciliation, not another enrollment.

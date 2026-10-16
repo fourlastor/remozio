@@ -61,7 +61,8 @@ These fixtures use ordinary credentials and synthetic signing policies. They do 
 The [native mechanism experiment](experiments/release-activity.md) also ran on macOS 26.6.2 and 27.0.1.
 The [macOS 26 CI record](experiments/evidence/2026-10-16-release-activity-ci.json) identifies the exact source and job.
 
-The app, setup, pairing, transport, gateway and GUI permits still need coordinated activity ownership.
+The [installed setup host and Root pairing endpoint](macos-setup-pairing-release-activity.md) also retain machine activity.
+The app, transport, gateway, GUI permits and other role work still need complete coordinated activity ownership.
 The raw component runtime keeps its optional fixture path. Installed command startup always supplies this barrier.
 The installer still needs staging validation, service quiescence, generation and protocol checks, durable activation, floor commit, and crash recovery.
 An exclusive token alone cannot authorize activation or prove that every role is idle.

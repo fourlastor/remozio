@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 import SQLite3
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -35,8 +36,9 @@ final class ScopedSetupAccountOwnerTests: XCTestCase {
                 macID: mac, maximumRecords: 10, initialize: initialize, didCommit: didCommit)
         }
         func owner(verify: @escaping (InstallationInventory) throws -> Void = { _ in },
+                   activity: ReleaseActivityBarrier? = nil,
                    resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent = { _, _ in throw Interrupted() }) throws -> SetupAccountOwner {
-            try .init(openMachine: { try self.open() }, expectedReleaseDigest: release, resume: resume, verifyHost: verify)
+            try .init(openMachine: { try self.open() }, expectedReleaseDigest: release, resume: resume, verifyHost: verify, releaseActivity: activity)
         }
         func begin() throws -> AuthorityInitializationIntent {
             let machine = try open(); defer { try? machine.close() }
@@ -71,6 +73,74 @@ final class ScopedSetupAccountOwnerTests: XCTestCase {
         guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Same-owner protected storage") }
         let f = try Fixture(); defer { f.close() }; try body(f)
     }
+    func testActivityCoversSetupHandshakeAndProgressRepliesWithoutHoldingTheWriter() throws {
+        try fixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), owner = try f.owner(activity: activity.open())
+            defer { try? owner.close() }
+            let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { getuid() }, authorize: { _ in }, invalidate: {})
+            let replies = Mutex(0), anchor = f.root.path, mac = f.mac
+            let checkReply: @Sendable () -> Void = {
+                replies.withLock { $0 += 1 }
+                do { let unexpected = try installer.acquireExclusive(); unexpected.close(); XCTFail("Reply lost activity") }
+                catch ReleaseActivityError.busy { }
+                catch { XCTFail("Unexpected activity failure") }
+                do {
+                    let machine = try PreparationIntentStore(lease: InstallationStorageLease(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                        macID: mac, maximumRecords: 10, initialize: false)
+                    try machine.close()
+                } catch { XCTFail("Reply retained the machine writer") }
+            }
+            endpoint.hello { code in XCTAssertEqual(code, AdministrativeSetupInterface.storageVersion); checkReply() }
+            endpoint.accountStorageProgress(f.account) { bytes in XCTAssertNotNil(bytes); checkReply() }
+            XCTAssertEqual(replies.withLock { $0 }, 2)
+            let update = try installer.acquireExclusive(); update.close(); endpoint.close()
+        }
+    }
+
+    func testActivityBlocksInstallationOnlyForTheSetupOperationAndReleasesAfterFailure() throws {
+        try fixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            var fail = false
+            let owner = try f.owner(verify: { _ in
+                XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+                if fail { throw Interrupted() }
+            }, activity: activity.open())
+            defer { try? owner.close() }
+            let idle = try installer.acquireExclusive(); idle.close()
+            try owner.verifyCurrent()
+            fail = true; XCTAssertThrowsError(try owner.verifyCurrent())
+            let afterFailure = try installer.acquireExclusive(); afterFailure.close()
+            try f.requireAvailableWriter()
+        }
+    }
+    func testExclusiveActivityRefusesSetupBeforeOpeningTheMachineWriterAndAllowsRetry() throws {
+        try fixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), barrier = try activity.open()
+            var opened = 0
+            let update = try installer.acquireExclusive()
+            XCTAssertThrowsError(try SetupAccountOwner(openMachine: { opened += 1; return try f.open() },
+                expectedReleaseDigest: f.release, resume: { _, _ in throw Interrupted() }, releaseActivity: barrier)) {
+                XCTAssertEqual($0 as? ReleaseActivityError, .busy)
+            }
+            XCTAssertEqual(opened, 0); update.close()
+            let owner = try f.owner(activity: barrier); defer { try? owner.close() }
+            let secondUpdate = try installer.acquireExclusive()
+            XCTAssertThrowsError(try owner.verifyCurrent()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+            secondUpdate.close(); try owner.verifyCurrent(); try f.requireAvailableWriter()
+        }
+    }
+    func testChangedActivityMetadataRefusesSetupAndReleasesItsWriter() throws {
+        try fixture { f in
+            let activity = try ReleaseActivityFixture(), path = activity.directory.appendingPathComponent("activity.lock").path
+            let owner = try f.owner(verify: { _ in XCTAssertEqual(chmod(path, 0o644), 0) }, activity: activity.open())
+            defer { try? owner.close() }
+            XCTAssertThrowsError(try owner.verifyCurrent()) { XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata) }
+            try f.requireAvailableWriter()
+            XCTAssertEqual(chmod(path, 0o600), 0)
+            XCTAssertThrowsError(try owner.verifyCurrent()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        }
+    }
+
     func testIdleOwnersReleaseTheActualWriterAndReadFreshProgress() throws {
         try fixture { f in
             let one = try f.owner(), two = try f.owner()

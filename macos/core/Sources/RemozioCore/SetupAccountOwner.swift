@@ -45,6 +45,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     private let lock = NSRecursiveLock()
     private let machines: Machines
+    private let releaseActivity: ReleaseActivityBarrier?
     private let processID = getpid()
     private let installationID: Data
     private let expectedReleaseDigest: Data
@@ -60,9 +61,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
 
     public static func open(machineDirectory: String, macID: Data, expectedReleaseDigest: Data) throws -> SetupAccountOwner {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let activity = try ReleaseActivityBarrier.open(machineDirectory: machineDirectory)
         return try .init(openMachine: { try PreparationIntentStore.open(directoryPath: machineDirectory, macID: macID) },
             expectedReleaseDigest: expectedReleaseDigest,
-            resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) })
+            resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, releaseActivity: activity)
     }
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
@@ -76,9 +78,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
-         }, activationOperations: RuntimeActivationOperations = .native) throws {
+         }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -92,9 +94,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try ServiceAccountPreparation.prepare(machine: $0, account: $1, verifyCurrent: $2)
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
-         }, activationOperations: RuntimeActivationOperations = .native) throws {
+         }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -103,10 +105,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareAccount: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent,
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
-         activationOperations: RuntimeActivationOperations) throws {
+         activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?) throws {
+        self.releaseActivity = releaseActivity
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
             installationID = try machines.use { machine in
                 guard expectedReleaseDigest.count == 32, let inventory = try machine.inventory(),
                       inventory.releaseDigest == expectedReleaseDigest else { throw AdministrativeSetupError.invalidConfiguration }
@@ -121,11 +126,24 @@ public final class SetupAccountOwner: @unchecked Sendable {
             try machines.close(); closed = true
         }
     }
+    /// The native endpoint retains this reference through response encoding and the reply callback.
+    func acquireReleaseActivity() throws -> ReleaseActivityToken? {
+        try lock.withLock {
+            guard !closed else { throw AdministrativeSetupError.unavailable }
+            guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+            return try releaseActivity?.acquireShared()
+        }
+    }
+
     private func withMachine<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
         try lock.withLock {
             guard !closed else { throw AdministrativeSetupError.unavailable }
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
-            return try machines.use(body)
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            let result = try machines.use(body)
+            try activity?.validate()
+            return result
         }
     }
     func verifyCurrent() throws {
@@ -263,6 +281,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
         try lock.withLock {
             guard !closed else { throw AdministrativeSetupError.unavailable }
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            // Activity spans both writer scopes and native registration between them.
             // No native command runs within this first machine-writer scope.
             let context = try machines.useActivation { machine -> (AccountPreparationIntent, AuthorityInitializationIntent, RuntimeActivationPlan) in
                 guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
@@ -350,6 +371,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             allowedContracts: [contract], installCommandReplay: true)
     }
     private func currentInventory(_ machine: PreparationIntentStore) throws -> InstallationInventory {
+        try releaseActivity?.validate()
         guard !closed, let inventory = try machine.inventory() else { throw AdministrativeSetupError.unavailable }
         try verifyHost(inventory)
         guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {

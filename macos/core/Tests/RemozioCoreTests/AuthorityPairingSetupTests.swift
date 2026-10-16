@@ -33,7 +33,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 12, maxItems: 1024)
         var mac: Data { Data(repeating: 1, count: 16) }
         var account: Data { Data(repeating: 2, count: 16) }
-        init(auditVersions: Set<UInt64> = [1]) throws {
+        init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil) throws {
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
             var complete = false
@@ -67,6 +67,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                 clockEpoch: environment.epoch, maximumRequests: 4, maximumRetainedBytes: 16384,
                 requestLimits: limits, captureLimits: limits, decisionLimits: limits, signingLimits: limits, auditLimits: limits)
             journal = AuthorityJournal(requests: requests)
+            if let activity { try journal.attachReleaseActivityBarrier(activity) }
             policy = try .init(teamID: app.teamID, componentIdentifier: app.identifier,
                 approvedCodeDirectoryHashes: [app.codeDirectoryHash], expectedUserID: getuid())
             let journal = journal, environment = environment, authority = authority
@@ -469,6 +470,93 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             XCTAssertThrowsError(try Fixture(auditVersions: versions)) {
                 XCTAssertEqual($0 as? AuthorityPairingSetupError, .invalidConfiguration)
             }
+        }
+    }
+
+    func testReleaseActivityRetainsIndependentPairingAttemptsUntilCancelAndDisconnect() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+        let one = try f.endpoint(), two = try f.endpoint(); try hello(one); try hello(two)
+        _ = try staged(one, proposal: f.proposal()); _ = try staged(two, proposal: f.proposal())
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        let cancelled = Box(false); one.cancelPairing { cancelled.value = $0 }; XCTAssertTrue(cancelled.value)
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        two.close()
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertEqual(try f.records(), 0); XCTAssertEqual(f.environment.signed.value, 0); try f.assertCheckpoint()
+    }
+    func testReleaseActivityUsesTheBarrierAttachedAfterPairingAccessConstruction() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let endpoint = try f.endpoint(); try hello(endpoint)
+        _ = try staged(endpoint, proposal: f.proposal())
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        endpoint.close()
+        let update = try installer.acquireExclusive(); update.close()
+    }
+    func testReleaseActivityEndpointDestructionDiscardsOnlyItsUncommittedAttempt() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+        var endpoint: AuthorityPairingXPCEndpoint? = try f.endpoint()
+        try hello(XCTUnwrap(endpoint)); _ = try staged(XCTUnwrap(endpoint), proposal: f.proposal())
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        endpoint = nil
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertEqual(try f.records(), 0); XCTAssertEqual(f.environment.signed.value, 0)
+    }
+
+    func testReleaseActivityCoversTheCommittedReceiptReplyAndThenReleases() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+        let endpoint = try f.endpoint(); try hello(endpoint)
+        let value = try staged(endpoint, proposal: f.proposal()), reply = Box<Data?>(nil)
+        let proof = try f.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let blocked = Box(false)
+        endpoint.commitPairing(value.setupID, confirmedDigest: try value.digest(), biometricProof: proof, authorization: authorization) { response in
+            do { let unexpected = try installer.acquireExclusive(); unexpected.close() }
+            catch ReleaseActivityError.busy { blocked.value = true }
+            catch { }
+            reply.value = response
+        }
+        XCTAssertTrue(blocked.value)
+        XCTAssertTrue(try value.verify(signature: XCTUnwrap(reply.value), publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
+    }
+    func testReleaseActivityExpiryUsesTheOriginalMonotonicDeadlineWithoutEnrollment() throws {
+        for current: UInt64 in [99, 1100, 100_000] {
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+            let endpoint = try f.endpoint(); try hello(endpoint)
+            let value = try staged(endpoint, proposal: f.proposal())
+            f.environment.time.value = 1099; endpoint.expireStagedIfNeeded()
+            XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+            f.environment.time.value = current; endpoint.expireStagedIfNeeded()
+            let update = try installer.acquireExclusive(); update.close()
+            XCTAssertNil(try commit(endpoint, transcript: value, fixture: f))
+            XCTAssertEqual(try f.records(), 0); XCTAssertEqual(f.environment.signed.value, 0); try f.assertCheckpoint()
+        }
+    }
+    func testReleaseActivityTimerClearsAnExpiredAttemptWithoutAnotherInvocation() async throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+        let endpoint = try f.endpoint(); try hello(endpoint)
+        _ = try staged(endpoint, proposal: f.proposal()); f.environment.time.value = 1100
+        let deadline = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
+        var update: ReleaseActivityToken?
+        while update == nil, DispatchTime.now().uptimeNanoseconds < deadline {
+            do { update = try installer.acquireExclusive() }
+            catch ReleaseActivityError.busy { try await Task.sleep(for: .milliseconds(20)) }
+        }
+        try XCTUnwrap(update).close()
+        XCTAssertEqual(try f.records(), 0); endpoint.close()
+    }
+    func testReleaseActivityStageFailureAndExclusiveRefusalCannotEnrollOrLeakReferences() throws {
+        for exclusive in [false, true] {
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(activity: activity.open())
+            let endpoint = try f.endpoint(); try hello(endpoint)
+            let update = try exclusive ? installer.acquireExclusive() : nil
+            f.environment.denied.value = !exclusive
+            let reply = Box<Data?>(nil)
+            endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { reply.value = $0 }
+            XCTAssertNil(reply.value); update?.close()
+            let available = try installer.acquireExclusive(); available.close()
+            XCTAssertEqual(try f.records(), 0); XCTAssertEqual(f.environment.signed.value, 0)
         }
     }
 

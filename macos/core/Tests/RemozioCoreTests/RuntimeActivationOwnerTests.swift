@@ -15,6 +15,7 @@ final class RuntimeActivationOwnerTests: XCTestCase {
         var prepares = 0, registrations = 0
         var stoppedAt: RuntimeActivationOperations.Stage?
         var rejectNextRegistration = false
+        var observeRegistration: (() throws -> Void)?
         init() throws {
             f = try .init(); try f.machine.close()
             // Only the owned fixture anchor becomes traversable. Each database and private output remains private.
@@ -49,23 +50,44 @@ final class RuntimeActivationOwnerTests: XCTestCase {
                     let inventory = try XCTUnwrap(machine.inventory())
                     XCTAssertTrue(inventory.services.contains(job.declaration))
                 }
+                try self.observeRegistration?()
                 self.registrations += 1; self.bootstrapLabels.insert(job.declaration.label)
                 if self.rejectNextRegistration { self.rejectNextRegistration = false; throw Interrupted() }
                 try verify()
             }, didStage: { if $0 == self.stoppedAt { throw Interrupted() } })
         }
-        func owner(open: (() throws -> PreparationIntentStore)? = nil) throws -> SetupAccountOwner {
+        func owner(open: (() throws -> PreparationIntentStore)? = nil, activity: ReleaseActivityBarrier? = nil) throws -> SetupAccountOwner {
             try .init(openMachine: open ?? { try self.f.f.open() }, expectedReleaseDigest: f.f.release,
                 resume: { _, _ in throw Interrupted() }, accountCodePolicy: f.f.policy,
                 lookupAccount: { uid in
                     guard uid == self.f.f.identity.uid else { throw AdministrativeSetupError.wrongAccount }; return self.f.f.identity
-                }, activationOperations: operations)
+                }, activationOperations: operations, releaseActivity: activity)
         }
     }
     private func harness() throws -> Harness {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Owned SQLite/files and logical registration only") }
         return try .init()
     }
+    func testReleaseActivitySpansRegistrationWithoutRetainingTheMachineWriter() throws {
+        for interrupted in [false, true] {
+            let h = try harness(), activity = try ReleaseActivityFixture(), installer = try activity.open()
+            var checked = 0
+            h.observeRegistration = {
+                checked += 1
+                XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+                try h.withMachine { _ in () }
+            }
+            let owner = try h.owner(activity: activity.open()); defer { try? owner.close() }
+            let before = try XCTUnwrap(owner.activationProgress(callerUID: getuid()))
+            h.rejectNextRegistration = interrupted
+            if interrupted { XCTAssertThrowsError(try owner.resumeActivation(callerUID: getuid(), expected: before)) }
+            else { XCTAssertTrue(try owner.resumeActivation(callerUID: getuid(), expected: before).jobsRegistered) }
+            XCTAssertEqual(checked, interrupted ? 1 : 2)
+            let update = try installer.acquireExclusive(); update.close()
+            try h.withMachine { _ in () }
+        }
+    }
+
     func testReadsArePassiveAndNativeCommandsReceiveNoMachineWriterLease() throws {
         let h = try harness(), owner = try h.owner(); defer { try? owner.close() }
         let before = try XCTUnwrap(owner.activationProgress(callerUID: getuid()))

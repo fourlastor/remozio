@@ -25,6 +25,8 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private var closed = false
     private var busy = false
     private var attempt: PairingEnrollmentAttempt?
+    private var attemptActivity: ReleaseActivityToken?
+    private var expiryTimer: DispatchSourceTimer?
 
     convenience init(connection: NSXPCConnection, policy: XPCPeerPolicy, access: AuthorityPairingSetupAccess,
                      budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
@@ -44,16 +46,18 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         self.access = access; self.budget = budget; self.verify = verify; self.authorize = authorize
         self.invalidate = invalidate; self.onHandshake = onHandshake
     }
+    deinit { expiryTimer?.cancel(); attemptActivity?.close() }
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
-            closed = true; ready = false; attempt = nil; return true
+            closed = true; ready = false; clearAttempt(); return true
         }
         if notify { invalidate() }
     }
     func pairingHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
-            try work(handshake: true) { ready = true }
+            let completed = try work(handshake: true) { ready = true }
+            defer { completed.activity?.close() }
             onHandshake(); send { reply(1) }
         } catch { close(); reply(0) }
     }
@@ -65,9 +69,13 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             guard attempt == nil, proposal.count <= 132_000,
                   authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AuthorityPairingSetupError.unavailable }
             try authorize(authorization)
+            let activity = try access.acquireReleaseActivity()
+            var transferred = false
+            defer { if !transferred { activity?.close() } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
-            attempt = staged
+            attempt = staged; attemptActivity = activity; transferred = true
+            startExpiryTimer()
             return bytes
         }
     }
@@ -78,29 +86,62 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 throw AuthorityPairingSetupError.unavailable
             }
             // An ambiguous commit must reconcile its durable receipt. This connection cannot blindly commit again.
-            attempt = nil
+            clearAttempt()
             return try access.commit(pending, setupID: setupID, confirmedDigest: confirmedDigest, proof: biometricProof,
                 authorize: { [authorize] in try authorize(authorization) })
         }
     }
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
-        do { try work { attempt = nil }; send { reply(true) } }
+        do {
+            let completed = try work { clearAttempt() }
+            defer { completed.activity?.close() }
+            send { reply(true) }
+        }
         catch { close(); reply(false) }
     }
     private func respond(_ reply: @escaping @Sendable (Data?) -> Void, _ body: () throws -> Data) {
-        do { let bytes = try work(body); send { reply(bytes) } }
+        do {
+            let completed = try work(body)
+            defer { completed.activity?.close() }
+            send { reply(completed.value) }
+        }
         catch { close(); reply(nil) }
     }
-    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> T {
+    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> (value: T, activity: ReleaseActivityToken?) {
         // Native checks stay on the original exported invocation stack.
         try verify()
         return try lock.withLock {
             guard !closed, !busy, ready != handshake, budget.acquire() else { throw AuthorityPairingSetupError.unavailable }
             busy = true; defer { busy = false; budget.release() }
+            let activity = try access.acquireReleaseActivity()
+            var transferred = false
+            defer { if !transferred { activity?.close() } }
             try access.verifyCurrent()
-            return try body()
+            let value = try body()
+            try activity?.validate()
+            transferred = true
+            return (value, activity)
         }
     }
+    private func clearAttempt() {
+        expiryTimer?.cancel(); expiryTimer = nil
+        attempt = nil; attemptActivity?.close(); attemptActivity = nil
+    }
+    private func startExpiryTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        // Recheck the continuous authority clock after wake instead of extending setup by sleep duration.
+        timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(1), leeway: .milliseconds(100))
+        timer.setEventHandler { [weak self] in self?.expireStagedIfNeeded() }
+        expiryTimer = timer; timer.resume()
+    }
+    func expireStagedIfNeeded() {
+        lock.withLock {
+            guard !closed, !busy, let attempt else { return }
+            do { if try access.isExpired(attempt) { clearAttempt() } }
+            catch { clearAttempt() }
+        }
+    }
+
     private func send(_ reply: () -> Void) { lock.withLock { if !closed { reply() } } }
 }
 

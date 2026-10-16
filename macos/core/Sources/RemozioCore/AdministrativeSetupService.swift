@@ -103,6 +103,9 @@ public final class AdministrativeSetupService {
         var machine: PreparationIntentStore?
         var owner: SetupAccountOwner?
         do {
+            let activity = try ReleaseActivityBarrier.open(machineDirectory: configuration.machineDirectory)
+            let startup = try activity.acquireShared()
+            defer { startup.close() }
             _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
             try configuration.validate(release: release)
@@ -137,7 +140,7 @@ public final class AdministrativeSetupService {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
-                accountCodePolicy: configuration.codePolicy)
+                accountCodePolicy: configuration.codePolicy, releaseActivity: activity)
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                 teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,
