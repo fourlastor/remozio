@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-16",
+  "scope": "Android Firebase client settings and local opaque-wake integration",
+  "android": {
+    "release": "17",
+    "api": "37",
+    "freshDisposableEmulator": true,
+    "physicalPixelUsed": false
+  },
+  "apk": {
+    "variant": "debug",
+    "sha256": "8d811741e06858826955d715d081a21d12270dc662d801a4125724120baf0c86"
+  },
+  "packagedManifest": {
+    "firebaseInitProviderAbsent": true,
+    "firebaseFallbackServiceAbsent": true,
+    "applicationServiceExported": false,
+    "autoInit": false,
+    "analyticsCollection": false,
+    "notificationDelegation": false,
+    "installationIDDelivery": false
+  },
+  "captures": {
+    "phone-settings-top": {
+      "sha256": "e566cf957fafd6a62bc0b0fbfff52e3d8833c43749d744cf25f87977d3b2e606",
+      "width": 1080,
+      "height": 2424
+    },
+    "phone": {
+      "sha256": "f978dce71936e412f54ff4eeeda11f10c0217c76b1980bc5486b1dd5317563c9",
+      "width": 1080,
+      "height": 2424
+    },
+    "phone-dark-large": {
+      "sha256": "7e7dcf01f7cbd9f07953e34c32e48e8a8368a8e2207c056dc5b20f47d7ad4847",
+      "width": 1080,
+      "height": 2424
+    },
+    "tablet": {
+      "sha256": "f1f03dc494ea87aa992d780c2108ade8b583a012aa2145e0f75cc96f8ec2b208",
+      "width": 1600,
+      "height": 2560
+    }
+  },
+  "focusedJVMTests": {
+    "count": 24,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "unproven": [
+    "Real FCM provider registration and delivery",
+    "Mac token-possession registration",
+    "Authenticated background fetch",
+    "Doze and physical Pixel lifecycle behavior",
+    "Configured-client settings on a real provider",
+    "Privileged Mac installation and execution"
+  ],
+  "uiReview": {
+    "disposition": "ship",
+    "scope": "Unconfigured Firebase client card within existing native settings",
+    "configuredControls": "Source reviewed only",
+    "physicalHardware": "Unverified",
+    "reviewFixStateLabel": "IGNORED source-reviewed; prior scoped ship disposition unchanged"
+  },
+  "gradleGate": {
+    "protocol": 113,
+    "phoneCore": 213,
+    "approvalFlow": 65,
+    "android": 232,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "releaseBuild": {
+    "variant": "releaseUnsigned",
+    "shrinking": true,
+    "messagingServiceRetained": true,
+    "wakeWorkerRetained": true,
+    "providerDeliveryProven": false,
+    "handleIntentOverrideRetained": true,
+    "rpcAcknowledgementRetained": true,
+    "retentionProbeAPK_SHA256": "cec59c5e9515ef2d0250e12ac1022183cc16e6cd962040e0167d7c90a3cd87fb",
+    "retentionProbePrecedesFinalDiagnosticCopy": true
+  },
+  "nativeGate": {
+    "coreTests": 2397,
+    "skipped": 1,
+    "failures": 0,
+    "exit": 0,
+    "finalOwnershipMarker": true
+  },
+  "capturesFromCommit": "34882633d449c6827ddbf1ba8cfe60988fcf7d9c",
+  "finalBuild": {
+    "debugSHA256": "9849e531803f3920b6767bf1cca9c2ec4ffffc3af3771a1d649ea42204610c94",
+    "signed": false,
+    "installedOnPhysicalDevice": false
+  }
+}

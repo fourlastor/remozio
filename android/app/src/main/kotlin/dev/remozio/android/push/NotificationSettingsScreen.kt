@@ -118,6 +118,7 @@ internal fun NotificationSettingsScreen() {
                 TextButton(enabled = !busy, onClick = { refresh++ }) { Text(stringResource(R.string.notification_refresh)) }
             }
         }
+        FCMClientSettingsCard()
         LocalNetworkSettingsCard()
     }
 }

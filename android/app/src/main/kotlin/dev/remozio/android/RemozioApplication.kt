@@ -1,6 +1,12 @@
 package dev.remozio.android
 
 import android.app.Application
+import android.os.SystemClock
+import dev.remozio.android.push.androidPushClient
+import dev.remozio.android.push.AndroidWakeNotifications
+import dev.remozio.android.push.StoredWakeNotifications
+import dev.remozio.android.push.PushDeliveryReports
+import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.android.audit.androidStoredAuditReader
 import dev.remozio.android.enrollment.AndroidPairingAttempt
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
@@ -23,6 +29,20 @@ import kotlinx.coroutines.async
 class RemozioApplication : Application() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val enrollmentAccess = Mutex()
+    internal val pushDelivery by lazy { PushDeliveryReports(this) }
+    internal val pushClient by lazy { androidPushClient(this) }
+    internal val wakeNotifications by lazy {
+        val notifications = AndroidWakeNotifications(this, 60_000)
+        StoredWakeNotifications(
+            { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            enrollmentAccess, pushClient, { ElapsedInstant(1, SystemClock.elapsedRealtime().toULong()) },
+            notifications::postForRecord, notifications::cancelRecord,
+        )
+    }
+    override fun onCreate() {
+        super.onCreate()
+        pushClient.restore()
+    }
     internal val macs by lazy {
         StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
     }
@@ -37,7 +57,9 @@ class RemozioApplication : Application() {
         StoredPairingHost(
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
-            enrollmentAccess, { commands.invalidateRecordsLocked(it) }, ::validatePairingKeys,
+            enrollmentAccess, { ids ->
+                try { commands.invalidateRecordsLocked(ids) } finally { wakeNotifications.invalidateRecordsLocked(ids) }
+            }, ::validatePairingKeys,
         )
     }
     internal val pairingReceipts by lazy {

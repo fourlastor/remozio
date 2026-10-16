@@ -24,7 +24,7 @@ Build and lint checks do not prove device behavior. Installation, accessibility,
 
 References: [Android 17 setup](https://developer.android.com/about/versions/17/setup-sdk), [AGP 9.3](https://developer.android.com/build/releases/agp-9-3-0-release-notes), [Material 3 releases](https://developer.android.com/jetpack/androidx/releases/compose-material3), and [Android UX motion guidance](https://github.com/rock3r/android-ux-skills).
 
-The [generic notification backend](../phone/core/PUSH.md) is available for future push integration. It is not connected to the launcher or Firebase yet.
+The [Firebase client settings](../docs/android-fcm-client.md) import public client options at runtime. The client routes opaque hints through the [generic notification backend](../phone/core/PUSH.md). Mac delivery registration and authenticated background fetching remain pending.
 
 ## Command inspection
 

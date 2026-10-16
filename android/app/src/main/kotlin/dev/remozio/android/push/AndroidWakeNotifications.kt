@@ -16,6 +16,7 @@ import dev.remozio.phone.push.WakeEnrollment
 import dev.remozio.phone.push.WakeNotificationResult
 import dev.remozio.phone.push.WakeReceipt
 import dev.remozio.phone.requests.ElapsedInstant
+import dev.remozio.protocol.CborValue
 
 /** Generic hints only. Request details and usable actions require a separately authenticated fetch. */
 class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long) {
@@ -24,7 +25,9 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
 
     init { require(timeoutMillis in 1..86_400_000) }
 
-    fun post(enrollment: WakeEnrollment, alert: Boolean): WakeNotificationResult {
+    fun post(enrollment: WakeEnrollment, alert: Boolean): WakeNotificationResult = post(tag(enrollment), alert)
+    internal fun postForRecord(recordID: CborValue.Bytes, alert: Boolean): WakeNotificationResult = post(recordTag(recordID), alert)
+    private fun post(tag: String, alert: Boolean): WakeNotificationResult {
         if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             return WakeNotificationResult.PERMISSION_DENIED
         }
@@ -49,7 +52,7 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
                 .setSilent(!alert)
                 .setTimeoutAfter(timeoutMillis)
                 .build()
-            manager.notify(tag(enrollment), NOTIFICATION_ID, notification)
+            manager.notify(tag, NOTIFICATION_ID, notification)
             WakeNotificationResult.POSTED
         } catch (_: SecurityException) {
             WakeNotificationResult.PERMISSION_DENIED
@@ -59,6 +62,16 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
     }
 
     fun cancel(enrollment: WakeEnrollment) { manager.cancel(tag(enrollment), NOTIFICATION_ID) }
+    internal fun cancelRecord(recordID: CborValue.Bytes) { manager.cancel(recordTag(recordID), NOTIFICATION_ID) }
+    private fun recordTag(recordID: CborValue.Bytes): String {
+        val bytes = recordID.copyBytes(); require(bytes.size == 16)
+        return "remozio.wake.record." + bytes.joinToString("") { "%02x".format(it.toInt() and 255) }
+    }
+    fun cancelAll(): Boolean = try {
+        manager.activeNotifications.filter { it.id == NOTIFICATION_ID && it.tag?.startsWith("remozio.wake.") == true }
+            .forEach { manager.cancel(it.tag, it.id) }
+        true
+    } catch (_: RuntimeException) { false }
 
     private fun tag(enrollment: WakeEnrollment): String = "remozio.wake." +
         enrollment.notificationTag.copyBytes().joinToString("") { "%02x".format(it.toInt() and 0xff) }
