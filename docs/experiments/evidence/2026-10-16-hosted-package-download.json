@@ -1,0 +1,33 @@
+{
+  "experiment": "hosted-native-package-download",
+  "schemaVersion": 1,
+  "workflowSourceCommit": "b49c27da4842a2220667d42d4039f1ba3b5fc689",
+  "packageReviewedHead": "8e1365ab157f1e74067416f229bf36942a9b4f0f",
+  "packageSourceTree": "0489e0ccfc3b8f01a2520c6d79ff1b6593a39f13",
+  "packageSHA256": "c4e5bd612aa3280b62c48677c99cc3feb1c51ef24b279c50056ddd2bfb75a074",
+  "runURL": "https://github.com/rock3r/remozio/actions/runs/38971316577",
+  "runID": 38971316577,
+  "jobID": 117210103233,
+  "runAttempt": 1,
+  "runnerLabel": "macos-26",
+  "conclusion": "failure",
+  "failedStage": "first unpublished draft metadata GET",
+  "providerProcessExit": 1,
+  "providerHTTPStatus": "unknown; original handler discarded provider diagnostics",
+  "nativeInstallationAttempted": false,
+  "rootStepSkipped": true,
+  "localMacChanged": false,
+  "retryPerformed": false,
+  "permissionsBroadened": false,
+  "draftPublished": false,
+  "exactTemporaryDraftDeleted": true,
+  "publicExperimentTagAbsent": true,
+  "diagnosticsIssue": "https://github.com/rock3r/remozio/issues/411",
+  "diagnosticsSourceSHA256": "f3909c64cc67d906348f05266b4fe8e9bba9fffe8608088235ca6c02597896b1",
+  "limits": [
+    "The original run establishes a transfer failure only. It contains no native Installer or Root execution result.",
+    "The HTTP cause remains unknown. The new handler has regression controls; it does not retroactively diagnose the original failure.",
+    "A new hosted experiment must use reviewed main, a new exact draft and asset, and an independently verified package hash.",
+    "A refused download must not be bypassed through public publication or expanded repository permissions."
+  ]
+}

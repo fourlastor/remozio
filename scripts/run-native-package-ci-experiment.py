@@ -55,6 +55,14 @@ def pins(digest, team):
         raise ValueError('An operator-pinned package hash and publisher Team ID are required')
 
 
+def provider_failure(stage, result):
+    # Keep provider text private. A unique bounded CLI status is diagnostic data only.
+    matches = set(re.findall(rb'\(HTTP ([1-5][0-9]{2})\)\r?$',
+        (result.stderr or b'')[-8192:], re.MULTILINE))
+    status = next(iter(matches)).decode('ascii') if len(matches) == 1 else 'unknown'
+    return f'{stage} failed with status {result.returncode}; reported HTTP status {status}'
+
+
 def command(arguments, *, root=False, timeout=120, accepted=(0,)):
     executable = Path(str(arguments[0])).name
     if root:
@@ -62,6 +70,8 @@ def command(arguments, *, root=False, timeout=120, accepted=(0,)):
                      'PATH=/usr/bin:/bin:/usr/sbin:/sbin', 'HOME=/var/root', 'LC_ALL=C', *arguments]
     result = subprocess.run([str(a) for a in arguments], capture_output=True, timeout=timeout)
     if result.returncode not in accepted:
+        if not root and arguments[:4] == ['gh', 'api', '--method', 'GET']:
+            raise RuntimeError(provider_failure('GitHub metadata request', result))
         raise RuntimeError(f'{executable} failed with status {result.returncode}')
     return result
 
@@ -112,7 +122,7 @@ def fetch(args):
         result = subprocess.run(['gh', 'api', '--method', 'GET', endpoint + '/assets/' + args.asset_id,
                                  '-H', 'Accept: application/octet-stream'], stdout=output, stderr=subprocess.PIPE, timeout=120)
     if result.returncode:
-        raise RuntimeError('Package asset download failed')
+        raise RuntimeError(provider_failure('Package asset download', result))
     verify_package(args.package, args.package_sha256, size)
     # Recheck draft status after transfer. This script never publishes a release.
     validate_asset(api(endpoint + '/' + args.release_id), api(endpoint + '/assets/' + args.asset_id),

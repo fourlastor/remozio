@@ -114,6 +114,49 @@ class NativePackageCIExperimentTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): EXPERIMENT.command(['/fixture'], accepted=(0, 1))
             self.assertEqual(run.call_count, 1)
 
+    def test_provider_metadata_reports_only_the_process_exit_and_bounded_http_status(self):
+        result = subprocess.CompletedProcess([], 1, b'private response',
+            b'Authorization: Bearer disposable-secret\ngh: Not Found (HTTP 404)\n')
+        with patch.object(EXPERIMENT.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError) as error:
+                EXPERIMENT.command(['gh', 'api', '--method', 'GET', 'repos/rock3r/remozio/releases/123'])
+        self.assertEqual(str(error.exception), 'GitHub metadata request failed with status 1; reported HTTP status 404')
+
+    def test_provider_asset_failure_does_not_disclose_raw_diagnostics(self):
+        result = subprocess.CompletedProcess([], 1, b'private response',
+            b'private-token gh: Forbidden (HTTP 403)\n')
+        with tempfile.TemporaryDirectory() as temporary:
+            args = SimpleNamespace(package=Path(temporary) / 'fixture.pkg', package_sha256='a' * 64,
+                trusted_team='ABCDEFGHIJ', release_id='123', asset_id='456')
+            with patch.object(EXPERIMENT, 'context'), \
+                 patch.object(EXPERIMENT, 'api', side_effect=[self.release(), self.asset()]) as api, \
+                 patch.object(EXPERIMENT.subprocess, 'run', return_value=result) as run:
+                with self.assertRaises(RuntimeError) as error: EXPERIMENT.fetch(args)
+            self.assertEqual(str(error.exception),
+                'Package asset download failed with status 1; reported HTTP status 403')
+            self.assertEqual(api.call_count, 2)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][:4], ['gh', 'api', '--method', 'GET'])
+
+    def test_missing_or_ambiguous_provider_status_remains_unknown(self):
+        for raw in [b'private credentials', b'(HTTP 401)\n(HTTP 403)\n', b'(HTTP 999)\n', None]:
+            result = subprocess.CompletedProcess([], 1, b'', raw)
+            self.assertEqual(EXPERIMENT.provider_failure('GitHub metadata request', result),
+                'GitHub metadata request failed with status 1; reported HTTP status unknown')
+
+    def test_provider_status_parsing_is_bounded(self):
+        raw = b'(HTTP 401)\n' + b'x' * 8192
+        result = subprocess.CompletedProcess([], 1, b'', raw)
+        self.assertEqual(EXPERIMENT.provider_failure('GitHub metadata request', result),
+            'GitHub metadata request failed with status 1; reported HTTP status unknown')
+
+    def test_unrelated_native_failures_keep_their_existing_error_contract(self):
+        result = subprocess.CompletedProcess([], 1, b'', b'private (HTTP 403)\n')
+        with patch.object(EXPERIMENT.subprocess, 'run', return_value=result):
+            with self.assertRaises(RuntimeError) as error:
+                EXPERIMENT.command(['/usr/sbin/installer', '-pkg', '/private/fixture.pkg', '-target', '/'], root=True)
+        self.assertEqual(str(error.exception), 'installer failed with status 1')
+
     def test_no_success_record_after_changed_retention_or_unclassified_failure(self):
         for failure in [None, 'repeat changed', 'generic refusal', 'refusal changed', 'signal', 'timeout']:
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:

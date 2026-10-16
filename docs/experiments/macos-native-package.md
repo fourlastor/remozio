@@ -81,3 +81,16 @@ Alternate volumes, Finder, LaunchServices, native Installer consent and the menu
 Hardware keys, installed service identities, signed IPC and the real Pixel remain in the [interactive handoff](interactive-handoff.md).
 Coordinated replacement and Sparkle remain product work. The initial installer still refuses a different installed release.
 This experiment is optional preparation. It must not delay an available user's first integration session.
+
+## First hosted attempt, 16 October 2026
+
+The [recorded attempt](evidence/2026-10-16-hosted-package-download.json) stopped at its first unpublished-draft metadata request.
+The provider process returned exit 1. The original handler discarded its HTTP diagnostics, so the cause remains unknown.
+The Root install step was skipped. This supplies no native installation result.
+The exact temporary draft was removed. No public experiment tag remains.
+
+The revised handler reports the process exit and one unambiguous HTTP status from the final 8192 stderr bytes.
+It reports Unknown when that status is absent or ambiguous. It never prints the raw response, account text or authorization headers.
+This is a reported CLI status, not proof of its underlying cause. Metadata and asset download failures use the same bounded format.
+The existing download guards, token permissions and Root boundary remain unchanged.
+Do not retry an unchanged failed experiment. Use a new explicit run only after the relevant fix is reviewed and merged.

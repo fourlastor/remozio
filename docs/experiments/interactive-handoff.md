@@ -7,7 +7,8 @@ The [metadata fix](macos-installed-access-metadata.md) passed review, CI and act
 A second native package attempt failed before bootstrap. Direct supervised bootstrap then completed with the same signed helper.
 The installed app cannot launch because its enclosing signature claims restricted entitlements without a profile.
 A [disposable signing control](macos-release-signing.md#native-launch-control-16-october-2026) opened the app without those claims.
-The initialized machine still pins the former signature. A verified transition remains required.
+The initialized machine still pins the former signature. The user approved a guarded archive of this unused development installation.
+The prepared transition has not run. The installed copy and all original state remain intact.
 Installed service behavior and production Root approval remain unproven.
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) records the six passing actual-child controls.
@@ -38,7 +39,8 @@ The complete approved product scope remains open.
 - Run the repository gate before selecting artifacts. Do not install a package or contact the phone as part of that gate.
 
 The developer candidate contains a Developer ID signed app inside an unsigned local package.
-It has no notarization result. Archive checks do not prove native installation.
+The selected replacement app has an accepted notarization result, a validated ticket and passing Gatekeeper and package extraction checks.
+The [repeatable workflow](../macos-notarization.md) is merged. These candidate checks do not prove native installation.
 All persistent executables remain inside the app.
 
 ## Stage 1: standalone native credentials
@@ -66,16 +68,23 @@ Direct supervised bootstrap created the machine files. The machine now has retai
 | --- | --- |
 | Native package installation | Failed; [#402](https://github.com/rock3r/remozio/issues/402) remains open |
 | Direct signed-helper bootstrap | Completed; follow-up inspection returned `retained` |
-| Installed app launch | Refused; [#404](https://github.com/rock3r/remozio/issues/404) tracks profileless signing |
+| Installed app launch | Old signature remains refused; the profileless source fix merged in [#407](https://github.com/rock3r/remozio/pull/407) |
 | Disposable corrected signature | Main window opened; no setup action ran |
-| Applications shortcut | Root-only mode; [#405](https://github.com/rock3r/remozio/issues/405) tracks user access |
+| Applications shortcut | Installed entry remains Root-only; the producer fix merged in [#409](https://github.com/rock3r/remozio/pull/409) |
 | Account setup, services and Pixel pairing | Not started |
 
 The shortcut producer fix passes its ordinary-owner tests, including the restrictive umask control.
 This does not prove that the installed shortcut is readable. The installed entry remains unchanged.
+The replacement candidate contains the notarized app and the shortcut fix. It is prepared for the next local administrator session.
+
+The [hosted attempt](evidence/2026-10-16-hosted-package-download.json) stopped at its first draft metadata request.
+Its Root installation step was skipped. [#411](https://github.com/rock3r/remozio/issues/411) tracks the missing provider diagnostics.
 
 Do not retry the failed package, strip its OS label or overwrite the initialized installation.
-Preserve both signed apps and all machine state. Prepare a verified transition before further installed setup.
+Preserve both signed apps and all machine state. The prepared one-off recovery first refuses any enrolled account, pairing or service.
+It archives the complete unused installation privately before installing the pinned replacement with a fresh identity.
+A failure or Unknown result stops it without an automatic retry. Results remain available for inspection.
+This user-approved development recovery does not authorize a general reset or bypass the update policy.
 The initial package supports fresh installation and same-build recovery. It refuses a different installed release.
 Do not install an intermediate candidate that needs a known code fix, then assume a later package can replace it.
 Do not erase the installation to bypass this protection.
@@ -163,7 +172,8 @@ Do not automatically retry an uncertain external action.
 The standalone credential experiment is complete.
 The production fix passed review, all five CI checks and the actual privileged child measurement.
 The first session found the native metadata blocker in #402.
-The signing fix, verified machine transition and remaining native installation controls must pass before installed setup can continue.
+The signing and shortcut fixes are merged, and the notarized replacement is prepared.
+The guarded machine transition and remaining native installation controls must pass before installed setup can continue.
 After that gate, reserve 60–90 minutes for installed boundaries, pairing and approval/decline/expiry.
 A native failure can require further code work. This allowance does not promise a successful complete flow.
 The [hosted package experiment](macos-native-package.md) can reduce installer uncertainty while the user is away.
