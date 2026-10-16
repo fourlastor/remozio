@@ -23,6 +23,11 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
         self.assertEqual(RUNNER.signing_options('a' * 40, 'ABCDEFGHIJ'), ('A' * 40, 'ABCDEFGHIJ'))
         self.assertEqual(RUNNER.signing_options(None, None), (None, None))
 
+    def test_secure_timestamp_requires_an_explicit_identity_before_any_tools(self):
+        with patch.object(RUNNER, 'run') as run:
+            with self.assertRaises(ValueError): RUNNER.measure(Path('/unused'), secure_timestamp=True)
+            run.assert_not_called()
+
     def test_aliases_and_special_files_are_rejected_before_any_subprocess(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -123,7 +128,10 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
                 'CFBundleShortVersionString': '0.1.0', 'CFBundleVersion': '1'}))
             before = RUNNER.fingerprint(app)
             claims = []
+            timestamp_options = []
             def command(arguments, **kwargs):
+                if '--sign' in arguments:
+                    timestamp_options.append([a for a in arguments if str(a).startswith('--timestamp')])
                 if '--sign' in arguments and Path(arguments[-1]).is_dir():
                     path = Path(arguments[arguments.index('--entitlements') + 1])
                     claims.append((Path(arguments[-1]).name, plistlib.loads(path.read_bytes())))
@@ -136,7 +144,10 @@ class ReleaseSigningSafetyTests(unittest.TestCase):
             with patch.object(RUNNER, 'ROOT', root), patch.object(RUNNER, 'run', side_effect=command), \
                  patch.object(RUNNER, 'load_manifest', return_value=manifest), \
                  patch.object(RUNNER, 'inspect', side_effect=inspect):
-                result = RUNNER.measure(Path('/unused'), identity='A' * 40, team='ABCDEFGHIJ')
+                result = RUNNER.measure(Path('/unused'), identity='A' * 40, team='ABCDEFGHIJ', secure_timestamp=True)
+            self.assertTrue(result['signingTimestampUsed'])
+            self.assertTrue(timestamp_options)
+            self.assertTrue(all(options == ['--timestamp'] for options in timestamp_options))
             self.assertEqual(claims, [('Remozio.app', {}), ('Extra.app', {}),
                 ('WrongEntitlement.app', {'com.apple.application-identifier': 'ABCDEFGHIJ.dev.remozio.other',
                                          'com.apple.developer.team-identifier': 'ABCDEFGHIJ'})])

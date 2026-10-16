@@ -1,5 +1,8 @@
 import gzip
 import importlib.util
+import os
+import plistlib
+from types import SimpleNamespace
 from pathlib import Path
 import stat
 import platform
@@ -69,6 +72,38 @@ class MacPackageBuilderTests(unittest.TestCase):
                          base + cpio('Remozio.app/helper', mode=stat.S_IFREG | 0o755, data=b'hello') + cpio('extra')):
                 write(data)
                 with self.assertRaises(RuntimeError): BUILDER.verify_payload(payload, app)
+
+    def test_private_umask_does_not_restrict_the_installed_payload_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); app = root / 'Remozio.app'
+            helper = app / 'Contents/Library/LaunchServices/RemozioSetup'
+            helper.parent.mkdir(parents=True); helper.write_bytes(b'owned helper')
+            (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleVersion': '1'}))
+            reader = SimpleNamespace(fingerprint=lambda _: 'fixed-fixture',
+                inspect=lambda *_: {'packageProfile': PINS})
+            measured = []
+            def command(arguments, **_):
+                if arguments[0] == '/usr/bin/pkgbuild':
+                    payload = Path(arguments[arguments.index('--root') + 1])
+                    measured.append((payload.stat().st_mode & 0o777, payload.parent.stat().st_mode & 0o777))
+                    raise RuntimeError('stop after observing the native archive input')
+                return subprocess.CompletedProcess([], 0, '/fixture/bin', '')
+            original_umask = os.umask(0o077)
+            try:
+                with patch.object(BUILDER, 'signing_reader', return_value=reader), patch.object(BUILDER, 'run', side_effect=command):
+                    with self.assertRaisesRegex(RuntimeError, 'stop after observing'):
+                        BUILDER.build(app, root / 'result.pkg', 'ABCDEFGHIJ', unsigned_developer=True)
+            finally: os.umask(original_umask)
+            self.assertEqual(measured, [(0o755, 0o700)])
+            self.assertFalse((root / 'result.pkg').exists())
+
+    def test_payload_refuses_a_private_installation_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); app = root / 'Remozio.app'; app.mkdir(); app.chmod(0o755)
+            payload = root / 'Payload'
+            payload.write_bytes(gzip.compress(cpio('.', mode=stat.S_IFDIR | 0o700) +
+                cpio('Remozio.app', mode=stat.S_IFDIR | 0o755) + cpio('TRAILER!!!')))
+            with self.assertRaises(RuntimeError): BUILDER.verify_payload(payload, app)
 
     def test_payload_rejects_directory_and_file_type_substitutions(self):
         with tempfile.TemporaryDirectory() as temporary:

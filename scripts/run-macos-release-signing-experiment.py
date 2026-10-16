@@ -124,8 +124,11 @@ def export_verified_app(probe, app, team, destination):
         exclusive_rename(candidate, destination)
 
 
-def measure(probe, *, identity=None, team=None, export_app=None):
+def measure(probe, *, identity=None, team=None, export_app=None, secure_timestamp=False):
     identity, team = signing_options(identity, team)
+    if secure_timestamp and not identity:
+        raise ValueError('Secure timestamps require an explicit Developer ID identity')
+    timestamp = '--timestamp' if secure_timestamp else '--timestamp=none'
     if export_app is not None:
         if not identity:
             raise ValueError('Export requires an explicit signing identity and trusted team')
@@ -155,7 +158,7 @@ def measure(probe, *, identity=None, team=None, export_app=None):
                     if not product:
                         continue
                     executable = app / relative
-                    run(['/usr/bin/codesign', '--force', '--sign', identity, '--timestamp=none',
+                    run(['/usr/bin/codesign', '--force', '--sign', identity, timestamp,
                          '--options', 'runtime', '--identifier', 'dev.remozio.' + name, executable])
                     shutil.copy2(executable, products / product)
                 info_path = app / 'Contents/Info.plist'
@@ -173,7 +176,7 @@ def measure(probe, *, identity=None, team=None, export_app=None):
                         'com.apple.application-identifier': team + '.' + entitlement_identifier,
                         'com.apple.developer.team-identifier': team}
                     entitlements.write_bytes(plistlib.dumps(claims))
-                    run(['/usr/bin/codesign', '--force', '--sign', identity, '--timestamp=none',
+                    run(['/usr/bin/codesign', '--force', '--sign', identity, timestamp,
                          '--options', 'runtime', '--identifier', APP_IDENTIFIER,
                          '--entitlements', entitlements, bundle])
                     run(['/usr/bin/codesign', '--verify', '--deep', '--strict', bundle])
@@ -199,21 +202,25 @@ def measure(probe, *, identity=None, team=None, export_app=None):
     return {'experiment': 'complete-release-signature-inspection', 'schemaVersion': 1,
         'mode': 'developer-id' if identity else 'ad-hoc-rejection', 'cases': cases,
         'trustedTeamID': team, 'identityFingerprint': identity, 'originalBundleUnchanged': True,
-        'temporarySignedCopiesRemoved': True, 'signedAppExported': export_app is not None, 'signingTimestampUsed': False,
+        'temporarySignedCopiesRemoved': True, 'signedAppExported': export_app is not None, 'signingTimestampUsed': secure_timestamp,
         'notarizationTested': False, 'appLaunched': False, 'servicesInstalled': False,
         'limits': ['Candidate signature evidence only; no protected installation or activation',
                    'No password retrieval or authentication UI automation',
-                   'No notarization, secure timestamp, revocation or macOS 26 runtime proof']}
+                   'No notarization, revocation or macOS 26 runtime proof',
+                   'Secure timestamps requested' if secure_timestamp else 'No secure timestamps requested']}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--signing-identity', help='Explicit certificate SHA-1 fingerprint; no automatic selection')
     parser.add_argument('--trusted-team', help='Expected Team ID from trusted policy, independent of the candidate')
+    parser.add_argument('--secure-timestamp', action='store_true', help='Request Apple secure timestamps; requires network access and an explicit identity')
     parser.add_argument('--export-app', type=Path, help='Keep one verified signed copy at a new path for developer package preparation')
     arguments = parser.parse_args()
     try:
         identity, team = signing_options(arguments.signing_identity, arguments.trusted_team)
+        if arguments.secure_timestamp and not identity:
+            raise ValueError('Secure timestamps require an explicit Developer ID identity')
     except ValueError as error:
         parser.error(str(error))
     if platform.system() != 'Darwin' or platform.machine() != 'arm64' or os.geteuid() == 0:
@@ -224,7 +231,7 @@ def main():
     run(build_arguments, timeout=300)
     binary_path = Path(run([*build_arguments, '--show-bin-path']).stdout.strip())
     probe = binary_path / 'ReleaseSigningProbe'
-    evidence = measure(probe, identity=identity, team=team, export_app=arguments.export_app)
+    evidence = measure(probe, identity=identity, team=team, export_app=arguments.export_app, secure_timestamp=arguments.secure_timestamp)
     evidence['recordedAtUTC'] = datetime.now(timezone.utc).isoformat()
     evidence['probeSHA256'] = hashlib.sha256(probe.read_bytes()).hexdigest()
     evidence['host'] = {'os': run(['sw_vers', '-productVersion']).stdout.strip(),

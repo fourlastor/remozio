@@ -185,7 +185,7 @@ def verify_payload(payload, app):
     for name, row in records.items():
         if row['metadata'] and str(Path(name).with_name(Path(name).name[2:])) not in expected:
             raise RuntimeError('Orphan package metadata')
-    if {name for name, row in records.items() if not row['metadata']} != expected or records['Remozio.app']['mode'] != stat.S_IMODE(app.lstat().st_mode) or any(records[name]['type'] != stat.S_IFDIR for name in ('.', 'Remozio.app')):
+    if {name for name, row in records.items() if not row['metadata']} != expected or records['.']['mode'] != 0o755 or records['Remozio.app']['mode'] != stat.S_IMODE(app.lstat().st_mode) or any(records[name]['type'] != stat.S_IFDIR for name in ('.', 'Remozio.app')):
         raise RuntimeError('The package contains an unexpected payload')
     return len(records)
 
@@ -216,7 +216,7 @@ def build(app, output, team, *, installer_identity=None, unsigned_developer=Fals
     probe = Path(run([*probe_arguments, '--show-bin-path']).stdout.strip()) / 'ReleaseSigningProbe'
     with tempfile.TemporaryDirectory(prefix='remozio-package-') as temporary:
         staging = Path(temporary).resolve()
-        payload = staging / 'payload'; payload.mkdir()
+        payload = staging / 'payload'; payload.mkdir(mode=0o755); payload.chmod(0o755)
         copy = payload / 'Remozio.app'; shutil.copytree(app, copy, symlinks=True)
         if reader.fingerprint(copy) != original:
             raise RuntimeError('The app changed while copying')

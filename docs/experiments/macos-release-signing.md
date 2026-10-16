@@ -21,6 +21,10 @@ The runner does not discover a signing identity or derive trust from the candida
 An unavailable key or signing timeout fails this opt-in experiment. It never counts as expected rejection.
 The runner does not retrieve passwords or vault secrets or operate authentication UI.
 
+Use `--secure-timestamp` to request timestamps explicitly for a later notarization candidate.
+This option requires a signing identity and network access. It does not submit the app to Apple.
+The [notarization workflow](../macos-notarization.md) independently checks timestamps on all eight roles before submission.
+
 The profileless Developer ID export signs the enclosing app with an empty entitlements dictionary.
 Its identifier, publisher, hardened runtime and exact hashes still undergo the production checks.
 The foreign-identity rejection fixture alone adds identity entitlement claims.
@@ -39,7 +43,8 @@ The runner signs only owned temporary copies. It rejects aliases and special fil
 It checks the original bundle fingerprint again on success or failure. Evidence contains public identity fields and sanitized outcomes.
 Every signing and inspection subprocess has a deadline. A timeout records failure or uncertainty, never acceptance.
 
-This proves candidate signature inspection on the recorded host. It does not prove protected placement, activation, installed continuity, revocation, notarization or secure timestamps.
+This proves candidate signature inspection on the recorded host. It does not prove protected placement, activation, installed continuity, revocation or notarization.
+The default run has no secure timestamps. An opt-in timestamp request alone does not prove a notarization result.
 The app and its helpers are not launched. No service is installed and no private key is exported.
 A deployment target of macOS 26 does not establish macOS 26 runtime behavior.
 

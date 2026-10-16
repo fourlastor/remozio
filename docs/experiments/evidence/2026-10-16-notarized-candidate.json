@@ -1,0 +1,83 @@
+{
+  "experiment": "local-notarized-candidate-workflow",
+  "schemaVersion": 1,
+  "recordedAtUTC": "2026-10-16T21:27:47.713546+00:00",
+  "host": {
+    "os": "27.0.1",
+    "architecture": "arm64",
+    "sdk": "27.0",
+    "deploymentTarget": "26.0"
+  },
+  "initialWorkflowSourceCommit": "aa21993ae47e6864402d331da6ebf34e18b7f446",
+  "followupSourceSHA256": {
+    "scripts/prepare-macos-notarized-candidate.py": "388cb648c761ba532d47191f0127e40b66e2d92c0004f8a520ae3bd1762e7ad9",
+    "scripts/run-macos-release-signing-experiment.py": "47bccf4acd91bf1bbae21485435b00aff02de9971c1012a91688612c1a000f0d",
+    "scripts/build-macos-package.py": "e1068ba057e52ee4f69b86c62ef9b6007f0788b40ba0d92afd990e931609b86e",
+    "tests/test_macos_notarized_candidate.py": "2e7f50cf1fc5e9c57647e414c3b58ff12f4826677a82b9eb3eb69525dd2d117c",
+    "tests/test_macos_package_builder.py": "a556cfa6ff486c52db5f8c750794604d479b993bbb977265a3ad5e8f65a351eb"
+  },
+  "signing": {
+    "mode": "Developer ID",
+    "trustedTeamID": "PVDFPZ5D64",
+    "secureTimestamps": true,
+    "productionComponents": 8,
+    "controlsPassed": 6,
+    "originalBuildPreserved": true
+  },
+  "submission": {
+    "attempts": 1,
+    "initialResult": "unknown after the upload receipt was rejected by the initial parser",
+    "idRecoveredFromAuthenticatedHistory": true,
+    "authenticatedInfoMatchedUniqueArchiveName": true,
+    "status": "Accepted",
+    "archiveSHA256": "67518084ddfd22bd6b7353b7fa3b767a1a070253f98a2844df9c208b380ce722",
+    "reuploadPerformed": false
+  },
+  "appValidation": {
+    "stapledTicketMode": "0644",
+    "strictSignatures": true,
+    "gatekeeperAccepted": true,
+    "packageExtractionVerified": true,
+    "submittedAppPreserved": true
+  },
+  "packageParentControl": {
+    "processUmask": "0077",
+    "initialPayloadRootMode": "0700",
+    "initialPackageSelectedForInstallation": false,
+    "fixedPayloadRootMode": "0755",
+    "fixedPackageSHA256": "cce032890ede47c68e1839e8fd34e069bb01c8042f39cda28dc4bef67776b8e3",
+    "fixedAppFingerprint": "282f27d9896deebd649c00dc369098f5ae59329f8c6079093cf0d9ebaed38c9f",
+    "fixedPackageRoundTripChecks": [
+      {
+        "tool": "xcrun",
+        "exitCode": 0
+      },
+      {
+        "tool": "codesign",
+        "exitCode": 0
+      },
+      {
+        "tool": "spctl",
+        "exitCode": 0
+      }
+    ],
+    "packageSigned": false
+  },
+  "uploadReceiptFix": {
+    "statusOptionalForUploadReceipt": true,
+    "processingAcceptanceRequiresAuthenticatedInfo": true,
+    "validation": "regression fixture; no second live upload"
+  },
+  "installed": false,
+  "appLaunched": false,
+  "servicesRegistered": false,
+  "rootExecutionPerformed": false,
+  "priorPreparedRecoveryCandidateChanged": false,
+  "limits": [
+    "The live upload exercised the original parser failure and authenticated recovery. The receipt parser fix has a focused regression test.",
+    "The package parent fix has a real private-umask package and extraction control.",
+    "These are candidate and archive checks. Native installation, setup-daemon registration and the Mac-Pixel approval flow remain separate.",
+    "The package is unsigned. App notarization does not claim package notarization or public release readiness.",
+    "macOS 27 execution does not prove macOS 26 runtime behavior."
+  ]
+}
