@@ -91,7 +91,7 @@ static int spawn_child(const char *path, const void *frame, size_t count,
     remozio_child_spec_t spec = {0};
     int failure = remozio_child_spec_decode(frame, count, &spec);
     if (failure) return failure;
-    if (spec.format_version != (mapped ? 2U : 1U)) { remozio_child_spec_close(&spec); return ENOTSUP; }
+    if (spec.format_version == 3 ? ((spec.io_mode == 2) != mapped) : spec.format_version != (mapped ? 2U : 1U)) { remozio_child_spec_close(&spec); return ENOTSUP; }
     if (mapped) {
         int streams[3] = {input, output, error};
         failure = remozio_child_spec_validate_stdio(&spec, terminal, streams);

@@ -91,7 +91,7 @@ static int pump_configuration(monitor_t *monitor) {
         monitor->frame_used += (size_t)received;
         if (!monitor->frame && monitor->frame_used == sizeof(monitor->header)) {
             uint32_t count = word(monitor->header + 4), budget = word(monitor->header + 28);
-            if ((word(monitor->header) != REMOZIO_CHILD_FRAME_V1 && word(monitor->header) != REMOZIO_CHILD_FRAME_V2) || count > REMOZIO_CHILD_MAX_BYTES - sizeof(monitor->header) || budget < 100 || budget > 60000) return EPROTO;
+            if ((word(monitor->header) != REMOZIO_CHILD_FRAME_V1 && word(monitor->header) != REMOZIO_CHILD_FRAME_V2 && word(monitor->header) != REMOZIO_CHILD_FRAME_V3) || count > REMOZIO_CHILD_MAX_BYTES - sizeof(monitor->header) || budget < 100 || budget > 60000) return EPROTO;
             monitor->deadline = monitor->started + budget;
             monitor->frame_count = sizeof(monitor->header) + count;
             monitor->frame = malloc(monitor->frame_count); if (!monitor->frame) return ENOMEM;

@@ -5,24 +5,15 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
-static gid_t fixture_groups[16];
-static int fixture_group_count;
-static uid_t fixture_getuid(void) { static int calls; return calls++ ? getuid() : 0; }
-static uid_t fixture_geteuid(void) { static int calls; return calls++ ? geteuid() : 0; }
-static int fixture_setuid(uid_t uid) { if (uid == getuid()) return 0; errno = EPERM; return -1; }
-static int fixture_setgid(gid_t gid) { if (gid == getgid()) return 0; errno = EPERM; return -1; }
-static int fixture_setgroups(int count, const gid_t *groups) {
-    if (count != 1 || !groups || groups[0] != getgid()) { errno = EPERM; return -1; }
-    memcpy(fixture_groups, groups, (size_t)count * sizeof(gid_t)); fixture_group_count = count; return 0;
-}
-static int fixture_getgroups(int count, gid_t *groups) {
-    if (count < fixture_group_count || !groups) { errno = EINVAL; return -1; }
-    memcpy(groups, fixture_groups, (size_t)fixture_group_count * sizeof(gid_t)); return fixture_group_count;
+#include "RemozioCommandCredentials.h"
+static uid_t fixture_getuid(void) { return 0; }
+static uid_t fixture_geteuid(void) { return 0; }
+static int fixture_account_apply(const remozio_child_spec_t *spec) {
+    return spec && spec->format_version == 3 && spec->uid == getuid() && spec->gid == getgid() &&
+        spec->group_count == 1 && spec->groups && spec->groups[0] == getgid() &&
+        spec->account_name && !strcmp(spec->account_name, "fixture") ? 0 : EPERM;
 }
 #define getuid fixture_getuid
 #define geteuid fixture_geteuid
-#define setuid fixture_setuid
-#define setgid fixture_setgid
-#define setgroups fixture_setgroups
-#define getgroups fixture_getgroups
+#define remozio_child_account_apply fixture_account_apply
 #include "../../macos/app/CommandChild/ChildMain.c"

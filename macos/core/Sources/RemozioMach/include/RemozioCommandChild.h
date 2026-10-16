@@ -7,6 +7,9 @@
 #define REMOZIO_CHILD_HEADER_BYTES 40U
 #define REMOZIO_CHILD_FRAME_V1 0x524d4331U
 #define REMOZIO_CHILD_FRAME_V2 0x524d4332U
+#define REMOZIO_CHILD_FRAME_V3 0x524d4333U
+#define REMOZIO_CHILD_MAX_ACCOUNT_GROUPS 1024U
+#define REMOZIO_CHILD_MAX_ACCOUNT_NAME 65535U
 /* This decoder only owns data. It grants no execution permission. */
 typedef struct {
     uint32_t uid, gid, group_count, argument_count, environment_count;
@@ -15,6 +18,8 @@ typedef struct {
      * Bits 0, 1 and 2 select stdin, stdout and stderr on that terminal. */
     uint32_t format_version, stdio_pty_mask;
     uint32_t *groups;
+    /* Format 3 binds native account initialization to the complete captured account identity. */
+    char *account_name;
     char *executable;
     char **arguments;
     char **environment;

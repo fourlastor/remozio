@@ -30,7 +30,7 @@ static int string(const unsigned char *bytes, size_t count, size_t *cursor, remo
     return 0;
 }
 int remozio_child_spec_groups(const remozio_child_spec_t *spec, uint32_t *groups, uint32_t *count) {
-    if (!spec || !groups || !count || spec->gid == UINT32_MAX || spec->group_count > 16 || (spec->group_count && !spec->groups)) return EINVAL;
+    if (!spec || !groups || !count || spec->format_version == 3 || spec->gid == UINT32_MAX || spec->group_count > 16 || (spec->group_count && !spec->groups)) return EINVAL;
     *count = 1; groups[0] = spec->gid;
     for (uint32_t index = 0; index < spec->group_count; ++index) {
         uint32_t group = spec->groups[index];
@@ -50,10 +50,10 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
     if (!input || count < REMOZIO_CHILD_HEADER_BYTES || count > REMOZIO_CHILD_MAX_BYTES) return EINVAL;
     const unsigned char *bytes = input;
     uint32_t magic = word(bytes);
-    if ((magic != REMOZIO_CHILD_FRAME_V1 && magic != REMOZIO_CHILD_FRAME_V2) ||
+    if ((magic != REMOZIO_CHILD_FRAME_V1 && magic != REMOZIO_CHILD_FRAME_V2 && magic != REMOZIO_CHILD_FRAME_V3) ||
         word(bytes + 4) != count - REMOZIO_CHILD_HEADER_BYTES) return EINVAL;
     remozio_child_spec_t spec = {0};
-    spec.format_version = magic == REMOZIO_CHILD_FRAME_V1 ? 1 : 2;
+    spec.format_version = magic == REMOZIO_CHILD_FRAME_V1 ? 1 : magic == REMOZIO_CHILD_FRAME_V2 ? 2 : 3;
     size_t body_start = REMOZIO_CHILD_HEADER_BYTES;
     spec.uid = word(bytes + 8); spec.gid = word(bytes + 12); spec.group_count = word(bytes + 16);
     spec.argument_count = word(bytes + 20); spec.environment_count = word(bytes + 24);
@@ -62,14 +62,15 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
         if (spec.io_mode > 1) return EINVAL;
         spec.stdio_pty_mask = spec.io_mode == 1 ? 7 : 0;
     } else {
-        if (spec.io_mode != 2 || count < body_start + 4) return EINVAL;
+        if ((spec.format_version == 2 ? spec.io_mode != 2 : spec.io_mode > 2) || count < body_start + 4) return EINVAL;
         spec.stdio_pty_mask = word(bytes + body_start); body_start += 4;
-        if (spec.stdio_pty_mask > 7) return EINVAL;
+        if (spec.stdio_pty_mask > 7 || (spec.io_mode == 0 && spec.stdio_pty_mask != 0) ||
+            (spec.io_mode == 1 && spec.stdio_pty_mask != 7)) return EINVAL;
     }
-    if (spec.uid == UINT32_MAX || spec.gid == UINT32_MAX || spec.group_count > 16 || spec.argument_count == 0 ||
+    if (spec.uid == UINT32_MAX || spec.gid == UINT32_MAX || spec.group_count > (spec.format_version == 3 ? REMOZIO_CHILD_MAX_ACCOUNT_GROUPS : 16) || spec.argument_count == 0 ||
         spec.argument_count > REMOZIO_CHILD_MAX_ENTRIES || spec.environment_count > REMOZIO_CHILD_MAX_ENTRIES ||
         spec.preparation_milliseconds < 100 || spec.preparation_milliseconds > 60000 || spec.file_creation_mask > 0777) return EINVAL;
-    size_t entries = 1U + spec.argument_count + spec.environment_count;
+    size_t entries = 1U + spec.argument_count + spec.environment_count + (spec.format_version == 3 ? 1U : 0U);
     if (spec.group_count * 4U + entries * 4U > count - body_start) return EINVAL;
     spec.groups = calloc(spec.group_count + 1U, sizeof(uint32_t));
     spec.arguments = calloc(spec.argument_count + 1U, sizeof(char *));
@@ -84,8 +85,19 @@ int remozio_child_spec_decode(const void *input, size_t count, remozio_child_spe
         spec.groups[index] = word(bytes + cursor); cursor += 4;
         if (spec.groups[index] == UINT32_MAX) goto fail;
     }
-    uint32_t groups[16], group_count;
-    if (remozio_child_spec_groups(&spec, groups, &group_count)) goto fail;
+    if (spec.format_version == 3) {
+        bool primary = false;
+        if (!spec.group_count) goto fail;
+        for (uint32_t index = 0; index < spec.group_count; ++index) {
+            if (index && spec.groups[index - 1] >= spec.groups[index]) goto fail;
+            if (spec.groups[index] == spec.gid) primary = true;
+        }
+        if (!primary || string(bytes, count, &cursor, &spec, &used, &spec.account_name) ||
+            !*spec.account_name || strlen(spec.account_name) > REMOZIO_CHILD_MAX_ACCOUNT_NAME) goto fail;
+    } else {
+        uint32_t groups[16], group_count;
+        if (remozio_child_spec_groups(&spec, groups, &group_count)) goto fail;
+    }
     if (string(bytes, count, &cursor, &spec, &used, &spec.executable) || spec.executable[0] != '/') goto fail;
     for (uint32_t index = 0; index < spec.argument_count; ++index)
         if (string(bytes, count, &cursor, &spec, &used, &spec.arguments[index])) goto fail;
@@ -108,9 +120,9 @@ fail:
 
 int remozio_child_spec_validate_stdio(const remozio_child_spec_t *spec, int terminal, const int streams[3]) {
     if (!spec || !streams || spec->stdio_pty_mask > 7 || spec->io_mode > 2) return EINVAL;
-    if (spec->io_mode == 0) return spec->format_version == 1 && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;
-    if ((spec->io_mode == 1 && (spec->format_version != 1 || spec->stdio_pty_mask != 7)) ||
-        (spec->io_mode == 2 && spec->format_version != 2)) return EINVAL;
+    if (spec->io_mode == 0) return (spec->format_version == 1 || spec->format_version == 3) && terminal < 0 && spec->stdio_pty_mask == 0 ? 0 : EINVAL;
+    if ((spec->io_mode == 1 && ((spec->format_version != 1 && spec->format_version != 3) || spec->stdio_pty_mask != 7)) ||
+        (spec->io_mode == 2 && spec->format_version != 2 && spec->format_version != 3)) return EINVAL;
     struct stat control, stream;
     struct termios attributes;
     if (fstat(terminal, &control) < 0 || tcgetattr(terminal, &attributes) < 0) return errno;

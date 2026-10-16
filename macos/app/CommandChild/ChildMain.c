@@ -1,4 +1,5 @@
 #include "RemozioCommandChild.h"
+#include "RemozioCommandCredentials.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <libproc.h>
@@ -113,7 +114,7 @@ int main(int argc, char **argv) {
     unsigned char header[REMOZIO_CHILD_HEADER_BYTES];
     if ((error = read_exact(configuration_fd, header, sizeof(header), deadline))) goto fail;
     uint32_t body_count = word(header + 4), budget = word(header + 28);
-    if ((word(header) != REMOZIO_CHILD_FRAME_V1 && word(header) != REMOZIO_CHILD_FRAME_V2) || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
+    if ((word(header) != REMOZIO_CHILD_FRAME_V3) || body_count > REMOZIO_CHILD_MAX_BYTES - sizeof(header) || budget < 100 || budget > 60000) { error = EINVAL; goto fail; }
     deadline = started + budget;
     frame_count = sizeof(header) + body_count;
     frame = malloc(frame_count);
@@ -124,12 +125,9 @@ int main(int argc, char **argv) {
     close(configuration_fd);
     if ((error = remozio_child_spec_decode(frame, frame_count, &spec))) goto fail;
     wipe(frame, frame_count); free(frame); frame = NULL;
-    uint32_t groups[16], count;
-    if ((error = remozio_child_spec_groups(&spec, groups, &count))) goto fail;
-    if (setgroups((int)count, groups) != 0 || setgid(spec.gid) != 0 || setuid(spec.uid) != 0) { error = errno; goto fail; }
-    if (getuid() != spec.uid || geteuid() != spec.uid || getgid() != spec.gid || getegid() != spec.gid) { error = EPERM; goto fail; }
-    gid_t actual[16]; int actual_count = getgroups(16, actual);
-    if (actual_count != (int)count || memcmp(actual, groups, count * sizeof(gid_t)) != 0) { error = EPERM; goto fail; }
+    if ((error = remozio_child_account_apply(&spec))) goto fail;
+    close(configuration_fd);
+    if ((error = close_other_descriptors())) goto fail;
     if (fchdir(directory_fd) != 0) { error = errno; goto fail; }
     close(directory_fd); umask(spec.file_creation_mask);
     if (spec.io_mode != 0) {

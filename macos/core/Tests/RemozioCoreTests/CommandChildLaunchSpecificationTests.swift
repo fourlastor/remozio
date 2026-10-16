@@ -23,7 +23,7 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
             limits: .init(maxBytes: 8192, maxDepth: 16, maxItems: 1024))
     }
     private func frame() throws -> Data {
-        try CommandChildLaunchSpecification(capture: capture(), preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+        try CommandChildLaunchSpecification(legacyCapture: capture(), preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
     }
     private func decode(_ bytes: Data, inspect: (remozio_child_spec_t) throws -> Void = { _ in }) throws -> Int32 {
         var spec = remozio_child_spec_t()
@@ -73,7 +73,7 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
     func testEncoderSelectsExplicitTerminalFormatFromEveryApprovedSchemaThreeMask() throws {
         for mask: UInt32 in 0...7 {
             let capture = try layoutCapture(mask: mask, mode: .pty), original = capture.canonicalBytes
-            let frame = try CommandChildLaunchSpecification(capture: capture, preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
+            let frame = try CommandChildLaunchSpecification(legacyCapture: capture, preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
             XCTAssertEqual(frame, try mappedFrame(mask: mask))
             XCTAssertEqual(try decode(frame) { spec in
                 XCTAssertEqual(spec.format_version, 2)
@@ -86,10 +86,10 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
     }
 
     func testSchemaThreePipesAndLegacyTerminalRetainTheirNativeFrameMeanings() throws {
-        let pipes = try CommandChildLaunchSpecification(capture: layoutCapture(mask: 0, mode: .pipes),
+        let pipes = try CommandChildLaunchSpecification(legacyCapture: layoutCapture(mask: 0, mode: .pipes),
             preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
         XCTAssertEqual(pipes, try frame())
-        let legacy = try CommandChildLaunchSpecification(capture: capture(ioMode: .pty),
+        let legacy = try CommandChildLaunchSpecification(legacyCapture: capture(ioMode: .pty),
             preparationMilliseconds: 1000, fileCreationMask: 0o027).canonicalBytes
         var expected = try frame(); word(1, offset: 36, bytes: &expected)
         XCTAssertEqual(legacy, expected)
@@ -261,9 +261,9 @@ final class CommandChildLaunchSpecificationTests: XCTestCase {
     func testEncoderRejectsUnsupportedPreparationAndMaskWithoutChangingCapture() throws {
         let original = try capture(), bytes = original.canonicalBytes
         for budget: UInt32 in [0, 99, 60001, UInt32.max] {
-            XCTAssertThrowsError(try CommandChildLaunchSpecification(capture: original, preparationMilliseconds: budget, fileCreationMask: 0o022))
+            XCTAssertThrowsError(try CommandChildLaunchSpecification(legacyCapture: original, preparationMilliseconds: budget, fileCreationMask: 0o022))
         }
-        XCTAssertThrowsError(try CommandChildLaunchSpecification(capture: original, preparationMilliseconds: 1000, fileCreationMask: 0o1000))
+        XCTAssertThrowsError(try CommandChildLaunchSpecification(legacyCapture: original, preparationMilliseconds: 1000, fileCreationMask: 0o1000))
         XCTAssertEqual(original.canonicalBytes, bytes)
     }
 }

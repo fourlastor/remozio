@@ -54,7 +54,8 @@ The execution overload checks the policy scope against the current journal befor
 The serial receiver worker has a current-policy constructor. It passes the original authenticated attempt to the journal operation. It retains one receive queue and the shared journal, clock and epoch.
 The trusted stream-metadata factory runs after grant checks, inside admission. A factory failure returns typed uncertainty before filesystem capture. Imported resources close; borrowed caller descriptors remain open. An ordinary account cannot construct the production worker.
 
-Before activating execution, complete protected service registration and the native target-group experiment in [issue 298](https://github.com/rock3r/remozio/issues/298). Preserve the full OS group identity; do not truncate groups or silently reject Root targets.
+The [native account credential path](macos-native-account-credentials.md) preserves the full captured identity through native initialization.
+Before activating execution, complete protected service registration and the production child measurement in [issue 298](https://github.com/rock3r/remozio/issues/298). Preserve the full OS group identity; do not truncate groups or silently reject Root targets.
 The existing enrollment, signature, capture, caller-lifetime, durable-consumption and execution checks remain required.
 The 1Password and Little Snitch adapter contracts remain unchanged.
 

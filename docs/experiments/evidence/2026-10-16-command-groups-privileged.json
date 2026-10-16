@@ -1,0 +1,190 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-10-16T08:45:57.665781+00:00",
+  "hostMacOS": "27.0.1",
+  "hostArchitecture": "arm64",
+  "reviewedSourceSHA256": "9e5be593f070883f91f6ec71716b333ad4439341592f1f7af7c544cdb5a4bf31",
+  "administratorCommandSHA256": "fb73f381b44f394e5053893dd85acbc3a162f4d6dfa4761f7a7223b543053c04",
+  "probeHashes": {
+    "posix-probe": "1a101ee7ae0649b0fde6a7436d1d1778c8848d1e461251f50c03e321fc794ba4",
+    "darwin-probe": "e3712dcc8b6aa79ef393e54bd4485fbe4923ea05177b02861baa7d70bb5c6d3b"
+  },
+  "posix": {
+    "schemaVersion": 1,
+    "getgroupsInterface": "posix",
+    "privilegedControlsRun": true,
+    "kernelReportedLimit": 16,
+    "rootDirectoryGroups": 24,
+    "targetDirectoryGroups": 17,
+    "parentCredentialsUnchanged": true,
+    "fixtureRemoved": true,
+    "rootFullSetgroups": {
+      "credentialError": 22,
+      "observedGroupCount": -1,
+      "fixtureReadable": -1,
+      "accessError": 0
+    },
+    "targetFullSetgroups": {
+      "credentialError": 22,
+      "observedGroupCount": -1,
+      "fixtureReadable": -1,
+      "accessError": 0
+    },
+    "targetStaticSubset": {
+      "credentialError": 0,
+      "observedGroupCount": 16,
+      "fixtureReadable": 0,
+      "accessError": 13
+    },
+    "targetInitgroups": {
+      "credentialError": 0,
+      "observedGroupCount": 16,
+      "fixtureReadable": 1,
+      "accessError": 0
+    }
+  },
+  "darwinUnlimited": {
+    "schemaVersion": 1,
+    "getgroupsInterface": "darwin-unlimited",
+    "privilegedControlsRun": true,
+    "kernelReportedLimit": 16,
+    "rootDirectoryGroups": 24,
+    "targetDirectoryGroups": 17,
+    "parentCredentialsUnchanged": true,
+    "fixtureRemoved": true,
+    "rootFullSetgroups": {
+      "credentialError": 22,
+      "observedGroupCount": -1,
+      "fixtureReadable": -1,
+      "accessError": 0
+    },
+    "targetFullSetgroups": {
+      "credentialError": 22,
+      "observedGroupCount": -1,
+      "fixtureReadable": -1,
+      "accessError": 0
+    },
+    "targetStaticSubset": {
+      "credentialError": 0,
+      "observedGroupCount": 17,
+      "fixtureReadable": 0,
+      "accessError": 13
+    },
+    "targetInitgroups": {
+      "credentialError": 0,
+      "observedGroupCount": 17,
+      "fixtureReadable": 1,
+      "accessError": 0
+    }
+  },
+  "exits": {
+    "schemaVersion": 1,
+    "kind": "credential-session-exits",
+    "posixExit": 0,
+    "darwinExit": 0
+  },
+  "experimentTemporaryPathsRemaining": 0,
+  "installedRemozio": false,
+  "productionDispatchTested": false,
+  "productionAccountMembershipChanged": false,
+  "limits": [
+    "Production child launch format and target validation still need a reviewed fix",
+    "Installed services and Mac-Pixel approval flow remain untested",
+    "macOS26 runtime not established by this macOS27.0.1 measurement"
+  ],
+  "baseReviewedProbePR": "https://github.com/rock3r/remozio/pull/385",
+  "rootPositiveControl": {
+    "sourceSHA256": "8666ecc97fb2a0ce2ee1d839bf67c685a44551f9b88c1b2e297c8b71094ec2a6",
+    "baseSourceSHA256": "9e5be593f070883f91f6ec71716b333ad4439341592f1f7af7c544cdb5a4bf31",
+    "administratorCommandSHA256": "cc0ff72562709c390d76c0f93b7c9a22b21688cf84e6e3a571a7ef5200171195",
+    "change": "One additional fixed child calls initgroups for UID0; base wait/cleanup unchanged. Compiled with warnings as errors; ordinary-account privilege refusal retained.",
+    "posix": {
+      "schemaVersion": 1,
+      "getgroupsInterface": "posix",
+      "privilegedControlsRun": true,
+      "kernelReportedLimit": 16,
+      "rootDirectoryGroups": 24,
+      "targetDirectoryGroups": 17,
+      "parentCredentialsUnchanged": true,
+      "fixtureRemoved": true,
+      "rootFullSetgroups": {
+        "credentialError": 22,
+        "observedGroupCount": -1,
+        "fixtureReadable": -1,
+        "accessError": 0
+      },
+      "targetFullSetgroups": {
+        "credentialError": 22,
+        "observedGroupCount": -1,
+        "fixtureReadable": -1,
+        "accessError": 0
+      },
+      "targetStaticSubset": {
+        "credentialError": 0,
+        "observedGroupCount": 16,
+        "fixtureReadable": 0,
+        "accessError": 13
+      },
+      "targetInitgroups": {
+        "credentialError": 0,
+        "observedGroupCount": 16,
+        "fixtureReadable": 1,
+        "accessError": 0
+      },
+      "rootInitgroups": {
+        "credentialError": 0,
+        "observedGroupCount": 16,
+        "fixtureReadable": -1,
+        "accessError": 0
+      }
+    },
+    "darwinUnlimited": {
+      "schemaVersion": 1,
+      "getgroupsInterface": "darwin-unlimited",
+      "privilegedControlsRun": true,
+      "kernelReportedLimit": 16,
+      "rootDirectoryGroups": 24,
+      "targetDirectoryGroups": 17,
+      "parentCredentialsUnchanged": true,
+      "fixtureRemoved": true,
+      "rootFullSetgroups": {
+        "credentialError": 22,
+        "observedGroupCount": -1,
+        "fixtureReadable": -1,
+        "accessError": 0
+      },
+      "targetFullSetgroups": {
+        "credentialError": 22,
+        "observedGroupCount": -1,
+        "fixtureReadable": -1,
+        "accessError": 0
+      },
+      "targetStaticSubset": {
+        "credentialError": 0,
+        "observedGroupCount": 17,
+        "fixtureReadable": 0,
+        "accessError": 13
+      },
+      "targetInitgroups": {
+        "credentialError": 0,
+        "observedGroupCount": 17,
+        "fixtureReadable": 1,
+        "accessError": 0
+      },
+      "rootInitgroups": {
+        "credentialError": 0,
+        "observedGroupCount": 24,
+        "fixtureReadable": -1,
+        "accessError": 0
+      }
+    },
+    "exits": {
+      "schemaVersion": 1,
+      "kind": "credential-session-exits",
+      "posixExit": 0,
+      "darwinExit": 0
+    },
+    "experimentTemporaryPathsRemaining": 0,
+    "sourceLocation": "experiments/command-groups/probe.c"
+  }
+}

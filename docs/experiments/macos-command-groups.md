@@ -1,7 +1,7 @@
 # Native target-group experiment
 
-The command child currently accepts 16 groups. The full OS target lookup can return more groups, including for root.
-This experiment inspects that mismatch and prepares isolated credential controls. It does not change the production credential contract.
+The historical command child accepts 16 static groups. The full OS target lookup can return more groups, including for root.
+This experiment measures that mismatch through isolated credential controls. The [production integration](../macos-native-account-credentials.md) uses a separate versioned child format.
 
 ## Measured ordinary-account evidence
 
@@ -14,17 +14,20 @@ Seven ordinary-process controls also check completion, timeout, lost child owner
 They confirm that their children are reaped. They do not change credentials or establish privileged behavior.
 The probe compiles for Apple Silicon and macOS 26 with warnings treated as errors.
 
-## Privileged controls: unrun
+## Privileged controls: measured on macOS 27.0.1
 
 Each control runs in a separate child. The parent retains its credentials and removes its disposable Root-owned fixture.
-The controls compare the full root group list, full ordinary-account group list, a bounded static subset, and native `initgroups`.
+The controls compare the full Root group list, full ordinary-account group list, a bounded static subset, and native `initgroups` for both accounts.
 For the ordinary target, a Root-owned file tests access through a group outside the bounded subset.
 The result records credential API errors, observed group count, and file-access success or failure. It does not assume the membership result.
 Child waits are bounded. Failed or reversed clock readings end the wait.
 The parent never signals a reaped child and checks ownership again before timeout cleanup.
 Privileged mode restores the default child signal disposition before forking, so children remain waitable.
 The parent checks its unchanged UID and group list after reaping the children.
-These controls require the approved interactive privileged test stage. They remain unrun in CI and this evidence.
+The user approved the interactive stage on 16 October 2026. Both probe variants completed, retained parent credentials and removed their fixtures.
+Full static lists failed with EINVAL. The static subset lost extra-group file access; native initialization preserved it. Root initialization succeeded.
+The [retained results](evidence/2026-10-16-command-groups-privileged.json) preserve separate provenance for the reviewed baseline and the added Root-positive control.
+These are API controls, not production command execution. Privileged macOS 26 behavior remains untested.
 
 ## Why counts are insufficient
 
@@ -42,7 +45,7 @@ The runner compiles POSIX and Darwin extended variants in a disposable directory
 It verifies that the ordinary account receives a refusal for privileged mode and invalid UIDs.
 The JSON evidence records both source hashes, the owned-child results, host version and measured group counts.
 [The latest ordinary evidence](evidence/2026-10-15-command-groups-owned-wait.json) includes all seven passing controls.
-The privileged credential and file-access results remain unrun.
+The privileged credential and file-access results appear in the retained record above.
 
 ## Prepare the interactive controls
 

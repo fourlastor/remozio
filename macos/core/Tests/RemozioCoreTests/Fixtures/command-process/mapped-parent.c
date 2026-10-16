@@ -89,9 +89,16 @@ int main(int argc, char **argv) {
     if (inspection < 0) { failure = 8; goto cleanup; }
     if (!strcmp(argv[5], "preflight")) {
         if (remozio_command_monitor_spawn(argv[1], argv[2], frame, count, streams[0], streams[1], streams[2], directory, &monitor) != ENOTSUP || monitor) { failure = 9; goto cleanup; }
-        unsigned char legacy[8192]; memcpy(legacy, frame, 40); memcpy(legacy + 40, frame + 44, count - 44);
-        put_word(legacy, REMOZIO_CHILD_FRAME_V1); put_word(legacy + 4, (uint32_t)(count - 44)); put_word(legacy + 36, 0);
-        if (remozio_command_monitor_spawn_with_terminal(argv[1], argv[2], legacy, count - 4, input[0], output[1], errors[1], directory, slave, &monitor) != ENOTSUP || monitor) { failure = 10; goto cleanup; }
+        remozio_child_spec_t spec = {0};
+        if (remozio_child_spec_decode(frame, count, &spec)) { failure = 10; goto cleanup; }
+        size_t groups_end = 44 + spec.group_count * 4U, payload = groups_end + 4 + strlen(spec.account_name);
+        size_t removed = 4 + payload - groups_end, legacy_count = count - removed;
+        unsigned char legacy[8192]; memcpy(legacy, frame, 40);
+        memcpy(legacy + 40, frame + 44, spec.group_count * 4U);
+        memcpy(legacy + groups_end - 4, frame + payload, count - payload);
+        remozio_child_spec_close(&spec);
+        put_word(legacy, REMOZIO_CHILD_FRAME_V1); put_word(legacy + 4, (uint32_t)(legacy_count - 40)); put_word(legacy + 36, 0);
+        if (remozio_command_monitor_spawn_with_terminal(argv[1], argv[2], legacy, legacy_count, input[0], output[1], errors[1], directory, slave, &monitor) != ENOTSUP || monitor) { failure = 10; goto cleanup; }
         int mismatch = mask & 1 ? input[0] : slave;
         if (remozio_command_monitor_spawn_with_terminal(argv[1], argv[2], frame, count, mismatch, streams[1], streams[2], directory, slave, &monitor) != EINVAL || monitor) { failure = 11; goto cleanup; }
         goto retained;

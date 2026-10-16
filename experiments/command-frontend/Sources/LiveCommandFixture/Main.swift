@@ -319,7 +319,7 @@ private struct Probe {
                     try require(remozio_fixture_cancelled() == 0, "owned fixture cancelled")
                     _ = try host.poll { received in
                         let command = try host.assemble(received: received, captureSchemaVersion: 3,
-                            resolvedTarget: CommandTarget(uid: geteuid(), gid: getgid(), supplementaryGroups: [getgid()], observedName: nil),
+                            resolvedTarget: CommandTarget(uid: geteuid(), gid: getgid(), supplementaryGroups: [getgid()], observedName: "fixture"),
                             minimalEnvironment: [("HOME", root.path), ("LC_ALL", "C"), ("PATH", "/usr/bin:/bin"),
                                 ("PS1", "TEST> "), ("TERM", "dumb")].map { .init(name: Data($0.0.utf8), value: Data($0.1.utf8), source: .minimal) },
                             streamBinding: Data(repeating: 12, count: 16), submissionLimits: limits, captureLimits: limits)

@@ -40,7 +40,7 @@ final class CommandProcessTests: XCTestCase {
             ancestry: .init(completeness: .unavailable, entries: [], reason: .unsupported), unverifiedRationale: nil,
             submission: .init(id: Data(count: 16), nonce: Data(count: 32), callerBinding: Data(count: 16)),
             limits: .init(maxBytes: 2_097_152, maxDepth: 16, maxItems: 1024))
-        return try CommandChildLaunchSpecification(capture: capture, preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
+        return try CommandChildLaunchSpecification(legacyCapture: capture, preparationMilliseconds: budget, fileCreationMask: 0o022).canonicalBytes
     }
     private final class Resources {
         var input = [Int32](repeating: -1, count: 2), output = [Int32](repeating: -1, count: 2), error = [Int32](repeating: -1, count: 2)

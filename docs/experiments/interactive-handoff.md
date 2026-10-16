@@ -4,8 +4,8 @@ The app now includes account setup, service activation, pairing and a foreground
 Installed behavior remains untested. This candidate is not ready for Root command approval.
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) is a known blocker.
-The Mac reports 24 directory groups for root. The command launcher accepts at most 16.
-Run the native credential experiment first. Fix and review the production contract before the durable installation and Root execution tests.
+The Mac reports 24 directory groups for root. Full static assignment fails at the OS limit of 16.
+The native API experiment passed. The [production credential path](../macos-native-account-credentials.md) still needs review and a privileged child measurement before installation.
 Do not truncate groups or omit this gate to obtain a successful demo.
 
 ## What exists
@@ -40,15 +40,12 @@ All persistent executables remain inside the app.
 ### 1. Resolve the credential gate
 
 Follow the [target-group experiment](macos-command-groups.md).
-Ordinary inspection and owned-child controls are prepared. The privileged credential controls remain unrun.
+The privileged API controls completed on macOS 27.0.1 with native administrator consent.
+Full static assignment failed. The bounded subset lost extra-group file access; native initialization preserved access.
+Root initialization also succeeded. Parent credentials stayed unchanged and all disposable fixtures were removed.
 
-With the user present, prepare a protected temporary copy of the fixed probe and obtain native administrator consent.
-The probe uses isolated children and a disposable file. It does not install a service or execute an arbitrary target command.
-Compare full group assignment, the static subset and native directory membership through actual file access.
-Record failures as results. Do not infer effective access from a group count.
-
-Use that evidence to implement and review the production credential fix.
-The standalone experiment needs no persistent Remozio installation.
+Review the production credential integration, then measure its actual child with disposable targets before installing a service.
+The API probe does not prove production execution or macOS 26 behavior. Do not infer effective access from a group count.
 
 ## Stage 2: installation and pairing
 
@@ -137,8 +134,8 @@ Do not automatically retry an uncertain external action.
 
 ## Timing and later checks
 
-The first Mac session can start with the standalone credential experiment.
-Its results determine the production fix, which needs a separate implementation and review cycle.
+The standalone credential experiment is complete.
+The production fix needs review and an actual privileged child measurement.
 Reserve 60–90 minutes for installation and pairing after that fix and the update/recovery gate pass.
 Do not promise Root approval in the current candidate or a calendar date before that evidence.
 

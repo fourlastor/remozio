@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <membership.h>
 #include "RemozioCommandChild.h"
+#include "RemozioCommandCredentials.h"
 #include "RemozioCommandProcess.h"
 #include "RemozioCommandMonitorProtocol.h"
 #include "RemozioCommandMonitor.h"

@@ -1770,7 +1770,7 @@ final class MachCommandCallerReceiverTests: XCTestCase {
     private var assemblyLimits: CBORLimits { get throws { try CBORLimits(maxBytes: 8192, maxDepth: 16, maxItems: 1024) } }
     private var assemblyBinding: Data { Data(repeating: 0xb1, count: 16) }
     private var assemblyTarget: CommandTarget {
-        .init(uid: geteuid(), gid: getegid(), supplementaryGroups: [getegid()], observedName: nil)
+        .init(uid: geteuid(), gid: getegid(), supplementaryGroups: [getegid()], observedName: "fixture")
     }
     private var assemblyEnvironment: [CapturedEnvironmentEntry] {
         [.init(name: Data("PATH".utf8), value: Data("/synthetic/baseline".utf8), source: .minimal),

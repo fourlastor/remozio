@@ -145,11 +145,12 @@ int main(int argc, char **argv) {
     int fd = failure ? -1 : open(fixture, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0 || fchown(fd, 0, extra) != 0 || fchmod(fd, 0640) != 0) failure = 1;
     if (fd >= 0) close(fd);
-    struct result root_full, target_full, target_subset, target_dynamic;
+    struct result root_full, target_full, target_subset, target_dynamic, root_dynamic;
     if (!failure && (trial(&root, false, root.groups, root.count, NULL, &root_full) ||
         trial(&target, false, target.groups, target.count, fixture, &target_full) ||
         trial(&target, false, subset, count, fixture, &target_subset) ||
-        trial(&target, true, NULL, 0, fixture, &target_dynamic))) failure = 1;
+        trial(&target, true, NULL, 0, fixture, &target_dynamic) ||
+        trial(&root, true, NULL, 0, NULL, &root_dynamic))) failure = 1;
     int cleanup = unlink(fixture); int cleanup_error = errno;
     int directory_cleanup = rmdir(directory);
     if ((cleanup && cleanup_error != ENOENT) || directory_cleanup) failure = 1;
@@ -160,6 +161,6 @@ int main(int argc, char **argv) {
     if (failure) return 70;
     printf("{\"schemaVersion\":1,\"getgroupsInterface\":\"%s\",\"privilegedControlsRun\":true,\"kernelReportedLimit\":%ld,\"rootDirectoryGroups\":%d,\"targetDirectoryGroups\":%d,\"parentCredentialsUnchanged\":true,\"fixtureRemoved\":true,", GROUPS_INTERFACE, limit, root.count, target.count);
     emit("rootFullSetgroups", root_full); printf(","); emit("targetFullSetgroups", target_full); printf(",");
-    emit("targetStaticSubset", target_subset); printf(","); emit("targetInitgroups", target_dynamic); printf("}\n");
+    emit("targetStaticSubset", target_subset); printf(","); emit("targetInitgroups", target_dynamic); printf(","); emit("rootInitgroups", root_dynamic); printf("}\n");
     return 0;
 }

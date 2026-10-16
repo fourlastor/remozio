@@ -27,30 +27,8 @@ final class NativeStdioLayoutTests: XCTestCase {
         let childWrapper = directory.appendingPathComponent("fixture-child.c")
         // Only credential operations are mocked. The product framing, descriptors, terminal and exec remain real.
         try """
-        #include <unistd.h>
-        #include <errno.h>
-        #include <string.h>
-        static gid_t fixture_groups[16];
-        static int fixture_group_count;
-        static uid_t fixture_getuid(void) { static int calls; return calls++ ? getuid() : 0; }
-        static uid_t fixture_geteuid(void) { static int calls; return calls++ ? geteuid() : 0; }
-        static int fixture_setuid(uid_t uid) { if (uid == getuid()) return 0; errno = EPERM; return -1; }
-        static int fixture_setgid(gid_t gid) { if (gid == getgid()) return 0; errno = EPERM; return -1; }
-        static int fixture_setgroups(int count, const gid_t *groups) {
-            if (count < 0 || count > 16) { errno = EINVAL; return -1; }
-            memcpy(fixture_groups, groups, (size_t)count * sizeof(gid_t)); fixture_group_count = count; return 0;
-        }
-        static int fixture_getgroups(int count, gid_t *groups) {
-            if (count < fixture_group_count) { errno = EINVAL; return -1; }
-            memcpy(groups, fixture_groups, (size_t)fixture_group_count * sizeof(gid_t)); return fixture_group_count;
-        }
-        #define getuid fixture_getuid
-        #define geteuid fixture_geteuid
-        #define setuid fixture_setuid
-        #define setgid fixture_setgid
-        #define setgroups fixture_setgroups
-        #define getgroups fixture_getgroups
-        #include "\(app.appendingPathComponent("CommandChild/ChildMain.c").path)"
+        #define REMOZIO_OWNED_LIVE_FIXTURE 1
+        #include "\(core.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("experiments/command-frontend/live-child.c").path)"
         """.write(to: childWrapper, atomically: false, encoding: .utf8)
         func fixture(_ name: String) throws -> URL {
             try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "c", subdirectory: "Fixtures/command-process"))
@@ -91,12 +69,13 @@ final class NativeStdioLayoutTests: XCTestCase {
             withUnsafeBytes(of: &word) { bytes.append(contentsOf: $0) }
         }
         appendWord(mask, to: &body)
-        for value in [Data(target.path.utf8)] + arguments + environment {
+        appendWord(getgid(), to: &body)
+        for value in [Data("fixture".utf8), Data(target.path.utf8)] + arguments + environment {
             appendWord(UInt32(value.count), to: &body)
             body.append(value)
         }
         var frame = Data()
-        for value in [UInt32(0x524d4332), UInt32(body.count), getuid(), getgid(), 0, UInt32(arguments.count),
+        for value in [UInt32(0x524d4333), UInt32(body.count), getuid(), getgid(), 1, UInt32(arguments.count),
                       UInt32(environment.count), 5000, 0o022, 2] {
             appendWord(value, to: &frame)
         }
