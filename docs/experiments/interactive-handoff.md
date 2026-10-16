@@ -91,8 +91,10 @@ Keep both devices on the same LAN. Keep the Android app open for this initial pa
 Closing a fresh phone setup before a proof submission removes only its unsubmitted local preparation and unused keys.
 The biometric prompt can be retried while that setup remains open. Close can retry a failed cleanup.
 Preserve an incomplete record after any proof submission attempt or process restart.
-Receipt recovery UI remains unfinished; a lost reply does not authorize removing that record.
-Do not discard its keys or silently start another enrollment.
+For an incomplete record, choose **Check pairing** to query the Mac with its retained transport identity.
+A verified committed receipt completes that preparation without another biometric proof.
+An unavailable reply remains Unknown. Keep its keys and record; do not silently start another enrollment.
+This path is connected in source through [PR #388](https://github.com/rock3r/remozio/pull/388); actual Pixel recovery remains untested.
 
 ## Stage 3: first complete approval
 

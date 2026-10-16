@@ -1,0 +1,33 @@
+{
+  "hostArchitecture": "arm64",
+  "hostMacOS": "27.0.1",
+  "macOS26RuntimeTested": false,
+  "nativeControls": {
+    "cases": {
+      "closeOnExecReleasesWhileChildLives": true,
+      "duplicateCloseRetainsLock": true,
+      "exclusiveOwnerBlocksNewActivity": true,
+      "failedAutomaticAttemptAllowsNewActivity": true,
+      "forkCloseRetainsParentLock": true,
+      "forkUnlockReleasesParentLockNegative": true,
+      "pathReplacementBypassesLockNegative": true,
+      "reapedCrashReleasesLock": true,
+      "sharedOwnersBlockUntilLastClose": true
+    },
+    "childrenReaped": 10,
+    "childrenSpawned": 10,
+    "passed": true,
+    "productionActivationTested": false,
+    "rootOperations": false,
+    "schemaVersion": 1,
+    "servicesRegistered": false,
+    "unreapedChildren": 0
+  },
+  "productionActivationTested": false,
+  "productionCodeChanged": false,
+  "pythonVersion": "3.15.0",
+  "runnerSHA256": "a0edc98d9131b90b2f2f0a0a93b0e516d5f36f4e9404a24205b4c7157c448c7a",
+  "schemaVersion": 1,
+  "sourceSHA256": "f74d431d76c633a3a1e25e436ce3fb0f38c04d1db6f42e7b7a9a1db434d158c9",
+  "status": "ordinary-controls-passed"
+}

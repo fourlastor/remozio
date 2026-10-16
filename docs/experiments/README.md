@@ -8,6 +8,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Swift/Kotlin approval flow | [Synthetic peer harness](approval-flow.md) | Durable admission, real enrollment, encrypted transport, and device keys |
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
 | Single app and background services | [Bundle checks](macos-packaging.md) and [guarded lifecycle harness](service-lifecycle.md) | Interactive registration, protected placement, notarization and replacement |
+| Release activity barrier | [Nine native lock controls passed](release-activity.md) | Bind all actual activity owners, protect file identity, and integrate durable activation |
 | Release signature inspection | [Reproducible default and opt-in Developer ID controls](macos-release-signing.md) | Notarization, protected placement, and activation |
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
 | Installation inventory recovery | [Actual-store process exit and SIGKILL controls](installation-inventory-recovery.md) | Root isolation, native I/O faults, power loss and installed activation |
