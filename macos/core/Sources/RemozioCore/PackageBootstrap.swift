@@ -95,7 +95,7 @@ public enum PackageBootstrap {
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
         defer { placement.close() }
-        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let release = try SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.remozio.mac")
         try profile.validate(release)
         let shared = try ProtectedSetupDirectory(anchor: "/", relativePath: String(sharedPath.dropFirst()), owner: 0,
@@ -103,7 +103,7 @@ public enum PackageBootstrap {
         defer { shared.close() }
         let value = try body(shared, release)
         try shared.validate(); try placement.validate()
-        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         try profile.validate(SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.remozio.mac"))
         return value
     }

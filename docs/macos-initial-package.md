@@ -106,3 +106,11 @@ Do not erase those files to make a retry succeed.
 Service registration, dedicated service accounts, authority keys and explicit caller grants remain separate work.
 Sparkle remains the intended update path after the first complete approval flow.
 Its existing signature, generation and quiescence contracts still apply.
+
+## Native access metadata
+
+The first native attempt placed the signed app but failed before machine bootstrap.
+macOS added `com.apple.macl` to the app root. The former copied-object policy refused it.
+The [scoped installed-metadata check](experiments/macos-installed-access-metadata.md) handles that OS label without changing the payload-copy policy.
+The failed partial app remains intact. A corrected native installation and verified recovery still need evidence.
+An initialized installation still refuses a different release through this initial package.

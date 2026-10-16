@@ -160,4 +160,81 @@ final class ProtectedReleaseTreeInspectionTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .system(EBADF))
         }
     }
+    func testInstalledApplicationRootAcceptsMACLWithoutChangingCopiedObjectPolicy() throws {
+        try fixture { copy, lease in
+            try descriptor(copy) { fd in try attribute(fd, "com.apple.macl", Data(repeating: 0, count: 72)) }
+            let value = try lease.inspectInstalledApplication(name: "Fixture.app")
+            XCTAssertEqual(value.entries, 4); XCTAssertEqual(value.files, 2); XCTAssertEqual(value.links, 1)
+            rejectsMetadata(lease)
+        }
+    }
+    func testInstalledApplicationDoesNotAcceptMACLOnChildrenOrAliases() throws {
+        for name in ["file", "nested", "alias"] {
+            try fixture { copy, lease in
+                try descriptor(copy.appendingPathComponent(name)) { fd in
+                    try attribute(fd, "com.apple.macl", Data(repeating: 0, count: 72))
+                }
+                XCTAssertThrowsError(try lease.inspectInstalledApplication(name: "Fixture.app")) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+                }
+            }
+        }
+    }
+    func testInstalledApplicationMACLDoesNotAdmitOtherRootAttributes() throws {
+        for name in ["dev.remozio.fixture", "com.apple.quarantine", "com.apple.FinderInfo"] {
+            try fixture { copy, lease in
+                try descriptor(copy) { fd in
+                    try attribute(fd, "com.apple.macl", Data(repeating: 0, count: 72))
+                    let value = name == "com.apple.FinderInfo" ? Data([1]) + Data(repeating: 0, count: 31) : Data([1])
+                    try attribute(fd, name, value)
+                }
+                XCTAssertThrowsError(try lease.inspectInstalledApplication(name: "Fixture.app")) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+                }
+            }
+        }
+    }
+    func testInstalledApplicationMACLDoesNotAdmitWritableChildren() throws {
+        try fixture { copy, lease in
+            try descriptor(copy) { fd in try attribute(fd, "com.apple.macl", Data(repeating: 0, count: 72)) }
+            XCTAssertEqual(chmod(copy.appendingPathComponent("file").path, 0o666), 0)
+            XCTAssertThrowsError(try lease.inspectInstalledApplication(name: "Fixture.app")) {
+                XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+            }
+        }
+    }
+    func testInstalledApplicationMACLDoesNotAdmitFlagsOrMutationACLs() throws {
+        try fixture { copy, lease in
+            try descriptor(copy) { fd in
+                try attribute(fd, "com.apple.macl", Data(repeating: 0, count: 72))
+                XCTAssertEqual(fchflags(fd, UInt32(UF_NODUMP)), 0)
+                defer { XCTAssertEqual(fchflags(fd, 0), 0) }
+                XCTAssertThrowsError(try lease.inspectInstalledApplication(name: "Fixture.app")) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+                }
+            }
+            let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            process.arguments = ["+a", "everyone allow write,writeextattr", copy.appendingPathComponent("file").path]
+            try process.run(); process.waitUntilExit(); XCTAssertEqual(process.terminationStatus, 0)
+            XCTAssertThrowsError(try lease.inspectInstalledApplication(name: "Fixture.app")) {
+                XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+            }
+        }
+    }
+    func testInstalledApplicationContextRequiresAnApplicationDirectory() throws {
+        try fixture { copy, lease in
+            for name in ["Fixture", "../Fixture.app"] {
+                XCTAssertThrowsError(try lease.inspectInstalledApplication(name: name)) {
+                    XCTAssertEqual($0 as? ReleaseCopyError, .invalidInput)
+                }
+            }
+            try descriptor(copy.appendingPathComponent("file")) { fd in
+                var info = stat(); XCTAssertEqual(fstat(fd, &info), 0)
+                XCTAssertThrowsError(try CopiedReleaseMetadata.validate(fd, info, context: .installedApplicationRoot)) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+                }
+            }
+        }
+    }
+
 }

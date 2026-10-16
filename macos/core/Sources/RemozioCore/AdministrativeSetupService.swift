@@ -106,7 +106,7 @@ public final class AdministrativeSetupService {
             let activity = try ReleaseActivityBarrier.open(machineDirectory: configuration.machineDirectory)
             let startup = try activity.acquireShared()
             defer { startup.close() }
-            _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+            _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
             try configuration.validate(release: release)
             let store = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
@@ -120,7 +120,7 @@ public final class AdministrativeSetupService {
                 guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
                     throw AdministrativeSetupServiceError.changedConfiguration
                 }
-                _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+                _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
                 let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
                 try configuration.validate(inventory: inventory, release: release)
                 try DynamicCodeValidation.validateSelf(requirement: requirement)

@@ -19,7 +19,7 @@ public enum MachineBootstrap {
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
         defer { placement.close() }
         func inspect() throws -> SignedReleaseEvidence {
-            _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+            _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: teamID, appIdentifier: "dev.remozio.mac")
             guard let host = release.manifest.components.first(where: { $0.role == .setupController }),
                   host.identifier == "dev.remozio.setup-controller", host.relativePath == AdministrativeSetupConfiguration.executablePath,

@@ -1,8 +1,11 @@
 # First Mac–Pixel integration session
 
 The app includes account setup, service activation, pairing and a foreground command inbox.
-The native credential gate passed on macOS 26.6.2. Installed behavior remains untested.
-This candidate is ready for supervised installation testing, not production Root approval.
+The native credential gate passed on macOS 26.6.2.
+The first native installation on macOS 27.0.1 failed before bootstrap because of an OS access label.
+The [metadata fix](macos-installed-access-metadata.md) retains that failed result and its scoped native controls.
+A corrected reviewed artifact and verified recovery step remain required before another installation attempt.
+Installed service behavior and production Root approval remain unproven.
 
 [Issue #298](https://github.com/rock3r/remozio/issues/298) records the six passing actual-child controls.
 The [production credential path](../macos-native-account-credentials.md) uses native account initialization and retains the complete captured identity.
@@ -51,7 +54,11 @@ The earlier API probe and group counts alone do not establish this result.
 
 ## Stage 2: installation and pairing
 
-The credential fix and actual-child gate passed. Verify initial installation and same-build recovery next.
+The credential fix and actual-child gate passed.
+The first native installation left an intact signed app, with no machine identity, bootstrap state, services or pairing.
+Follow [#402](https://github.com/rock3r/remozio/issues/402) for the corrected artifact and exact recovery step.
+Do not retry the failed package or strip its OS label. Preserve the partial app.
+Verify corrected initial installation and same-build recovery next.
 The initial package supports fresh installation and same-build recovery. It refuses a different installed release.
 Do not install an intermediate candidate that needs a known code fix, then assume a later package can replace it.
 Do not erase the installation to bypass this protection.
@@ -138,7 +145,9 @@ Do not automatically retry an uncertain external action.
 
 The standalone credential experiment is complete.
 The production fix passed review, all five CI checks and the actual privileged child measurement.
-Reserve 60–90 minutes with the user for installation, installed boundaries, pairing and approval/decline/expiry.
+The first session found the native metadata blocker in #402.
+The product fix, reviewed artifact and concrete recovery step must pass before installation can continue.
+After that gate, reserve 60–90 minutes for installed boundaries, pairing and approval/decline/expiry.
 A native failure can require further code work. This allowance does not promise a successful complete flow.
 The [hosted package experiment](macos-native-package.md) can reduce installer uncertainty while the user is away.
 It does not replace administrator consent, service checks or Pixel evidence.

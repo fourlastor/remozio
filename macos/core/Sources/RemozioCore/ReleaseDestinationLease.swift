@@ -85,6 +85,12 @@ public final class ReleaseDestinationLease {
     func inspectCopiedTree(name: String, limits: ReleaseCopyLimits = try! .init()) throws -> ReleaseCopyCounts {
         try withDirectory { try ProtectedReleaseTreeInspection.inspect(parent: $0, name: name, owner: owner, limits: limits) }
     }
+    func inspectInstalledApplication(name: String, limits: ReleaseCopyLimits = try! .init()) throws -> ReleaseCopyCounts {
+        guard name.hasSuffix(".app") else { throw ReleaseCopyError.invalidInput }
+        return try withDirectory {
+            try ProtectedReleaseTreeInspection.inspect(parent: $0, name: name, owner: owner, limits: limits, installedApplication: true)
+        }
+    }
     func preparationAncestry() throws -> [PreparationFileIdentity] {
         try validate()
         return nodes.map { .init(device: UInt32(bitPattern: $0.identity.st_dev), inode: $0.identity.st_ino) }

@@ -45,7 +45,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
         var store: PreparationIntentStore?
         do {
-            _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+            _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let app = config.codePolicy.entries.first(where: { $0.role == .app })!
             try config.validateRelease(SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier), bundlePath: bundle.path)
             let machine = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
@@ -72,7 +72,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         }
         try DynamicCodeValidation.validateSelf(requirement: requirement)
         guard try DynamicCodeValidation.selfPath() == selfPath else { throw InstalledAuthorityCommandError.wrongExecutable }
-        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let app = configuration.codePolicy.entries.first(where: { $0.role == .app })!
         let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
         guard let inventory = try machine.loadInventory() else { throw InstalledAuthorityCommandError.wrongInstallation }

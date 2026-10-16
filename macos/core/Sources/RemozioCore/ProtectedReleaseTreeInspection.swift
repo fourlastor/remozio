@@ -3,14 +3,14 @@ import Foundation
 
 /// Checks every copied object. This check grants no installation or activation authority.
 enum ProtectedReleaseTreeInspection {
-    static func inspect(parent: Int32, name: String, owner: uid_t, limits: ReleaseCopyLimits) throws -> ReleaseCopyCounts {
+    static func inspect(parent: Int32, name: String, owner: uid_t, limits: ReleaseCopyLimits, installedApplication: Bool = false) throws -> ReleaseCopyCounts {
         guard !name.isEmpty, name != ".", name != "..", !name.contains("/"),
               !name.utf8.contains(0), name.utf8.count <= 255 else { throw ReleaseCopyError.invalidInput }
         let before = try named(parent, name)
         let root = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard root >= 0 else { throw JournalLeaseError.system(errno) }
         defer { Darwin.close(root) }
-        let walker = Walker(owner: owner, limits: limits)
+        let walker = Walker(owner: owner, limits: limits, installedApplication: installedApplication)
         try walker.inspect(fd: root, before: before, directory: true, depth: 0)
         guard stable(before, try named(parent, name)) else { throw JournalLeaseError.identityChanged }
         return walker.counts
@@ -20,7 +20,10 @@ enum ProtectedReleaseTreeInspection {
         let owner: uid_t
         let limits: ReleaseCopyLimits
         var counts = ReleaseCopyCounts()
-        init(owner: uid_t, limits: ReleaseCopyLimits) { self.owner = owner; self.limits = limits }
+        let installedApplication: Bool
+        init(owner: uid_t, limits: ReleaseCopyLimits, installedApplication: Bool) {
+            self.owner = owner; self.limits = limits; self.installedApplication = installedApplication
+        }
 
         func inspect(fd: Int32, before: stat, directory: Bool, depth: Int) throws {
             guard depth <= limits.depth else { throw ReleaseCopyError.limit }
@@ -28,7 +31,8 @@ enum ProtectedReleaseTreeInspection {
             guard stable(before, held) else { throw JournalLeaseError.identityChanged }
             try ProtectedStorageMetadata.validate(fd, held, directory: directory, privateObject: false,
                 owner: owner, ancestorOwner: owner)
-            try CopiedReleaseMetadata.validate(fd, try status(fd))
+            try CopiedReleaseMetadata.validate(fd, try status(fd),
+                context: installedApplication && directory && depth == 0 ? .installedApplicationRoot : .copiedObject)
             if directory {
                 let duplicate = dup(fd)
                 guard duplicate >= 0 else { throw JournalLeaseError.system(errno) }
@@ -84,7 +88,8 @@ enum ProtectedReleaseTreeInspection {
             guard stable(held, try status(fd)) else { throw JournalLeaseError.identityChanged }
             try ProtectedStorageMetadata.validate(fd, try status(fd), directory: directory, privateObject: false,
                 owner: owner, ancestorOwner: owner)
-            try CopiedReleaseMetadata.validate(fd, try status(fd))
+            try CopiedReleaseMetadata.validate(fd, try status(fd),
+                context: installedApplication && directory && depth == 0 ? .installedApplicationRoot : .copiedObject)
         }
     }
 

@@ -1,0 +1,57 @@
+{
+  "accountEnrollmentTested": false,
+  "applicationsShortcutCreated": false,
+  "architecture": "arm64",
+  "bootstrapPostinstallPassed": false,
+  "bootstrapRecordsCreated": false,
+  "bundledDaemonsRegistered": false,
+  "candidateOrdinaryProbe": {
+    "actualInstalledRootAccepted": true,
+    "controlsPassed": 5,
+    "copyContextRefused": true,
+    "fileFlagsRefused": true,
+    "installedAttributesChanged": false,
+    "nonDirectoryContextRefused": true,
+    "unknownAttributeRefused": true
+  },
+  "experiment": "native-installer-access-metadata",
+  "hostMacOS": "27.0.1",
+  "installedAppBytesTypesAndModesMatched": true,
+  "installedAppRootAttributes": [
+    "com.apple.macl",
+    "com.apple.provenance"
+  ],
+  "limitations": [
+    "The original installation failed and remains failed.",
+    "No corrected native installation or recovery result yet.",
+    "The compatibility probe reads the actual installed app but runs as an ordinary account.",
+    "No service admission, hardware key, pairing, Pixel, background push or complete approval result."
+  ],
+  "machineConfigurationCreated": false,
+  "machineDirectoryCreated": false,
+  "nativeInstallerPassed": false,
+  "originalSignedAppRootAttributes": [
+    "com.apple.provenance"
+  ],
+  "originalValidatorSourceCommit": "a26d7785e9a1775aa6a615fa90f32c8b8219ceba",
+  "originalValidatorSourceSHA256": {
+    "CopiedReleaseMetadata.swift": "cf229a79691860ba263fc68e924683e466d050e1d3537be9c9f53d59a86f33ab",
+    "ProtectedStorageMetadata.swift": "ca95ce91d78b3564c3f20e2ca18e401771f4e15d99ac21a79e5f6b93c25fe94a"
+  },
+  "packageBuildCommit": "90f10de38e5e7615185c2a936827f877f9904968",
+  "packageReceiptsCreated": false,
+  "packageSHA256": "940dc1f2e656b0d925f6e2f98337c9c400bfb2d3aee5d00cec88da9b48e41eda",
+  "payloadPlaced": true,
+  "physicalPixelTested": false,
+  "productionSignedReleaseReaderAccepted": true,
+  "readOnlyOrdinaryProbe": {
+    "attributeValuesCollected": false,
+    "installedAttributesChanged": false,
+    "productionCopiedAttributeCheckRefused": true,
+    "productionOwnershipModeMountAndACLAccepted": true
+  },
+  "recordedDateUTC": "2026-10-16",
+  "schemaVersion": 1,
+  "strictDeepCodesignPassed": true,
+  "unexpectedMetadataObjectCount": 1
+}

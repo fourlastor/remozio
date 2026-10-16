@@ -24,7 +24,7 @@ public enum AdministrativeSetupPublication {
         }
         func verify() throws {
             guard try store.loadInventory() == inventory else { throw AdministrativeSetupPublicationError.changedInventory }
-            _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+            _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
             try configuration.validate(inventory: inventory, release: release)
             try placement.validate()

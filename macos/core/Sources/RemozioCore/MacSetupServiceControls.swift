@@ -53,7 +53,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         guard MacSetupServiceLocation.matches(bundlePath: ownBundle, codePath: ownCode) else { return .requiresInstallation }
         let placement = try ReleaseDestinationLease.readForServiceRegistration(path: bundle.deletingLastPathComponent().path)
         defer { placement.close() }
-        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let identity = try runningIdentity()
         let release = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.remozio.mac")
         guard release.codeDirectoryHashes[.app] == identity.hash,
@@ -70,7 +70,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         }
         let result = Self.state(service.status)
         try placement.validate()
-        _ = try placement.inspectCopiedTree(name: bundle.lastPathComponent)
+        _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let current = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.remozio.mac")
         guard try InstallationInventory.digest(current) == InstallationInventory.digest(release) else {
             throw SetupRegistrationError.wrongRelease

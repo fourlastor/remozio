@@ -1,11 +1,17 @@
 import Darwin
 import Foundation
 
-/// Applies the metadata policy to newly copied release objects. Attribute values confer no authority.
+/// Checks copied objects and the typed installed app root. Attribute values confer no authority.
 enum CopiedReleaseMetadata {
-    static func validate(_ fd: Int32, _ info: stat) throws {
+    enum Context { case copiedObject, installedApplicationRoot }
+    static func validate(_ fd: Int32, _ info: stat, context: Context = .copiedObject) throws {
         guard info.st_flags == 0 else { throw JournalLeaseError.unsafeMetadata }
-        guard try attributeNames(fd).isSubset(of: ["com.apple.provenance"]) else {
+        var allowed: Set<String> = ["com.apple.provenance"]
+        if context == .installedApplicationRoot {
+            guard info.st_mode & S_IFMT == S_IFDIR else { throw JournalLeaseError.unsafeMetadata }
+            allowed.insert("com.apple.macl")
+        }
+        guard try attributeNames(fd).isSubset(of: allowed) else {
             throw JournalLeaseError.unsafeMetadata
         }
     }
