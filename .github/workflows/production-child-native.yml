@@ -1,0 +1,42 @@
+name: Native command child experiment
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-command-child-experiment
+  cancel-in-progress: false
+jobs:
+  native-command-child:
+    name: Privileged command child
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'rock3r/remozio' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Prepare the reviewed fixed helpers
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --exit-code HEAD
+          python3 scripts/run-production-child-experiment.py --prepare-new-directory "$RUNNER_TEMP/remozio-production-child-session"
+          python3 scripts/collect-production-child-ci-evidence.py verify --preparation "$RUNNER_TEMP/remozio-production-child-session/manifest.json"
+      - name: Run the fixed controls on this disposable VM
+        run: |
+          /usr/bin/sudo -n -- /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/var/root LC_ALL=C /bin/sh \
+            "$RUNNER_TEMP/remozio-production-child-session/administrator-command.txt" \
+            > "$RUNNER_TEMP/remozio-production-child-session/native-result.json"
+      - name: Validate the complete result and cleanup
+        run: |
+          python3 scripts/collect-production-child-ci-evidence.py collect \
+            --preparation "$RUNNER_TEMP/remozio-production-child-session/manifest.json" \
+            --native-result "$RUNNER_TEMP/remozio-production-child-session/native-result.json" \
+            --output "$RUNNER_TEMP/remozio-production-child-session/ci-evidence.json"
+      - name: Retain only the sanitized result
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: production-child-native-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remozio-production-child-session/ci-evidence.json
+          if-no-files-found: error
+          retention-days: 7

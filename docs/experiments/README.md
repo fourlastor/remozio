@@ -14,7 +14,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Installation inventory recovery | [Actual-store process exit and SIGKILL controls](installation-inventory-recovery.md) | Root isolation, native I/O faults, power loss and installed activation |
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
-| Production command child | [Ordinary preparation and owner controls](macos-production-child.md) | Actual privileged child execution, extra-group access and cleanup on macOS 26/27 |
+| Production command child | [Ordinary preparation and explicit hosted workflow](macos-production-child.md) | Actual privileged child execution, extra-group access and cleanup on macOS 26/27 |
 | Command caller identity | [Kernel audit token, code pin, exec and exit measured on macOS 26 and 27](macos-command-caller.md) | Production IPC, trusted signing floor, protected admission |
 | Command receive budget | [Native loss path and redacted diagnostics](command-receive-budget.md) | Original CI failure classification and a deadline-preserving repair |
 | Command input transfer | [Fileport identity, queued input, later streaming and PTY resize measured](macos-command-fileport.md) | macOS 26 repeat, authenticated descriptor channel, resource budgets, capture and executor integration |

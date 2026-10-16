@@ -9,6 +9,9 @@ flowchart TD
     A[Ordinary build and source snapshot] --> H[Record helper hashes and fixed administrator command]
     H --> R[Review the experiment]
     R --> U[User approves native administrator prompt]
+    R --> K[Manual workflow on reviewed main]
+    K --> L[Noninteractive sudo on disposable hosted Mac]
+    L --> C
     U --> C[Copy helpers into disposable Root-owned directory]
     C --> V[Verify each protected helper hash]
     V --> M[Product monitor owns the actual command child]
@@ -75,7 +78,34 @@ The directory permits traversal so the ordinary target can execute. Other users 
 
 After review, run that exact command through native macOS administrator consent with the user present.
 Do not install a service, change account membership or contact the Pixel for this experiment.
-The preparation script provides no elevation switch. CI cannot start the privileged stage.
+The preparation script provides no elevation switch. Routine CI runs ordinary checks only.
+
+## Explicit hosted macOS 26 run
+
+The [manual workflow](../../.github/workflows/production-child-native.yml) runs only from this repository's `main` branch.
+It does not accept a command, account or source-ref input. Its token can read repository contents only.
+[GitHub documents](https://docs.github.com/en/actions/reference/runners/github-hosted-runners#administrative-privileges) passwordless sudo on its disposable hosted Macs.
+The workflow still requires actual noninteractive permission and complete native results. No privileged result is recorded yet.
+
+After the workflow passes review and merges, dispatch it once:
+
+```sh
+gh workflow run production-child-native.yml --repo rock3r/remozio --ref main
+```
+
+The job verifies its commit, captured source hashes, helper bytes and exact frozen command before elevation.
+It checks the project source hashes against Git blobs from that commit. It clears the elevated process environment.
+The fixed command runs on the disposable VM. It installs no service and changes no account membership.
+A failed command stops collection. The job does not retry a timeout, signal or uncertain cleanup.
+
+The collector requires all six native controls, unchanged parent credentials, confirmed owned cleanup and removal of the fixture.
+Missing fields, partial results, unsupported versions and numeric substitutes for booleans fail validation.
+The record contains only approved hashes, public workflow metadata, host versions and fixed result fields.
+The artifact contains one `ci-evidence.json` file. The command text and its UID stay outside the artifact.
+
+Verify the provider's successful job and the record's matching commit before using this evidence.
+A JSON file alone does not prove that a job ran. Workflow environment checks prevent accidental misuse; they do not authenticate a separate caller.
+This run can establish native child behavior on macOS 26. It does not establish the installed Mac–Pixel flow.
 
 ## Failure and cleanup
 
