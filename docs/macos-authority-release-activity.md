@@ -4,6 +4,7 @@ The installed command authority now retains machine activity for each admitted r
 Native execution retains a separate reference until the child and its I/O resources finish cleanup.
 Closing the journal cannot release that execution reference early.
 
+The [authority RPC integration](macos-authority-rpc-release-activity.md) also retains activity through presence and transport replies.
 This implements one participant in the future update barrier. It does not enable bundle replacement or automatic updates.
 
 ## Ownership

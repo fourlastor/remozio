@@ -14,6 +14,7 @@ final class AuthorityPresenceXPCEndpoint: NSObject, AuthorityPresenceXPCProtocol
     private let binding: AuthorityPresenceBinding
     private let budget: AuthorityXPCWorkBudget
     private let verify: () throws -> Void
+    private let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
     private let verifyCurrent: @Sendable () throws -> Void
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
@@ -33,7 +34,7 @@ final class AuthorityPresenceXPCEndpoint: NSObject, AuthorityPresenceXPCProtocol
         _ = try policy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: policy)
         self.init(binding: binding, budget: budget, verify: { _ = try invocation.verifyInvocation() },
-            verifyCurrent: { try access.verifyCurrent() }, invalidate: { [weak connection] in connection?.invalidate(); onClose() },
+            acquireActivity: { try access.acquireReleaseActivity() }, verifyCurrent: { try access.verifyCurrent() }, invalidate: { [weak connection] in connection?.invalidate(); onClose() },
             onHandshake: onHandshake, withdraw: { access.withdraw(observer: binding.connectionID) },
             status: { try access.status(binding: binding) }, publish: { try access.publish($0) }, setMode: { try access.setMode($0) })
         policy.configure(connection)
@@ -43,11 +44,13 @@ final class AuthorityPresenceXPCEndpoint: NSObject, AuthorityPresenceXPCProtocol
         connection.invalidationHandler = { [weak self] in self?.close() }
     }
     init(binding: AuthorityPresenceBinding, budget: AuthorityXPCWorkBudget, verify: @escaping () throws -> Void,
+         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
          verifyCurrent: @escaping @Sendable () throws -> Void, invalidate: @escaping () -> Void,
          onHandshake: @escaping @Sendable () -> Void = {}, withdraw: @escaping @Sendable () -> Void,
          status: @escaping @Sendable () throws -> AuthorityPresenceStatus,
          publish: @escaping @Sendable (AuthorityPresencePublication) throws -> AuthorityPresenceStatus,
          setMode: @escaping @Sendable (AuthorityPresenceModeChange) throws -> AuthorityPresenceStatus) {
+        self.acquireActivity = acquireActivity
         self.binding = binding; self.budget = budget; self.verify = verify; self.verifyCurrent = verifyCurrent
         self.invalidate = invalidate; self.onHandshake = onHandshake; self.withdraw = withdraw
         self.status = status; publishSnapshot = publish; changeMode = setMode
@@ -62,7 +65,8 @@ final class AuthorityPresenceXPCEndpoint: NSObject, AuthorityPresenceXPCProtocol
     }
     func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
-            try work(handshake: true) { try verifyCurrent(); ready = true }
+            let completed = try work(handshake: true) { try verifyCurrent(); ready = true }
+            defer { completed.activity?.close() }
             onHandshake()
             send { reply(1) }
         } catch { close(); reply(0) }
@@ -97,17 +101,27 @@ final class AuthorityPresenceXPCEndpoint: NSObject, AuthorityPresenceXPCProtocol
         return try AuthorityPresenceCodec.encodeStatus(value)
     }
     private func respond(_ reply: @escaping @Sendable (Data?) -> Void, _ body: () throws -> Data) {
-        do { let bytes = try work(body); send { reply(bytes) } }
+        do {
+            let completed = try work(body)
+            defer { completed.activity?.close() }
+            send { reply(completed.value) }
+        }
         catch { close(); reply(nil) }
     }
-    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> T {
+    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> (value: T, activity: ReleaseActivityToken?) {
         // Keep OS identity validation on the original exported invocation stack.
         try verify()
         return try lock.withLock {
             guard !closed, ready != handshake, !busy, budget.acquire() else { throw AuthorityPresenceIPCError.unavailable }
             busy = true
             defer { busy = false; budget.release() }
-            return try body()
+            let activity = try acquireActivity()
+            var transferred = false
+            defer { if !transferred { activity?.close() } }
+            let value = try body()
+            try activity?.validate()
+            transferred = true
+            return (value, activity)
         }
     }
     private func send(_ body: () -> Void) { lock.withLock { if !closed { body() } } }

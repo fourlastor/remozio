@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import CoreGraphics
 import Security
 import Foundation
@@ -80,6 +81,27 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         func close() { connection.invalidate() }
         deinit { connection.invalidate() }
     }
+    /// Forwards native invocations synchronously, preserving the OS invocation guard's original stack.
+    private final class CheckedNativeReplies: NSObject, AuthorityPresenceXPCProtocol, @unchecked Sendable {
+        let endpoint: AuthorityPresenceXPCEndpoint
+        let check: @Sendable () -> Void
+        init(endpoint: AuthorityPresenceXPCEndpoint, check: @escaping @Sendable () -> Void) {
+            self.endpoint = endpoint; self.check = check
+        }
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) {
+            endpoint.hello { [check] version in
+                if version == 1 { check() }; reply(version); if version == 1 { check() }
+            }
+        }
+        func current(reply: @escaping @Sendable (Data?) -> Void) { endpoint.current(reply: checked(reply)) }
+        func publish(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { endpoint.publish(payload, reply: checked(reply)) }
+        func setMode(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { endpoint.setMode(payload, reply: checked(reply)) }
+        private func checked(_ reply: @escaping @Sendable (Data?) -> Void) -> @Sendable (Data?) -> Void {
+            { [check] bytes in
+                if bytes != nil { check() }; reply(bytes); if bytes != nil { check() }
+            }
+        }
+    }
     /// Anonymous listener owned by this test. No Mach service is registered and no Root process runs.
     private final class NativeServer: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         private let lock = NSRecursiveLock()
@@ -90,12 +112,13 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         let account: Data
         let policy: XPCPeerPolicy
         private let requirement: String
+        private let activityCheck: (@Sendable () -> Void)?
         private var connections: [(NSXPCConnection, AuthorityPresenceXPCEndpoint)] = []
         private var closed = false
         let loseNextModeReply = Box(false)
-        init(fixture: Fixture, requirement: String) {
+        init(fixture: Fixture, requirement: String, activityCheck: (@Sendable () -> Void)? = nil) {
             access = fixture.access; environment = fixture.environment; mac = fixture.mac; account = fixture.account
-            policy = fixture.policy; self.requirement = requirement
+            policy = fixture.policy; self.requirement = requirement; self.activityCheck = activityCheck
             super.init()
             listener.setConnectionCodeSigningRequirement(requirement); listener.delegate = self; listener.activate()
         }
@@ -120,7 +143,7 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
                         let current = try invocation.verifyInvocation()
                         guard current == credentials else { throw Failure.denied }
                         try environment.verify()
-                    }, verifyCurrent: { try access.verifyCurrent() }, invalidate: { [weak connection] in connection?.invalidate() },
+                    }, acquireActivity: { try access.acquireReleaseActivity() }, verifyCurrent: { try access.verifyCurrent() }, invalidate: { [weak connection] in connection?.invalidate() },
                        withdraw: { access.withdraw(observer: binding.connectionID) }, status: { try access.status(binding: binding) },
                        publish: { try access.publish($0) }, setMode: { change in
                            let status = try access.setMode(change)
@@ -129,7 +152,9 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
                        })
                     connection.setCodeSigningRequirement(requirement)
                     connection.exportedInterface = NSXPCInterface(with: AuthorityPresenceXPCProtocol.self)
-                    connection.exportedObject = endpoint
+                    if let activityCheck {
+                        connection.exportedObject = CheckedNativeReplies(endpoint: endpoint, check: activityCheck)
+                    } else { connection.exportedObject = endpoint }
                     connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }
                     connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
                     connections.append((connection, endpoint)); connection.activate(); return true
@@ -198,10 +223,11 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             try .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.app", installedGeneration: generation,
                 minimumGeneration: generation, codeDirectoryHash: Data(repeating: UInt8(generation), count: 20), active: active)
         }
-        func endpoint(binding received: AuthorityPresenceBinding? = nil) throws -> AuthorityPresenceXPCEndpoint {
+        func endpoint(binding received: AuthorityPresenceBinding? = nil, onHandshake: @escaping @Sendable () -> Void = {}) throws -> AuthorityPresenceXPCEndpoint {
             let binding = received ?? self.binding, environment = self.environment, access = self.access
             return try AuthorityPresenceXPCEndpoint(binding: binding, budget: .init(maximum: 1), verify: { try environment.verify() },
-                verifyCurrent: { try access.verifyCurrent() }, invalidate: { environment.invalidated.value += 1 },
+                acquireActivity: { try access.acquireReleaseActivity() },
+                verifyCurrent: { try access.verifyCurrent() }, invalidate: { environment.invalidated.value += 1 }, onHandshake: onHandshake,
                 withdraw: { access.withdraw(observer: binding.connectionID) }, status: { try access.status(binding: binding) },
                 publish: { try access.publish($0) }, setMode: { try access.setMode($0) })
         }
@@ -226,18 +252,228 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+
+    @discardableResult
+    private static func assertUpdateBusy(_ installer: ReleaseActivityBarrier, file: StaticString = #filePath, line: UInt = #line) -> Bool {
+        do {
+            let unexpected = try installer.acquireExclusive(); unexpected.close()
+            XCTFail("Active RPC did not exclude update admission", file: file, line: line); return false
+        } catch {
+            XCTAssertEqual(error as? ReleaseActivityError, .busy, file: file, line: line)
+            return (error as? ReleaseActivityError) == .busy
+        }
+    }
+    func testPresenceReleaseActivityCoversHandshakeAndAllOperationRepliesButNotIdleConnection() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let checks = Box(0)
+        let check: @Sendable () -> Void = {
+            Self.assertUpdateBusy(installer)
+            checks.value += 1
+        }
+        let endpoint = try f.endpoint(onHandshake: check)
+        endpoint.hello { XCTAssertEqual($0, 1); check() }
+        try installer.acquireExclusive().close()
+        endpoint.current { XCTAssertNotNil($0); check() }
+        try installer.acquireExclusive().close()
+        endpoint.publish(try f.publication()) { XCTAssertNotNil($0); check() }
+        try installer.acquireExclusive().close()
+        endpoint.setMode(try f.mode(.away, sequence: 2)) { XCTAssertNotNil($0); check() }
+        try installer.acquireExclusive().close()
+        XCTAssertEqual(checks.value, 5)
+        XCTAssertEqual(try f.current(endpoint).state.mode, .away)
+        endpoint.close()
+        try installer.acquireExclusive().close()
+    }
+    func testPresenceExclusiveActivityRefusesBeforeMutationAndAllowsFreshConnectionAfterRelease() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let endpoint = try f.endpoint()
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        let update = try installer.acquireExclusive()
+        endpoint.setMode(try f.mode(.away)) { XCTAssertNil($0) }
+        XCTAssertTrue(try f.records().isEmpty)
+        XCTAssertEqual(f.environment.invalidated.value, 1)
+        update.close()
+        let retry = try f.endpoint()
+        retry.hello { XCTAssertEqual($0, 1) }
+        retry.setMode(try f.mode(.away)) { XCTAssertNotNil($0) }
+        XCTAssertEqual(try f.current(retry).state.mode, .away)
+        try installer.acquireExclusive().close()
+    }
+    func testPresenceReleaseActivityClosesAfterMalformedWorkAndChangedMetadata() throws {
+        for changed in [false, true] {
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+            try f.journal.attachReleaseActivityBarrier(activity.open())
+            let access = f.access, binding = f.binding, path = activity.directory.appendingPathComponent("activity.lock").path
+            let endpoint = try AuthorityPresenceXPCEndpoint(binding: binding, budget: .init(), verify: {},
+                acquireActivity: { try access.acquireReleaseActivity() }, verifyCurrent: { try access.verifyCurrent() }, invalidate: {},
+                withdraw: { access.withdraw(observer: binding.connectionID) }, status: {
+                    let status = try access.status(binding: binding)
+                    Self.assertUpdateBusy(installer)
+                    if changed { XCTAssertEqual(chmod(path, 0o644), 0) }
+                    return status
+                }, publish: { try access.publish($0) }, setMode: { try access.setMode($0) })
+            endpoint.hello { XCTAssertEqual($0, 1) }
+            if changed {
+                endpoint.current { XCTAssertNil($0) }
+                XCTAssertEqual(chmod(path, 0o600), 0)
+            } else { endpoint.publish(Data([0])) { XCTAssertNil($0) } }
+            try installer.acquireExclusive().close()
+        }
+    }
+    func testTransportReleaseActivityCoversEverySelectorAndReplyWithIdleAdmissionOpen() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        let mac = f.mac, account = f.account, trust = DirectApprovalTrust(macID: mac, accountID: account, revision: UUID(), peers: [])
+        let checks = Box(0)
+        let check: @Sendable () -> Void = {
+            Self.assertUpdateBusy(installer)
+            checks.value += 1
+        }
+        let endpoint = try AuthorityXPCEndpoint(macID: mac, accountID: account, budget: .init(maximum: 1), activityJournal: f.journal,
+            verify: {}, verifyHandshakePolicy: check, invalidate: {}, onHandshake: check,
+            snapshot: { check(); return trust }, validate: { _ in check(); return true },
+            requestFrame: { _, _ in check(); return nil }, pendingRequestIDs: { _ in check(); return [] },
+            exchangeRequest: { _, _, _ in check(); return nil }, pairingReceipt: { _, _ in check(); return nil }, wakeHints: {
+                check(); return try .init(binding: .init(ownerID: Data(repeating: 4, count: 16), macID: mac, accountID: account,
+                    gatewayID: Data(repeating: 5, count: 16), lifecycleEpoch: Data(repeating: 6, count: 16)), deliveryIDs: [])
+            })
+        // The endpoint must resolve current journal activity, including attachment after its construction.
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let peer = try AuthorityPeerBinding(scope: .init(macID: mac, accountID: account, phoneID: Data(repeating: 7, count: 16),
+            enrollmentEpoch: Data(repeating: 8, count: 16)), transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, revision: UUID())
+        let binding = try AuthorityTrustCodec.encodeBinding(peer), requestID = Data(repeating: 9, count: 16)
+        let version: @Sendable (UInt64) -> Void = { XCTAssertEqual($0, 1); check() }
+        let bytes: @Sendable (Data?) -> Void = { XCTAssertNotNil($0); check() }
+        endpoint.hello(reply: version); try installer.acquireExclusive().close()
+        endpoint.requestDeliveryVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.requestDiscoveryVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.requestExchangeVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.pairingReceiptVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.requestWakeVersion(reply: version); try installer.acquireExclusive().close()
+        endpoint.pendingRequestIDs(binding, reply: bytes); try installer.acquireExclusive().close()
+        endpoint.requestFrame(binding, requestID: requestID, reply: bytes); try installer.acquireExclusive().close()
+        endpoint.exchangeRequest(binding, query: try AuthorityRequestExchange.encode(requestID: requestID), reply: bytes)
+        try installer.acquireExclusive().close()
+        endpoint.pairingReceipt(binding, setupID: requestID, reply: bytes); try installer.acquireExclusive().close()
+        endpoint.wakeDeliveryHints(reply: bytes); try installer.acquireExclusive().close()
+        endpoint.trustSnapshot(reply: bytes); try installer.acquireExclusive().close()
+        endpoint.validatePeer(binding) { XCTAssertTrue($0); check() }
+        try installer.acquireExclusive().close()
+        XCTAssertEqual(checks.value, 24)
+    }
+    func testTransportReleaseActivityRejectsExclusiveAdmissionAndReleasesBudgetAfterHandlerFailure() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture(), budget = try AuthorityXPCWorkBudget(maximum: 1)
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let calls = Box(0), trust = DirectApprovalTrust(macID: f.mac, accountID: f.account, revision: UUID(), peers: [])
+        let make: () -> AuthorityXPCEndpoint = {
+            AuthorityXPCEndpoint(macID: trust.macID, accountID: trust.accountID, budget: budget, activityJournal: f.journal,
+                verify: {}, verifyHandshakePolicy: { calls.value += 1 }, invalidate: {}, snapshot: {
+                    calls.value += 1; Self.assertUpdateBusy(installer); throw Failure.denied
+                }, validate: { _ in true })
+        }
+        let update = try installer.acquireExclusive(), denied = make()
+        denied.hello { XCTAssertEqual($0, 0) }
+        XCTAssertEqual(calls.value, 0); XCTAssertTrue(budget.acquire()); budget.release(); update.close()
+        let retry = make()
+        retry.hello { XCTAssertEqual($0, 1) }
+        retry.trustSnapshot { XCTAssertNil($0) }
+        XCTAssertEqual(calls.value, 2); XCTAssertTrue(budget.acquire()); budget.release()
+        try installer.acquireExclusive().close()
+    }
+    func testTransportReleaseActivityAllowsNestedReplyWithoutDroppingTheOuterReference() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let trust = DirectApprovalTrust(macID: f.mac, accountID: f.account, revision: UUID(), peers: [])
+        let endpoint = try AuthorityXPCEndpoint(macID: f.mac, accountID: f.account, budget: .init(maximum: 1), activityJournal: f.journal,
+            verify: {}, invalidate: {}, snapshot: { trust }, validate: { _ in true })
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.trustSnapshot { first in
+            XCTAssertNotNil(first)
+            endpoint.trustSnapshot { XCTAssertNotNil($0); Self.assertUpdateBusy(installer) }
+            Self.assertUpdateBusy(installer)
+            endpoint.close()
+            Self.assertUpdateBusy(installer)
+        }
+        try installer.acquireExclusive().close()
+    }
+    func testTransportDisconnectRetainsActivityUntilTheExecutingHandlerReturns() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let completed = expectation(description: "disconnected handler completed"), replies = Box(0)
+        let trust = DirectApprovalTrust(macID: f.mac, accountID: f.account, revision: UUID(), peers: [])
+        let endpoint = try AuthorityXPCEndpoint(macID: f.mac, accountID: f.account, budget: .init(maximum: 1), activityJournal: f.journal,
+            verify: {}, invalidate: {}, snapshot: {
+                entered.signal()
+                guard release.wait(timeout: .now() + 5) == .success else { throw Failure.denied }
+                Self.assertUpdateBusy(installer)
+                return trust
+            }, validate: { _ in true })
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        DispatchQueue.global().async {
+            endpoint.trustSnapshot { _ in replies.value += 1 }
+            completed.fulfill()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+        endpoint.close(); Self.assertUpdateBusy(installer)
+        release.signal(); wait(for: [completed], timeout: 5)
+        XCTAssertEqual(replies.value, 0)
+        try installer.acquireExclusive().close()
+    }
+    func testPresenceNestedReplyRetainsBothActivityReferencesUntilEachCallbackReturns() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let endpoint = try f.endpoint()
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.current { first in
+            XCTAssertNotNil(first)
+            endpoint.current { XCTAssertNotNil($0); Self.assertUpdateBusy(installer) }
+            Self.assertUpdateBusy(installer)
+            endpoint.close(); Self.assertUpdateBusy(installer)
+        }
+        try installer.acquireExclusive().close()
+    }
+    func testTransportReleaseActivityRevalidatesAfterHandlerBeforeSendingReply() throws {
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), f = try Fixture()
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let path = activity.directory.appendingPathComponent("activity.lock").path
+        let trust = DirectApprovalTrust(macID: f.mac, accountID: f.account, revision: UUID(), peers: [])
+        let endpoint = try AuthorityXPCEndpoint(macID: f.mac, accountID: f.account, budget: .init(), activityJournal: f.journal,
+            verify: {}, invalidate: {}, snapshot: { XCTAssertEqual(chmod(path, 0o644), 0); return trust }, validate: { _ in true })
+        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.trustSnapshot { XCTAssertNil($0) }
+        XCTAssertEqual(chmod(path, 0o600), 0)
+        try installer.acquireExclusive().close()
+    }
+
     func testLiveAnonymousPresenceWireCommitsAndReconnectsInGuiSession() async throws {
         guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
             throw XCTSkip("Requires a supported unprivileged Mac GUI session; installed account checks remain separate")
         }
         let f = try Fixture(ownerUID: getuid()), requirement = try runningTestRequirement(), environment = f.environment
-        let server = NativeServer(fixture: f, requirement: requirement)
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), activityChecks = Box(0), activityFailures = Box(0)
+        try f.journal.attachReleaseActivityBarrier(activity.open())
+        let server = NativeServer(fixture: f, requirement: requirement, activityCheck: {
+            if !Self.assertUpdateBusy(installer) { activityFailures.value += 1 }; activityChecks.value += 1
+        })
+        func requireIdle() async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while true {
+                do { try installer.acquireExclusive().close(); return }
+                catch ReleaseActivityError.busy {
+                    guard ContinuousClock.now < deadline else { throw Failure.fixture }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            }
+        }
         defer { server.close() }
         func client() -> AuthorityPresenceChannel {
             AuthorityPresenceChannel(driver: NativeDriver(endpoint: server.listener.endpoint, policy: server.policy, requirement: requirement),
                 macID: f.mac, accountID: f.account, timeoutMilliseconds: 3000, sample: { _ in environment.now() })
         }
         let first = client(), initial = try await first.start()
+        try await requireIdle()
         XCTAssertEqual(initial.state, .init(mode: .automatic, revision: 0))
         let present = try await first.setMode(.present, expectedRevision: 0)
         XCTAssertEqual(present.state, .init(mode: .present, revision: 1)); XCTAssertEqual(present.routing.destination, .localMac)
@@ -287,6 +523,21 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         await reader.close()
         XCTAssertEqual(try f.records().count, 3)
         XCTAssertGreaterThanOrEqual(environment.verified.value, 19)
+        try await requireIdle()
+        guard activityChecks.value >= 32, activityFailures.value == 0 else { throw Failure.fixture }
+        if let output = ProcessInfo.processInfo.environment["REMOZIO_RPC_ACTIVITY_XPC_EVIDENCE"] {
+            let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "authority-presence-native-xpc-release-activity",
+                "status": "passed", "osVersion": ProcessInfo.processInfo.operatingSystemVersionString,
+                "hostArchitecture": "arm64", "guiSessionAvailable": true, "sameProcessNativeConnection": true,
+                "kernelPeerCredentialsChecked": true, "invocationConnectionChecked": true, "testCodeHashRequirementApplied": true,
+                "verifiedInvocations": environment.verified.value, "activityChecksBeforeAndAfterNativeReply": activityChecks.value,
+                "independentExclusiveDescriptorRefusedInsideReplies": true, "idleConnectionAllowsExclusiveActivity": true,
+                "reconnectPreservesMode": true, "lostReplyReconciled": true, "modeChangesAudited": 3,
+                "installedRootAccountsTested": false, "developerIDPolicyTested": false, "physicalPresenceSignalsTested": false,
+                "serviceInstalled": false, "realApprovalIssued": false, "productionActivationTested": false]
+            try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: output), options: .atomic)
+        }
         if let output = ProcessInfo.processInfo.environment["REMOZIO_PRESENCE_XPC_EVIDENCE"] {
             let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "account-presence-anonymous-native-xpc", "status": "passed",
                 "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "guiSessionAvailable": true,

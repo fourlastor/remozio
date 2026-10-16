@@ -91,6 +91,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
     private let policy: XPCPeerPolicy
     private let macID: Data
     private let accountID: Data
+    private let activityJournal: AuthorityJournal?
     private let budget: AuthorityXPCWorkBudget
     private let verifyHandshakePolicy: @Sendable () throws -> Void
     private let snapshot: @Sendable () throws -> DirectApprovalTrust
@@ -105,7 +106,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
 
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, macID: Data, accountID: Data,
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
-                maximumOperations: Int = 8,
+                maximumOperations: Int = 8, activityJournal: AuthorityJournal? = nil,
                 verifyHandshakePolicy: @escaping @Sendable () throws -> Void = {},
                 snapshot: @escaping @Sendable () throws -> DirectApprovalTrust,
                 validate: @escaping @Sendable (AuthorityPeerBinding) throws -> Bool,
@@ -120,6 +121,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try AuthorityXPCWorkBudget(maximum: maximumOperations)
         listener = NSXPCListener(machServiceName: serviceName)
+        self.activityJournal = activityJournal
         policy = peerPolicy; self.macID = macID; self.accountID = accountID
         self.verifyHandshakePolicy = verifyHandshakePolicy; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
         self.wakeHints = wakeHints; self.receipt = pairingReceipt
@@ -162,7 +164,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
         } else { receiptHandler = nil }
         try self.init(serviceName: serviceName, peerPolicy: peerPolicy, macID: macID, accountID: accountID,
             maximumConnections: maximumConnections, handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds,
-            maximumOperations: maximumOperations, verifyHandshakePolicy: { try access.verifyCurrent() },
+            maximumOperations: maximumOperations, activityJournal: journal, verifyHandshakePolicy: { try access.verifyCurrent() },
             snapshot: { try access.snapshot() }, validate: { try access.validate($0) },
             requestFrame: frameHandler, pendingRequestIDs: pendingHandler, exchangeRequest: exchangeHandler,
             pairingReceipt: receiptHandler, wakeHints: wakeHints)
@@ -183,7 +185,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
             guard listener === self.listener, running, !closed, let id = registry.reserve() else { connection.invalidate(); return false }
             do {
                 let endpoint = try AuthorityXPCEndpoint(connection: connection, peerPolicy: policy, macID: macID, accountID: accountID,
-                    budget: budget, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
+                    budget: budget, activityJournal: activityJournal, verifyHandshakePolicy: verifyHandshakePolicy, onHandshake: { [weak registry] in registry?.handshake(id) },
                     onClose: { [weak registry] in registry?.remove(id) }, snapshot: snapshot, validate: validate, requestFrame: frame,
                     pendingRequestIDs: pendingRequests, exchangeRequest: exchange, pairingReceipt: receipt, wakeHints: wakeHints)
                 let owner = NativeAuthorityConnection(connection: connection, endpoint: endpoint)

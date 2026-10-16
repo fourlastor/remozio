@@ -29,6 +29,7 @@ final class AuthorityPresenceAccess: Sendable {
         epoch = try now().epoch
         self.now = now; self.validateSelf = validateSelf
     }
+    func acquireReleaseActivity() throws -> ReleaseActivityToken? { try journal.acquireReleaseActivity() }
     func verifyCurrent() throws { try journal.read { try self.requireCurrent($0) } }
     func status(binding: AuthorityPresenceBinding) throws -> AuthorityPresenceStatus {
         try requireBinding(binding)
