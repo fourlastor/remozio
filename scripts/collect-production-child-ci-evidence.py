@@ -46,7 +46,7 @@ def workflow_context(env, system, architecture, version, uid, euid, head):
 def verify_preparation(manifest, expected_sources, context):
     expected = {"schemaVersion": 1, "hostMacOS": context["hostMacOS"], "hostArchitecture": "arm64",
                 "ordinaryControls": {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False},
-                "ownerControls": {"schemaVersion": 1, "ownerControls": 28, "privilegedControlsRun": False, "realProcessesSpawned": 0},
+                "ownerControls": {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0},
                 "descriptorControls": {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False},
                 "ordinaryPrivilegedModeRefused": True, "invalidUIDRefused": True,
                 "privilegedControlsRun": False, "productionExecutionTested": False, "installedRemozio": False}

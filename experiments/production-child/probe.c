@@ -107,7 +107,16 @@ static uint64_t now(void) {
 static bool before(uint64_t began, unsigned budget) {
     uint64_t current = now(); return began && current >= began && current - began < budget;
 }
-static int one(const struct account *target, enum case_kind kind, bool *all_reaped) {
+struct control_diagnostic {
+    int primary_stage, stage, poll_error;
+    remozio_command_monitor_observation_t state;
+};
+static bool awaiting_retirement(const remozio_command_monitor_observation_t *state) {
+    return !state->monitor_reaped || (!state->status.reaped && !state->status_closed);
+}
+static int one(const struct account *target, enum case_kind kind, bool *all_reaped,
+               struct control_diagnostic *diagnostic) {
+    *diagnostic = (struct control_diagnostic){0};
     unsigned char bytes[16384]; size_t count = frame(target, kind, bytes);
     int input[2] = {-1,-1}, output[2] = {-1,-1}, sink = -1, cwd = -1, failure = 0;
     remozio_command_monitor_t *owner = NULL; remozio_command_monitor_observation_t state = {0};
@@ -120,9 +129,9 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     if (error || !owner) { failure = 4; goto cleanup; }
     close(output[1]); output[1] = -1;
     uint64_t began = now();
-    while (!state.prepared && !state.monitor_reaped && !state.monitor_ownership_lost && before(began, 15000)) {
+    while (!state.prepared && awaiting_retirement(&state) && !state.monitor_ownership_lost && before(began, 15000)) {
         error = remozio_command_monitor_poll(owner, &state);
-        if (error) { failure = 13; goto cleanup; }
+        if (error) { diagnostic->poll_error = error; failure = 13; goto cleanup; }
         if (state.status.failed) break;
         usleep(1000);
     }
@@ -139,8 +148,9 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
         if (remozio_command_monitor_cancel(owner)) { failure = 7; goto cleanup; }
     }
     began = now();
-    while (!state.monitor_reaped && !state.monitor_ownership_lost && before(began, 15000)) {
+    while (awaiting_retirement(&state) && !state.monitor_ownership_lost && before(began, 15000)) {
         error = remozio_command_monitor_poll(owner, &state);
+        if (error) diagnostic->poll_error = error;
         if (error || state.fault || state.protocol_failed || (should_prepare && state.status.failed)) { failure = 13; goto cleanup; }
         usleep(1000);
     }
@@ -159,17 +169,21 @@ static int one(const struct account *target, enum case_kind kind, bool *all_reap
     } else if (received != 0 || state.release_attempted || state.target_exec_observed ||
                ioctl(input[0], FIONREAD, &available) || available != 1) failure = 10;
 cleanup:
+    diagnostic->primary_stage = failure;
     if (owner) {
         (void)remozio_command_monitor_cancel(owner);
         uint64_t began = now();
-        while (!state.monitor_reaped && !state.monitor_ownership_lost && before(began, 15000)) {
-            (void)remozio_command_monitor_poll(owner, &state); usleep(1000);
+        while (awaiting_retirement(&state) && !state.monitor_ownership_lost && before(began, 15000)) {
+            int poll_error = remozio_command_monitor_poll(owner, &state);
+            if (poll_error) diagnostic->poll_error = poll_error;
+            usleep(1000);
         }
         if (!state.monitor_reaped || state.monitor_ownership_lost || !state.status.reaped) { *all_reaped = false; failure = 11; }
         if (state.monitor_reaped && remozio_command_monitor_dispose(owner)) { *all_reaped = false; failure = 12; }
     }
     int descriptors[] = {input[0], input[1], output[0], output[1], sink, cwd};
     for (unsigned i = 0; i < 6; ++i) if (descriptors[i] >= 0) close(descriptors[i]);
+    diagnostic->stage = failure; diagnostic->state = state;
     return failure;
 }
 int main(int argc, char **argv) {
@@ -214,8 +228,22 @@ int main(int argc, char **argv) {
     int failure = fchown(file, 0, extra) || fchmod(file, 0640) || write(file, "G", 1) != 1;
     close(file); bool all_reaped = true; int passed = 0;
     for (unsigned i = 0; !failure && i < 6; ++i) {
-        int result = one(accounts[i], kinds[i], &all_reaped);
-        if (result) { fprintf(stderr, "Production child control %u failed at stage %d.\n", i, result); failure = 1; }
+        struct control_diagnostic diagnostic;
+        int result = one(accounts[i], kinds[i], &all_reaped, &diagnostic);
+        if (result) {
+            remozio_command_monitor_observation_t observed = diagnostic.state;
+            fprintf(stderr, "Production child control %u failed at stage %d.\n", i, result);
+            fprintf(stderr, "Control diagnostic: {\"control\":%u,\"stage\":%d,\"primaryStage\":%d,"
+                "\"pollError\":%d,\"prepared\":%d,\"monitorReaped\":%d,\"ownershipLost\":%d,"
+                "\"targetReaped\":%d,\"statusClosed\":%d,\"statusFailed\":%d,\"statusError\":%u,"
+                "\"fault\":%d,\"protocolFailed\":%d,\"lastTag\":%u,\"lastDetail\":%u,\"monitorWaitStatus\":%d}\n",
+                i, diagnostic.stage, diagnostic.primary_stage, diagnostic.poll_error,
+                observed.prepared, observed.monitor_reaped, observed.monitor_ownership_lost,
+                observed.status.reaped, observed.status_closed, observed.status.failed, observed.status.failure_error,
+                observed.fault, observed.protocol_failed, observed.status.latest.tag, observed.status.latest.detail,
+                observed.monitor_wait_status);
+            failure = 1;
+        }
         else passed++;
     }
     gid_t after[CAPACITY]; int after_count = getgroups(CAPACITY, after);
@@ -224,7 +252,10 @@ int main(int argc, char **argv) {
         getgid() == initial_gid && getegid() == initial_egid;
     bool removed = false;
     if (all_reaped) removed = unlink(fixture) == 0;
-    printf("{\"schemaVersion\":1,\"privilegedControlsRun\":true,\"passed\":%d,\"parentCredentialsUnchanged\":%s,\"allOwnedCleanupConfirmed\":%s,\"fixtureRemoved\":%s,\"installedRemozio\":false}\n",
+    char summary[512];
+    snprintf(summary, sizeof(summary), "{\"schemaVersion\":1,\"privilegedControlsRun\":true,\"passed\":%d,\"parentCredentialsUnchanged\":%s,\"allOwnedCleanupConfirmed\":%s,\"fixtureRemoved\":%s,\"installedRemozio\":false}\n",
         passed, unchanged ? "true" : "false", all_reaped ? "true" : "false", removed ? "true" : "false");
+    fputs(summary, stdout);
+    if (failure || passed != 6 || !unchanged || !all_reaped || !removed) fputs(summary, stderr);
     return !failure && passed == 6 && unchanged && all_reaped && removed ? 0 : 71;
 }

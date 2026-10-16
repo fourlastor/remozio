@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import platform
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,7 +25,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
                     Path(command[command.index("-o") + 1]).write_bytes(b"fixture")
                     return subprocess.CompletedProcess(command, 0)
                 self.assertEqual(Path(command[0]).name, "owner-controls")
-                return subprocess.CompletedProcess(command, 0, json.dumps({"schemaVersion": 1, "ownerControls": 28,
+                return subprocess.CompletedProcess(command, 0, json.dumps({"schemaVersion": 1, "ownerControls": 30,
                     "privilegedControlsRun": False, "realProcessesSpawned": 0}), "")
 
             with patch.object(EXPERIMENT, "source_hashes", return_value={"input.c": "after"}), \
@@ -63,7 +65,7 @@ class ProductionChildPreparationTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0)
                 name = Path(command[0]).name
                 if name == "owner-controls":
-                    value = {"schemaVersion": 1, "ownerControls": 28, "privilegedControlsRun": False, "realProcessesSpawned": 0}
+                    value = {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0}
                 elif "--descriptor-controls" in command:
                     value = {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False}
                 elif "--inspect" in command and command[-1] != str(2**32 - 1):
@@ -95,6 +97,65 @@ class ProductionChildPreparationTests(unittest.TestCase):
                         dict(binaries, child={"sha256": "0" * 63 + "\n"})]:
             with self.subTest(changed=changed), self.assertRaises(ValueError):
                 EXPERIMENT.administrator_command(Path("/tmp/fixture"), changed, 501)
+
+
+@unittest.skipUnless(platform.system() == "Darwin" and platform.machine() == "arm64" and
+                     os.getuid() != 0 and os.geteuid() != 0, "Requires an ordinary Apple Silicon Mac account")
+class ProductionChildLegacyCompositionTests(unittest.TestCase):
+    def test_actual_legacy_refusal_retires_without_target_execution(self):
+        # Only the two entry guards are substituted. The credential API keeps the real UID.
+        with tempfile.TemporaryDirectory(prefix="remozio-legacy-refusal-") as temporary, \
+             EXPERIMENT.source_snapshot(EXPERIMENT.source_inputs()) as snapshot:
+            directory = Path(temporary)
+            native = snapshot / EXPERIMENT.NATIVE.relative_to(EXPERIMENT.ROOT)
+            experiment = snapshot / EXPERIMENT.EXPERIMENT.relative_to(EXPERIMENT.ROOT)
+            for name, original in [("monitor", "macos/app/CommandMonitor/MonitorMain.c"),
+                                   ("child", "macos/app/CommandChild/ChildMain.c")]:
+                (directory / (name + ".c")).write_text(
+                    '#include <unistd.h>\nstatic uid_t fixture_entry_uid(void) { return 0; }\n'
+                    '#define getuid fixture_entry_uid\n#define geteuid fixture_entry_uid\n'
+                    '#include "' + str(snapshot / original) + '"\n')
+            (directory / "probe.c").write_text(
+                '#define main production_probe_entry\n#include "' + str(experiment / "probe.c") + '"\n#undef main\n' + r'''
+int main(void) {
+    if (!getuid() || !geteuid()) return 77;
+    if (!locate()) return 70;
+    strcpy(target_path, "/usr/bin/true");
+    struct sigaction action = {0}; action.sa_handler = SIG_DFL;
+    if (sigemptyset(&action.sa_mask) || sigaction(SIGCHLD, &action, NULL)) return 70;
+    signal(SIGPIPE, SIG_IGN);
+    struct account target;
+    if (account(getuid(), &target)) return 70;
+    for (unsigned trial = 0; trial < 8; ++trial) {
+        bool retired = true; struct control_diagnostic diagnostic;
+        int result = one(&target, legacy, &retired, &diagnostic);
+        remozio_command_monitor_observation_t state = diagnostic.state;
+        if (result || !retired || !state.monitor_reaped || !state.status.reaped ||
+            state.monitor_ownership_lost || state.prepared || state.release_attempted || state.target_exec_observed ||
+            !state.status.failed || state.status.failure_error != EINVAL || state.fault || state.protocol_failed) {
+            fprintf(stderr, "Legacy refusal trial=%u stage=%d primary=%d poll=%d monitorReaped=%d "
+                "targetReaped=%d lost=%d failed=%d error=%u fault=%d protocol=%d tag=%u wait=%d\n",
+                trial, result, diagnostic.primary_stage, diagnostic.poll_error, state.monitor_reaped,
+                state.status.reaped, state.monitor_ownership_lost, state.status.failed, state.status.failure_error,
+                state.fault, state.protocol_failed, state.status.latest.tag, state.monitor_wait_status);
+            return 1;
+        }
+    }
+    puts("Eight guarded ordinary legacy refusals retired. No target was released.");
+    return 0;
+}
+''')
+            for name, sources in EXPERIMENT.SOURCES.items():
+                if name == "target":
+                    continue
+                compiled = [str(directory / (name + ".c"))]
+                compiled.extend(str(snapshot / path.relative_to(EXPERIMENT.ROOT)) for path in sources[1:])
+                subprocess.run(["xcrun", "clang", "-target", "arm64-apple-macos26.0", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                                "-I", str(native / "include"), "-I", str(experiment), *compiled,
+                                "-o", str(directory / name)], check=True, timeout=120)
+            result = subprocess.run([str(directory / "probe")], capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "Eight guarded ordinary legacy refusals retired. No target was released.\n")
 
 
 if __name__ == "__main__":

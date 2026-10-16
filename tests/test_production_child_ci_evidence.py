@@ -28,7 +28,7 @@ class ProductionChildCIEvidenceTests(unittest.TestCase):
     def preparation(self):
         return {"schemaVersion": 1, "hostMacOS": "26.6.2", "hostArchitecture": "arm64",
                 "ordinaryControls": {"schemaVersion": 1, "codecControls": 6, "privilegedControlsRun": False},
-                "ownerControls": {"schemaVersion": 1, "ownerControls": 28, "privilegedControlsRun": False, "realProcessesSpawned": 0},
+                "ownerControls": {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0},
                 "descriptorControls": {"schemaVersion": 1, "descriptorControls": 3, "privilegedControlsRun": False},
                 "ordinaryPrivilegedModeRefused": True, "invalidUIDRefused": True,
                 "privilegedControlsRun": False, "productionExecutionTested": False, "installedRemozio": False,

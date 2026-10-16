@@ -91,7 +91,7 @@ def prepare(directory):
                         str(snapshot / (EXPERIMENT / "owner-controls.c").relative_to(ROOT)), str(snapshot / (NATIVE / "CommandAccountCredentials.c").relative_to(ROOT)),
                         str(snapshot / (NATIVE / "CommandChildSpecification.c").relative_to(ROOT)), "-o", str(controls)], check=True, timeout=120)
         owner = subprocess.run([str(controls)], check=True, capture_output=True, text=True, timeout=30)
-        expected_owner = {"schemaVersion": 1, "ownerControls": 28, "privilegedControlsRun": False, "realProcessesSpawned": 0}
+        expected_owner = {"schemaVersion": 1, "ownerControls": 30, "privilegedControlsRun": False, "realProcessesSpawned": 0}
         if json.loads(owner.stdout) != expected_owner:
             raise RuntimeError("Unexpected owner control result")
         controls.unlink()

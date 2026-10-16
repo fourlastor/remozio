@@ -2,7 +2,7 @@
 
 This experiment prepares the actual product monitor and command child without credential substitution.
 Ordinary preparation compiles the helpers and checks refusal and frame handling. It never requests elevation.
-The privileged run remains a separate interactive gate. No privileged result is recorded yet.
+The privileged run remains a separate gate. The first hosted run failed its cleanup check; no successful privileged result is recorded.
 
 ```mermaid
 flowchart TD
@@ -53,11 +53,15 @@ python3 scripts/run-production-child-experiment.py
 The script compiles for Apple Silicon and macOS 26 with warnings treated as errors.
 It checks six frames through the actual decoder and account validator, including the full Root capture.
 All four binaries refuse missing arguments. The probe refuses privileged mode from an ordinary account.
-Twenty-eight separate owner controls substitute monitor calls and clock readings at compile time.
+Thirty separate owner controls substitute monitor calls and clock readings at compile time.
 They check preparation failures, early input/output, release errors, missing execution/reaping, ownership loss and clock failure or rollback.
 Negative controls require the expected account or frame error. A timeout cannot count as an identity refusal.
 Three actual descriptor controls also check a clean table, a leaked descriptor at 128 and the restored table.
 The owner controls spawn no process and change no credentials. They establish test-owner behavior, not privileged product execution.
+Two owner controls require another status poll after monitor reaping. The final target record can arrive between the status read and monitor reaping.
+The ordinary native composition test also checks eight legacy refusals through the real process and protocol code.
+Only the monitor and child entry guards are substituted. The credential API keeps the real ordinary UID and cannot apply credentials.
+The test never releases a target. It does not establish Root behavior.
 The normal repository gate runs these ordinary checks only.
 
 ## Prepare the interactive run
@@ -120,7 +124,15 @@ Success requires unchanged parent IDs/groups, all six controls and confirmed cle
 The Root parent removes its group fixture only after owned cleanup is confirmed.
 The frozen command removes only its four helpers and directory after a successful run.
 Failure retains the protected directory for diagnosis. Do not erase it while ownership remains uncertain.
-A failed run prints its directory and failed stage; it must not be reported as a successful experiment.
+A failed run prints its directory, failed stage and bounded numeric state. It also prints the fixed summary to stderr.
+The diagnostics preserve the primary stage when a later cleanup failure replaces it. They contain no account name, UID, PID or command payload.
+The probe continues bounded status polling after monitor reaping. It still requires the target-reaping record and the expected monitor exit.
+A failed run must not be reported as a successful experiment.
+
+The [first hosted attempt](https://github.com/rock3r/remozio/actions/runs/38907371790) failed control 4, the legacy refusal, at cleanup stage 11.
+Preparation and source verification passed. The native summary was not retained, so parent credentials and target cleanup remain unconfirmed.
+The harness could stop polling before reading a pending target-reaping record. Controlled delayed-record tests reproduce that harness failure.
+This does not establish the cause of the hosted failure. A fresh reviewed run must establish the complete native result.
 
 ## Evidence still required
 

@@ -47,7 +47,7 @@ static int fixture_poll(remozio_command_monitor_t *owner, remozio_command_monito
         if (scenario == 22 || scenario == 24) owner->state.monitor_wait_status = EX_SOFTWARE << 8;
         if (scenario == 23) owner->state.monitor_wait_status = SIGTERM;
         if (scenario == 25) owner->state.monitor_wait_status = 0;
-        owner->state.status.reaped = scenario != 13;
+        owner->state.status.reaped = scenario != 13 && !(scenario == 26 && polls == 2);
         owner->state.target_exit_observed = owner->state.release_attempted;
         owner->state.target_exec_observed = owner->state.release_attempted && scenario != 9;
         owner->state.status.latest.tag = REMOZIO_MONITOR_TARGET_REAPED;
@@ -96,17 +96,24 @@ int main(void) {
         {12,positive,11,false,0}, {13,positive,11,false,1}, {14,positive,11,false,0}, {15,positive,11,false,0},
         {16,wrong_name,5,true,1}, {17,missing_group,5,true,1},
         {18,positive,13,true,1}, {19,positive,13,true,1}, {20,positive,13,true,1}, {21,positive,13,true,1},
-        {22,positive,14,true,1}, {23,positive,14,true,1}, {24,cancel_prepared,14,true,1}, {25,wrong_name,14,true,1}
+        {22,positive,14,true,1}, {23,positive,14,true,1}, {24,cancel_prepared,14,true,1}, {25,wrong_name,14,true,1},
+        {26,positive,0,true,1}, {26,legacy,0,true,1}
     };
     for (unsigned i = 0; i < sizeof(cases)/sizeof(*cases); ++i) {
         rejection_error = cases[i].kind == legacy ? EINVAL : ESTALE;
         scenario = cases[i].scenario; negative = cases[i].kind == wrong_name || cases[i].kind == missing_group || cases[i].kind == legacy;
         memset(&fixture_owner, 0, sizeof(fixture_owner)); polls = releases = disposals = 0; ticks = 1; cancelled = false;
-        bool retired = true; int result = one(&target, cases[i].kind, &retired);
+        struct control_diagnostic diagnostic;
+        bool retired = true; int result = one(&target, cases[i].kind, &retired, &diagnostic);
         if (fixture_output >= 0) { close(fixture_output); fixture_output = -1; }
+        if (diagnostic.stage != result || diagnostic.state.monitor_reaped != fixture_owner.state.monitor_reaped ||
+            (scenario == 13 && (diagnostic.primary_stage != 8 || diagnostic.state.status.reaped)) ||
+            (scenario == 4 && (diagnostic.primary_stage != 13 || diagnostic.poll_error != EIO))) {
+            fprintf(stderr, "Owner control %u lost its failure diagnostics.\n", i); return 1;
+        }
         if (result != cases[i].error || retired != cases[i].retired || disposals != cases[i].disposed) {
             fprintf(stderr, "Owner control %u: result=%d cleanup=%d dispose=%d\n", i, result, retired, disposals); return 1;
         }
     }
-    puts("{\"schemaVersion\":1,\"ownerControls\":28,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
+    puts("{\"schemaVersion\":1,\"ownerControls\":30,\"privilegedControlsRun\":false,\"realProcessesSpawned\":0}"); return 0;
 }
