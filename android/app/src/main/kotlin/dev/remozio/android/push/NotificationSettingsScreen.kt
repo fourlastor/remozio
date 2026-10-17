@@ -119,6 +119,8 @@ internal fun NotificationSettingsScreen() {
             }
         }
         FCMClientSettingsCard()
+        PushRegistrationStatusCard()
+        PushRegistrationWorkSettingsCard()
         WakeWorkSettingsCard()
         LocalNetworkSettingsCard()
     }

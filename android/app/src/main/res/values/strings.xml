@@ -347,7 +347,7 @@
     <string name="nav_settings">Settings</string>
     <string name="notification_settings_title">Notifications</string>
     <string name="notification_settings_reason">Allow notifications so Remozio can alert you when a Mac needs attention. You can change this choice in Android settings.</string>
-    <string name="notification_remote_pending">Remote push delivery is not connected yet.</string>
+    <string name="notification_remote_pending">Check the registration status for each Mac below.</string>
     <string name="notification_reading">Checking notification settings…</string>
     <string name="notification_permission_required">Notification permission is not granted</string>
     <string name="notification_app_disabled">App notifications are disabled</string>
@@ -459,7 +459,6 @@
     <string name="fcm_registration_failed">Could not register with Firebase. Check your connection and retry.</string>
     <string name="fcm_restart_required">Configuration saved. Restart the app process to use the new Firebase project.</string>
     <string name="fcm_unavailable">Push configuration is unavailable. Retry or import a valid client file.</string>
-    <string name="fcm_mac_registration_pending">Mac delivery registration is not connected yet. Firebase registration alone does not enable remote approval alerts.</string>
     <string name="fcm_imported">Firebase client configuration saved.</string>
     <string name="fcm_unchanged">This client file is already configured. Your connection setting stays unchanged.</string>
     <string name="fcm_invalid_configuration">This file is not a valid Firebase Android client configuration for this app.</string>
@@ -491,4 +490,22 @@
     <string name="wake_settings_failed">Could not save these settings. Keep your values and try again.</string>
     <string name="wake_settings_show">Advanced background settings</string>
     <string name="wake_settings_hide">Hide background settings</string>
+    <string name="registration_work_title">Background registration limits</string>
+    <string name="registration_work_reason">Tune background jobs, parallel Mac attempts and recovery timing. Lower parallel limits affect new attempts.</string>
+    <string name="registration_queue_limit">Maximum unfinished jobs per queue</string>
+    <string name="registration_parallel_limit">Maximum parallel Mac attempts</string>
+    <string name="registration_operation_timeout">Registration timeout (seconds)</string>
+    <string name="registration_status_title">Notification setup for each Mac</string>
+    <string name="registration_status_reason">Registration status does not show whether a Mac is online or a notification will arrive.</string>
+    <string name="registration_provider_pending">Waiting for notification provider setup</string>
+    <string name="registration_pending">Registration has not been checked yet</string>
+    <string name="registration_mapping_observed">Delivery setup was recently confirmed</string>
+    <string name="registration_proof_committed">Phone verification accepted; gateway status unknown</string>
+    <string name="registration_waiting_challenge">Waiting for phone verification</string>
+    <string name="registration_recovery_required">Checking a previous verification attempt</string>
+    <string name="registration_retry_pending">Setup is unavailable; it can retry in the background</string>
+    <string name="registration_incompatible">Registration is not enabled on this Mac</string>
+    <string name="registration_retry">Retry registration</string>
+    <string name="registration_retry_queued">Registration recovery was queued</string>
+    <string name="registration_lifecycle_hint">Registration progress for each paired Mac appears below.</string>
 </resources>

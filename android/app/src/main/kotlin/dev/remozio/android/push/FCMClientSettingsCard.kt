@@ -65,7 +65,7 @@ internal fun FCMClientSettingsCard() {
             Text(stringResource(status.label()), style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
             if (status == PushClientStatus.INITIALIZING) CircularProgressIndicator()
-            Text(stringResource(R.string.fcm_mac_registration_pending))
+            Text(stringResource(R.string.registration_lifecycle_hint))
             Button(enabled = !busy, onClick = {
                 try { import.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) }
                 catch (_: RuntimeException) { result = R.string.fcm_action_failed }

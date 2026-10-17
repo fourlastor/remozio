@@ -26,6 +26,17 @@ internal fun dispatchFCMIntent(
     if (delivery && (!enabled || !acceptsFCMExtras(keys))) acknowledgeRejected() else deliver()
 }
 
+/** Provider callbacks route challenge data to private storage. They never display it as an approval request. */
+internal fun dispatchFCMData(data: Map<String, String>, wake: (PushData.Wake) -> Unit,
+                             challenge: (PushData.TokenChallenge) -> Unit): Boolean {
+    val decoded = try { PushData.decode(data) } catch (_: IllegalArgumentException) { return false }
+    when (decoded) {
+        is PushData.Wake -> wake(decoded)
+        is PushData.TokenChallenge -> challenge(decoded)
+    }
+    return true
+}
+
 class RemozioMessagingService : FirebaseMessagingService() {
     private val rejectedDeliveryRPC by lazy { Rpc(applicationContext) }
     override fun handleIntent(intent: Intent) = dispatchFCMIntent(
@@ -42,8 +53,11 @@ class RemozioMessagingService : FirebaseMessagingService() {
         val app = application as RemozioApplication
         val generation = app.pushClient.generation() ?: return
         if (message.notification != null || !app.pushClient.acceptsSender(message.from)) return
-        val wake = try { PushData.decode(message.data) as? PushData.Wake } catch (_: Exception) { null } ?: return
-        app.wakeWork.accept(generation, wake)
+        try {
+            dispatchFCMData(message.data, { app.wakeWork.accept(generation, it) }, { challenge ->
+                app.pushChallenges.admit(generation, challenge)?.let { app.pushRegistrationWork.accept(it) }
+            })
+        } catch (_: Exception) { report(app, generation, PushDeliveryStatus.UNAVAILABLE) }
     }
 }
 

@@ -38,7 +38,7 @@ A committed activation does not expire with the original proof window.
 Restart or elapsed proof time must not replace a working mapping.
 A fresh gateway query is required before deciding that a committed mapping is missing.
 The [shared publication loop](authority-phone-push-publication.md) now publishes retained controls and repairs missing mappings.
-Phone status recovery remains open.
+The [optional recovery exchange](../../protocol/phone-push-recovery.md) now returns retained phone registration state.
 
 ## Fresh mapping queries
 
@@ -68,5 +68,6 @@ Legacy endpoint and channel controls retain the connection after optional-query 
 
 These controls do not establish hardware startup, an installed service or real FCM delivery.
 The startup evidence predates the shared publication integration.
-Provider challenge processing, phone recovery and app settings remain incomplete.
+Android provider ingress, recovery, scheduling and settings are connected in source.
+Installed activation, hardware restoration and actual provider delivery remain separate gates.
 Physical Mac–Pixel validation remains part of the supervised integration session.

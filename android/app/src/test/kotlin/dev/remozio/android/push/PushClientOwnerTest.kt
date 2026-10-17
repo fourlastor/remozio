@@ -54,6 +54,44 @@ class PushClientOwnerTest {
         assertEquals(PushConfigurationResult.UNCHANGED, f.owner.import(publicFCMConfiguration()))
         assertEquals(1, f.storage.writes); assertSame(candidate, f.owner.tokenCandidate()); assertEquals(1, f.driver.attempts.size)
     }
+    @Test fun registrationGuardTracksTokenRevisionAndKeepsSameTokenCallbacksStable() {
+        val f = PushClientFixture(); f.enable(); val callback = f.driver.attempts.single()
+        assertNull(f.owner.tokenRevisionState.value)
+        callback.token("first-token"); val first = assertNotNull(f.owner.tokenCandidate())
+        assertEquals("12345", first.senderID); assertEquals("dev.remozio.android.debug", first.packageName)
+        assertEquals(first.revision, f.owner.tokenRevisionState.value)
+        assertEquals(true, f.owner.withCurrentToken(first.generation, first.revision) { true })
+        callback.token("first-token"); assertSame(first, f.owner.tokenCandidate())
+        assertEquals(first.revision, f.owner.tokenRevisionState.value)
+        callback.token("second-token"); val second = assertNotNull(f.owner.tokenCandidate())
+        assertEquals(first.generation, second.generation); assertNotEquals(first.revision, second.revision)
+        assertEquals(second.revision, f.owner.tokenRevisionState.value)
+        assertNull(f.owner.withCurrentToken(first.generation, first.revision) { error("Old token published") })
+        assertEquals(true, f.owner.withCurrentToken(second.generation, second.revision) { true })
+        assertFalse(second.toString().contains("second-token"))
+    }
+    @Test fun sameTokenAfterRetryCannotReviveAnOlderRegistrationAttempt() {
+        val f = PushClientFixture(); f.enable(); f.driver.attempts.single().token("same-token")
+        val first = assertNotNull(f.owner.tokenCandidate())
+        f.owner.retry(); assertNull(f.owner.tokenRevisionState.value)
+        assertNull(f.owner.withCurrentToken(first.generation, first.revision) { error("Cleared token published") })
+        f.driver.attempts.last().token("same-token"); val second = assertNotNull(f.owner.tokenCandidate())
+        assertEquals(first.generation, second.generation); assertNotEquals(first.revision, second.revision)
+        assertNull(f.owner.withCurrentToken(first.generation, first.revision) { error("Retry revived old token work") })
+        f.driver.attempts.last().failed(); assertNull(f.owner.tokenRevisionState.value)
+        assertNull(f.owner.withCurrentToken(second.generation, second.revision) { error("Failed token published") })
+    }
+    @Test fun providerReplacementAndDisablementClearTheRegistrationRevision() {
+        val f = PushClientFixture(); f.enable(); f.driver.attempts.single().token("synthetic-token")
+        val first = assertNotNull(f.owner.tokenCandidate()); assertTrue(f.owner.setEnabled(false))
+        assertNull(f.owner.tokenRevisionState.value)
+        assertNull(f.owner.withCurrentToken(first.generation, first.revision) { error("Disabled token published") })
+        assertTrue(f.owner.setEnabled(true)); f.driver.attempts.last().token("synthetic-token")
+        val second = assertNotNull(f.owner.tokenCandidate())
+        assertEquals(PushConfigurationResult.RESTART_REQUIRED, f.owner.import(publicFCMConfiguration(sender = "67890", project = "other-project")))
+        assertNull(f.owner.tokenRevisionState.value)
+        assertNull(f.owner.withCurrentToken(second.generation, second.revision) { error("Replaced provider published") })
+    }
     @Test fun invalidImportPreservesTheCurrentClientAndDoesNotWrite() {
         val f = PushClientFixture(); f.enable(); f.driver.attempts.single().token("synthetic-token-1")
         val candidate = f.owner.tokenCandidate()

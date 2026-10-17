@@ -26,12 +26,31 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 
 class RemozioApplication : Application() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val enrollmentAccess = Mutex()
     internal val pushDelivery by lazy { PushDeliveryReports(this) }
     internal val pushClient by lazy { androidPushClient(this) }
+    internal val pushChallenges by lazy {
+        ApplicationPushChallenges(pushClient, { AndroidPushChallenges.moment(this) }) { AndroidPushChallenges.open(this) }
+    }
+    internal val pushRegistrationWorkSettings by lazy { PushRegistrationWorkSettings(this) }
+    private val pushProofs by lazy { ApplicationPushProofs(pushClient) { AndroidPushProofs.open(this) } }
+    internal val pushRegistrations by lazy {
+        StoredPushRegistrations(
+            { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            enrollmentAccess, pushClient, pushChallenges, pushProofs,
+            { parent, record -> androidPushRecoveryWire(this, parent, record, pushRegistrationWorkSettings.read().operationSeconds * 1000L) },
+            { parent, record -> androidPushProofWire(this, parent, record, pushRegistrationWorkSettings.read().operationSeconds * 1000L) },
+            { pushRegistrationWorkSettings.read().operationSeconds * 1000L }, maximumConcurrent = 64,
+            concurrencyLimit = { pushRegistrationWorkSettings.read().maximumConcurrent },
+        )
+    }
+    internal val pushRegistrationWork by lazy {
+        AndroidPushRegistrationWork(this, pushClient, pushRegistrationWorkSettings, pushRegistrations::records)
+    }
     internal val wakeWorkSettings by lazy { WakeWorkSettings(this) }
     private val wakeDemand by lazy { ApplicationWakeDemand(pushClient) { AndroidWakeDemand.open(this) } }
     internal val wakeFetches by lazy {
@@ -59,6 +78,7 @@ class RemozioApplication : Application() {
         super.onCreate()
         pushClient.restore()
         wakeWork.start(scope)
+        pushRegistrationWork.start(scope)
     }
     internal val macs by lazy {
         StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
@@ -77,10 +97,15 @@ class RemozioApplication : Application() {
             enrollmentAccess, { ids ->
                 try { commands.invalidateRecordsLocked(ids) }
                 finally {
-                    wakeFetches.invalidateRecordsLocked(ids)
-                    wakeNotifications.invalidateRecordsLocked(ids)
+                    try { wakeFetches.invalidateRecordsLocked(ids) }
+                    finally {
+                        try { wakeNotifications.invalidateRecordsLocked(ids) }
+                        finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                    }
                 }
-            }, ::validatePairingKeys,
+            }, ::validatePairingKeys, onChanged = {
+                scope.launch(Dispatchers.IO) { pushRegistrationWork.changed() }
+            },
         )
     }
     internal val pairingReceipts by lazy {

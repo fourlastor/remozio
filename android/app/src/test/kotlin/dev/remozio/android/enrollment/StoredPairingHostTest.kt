@@ -442,4 +442,48 @@ class StoredPairingHostTest {
         h.remove(e.recordID, 1u)
         assertTrue(leases.none { it.isCurrent() })
     }
+    private fun notifyingHost(changed: () -> Unit) = StoredPairingHost(
+        ::open, ::open, mutex, { assertTrue(mutex.isLocked); invalidated.add(it) },
+        { custodyChecks++; check(custodyAvailable) }, Dispatchers.Unconfined, onChanged = changed,
+    )
+
+    @Test fun registrationSchedulingSeesCommittedTrustOutsideTheEnrollmentLock() = runBlocking<Unit> {
+        val phases = mutableListOf<EnrollmentPhase>()
+        val h = notifyingHost {
+            assertTrue(mutex.tryLock()); mutex.unlock()
+            open().use { phases += it.snapshot().entries.single().phase }
+        }
+        val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u); assertTrue(phases.isEmpty())
+        val active = h.activate(e.recordID, receipt(t))
+        assertEquals(listOf(EnrollmentPhase.ACTIVE), phases)
+        h.remove(e.recordID, active.revision)
+        assertEquals(listOf(EnrollmentPhase.ACTIVE, EnrollmentPhase.REMOVED), phases)
+    }
+
+    @Test fun failedTrustWritesNeverScheduleRegistration() = runBlocking<Unit> {
+        var changes = 0
+        val h = notifyingHost { changes++ }; val e = record(1); val t = transcript(e)
+        h.prepare(e, t, 0u, 1u); storage.fail = true
+        assertFails { h.activate(e.recordID, receipt(t)) }; assertEquals(0, changes)
+        storage.fail = false
+        val active = h.activate(e.recordID, receipt(t)); assertEquals(1, changes)
+        storage.fail = true
+        assertFails { h.remove(e.recordID, active.revision) }; assertEquals(1, changes)
+        storage.fail = false
+        open().use { assertEquals(EnrollmentPhase.ACTIVE, it.snapshot().entries.single().phase) }
+    }
+
+    @Test fun schedulingFailureCannotUndoACommittedPairingOrRemoval() = runBlocking<Unit> {
+        var changes = 0
+        val h = notifyingHost { changes++; error("Synthetic scheduling failure") }
+        val e = record(1); val t = transcript(e); h.prepare(e, t, 0u, 1u)
+        val active = h.activate(e.recordID, receipt(t))
+        assertEquals(EnrollmentPhase.ACTIVE, active.entries.single().phase)
+        val removed = h.remove(e.recordID, active.revision)
+        assertEquals(EnrollmentPhase.REMOVED, removed.entries.single().phase)
+        assertEquals(2, changes)
+        open().use { assertEquals(EnrollmentPhase.REMOVED, it.snapshot().entries.single().phase) }
+    }
+
 }

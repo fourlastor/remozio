@@ -18,7 +18,7 @@ internal enum class PushClientStatus { UNCONFIGURED, DISABLED, INITIALIZING, CLI
 internal enum class PushConfigurationResult { IMPORTED, UNCHANGED, RESTART_REQUIRED, INVALID, FAILED }
 
 /** The token is a private delivery address. It grants no enrollment, fetch or decision authority. */
-internal class PushTokenCandidate(val generation: UUID, val revision: UUID, val projectID: String, val token: String) {
+internal class PushTokenCandidate(val generation: UUID, val revision: UUID, val projectID: String, val senderID: String, val packageName: String, val token: String) {
     override fun toString() = "PushTokenCandidate(redacted)"
 }
 
@@ -33,6 +33,8 @@ internal class PushClientOwner(
     val status = mutableStatus.asStateFlow()
     private val mutableGeneration = MutableStateFlow<UUID?>(null)
     val generationState = mutableGeneration.asStateFlow()
+    private val mutableTokenRevision = MutableStateFlow<UUID?>(null)
+    val tokenRevisionState = mutableTokenRevision.asStateFlow()
     private var desired: StoredPushConfiguration? = null
     private var started: StoredPushConfiguration? = null
     private var candidate: PushTokenCandidate? = null
@@ -94,8 +96,20 @@ internal class PushClientOwner(
         return body()
     }
 
+    /** Registration publication must also match the current token, including retries within one provider generation. */
+    @Synchronized fun <T> withCurrentToken(generation: UUID, revision: UUID, body: () -> T): T? {
+        if (current()?.generation != generation || candidate?.revision != revision) return null
+        return body()
+    }
+
     @Synchronized fun <T> withCurrentOrDisabled(generation: UUID?, body: () -> T): T? {
         if (current()?.generation != generation) return null
+        return body()
+    }
+
+    /** A stale collector cannot cancel or replace work for a newer token revision. */
+    @Synchronized fun <T> withCurrentTokenOrDisabled(generation: UUID?, revision: UUID?, body: () -> T): T? {
+        if (current()?.generation != generation || tokenCandidate()?.revision != revision) return null
         return body()
     }
 
@@ -106,6 +120,7 @@ internal class PushClientOwner(
     private fun publish(status: PushClientStatus) {
         mutableStatus.value = status
         mutableGeneration.value = current()?.generation
+        mutableTokenRevision.value = if (current() != null) candidate?.revision else null
     }
     private fun retire() {
         candidate = null
@@ -141,7 +156,7 @@ internal class PushClientOwner(
         if (token.length !in 1..4096 || token.any { it.code !in 33..126 }) {
             candidate = null; publish(PushClientStatus.REGISTRATION_FAILED); return
         }
-        if (candidate?.token != token) candidate = PushTokenCandidate(generation, newGeneration(), selected.client.projectID, token)
+        if (candidate?.token != token) candidate = PushTokenCandidate(generation, newGeneration(), selected.client.projectID, selected.client.senderID, selected.client.packageName, token)
         publish(PushClientStatus.CLIENT_READY)
     }
 }

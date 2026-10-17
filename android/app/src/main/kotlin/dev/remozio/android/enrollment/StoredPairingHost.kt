@@ -24,6 +24,7 @@ internal class StoredPairingHost(
     private val invalidateLocked: (Set<CborValue.Bytes>) -> Unit,
     private val validateKeys: (PhoneEnrollment) -> Unit,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val onChanged: () -> Unit = {},
 ) {
     private val preparedLeases = mutableMapOf<CborValue.Bytes, MutableSet<PreparedPairingLease>>()
 
@@ -100,7 +101,7 @@ internal class StoredPairingHost(
                 attempt.activate(store, receipt.copyBytes())
             }
         }
-    }
+    }.also { notifyChange() }
 
     /** Only a joined fresh setup owner that never submitted its proof may call this operation. */
     suspend fun abandonUnsubmitted(expected: StoredPhoneEnrollment, retireKeys: () -> Unit) = withContext(dispatcher) {
@@ -132,6 +133,9 @@ internal class StoredPairingHost(
         }
     }
 
+    /** Work admission can be retried from the committed archive after a callback or process failure. */
+    private fun notifyChange() { try { onChanged() } catch (_: Exception) { } }
+
     private fun references(enrollment: PhoneEnrollment): List<EnrollmentKeyReference> =
         listOf(enrollment.transportKey, enrollment.decisionKey, enrollment.biometricKey)
 
@@ -146,7 +150,7 @@ internal class StoredPairingHost(
                 store.remove(recordID.copyBytes(), expectedRevision)
             }
         }
-    }
+    }.also { notifyChange() }
 }
 
 
