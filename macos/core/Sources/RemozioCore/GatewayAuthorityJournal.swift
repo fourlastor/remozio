@@ -433,7 +433,7 @@ final class GatewayAuthorityJournal {
     }
 
     /// Record only controls already present in protected local history. Never fill a history gap from this reply.
-    func acknowledge(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+    func acknowledge(_ verified: VerifiedGatewayHead, record: Bool = true) throws -> GatewayAcknowledgmentResult {
         let evidence = verified.evidence, identity = evidence.registration
         let local = try head(identity), previous = try acknowledgment(identity)
         func result(_ disposition: GatewayAcknowledgmentDisposition, _ value: GatewayAcknowledgment?) -> GatewayAcknowledgmentResult {
@@ -457,6 +457,7 @@ final class GatewayAuthorityJournal {
         }
         guard evidence.revision <= local else { return result(.missingLocalHistory, previous) }
         let value = GatewayAcknowledgment(revision: evidence.revision, operationID: evidence.receipt?.operationID)
+        if !record { return result(.recorded, value) }
         try statement("""
             INSERT INTO main.gateway_acknowledgment_v1 VALUES(1,?,?)
             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,operation=excluded.operation
@@ -503,6 +504,25 @@ final class GatewayAuthorityJournal {
                 }
             }
             return value
+        }
+    }
+
+    /// A registration publisher cannot skip another retained control, even after that control expires.
+    /// Only a fresh verified gateway head can establish that this ordering barrier has passed.
+    func firstNonRegistrationControl(after revision: UInt64, identity: GatewayRegistrationIdentity) throws -> UInt64? {
+        guard revision <= (try head(identity)) else { throw GatewayAuthorityError.headMismatch }
+        let submission = try submissionSchemaVersion() >= 16
+            ? " UNION ALL SELECT operation,revision FROM main.gateway_submission_outbox_v1 WHERE revision>?" : ""
+        var arguments = [uint(revision)]
+        if !submission.isEmpty { arguments.append(uint(revision)) }
+        return try statement("SELECT operation,revision FROM main.gateway_revocations_v1 WHERE revision>?" + submission + " ORDER BY revision LIMIT 1", arguments) { row in
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
+            let next = try unsigned(blob(row, 1, maximum: 8))
+            guard let retained = try envelope(blob(row, 0, maximum: 16), identity: identity), retained.revision == next,
+                  retained.kind == 3 || GatewaySubmissionKind(rawValue: retained.kind) != nil else { throw GatewayAuthorityError.corruptData }
+            return next
         }
     }
 

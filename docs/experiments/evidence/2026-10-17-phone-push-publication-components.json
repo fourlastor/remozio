@@ -1,0 +1,168 @@
+{
+  "experiment": "phone-push-publication-components",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-17T19:30:31.386963+00:00",
+  "sourceCommit": "2254a284505c6aee3372aad2276eada047232167",
+  "sourceBase": "fd3cacc4a6d7ab0e620eef910bf74c6e69ddf342",
+  "sourceBasis": "The named source commit contains the executable implementation and tests. Later evidence and prose changes do not alter those inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "validation": {
+    "nativePythonGate": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2490,
+      "skipped": 1,
+      "failures": 0,
+      "skipReason": "LiveOwnedJobInspectionTests.testOwnedGUIJobReconciliation is an explicit ordinary GUI-session experiment."
+    },
+    "nativeLogSHA256": "315fc7dc6acb986a3a4f1d047e988b17d126354112cd1b53059790ba2ce8e788",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 125,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 243,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 69,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 279,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "localGateComposition": "Mac check-local.sh equivalent: check.sh then the six required Gradle tasks through ATC.",
+    "unchangedGradleOutputsMayBeReused": true
+  },
+  "retainedNonRegistrationControlKindsTested": [
+    "phoneRevocation",
+    "submissionRotation",
+    "submissionRevocation"
+  ],
+  "relevantPassedMethods": {
+    "AuthorityPhonePushRegistrationTests": [
+      "testCandidateMetadataAndProofResultFollowCheckpointedCommits",
+      "testCheckpointFailureWithholdsMetadataAndProofOutcomes",
+      "testCurrentTokenStateSeparatesAbsentCandidateProofAndExpiry",
+      "testDuplicateProofCannotCreateAnotherActivationOrRetireHealthyStorage",
+      "testExpiredMappingObservationCannotChangeTheCheckpoint",
+      "testExpiredRenewalRetainsEnrollmentAndRequiresAFreshProviderProof",
+      "testFreshHeadAcknowledgmentCommitsOnceAndRechecksTrust",
+      "testHostileResponseRolesNeverCreateControls",
+      "testIncompatibleProviderDoesNotCreateCandidateOrSign",
+      "testLiveCandidateIsNotRenewedAndWrongEnrollmentCannotReadPrivateState",
+      "testMissingMappingRepairRequiresFreshProofAndPreservesPairing",
+      "testPresentMappingAndUnconsumedCandidateCannotTriggerRepair",
+      "testProtectedStartupCheckpointFailureRetiresTheOwnerBeforeListenerStart",
+      "testProtectedStartupConfiguresTheFixedIdentityThroughTheCheckpoint",
+      "testProtectedStartupRejectsADifferentAuthorityClockWithoutWriting",
+      "testProtectedStartupRejectsAReplacementIdentityAndKeepsTheOriginalOwnerUsable",
+      "testProtectedStartupValidatesRootBeforeCreatingGatewayState",
+      "testReopenedAuthorityRetainsPairingAndTheCommittedMappingBoundary",
+      "testSupersededOrStaleTrustObservationCannotRepairAnotherCandidate",
+      "testTransportRejectionAndStaleBindingCannotReachTheSigner"
+    ],
+    "AuthorityPhonePushPublisherTests": [
+      "testCandidateOfferOrderDoesNotDependOnEnrollmentCursorOrder",
+      "testCandidateProbeProofAndActivationUseTheSingleRootChannel",
+      "testControlBetweenCandidateAndProofBlocksOnlyTheLaterActivation",
+      "testEarlierCandidatesPublishBeforeActivationAtTheOnePhoneBudget",
+      "testExpiredLeaseAfterCandidateReplyStopsPublicationAndClosesTheChannel",
+      "testExpiredNonRegistrationControlsStillBlockLaterRegistration",
+      "testExpiredProbeWaitsForThePhoneWithoutFillingRetainedHistory",
+      "testExpiredUnappliedActivationRequiresFreshAbsenceBeforeRenewal",
+      "testInvalidGatewayHeadCannotPublishAndDoesNotRetireHealthyRoot",
+      "testLegacyMappingQueryRejectionKeepsTheControlConnection",
+      "testLostActivationReplyDoesNotReplaceAnAlreadyMappedActivation",
+      "testProviderInvalidationRepairsWithFreshProofAndRetainsPairing",
+      "testRegistrationWaitsForEveryEarlierNonRegistrationControl",
+      "testRetiredOwnerAfterCandidateReplyCannotStartAProbe",
+      "testReversePhoneProofOrderPublishesBothActivationsWithinEitherBudget",
+      "testSupersededCandidateCannotStartAProbeAfterTheReply",
+      "testTemporaryMappingQueryRejectionRecoversOnTheSameConnection",
+      "testThreePhonesProgressAcrossBoundedTurnsWithoutRepeatedProbes",
+      "testTransientCandidateRejectionPreservesAllPhonesAndOriginalOffers",
+      "testTransientControlRejectionsRetainTheCommittedActivation"
+    ],
+    "AuthorityWakePublisherTests": [
+      "testAccountPresenceModeChangesReachPublisherAndLiveHintFeed",
+      "testCancellationOrUnenrollmentDuringAcknowledgmentWithdrawsBeforeHint",
+      "testClosedJournalCannotExposePreviouslyRegisteredHint",
+      "testClosingDuringRegistrationRejectsLateAcknowledgmentAndConcurrentDrain",
+      "testCommandPolicyRetirementClosesServiceWhileGatewayIsUnavailable",
+      "testCommandPolicyRetirementClosesServiceWithHealthyGateway",
+      "testCommandPolicyRetirementInterruptsLongGatewayBackoff",
+      "testCommandPolicyRetirementInterruptsLongPublicationSleep",
+      "testCommandReceiverDrainsBeforeServiceClosesSharedJournal",
+      "testCommandRetirementDuringGatewayHelloPreventsInitialPublication",
+      "testDisconnectedTerminalRequestKeepsWithdrawalAcrossReplacement",
+      "testExecutorSaturationRetiresItsEnclosingServiceWithoutAbandoningQueuedCleanup",
+      "testExpiryDuringAcknowledgmentWithdrawsOriginalGrant",
+      "testFailedRequestShutdownRetainsCleanupForRetry",
+      "testInvalidAuthorityClockRetiresRequestsRatherThanRetryingGateway",
+      "testLateAcknowledgmentCannotAffectReplacementPublisherOrHintSource",
+      "testLeaseExpiryDuringAcknowledgmentRetiresWakeOnly",
+      "testPresenceDuringAcknowledgmentSuppressesHintsAndSynchronizesGateway",
+      "testPublisherFeedComposesWithNegotiatedRootEndpointAndReflectsTerminalForget",
+      "testRegisteredGrantUsesCurrentJournalLeaseAndIsNotRegisteredAgain",
+      "testRejectedRegistrationRetriesOriginalGrantWithoutRenewingRequest",
+      "testReplacementPublisherKeepsGrantAndRejectsOldSessionOwnership",
+      "testRequestExpiredWhileDisconnectedCannotRegainWakeGrant",
+      "testServiceCloseDuringReceiverReadinessCannotStartLatePublisher",
+      "testServiceDeinitDrainsReceiverObserverWithoutRetainingService",
+      "testServiceDeinitJoinsExecutorBeforeClosingTheSharedJournal",
+      "testServiceShutdownCancelsRunningRegistrationBeforeClosingRequestJournal",
+      "testServiceStartsExecutorBeforeRequestsAndJoinsQueuedWorkBeforeJournalClose",
+      "testShutdownDuringBackoffPreventsAnotherConnectionAttempt",
+      "testStorageRetirementClosesDirectRequestsWithoutGatewayRetry",
+      "testUnavailableGatewayAndReconnectLeaveDirectRequestsRunning"
+    ]
+  },
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushPublication.swift": "4a690077dcff877eb8cd0ef7d870280387a871ffab9d0e7822be1b4fc01b47e9",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushRegistration.swift": "1ad185f95d6623f43cd8b76be50dde659a11b5e79c21bf8fc1fe4a760e29c7b9",
+    "macos/core/Sources/RemozioCore/ApprovalRequestCoordinator.swift": "a9bf956f5e6c78349655716c297e2f9da26b03bf85f6b67701dc141a3bffe6fb",
+    "macos/core/Sources/RemozioCore/GatewayAuthorityJournal.swift": "f9f09e3021973e47e7b60132fd69ca61510cc873a10eb3c5c54f6a98670b6f8a",
+    "macos/core/Sources/RemozioCore/JournalDatabase.swift": "5f66fc6d91935f9ef62cb558e09dfd78afbfb600dabd3119c8c5a0a02f8cc3b9",
+    "macos/core/Sources/RemozioCore/AuthorityWakePublisher.swift": "3fb649b569186a46c8a8c695c759d4e14e019a038ae793d3cd1181af4f1b9d21",
+    "macos/core/Sources/RemozioCore/AuthorityWakeService.swift": "5bb794aa0bf37de93654c808847450f38867367a959256f6d0a75bd3828f4cac",
+    "macos/core/Sources/RemozioCore/GatewayRootChannel.swift": "23c24f2dda29255261138eda24c24332926178b0987421a51a2c312a67406bb7",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushRegistrationTests.swift": "f7b875337599b676113746310fe3a9a46a34a59e119a2a73b0059d3aec43c1c1",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushPublisherTests.swift": "8585aac691d9cca39d63bd80e58ebbccbc41f5651666ff821c55a568d7076757"
+  },
+  "usesSoftwareFixtureKeys": true,
+  "realGatewayJournalAndCoordinator": true,
+  "syntheticProviderAndRootChannelDriver": true,
+  "hardwareRootStartupTested": false,
+  "installedServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "physicalAndroidTested": false,
+  "limits": [
+    "The observed host is macOS27; deployment target26 does not establish runtime behavior on26.",
+    "A completed publication turn is not phone delivery or a UI mapping-status guarantee.",
+    "Android provider challenge ingress, current metadata/status recovery and settings integration remain incomplete.",
+    "No production setup is enabled by these component results."
+  ]
+}

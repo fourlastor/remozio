@@ -98,7 +98,13 @@ public actor GatewayRootChannel {
         }
         guard accepted else { throw GatewayRootChannelError.rejected }
     }
-    /// Recovery replies remain unverified data until GatewayHeadQueryOwner accepts the fresh query response.
+    /// Start a provider probe only for a retained candidate admitted on this control connection.
+    public func probeCandidate(operationID: Data, phoneID: Data) async throws {
+        guard operationID.count == 16, phoneID.count == 16 else { throw GatewayRootChannelError.invalidMessage }
+        try await requireAcceptance(.probe(operationID: operationID, phoneID: phoneID))
+    }
+
+    /// Recovery replies remain unverified until GatewayHeadQueryOwner accepts the fresh response.
     public func head(query: Data) async throws -> GatewayHeadReply {
         let fields = try await command(.head(query))
         guard fields.count == 3, case .bytes(let payload) = fields[1], case .bytes(let signature) = fields[2], signature.count == 64 else {

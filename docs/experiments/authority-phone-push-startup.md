@@ -10,7 +10,8 @@ flowchart LR
     J --> L[Start request listener]
     L --> R[Enrolled phone registration exchange]
     R --> P[Retained candidate and proof state]
-    P -. Publication integration remains open .-> G[Gateway]
+    P --> Q[Shared publication loop]
+    Q --> G[Gateway]
 ```
 
 ## Startup and compatibility
@@ -36,7 +37,8 @@ Renewal retains the phone enrollment and still requires provider possession proo
 A committed activation does not expire with the original proof window.
 Restart or elapsed proof time must not replace a working mapping.
 A fresh gateway query is required before deciding that a committed mapping is missing.
-Automatic publication, missing-mapping repair and phone status recovery remain open.
+The [shared publication loop](authority-phone-push-publication.md) now publishes retained controls and repairs missing mappings.
+Phone status recovery remains open.
 
 ## Fresh mapping queries
 
@@ -65,5 +67,6 @@ The coordinator rejects an expired Root lease before signing or contacting a pro
 Legacy endpoint and channel controls retain the connection after optional-query rejection.
 
 These controls do not establish hardware startup, an installed service or real FCM delivery.
-The shared publication owner, provider challenge processing and app settings remain incomplete.
+The startup evidence predates the shared publication integration.
+Provider challenge processing, phone recovery and app settings remain incomplete.
 Physical Mac–Pixel validation remains part of the supervised integration session.

@@ -35,6 +35,10 @@ public struct AuthorityPhonePushRegistration: Sendable {
         try verifySelf(transaction)
         try transaction.configureGatewayAuthority(policy.registration)
     }
+    func publicationBarrier(after revision: UInt64, transaction tx: JournalTransaction) throws -> UInt64? {
+        try verifySelf(tx)
+        return try tx.firstGatewayNonRegistrationControl(after: revision, registration: policy.registration)
+    }
     func current(phoneID: Data, enrollmentEpoch: Data, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
         try verifySelf(tx)
@@ -59,6 +63,37 @@ public struct AuthorityPhonePushRegistration: Sendable {
             })
         return try current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: tx, now: now, wall: wall)
     }
+    func acknowledge(_ head: VerifiedGatewayHead, expectedTrustRevision: UUID, transaction tx: JournalTransaction,
+                     commit: Bool) throws -> GatewayAcknowledgmentResult {
+        try verifySelf(tx)
+        guard head.evidence.registration == policy.registration else { throw GatewayAuthorityError.wrongScope }
+        guard try tx.approvalTrustSnapshot().revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+        if commit { return try tx.acknowledgeGatewayHead(head) }
+        return try tx.inspectGatewayHead(head)
+    }
+
+    /// Only a fresh absent observation for the exact committed desired mapping may trigger repair.
+    func renewMissing(_ observation: VerifiedGatewayMappingState, expectedTrustRevision: UUID,
+                      transaction tx: JournalTransaction, now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        try verifySelf(tx)
+        guard try tx.approvalTrustSnapshot().revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+        guard observation.scope.registration == policy.registration, observation.activation == nil,
+              let retained = try current(phoneID: observation.scope.phoneID, enrollmentEpoch: observation.scope.enrollmentEpoch,
+                transaction: tx, now: now, wall: wall), retained.activation != nil else { throw GatewayAuthorityError.superseded }
+        let candidate = try GatewayTokenCandidate.decode(retained.candidate.canonicalPayload, limits: limits)
+        guard observation.scope.matches(candidate.binding) else { throw GatewayAuthorityError.superseded }
+        let r = policy.registration
+        _ = try tx.renewDesiredGatewayCandidate(phoneID: candidate.binding.phoneID, enrollmentEpoch: candidate.binding.enrollmentEpoch,
+            registration: r, registrationActive: true, expectedTrustRevision: expectedTrustRevision,
+            expectedHead: tx.gatewayAuthorityHead(r), nowUnixMillis: wall, now: now,
+            sign: { candidate in
+                try signing(GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+                    canonicalPayload: candidate.encode(limits: limits), payloadLimits: limits, inputLimits: limits))
+            })
+        return try current(phoneID: candidate.binding.phoneID, enrollmentEpoch: candidate.binding.enrollmentEpoch,
+            transaction: tx, now: now, wall: wall)
+    }
+
     func process(_ request: PhonePushRegistrationFrame, binding: AuthorityPeerBinding, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> PhonePushRegistrationFrame {
         try verifySelf(tx)

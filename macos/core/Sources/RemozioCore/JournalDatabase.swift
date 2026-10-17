@@ -966,6 +966,10 @@ public final class JournalTransaction {
         try withGateway(write: false) { try $0.head(identity) }
     }
 
+    func firstGatewayNonRegistrationControl(after revision: UInt64, registration: GatewayRegistrationIdentity) throws -> UInt64? {
+        try withGateway(write: false) { try $0.firstNonRegistrationControl(after: revision, identity: registration) }
+    }
+
     /// Historical metadata only. It cannot establish current gateway availability or restore authority.
     public func gatewayAcknowledgment(_ identity: GatewayRegistrationIdentity) throws -> GatewayAcknowledgment? {
         try withGateway(write: false) { try $0.acknowledgment(identity) }
@@ -975,6 +979,11 @@ public final class JournalTransaction {
     /// Missing or conflicting history requires reconciliation before publishing mappings or enabling affected authority.
     public func acknowledgeGatewayHead(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
         try withGateway(write: true) { try $0.acknowledge(verified) }
+    }
+
+    /// Inspect the proposed acknowledgment without writing. A recorded disposition still requires the owner to commit it.
+    func inspectGatewayHead(_ verified: VerifiedGatewayHead) throws -> GatewayAcknowledgmentResult {
+        try withGateway(write: false) { try $0.acknowledge(verified, record: false) }
     }
 
     /// Protected root recovery after independent continuity checks. Serialize with trust and registration changes.

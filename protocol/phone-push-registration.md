@@ -2,7 +2,9 @@
 
 This draft connects the existing gateway token-possession contract to an enrolled phone channel.
 It does not enroll a device, approve a request, or authorize an ADB session.
-The transport and authority exchange are implemented. Protected startup configuration and Android runtime wiring remain pending.
+The transport and authority exchange are implemented.
+[Protected startup](../docs/experiments/authority-phone-push-startup.md) and [Root publication](../docs/experiments/authority-phone-push-publication.md) are also implemented as optional source components.
+Android runtime wiring and phone recovery remain pending.
 No installed service enables token registration yet.
 
 ## Channel boundary
@@ -133,7 +135,9 @@ The authority consumes proofs through the request owner and independent continui
 Registration uses a separate IPC connection, so unsupported Root versions cannot retire the ordinary approval connection.
 The Root producer exposes challenge-free metadata. It returns Proof committed after consumption, never Mapping confirmed.
 
-Still required: protected startup policy, actual provider challenge ingress, current-generation join/recovery,
-gateway activation and its acknowledgment, production app wiring and real FCM delivery.
+The optional Root publisher applies retained gateway candidates and activations through one control connection.
+Fresh gateway observations control repair; timer expiry alone does not replace a committed mapping.
+
+Still required: actual provider challenge ingress, current-generation join/recovery, production app wiring and real FCM delivery.
 A mapping-status query and recovery contract remain required before the phone can display Mapping confirmed.
 The first foreground Mac–Pixel approval remains independent of this push-registration work.

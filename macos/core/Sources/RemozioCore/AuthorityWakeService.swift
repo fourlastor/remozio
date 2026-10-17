@@ -128,6 +128,13 @@ public actor AuthorityWakeService {
             let ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)?
             if let presence { ownerRouting = { owner, moment in try presence.routing(owner: owner, now: moment) } }
             else { ownerRouting = nil }
+            let phonePush = try configuration.phonePush.map {
+                try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
+            }
+            let phonePublication: AuthorityPhonePushPublication?
+            if let phonePush, let options = configuration.phonePush {
+                phonePublication = try AuthorityPhonePushPublication(provider: phonePush, gatewayPublicKey: options.gatewayReceiptPublicKey)
+            } else { phonePublication = nil }
             let hints = try AuthorityWakeHintSource(registration: configuration.registration)
             let retired = AuthorityRequestRetirementSignal()
             let makePublisher: @Sendable () throws -> AuthorityWakePublisher = {
@@ -135,10 +142,7 @@ public actor AuthorityWakeService {
                     timeoutMilliseconds: configuration.timeoutMilliseconds)
                 return try AuthorityWakePublisher(journal: journal, channel: channel, registration: configuration.registration,
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
-                    ownerRouting: ownerRouting)
-            }
-            let phonePush = try configuration.phonePush.map {
-                try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
+                    ownerRouting: ownerRouting, phonePush: phonePublication)
             }
             let executionWorker = try commandExecutionFactory?(journal, clock)
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,

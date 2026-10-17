@@ -7,7 +7,7 @@ import XCTest
 @testable import RemozioCore
 
 private func pushID(_ n: UInt8, _ count: Int = 16) -> Data { Data(repeating: n, count: count) }
-private final class PushSignCount: @unchecked Sendable {
+final class PushSignCount: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
     func increment() { lock.withLock { count += 1 } }
@@ -16,7 +16,7 @@ private final class PushSignCount: @unchecked Sendable {
 
 final class AuthorityPhonePushRegistrationTests: XCTestCase {
     private enum Failure: Error { case injected }
-    private final class Harness {
+    final class Harness: @unchecked Sendable {
         let root: URL
         let key: P256.Signing.PrivateKey
         let clock = UUID()
@@ -25,11 +25,14 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let store: ContinuityStore
         let owner: ApprovalRequestCoordinator
         let binding: AuthorityPeerBinding
+        let bindings: [AuthorityPeerBinding]
         let registration: GatewayRegistrationIdentity
         let provider: AuthorityPhonePushRegistration
         let signs = PushSignCount()
         let limits: CBORLimits
-        init(configureGateway: Bool = true) throws {
+        init(configureGateway: Bool = true, enrollmentCount: Int = 1,
+             gatewaySetup: (JournalTransaction, GatewayRegistrationIdentity, P256.Signing.PrivateKey, CBORLimits, UUID, AuditEpochWriter) throws -> Void = { _, _, _, _, _, _ in }) throws {
+            precondition((1...8).contains(enrollmentCount))
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
             defer { free(canonical) }
             let root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
@@ -63,14 +66,36 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
                 approval: ApprovalEnrollment(phoneID: pushID(5), active: true, capabilities: capabilities, keys: [
                     EnrolledApprovalKey(id: pushID(6), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
                     EnrolledApprovalKey(id: pushID(7), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)]))
-            let enrolled = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
+            var enrolled = try db.write { try $0.addApprovalEnrollment(enrollment, expectedTrustRevision: revision,
                 eventID: pushID(30), receiptTimeMs: 900, writer: writer, expectedAuditHead: 0) }
-            binding = try .init(scope: ChannelScope(macID: pushID(1), accountID: pushID(2), phoneID: pushID(5), enrollmentEpoch: pushID(9)),
-                transportPublicKey: identity.publicKey.derRepresentation, revision: enrolled)
+            var enrolledValues = [enrollment]
+            for index in 1..<enrollmentCount {
+                let offset = UInt8(index * 10)
+                let next = try StoredApprovalEnrollment(epoch: pushID(9 + offset), notificationTag: pushID(10 + offset, 32),
+                    identityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
+                    approval: ApprovalEnrollment(phoneID: pushID(5 + offset), active: true, capabilities: capabilities, keys: [
+                        EnrolledApprovalKey(id: pushID(6 + offset), keyClass: .biometric, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                        EnrolledApprovalKey(id: pushID(7 + offset), keyClass: .decision, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)]))
+                enrolled = try db.write { try $0.addApprovalEnrollment(next, expectedTrustRevision: enrolled,
+                    eventID: pushID(30 + offset), receiptTimeMs: 900, writer: writer, expectedAuditHead: UInt64(index)) }
+                enrolledValues.append(next)
+            }
             let registration = try GatewayRegistrationIdentity(ownerID: pushID(40), macID: pushID(1), accountID: pushID(2),
                 gatewayID: pushID(41), lifecycleEpoch: pushID(42), rootPublicKey: key.publicKey.x963Representation)
             self.registration = registration
-            if configureGateway { try db.write { try $0.configureGatewayAuthority(registration) } }
+            if configureGateway {
+                let setupKey = key, setupLimits = limits, setupClock = clock
+                try db.write {
+                    try $0.configureGatewayAuthority(registration)
+                    try gatewaySetup($0, registration, setupKey, setupLimits, setupClock, writer)
+                }
+            }
+            let bindingRevision = try db.read { try $0.approvalTrustSnapshot().revision }
+            bindings = try enrolledValues.map { enrollment in
+                try AuthorityPeerBinding(scope: ChannelScope(macID: pushID(1), accountID: pushID(2), phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
+                    transportPublicKey: P256.Signing.PublicKey(x963Representation: enrollment.identityPublicKey).derRepresentation, revision: bindingRevision)
+            }
+            binding = bindings[0]
             let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch, generation: 1, authorityGeneration: 3) }
             let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
                 macID: pushID(1), accountID: pushID(2), initialize: initial)
@@ -118,6 +143,106 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
     private func proof(_ candidate: GatewayTokenCandidate) -> PhonePushRegistrationFrame {
         .proof(correlationID: pushID(51), proof: GatewayTokenProof(binding: candidate.binding))
     }
+    private func observation(_ h: Harness, time: UInt64 = 120, present: Bool = false) throws -> VerifiedGatewayMappingState {
+        let now = AuthorityMoment(epoch: h.clock, milliseconds: time)
+        let state = try XCTUnwrap(h.owner.currentPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9), now: now, wall: 900 + time))
+        let candidate = try GatewayTokenCandidate.decode(state.candidate.canonicalPayload, limits: h.limits)
+        let scope = try GatewayMappingScope(registration: h.registration, binding: candidate.binding)
+        let key = P256.Signing.PrivateKey(), queryOwner = try GatewayMappingQueryOwner(scope: scope, gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: h.clock)
+        let (_, nonce) = try GatewayMappingStateWire.query(queryOwner.query(now: now))
+        var fields = try scope.fields
+        fields[0] = .unsigned(2); fields[1] = .unsigned(5); fields[3] = .bytes(nonce); fields[8] = .unsigned(present ? 1 : 0)
+        fields[9] = .bytes(present ? try XCTUnwrap(state.activation).canonicalPayload : Data())
+        fields[10] = .bytes(present ? try XCTUnwrap(state.activation).signature : Data())
+        let payload = try DeterministicCBOR.encode(.map(fields), limits: GatewayMappingStateWire.replyLimits)
+        return try queryOwner.accept(GatewayMappingStateReply(canonicalPayload: payload,
+            signature: key.signature(for: GatewayMappingStateWire.signingInput(payload)).rawRepresentation), now: now)
+    }
+    func testMissingMappingRepairRequiresFreshProofAndPreservesPairing() throws {
+        let h = try Harness(), old = try h.candidate(prepared(h.exchange(h.offer())))
+        _ = try h.exchange(proof(old), time: 110)
+        let missing = try observation(h), before = try h.store.read()
+        let state = try XCTUnwrap(h.owner.renewMissingPhonePushRegistration(h.provider, observation: missing,
+            expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 121), wall: 1021))
+        let renewed = try GatewayTokenCandidate.decode(state.candidate.canonicalPayload, limits: h.limits)
+        XCTAssertNil(state.activation); XCTAssertNotEqual(renewed.binding.candidateID, old.binding.candidateID)
+        XCTAssertNotEqual(renewed.binding.challenge, old.binding.challenge)
+        XCTAssertEqual(renewed.binding.enrollmentEpoch, old.binding.enrollmentEpoch)
+        XCTAssertEqual(renewed.binding.tokenDigest, old.binding.tokenDigest)
+        XCTAssertEqual(try h.store.read().committed.generation, before.committed.generation + 1)
+        let retained = try h.store.read()
+        XCTAssertThrowsError(try h.owner.renewMissingPhonePushRegistration(h.provider, observation: missing,
+            expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 122), wall: 1022))
+        XCTAssertEqual(try h.store.read(), retained)
+        XCTAssertThrowsError(try h.exchange(proof(old), time: 123))
+        _ = try h.exchange(proof(renewed), time: 124)
+        XCTAssertEqual(try h.head, 4); try h.assertCheckpoint()
+    }
+    func testPresentMappingAndUnconsumedCandidateCannotTriggerRepair() throws {
+        for committed in [false, true] {
+            let h = try Harness(), candidate = try h.candidate(prepared(h.exchange(h.offer())))
+            if committed { _ = try h.exchange(proof(candidate), time: 110) }
+            let current = try observation(h, present: committed), before = try h.store.read()
+            XCTAssertThrowsError(try h.owner.renewMissingPhonePushRegistration(h.provider, observation: current,
+                expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 121), wall: 1021))
+            XCTAssertEqual(try h.store.read(), before); XCTAssertFalse(h.owner.retired)
+        }
+    }
+    func testSupersededOrStaleTrustObservationCannotRepairAnotherCandidate() throws {
+        let h = try Harness(), candidate = try h.candidate(prepared(h.exchange(h.offer())))
+        _ = try h.exchange(proof(candidate), time: 110)
+        let missing = try observation(h)
+        _ = try h.exchange(h.offer(), time: 121)
+        let before = try h.store.read()
+        for revision in [h.binding.revision, UUID()] {
+            XCTAssertThrowsError(try h.owner.renewMissingPhonePushRegistration(h.provider, observation: missing,
+                expectedTrustRevision: revision, now: .init(epoch: h.clock, milliseconds: 122), wall: 1022))
+        }
+        XCTAssertEqual(try h.store.read(), before); XCTAssertEqual(try h.head, 3)
+    }
+    func testExpiredMappingObservationCannotChangeTheCheckpoint() throws {
+        let h = try Harness(), candidate = try h.candidate(prepared(h.exchange(h.offer())))
+        _ = try h.exchange(proof(candidate), time: 110)
+        let missing = try observation(h), before = try h.store.read()
+        XCTAssertThrowsError(try h.owner.renewMissingPhonePushRegistration(h.provider, observation: missing,
+            expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 5120), wall: 6020))
+        XCTAssertEqual(try h.store.read(), before); XCTAssertFalse(h.owner.retired)
+    }
+    func testFreshHeadAcknowledgmentCommitsOnceAndRechecksTrust() throws {
+        let h = try Harness()
+        _ = try prepared(h.exchange(h.offer()))
+        let state = try XCTUnwrap(h.owner.currentPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9), now: .init(epoch: h.clock, milliseconds: 110), wall: 1010))
+        let key = P256.Signing.PrivateKey(), now = AuthorityMoment(epoch: h.clock, milliseconds: 110)
+        let queryOwner = try GatewayHeadQueryOwner(registration: h.registration, gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: h.clock)
+        let directory = h.root.appendingPathComponent("gateway")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        for name in ["writer.lock", "gateway.sqlite"] {
+            let fd = Darwin.open(directory.appendingPathComponent(name).path, O_CREAT | O_EXCL | O_WRONLY, 0o600)
+            guard fd >= 0 else { throw Failure.injected }; Darwin.close(fd)
+        }
+        let gateway = try GatewayDatabase(lease: ProtectedGatewayLease(anchor: h.root.path, relativeDirectory: "gateway", serviceUID: getuid(), ancestorUID: getuid()),
+            identity: h.registration, payloadLimits: h.limits, signingLimits: h.limits, maximumOperations: 30,
+            maximumPendingPerEnrollment: 5, maximumLifetimeMillis: 1000, clockEpoch: h.clock, busyMilliseconds: 100, initialize: true)
+        defer { try? gateway.close() }
+        let r = h.registration
+        let trust = try GatewayCandidateTrust(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID, gatewayID: r.gatewayID,
+            lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey, active: true, revision: UUID(), appliedControlRevision: 0,
+            enrollment: GatewayPhoneEnrollment(phoneID: pushID(5), epoch: pushID(9), tag: pushID(10, 32), active: true))
+        _ = try gateway.admitCandidate(canonicalPayload: state.candidate.canonicalPayload, signature: state.candidate.signature,
+            wireVersion: 1, registrationToken: "synthetic-token", trust: trust, nowUnixMillis: 1010, now: now)
+        let reply = try gateway.headReply(canonicalQuery: queryOwner.makeQuery(now: now)) { try key.signature(for: $0).rawRepresentation }
+        let verified = try queryOwner.accept(reply, now: now)
+        let before = try h.store.read()
+        let first = try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 111))
+        XCTAssertEqual(first.disposition, .recorded)
+        XCTAssertEqual(try h.store.read().committed.generation, before.committed.generation + 1)
+        let checkpoint = try h.store.read()
+        let duplicate = try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: h.binding.revision, now: .init(epoch: h.clock, milliseconds: 112))
+        XCTAssertEqual(duplicate.disposition, .alreadyRecorded); XCTAssertEqual(try h.store.read(), checkpoint)
+        XCTAssertThrowsError(try h.owner.acknowledgePhonePushHead(h.provider, head: verified, expectedTrustRevision: UUID(), now: .init(epoch: h.clock, milliseconds: 113)))
+        XCTAssertEqual(try h.store.read(), checkpoint); try h.assertCheckpoint()
+    }
+
     func testReopenedAuthorityRetainsPairingAndTheCommittedMappingBoundary() throws {
         for committed in [false, true] {
         let h = try Harness(), metadata = try prepared(h.exchange(h.offer())), original = try h.candidate(metadata)
