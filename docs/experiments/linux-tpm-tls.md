@@ -2,12 +2,15 @@
 
 [Recorded simulator evidence](linux-tpm-tls-evidence.json) demonstrates a TPM-provider
 P-256 signing key completing actual mutual TLS 1.3 through OpenSSL 3.5.3. This is
-**software TPM simulator evidence only**. It does not establish physical TPM
+**software TPM simulator evidence only**. A subsequent supervised
+[/dev/tpmrm0 checkpoint](linux-tpm-tls-device-evidence.json) passed creation,
+fresh-process reuse, signing and mutual TLS on the Ubuntu host. Neither establishes
+physical TPM
 nonexportability, reboot retention, protected account access or Android interoperability.
 
 The host used Ubuntu 25.10 amd64, kernel 6.17.0-41-generic. Ubuntu packages were
 downloaded and extracted under `/tmp`; no packages or services were installed.
-The runner did not open `/dev/tpm0` or `/dev/tpmrm0`, change their permissions,
+The simulator run did not open `/dev/tpm0` or `/dev/tpmrm0`, change their permissions,
 clear a TPM, or change a system service. Simulator state, wrapped keys, certificates,
 software client keys and signatures lived in a private temporary directory removed
 on completion. The report contains assertions and runtime metadata only.
@@ -116,9 +119,19 @@ timeout 120s python3 experiments/linux-tpm-tls/check_hardware_adapter.py \
 
 ## Prepared human hardware gate
 
-**The hardware mode is implemented but has not been run on this host's TPM.**
-This user currently lacks read/write TPM access. The runner will return 77 before
-starting tools if `/dev/tpmrm0` access is unavailable. An interactive operator must
+**Creation and fresh-process reuse passed on this host's `/dev/tpmrm0` on
+17 October 2026; the reboot check remains pending.** The operator granted a
+per-user read/write ACL for the interactive test. Public capability reads established
+`ownerAuthSet: 0`, `shEnable: 1` and lockout counter zero before using the empty-owner
+adapter. Both runs passed signing, mutual TLS and all negative controls. Independent
+file hashes confirmed every retained record, including both public identities, was
+unchanged after reuse. Persistent and NV handle listings were unchanged, and the
+lockout counter remained zero; this comparison does not inspect NV contents.
+The [device evidence](linux-tpm-tls-device-evidence.json) contains sanitized results.
+Key records, raw inventories and boot-comparison metadata remain outside the repository.
+
+The runner will return 77 before starting tools if `/dev/tpmrm0` access is unavailable.
+An interactive operator must
 arrange authorized access according to the intended deployment policy. The runner
 never changes TPM permissions, resets a hierarchy, installs a service, provisions a
 persistent handle or globally flushes contexts.
@@ -174,8 +187,8 @@ Ubuntu amd64 tool layout. After reboot that temporary runtime may need extractin
 again. Keep the fixture directory through the reboot. The phase field is an operator
 declaration; the runner does not itself prove that a reboot/service restart occurred.
 Review and retain the secret-free JSON results plus the operator's reboot chronology.
-Never commit the retained key records or fixture directory. No physical TPM result is included in this change. Even when a future run opens
-`/dev/tpmrm0`, its report claims only `tpmResourceManagerDeviceTested`, with
+Never commit the retained key records or fixture directory. The recorded device runs
+open `/dev/tpmrm0`; their reports claim only `tpmResourceManagerDeviceTested`, with
 `physicalHardwareTPMVerified: false`; the path alone is not physical attestation.
 
 Each hardware invocation exercises both-key reopen/sign/verify, actual loopback

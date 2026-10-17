@@ -15,7 +15,7 @@ On 17 October 2026, Ubuntu 25.10 x86_64, kernel `6.17.0-41-generic`:
 | `scripts/check.sh`, system Python 3.13 | 165 repository tests, six explicit skips; 221 watcher tests passed. Run outside the socket-restricted execution sandbox. |
 | Existing Swift protocol suite | 119 tests passed; all 25 shared fixture files unchanged. |
 | Caller experiment | 31 observations and four cleanup checks passed; all nine focused tests passed with live checks enabled. |
-| TPM/provider TLS and hardware-adapter control | Both passed against private simulators; eleven focused unit tests passed. No physical TPM execution. |
+| TPM/provider TLS and hardware-adapter control | Private simulator controls and eleven focused unit tests passed. Supervised `/dev/tpmrm0` create/reopen, signing and mutual TLS also passed; reboot remains pending. |
 | Linux-runnable Kotlin/Android tasks | Passed with JDK 21 and SDK 37; Gradle reused unchanged task results. Debug APK and lint tasks succeeded. |
 | Full required Gradle gate | Blocked by the four absent Mac peers described below. |
 | Mac checks and remote CI | Not run; the added Linux protocol CI job is prepared only. |
@@ -71,8 +71,11 @@ Mac runtime compatibility.
 
 ## Human testing boundary
 
-The next device-dependent evidence is physical TPM signing and mutual TLS, using
-the prepared TPM experiment procedure under the intended access configuration.
+Supervised `/dev/tpmrm0` creation, fresh-process reopen, signing and mutual TLS
+passed with the operator's temporary per-user device ACL. The
+[device checkpoint](experiments/linux-tpm-tls-device-evidence.json) records all negative
+controls, unchanged retained records and unchanged persistent/NV handle listings.
+The next device-dependent check is reusing those exact keys after an operator reboot.
 The [operator procedure](experiments/linux-tpm-tls.md#prepared-human-hardware-gate) requires
 explicit hardware mode, authorized ordinary-user resource-manager access and
 known-empty owner authorization for this provider adapter. Unknown or nonempty
@@ -88,6 +91,18 @@ access and copied-record rejection need their own explicit controls. A real TPM
 result does not establish a protected Linux installation or a phone approval flow.
 Using `/dev/tpmrm0` is device-path evidence, not physical-hardware attestation;
 the operator must identify the test platform accurately, including any virtual TPM.
+
+The retained fixture is under the operator's private user state directory,
+`~/.local/state/remozio-experiments/tpm-tls-fixture`. Keep it through the reboot;
+reuse must not regenerate either key. Sibling files retain the before-boot identity
+hashes and boot comparison metadata. The `runtime-debs` sibling preserves the
+isolated runtime packages and `runtime-package-hashes.json` records their checksums
+so the same runtime can be restored if `/tmp` is cleared. After returning, re-establish
+the temporary device ACL if needed, verify the public prerequisites and package
+hashes, compare the boot identity, and run the documented `--reuse-fixture` invocation
+with `--operator-phase after-reboot`. Publish comparison booleans only, never
+the raw boot identifier or retained key records. Remove the temporary ACL after
+the supervised tests finish.
 
 Physical Pixel pairing and biometrics become actionable after the Linux services,
 negotiated capture contract and executor are implemented. The current experiments
