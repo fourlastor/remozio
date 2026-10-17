@@ -9,9 +9,12 @@ the toolchain, dependency revisions, fixture hashes and test result.
 
 The package imports Apple's platform CryptoKit on macOS and the official
 [Swift Crypto](https://github.com/apple/swift-crypto) `Crypto` module on Linux.
-The Linux manifest pins Swift Crypto 4.5.1 exactly. `Package.resolved` also records
-its Swift ASN.1 transitive dependency. Both source and test targets declare the
-Linux dependency; the macOS manifest declares no external crypto dependency.
+The shared manifest permits Swift Crypto 4.5.1 through 5.0.1. The protocol
+lockfile retains 4.5.1 and its Swift ASN.1 dependency. Existing Mac package
+lockfiles retain 5.0.1. Both targets link `Crypto` only on Linux
+through a platform condition. The package graph stays the same across hosts,
+while macOS continues to use CryptoKit. Both protocol gates require the resolved
+versions and reject incompatible dependency constraints.
 The conditional imports preserve the existing calls and wire encoding. This
 experiment introduces no Linux capture schema and ports no `macos/core` code.
 
@@ -67,8 +70,10 @@ Ubuntu 25.10 installation.
 
 ## Limits
 
-The macOS conditional manifest and CryptoKit imports were inspected, but an
-actual Mac build and the required full Mac/Android gate remain pending. Protocol
-fixture success does not prove Linux caller identity, TPM-backed TLS, protected
+A Mac fixture passed all 119 protocol tests with the platform-stable manifest.
+A forced build rejected an incompatible version constraint and kept the lockfile
+unchanged. Restoring the constraint passed with the same lockfile. Full combined
+Mac/Android validation remains a separate pre-push and CI gate. Protocol fixture
+success does not prove Linux caller identity, TPM-backed TLS, protected
 services, privileged dispatch, physical Android pairing or a complete Linux
 product. Those require their own experiments and integration checks.

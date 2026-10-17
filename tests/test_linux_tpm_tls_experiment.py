@@ -98,6 +98,7 @@ class HardwareGateTests(unittest.TestCase):
         for tcti, declaration in (("device:/dev/tpm0", True), ("device:/dev/tpmrm0", False), (None, True)):
             args = SimpleNamespace(tcti=tcti, acknowledge_empty_owner_auth=declaration)
             with self.subTest(tcti=tcti, declaration=declaration), \
+                 patch.object(EXPERIMENT.platform, "system", return_value="Linux"), \
                  patch.object(EXPERIMENT.subprocess, "Popen") as start, \
                  self.assertRaisesRegex(EXPERIMENT.Refused, "explicit-resource-manager"):
                 EXPERIMENT.run_hardware(args)
@@ -113,7 +114,7 @@ class HardwareGateTests(unittest.TestCase):
         import os
         import tempfile
         with tempfile.TemporaryDirectory() as temporary:
-            parent = Path(temporary)
+            parent = Path(temporary).resolve()
             parent.chmod(0o700)
             existing = parent / "existing"
             existing.mkdir(mode=0o700)
