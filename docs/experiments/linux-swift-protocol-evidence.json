@@ -1,0 +1,173 @@
+{
+  "experiment": "Linux Swift protocol portability",
+  "recorded_at": "2026-10-17T14:08:50Z",
+  "base_revision": "2d00126c8ce010f356a5de0db8e432dd37b504cc",
+  "host": {
+    "distribution": "Ubuntu 25.10 (Questing Quokka)",
+    "architecture": "x86_64",
+    "kernel": "6.17.0-41-generic",
+    "system_packages_changed": false
+  },
+  "toolchain": {
+    "version": "Swift version 6.2.4 (swift-6.2.4-RELEASE)",
+    "target": "x86_64-unknown-linux-gnu",
+    "binary_distribution": "Ubuntu 24.04 x86_64",
+    "archive_url": "https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz",
+    "signature_url": "https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz.sig",
+    "archive_sha256": "15608c4fa0364ef906014343d81639cf58169e8a40de2b2d3503c3f35a8bb66d",
+    "signature_verified": true,
+    "signature_fingerprint": "52BB7E3DE28A71BE22EC05FFEF80A866B47A981F",
+    "key_source": "https://swift.org/keys/all-keys.asc",
+    "signature_verification": "GnuPG GOODSIG and VALIDSIG; official Swift 6.x release key fingerprint matches Swift.org installation instructions"
+  },
+  "runtime_compatibility": {
+    "initial_observation": "swift --version succeeded; swift package failed because libxml2.so.2 was absent. Host has libxml2.so.16 and libicu76.",
+    "solution": "Extracted official Ubuntu noble-updates runtime packages in /tmp; used LD_LIBRARY_PATH for this toolchain only. No ABI symlinks or system installation.",
+    "package_source": "https://archive.ubuntu.com/ubuntu noble-updates/main amd64",
+    "package_verification": "APT validated signed InRelease with /usr/share/keyrings/ubuntu-archive-keyring.gpg and package hashes.",
+    "packages": [
+      {
+        "name": "libxml2",
+        "version": "2.9.14+dfsg-1.3ubuntu3.10",
+        "sha256": "c5a065f85c1e6f605741e365e40cad71c3ceb0e85e2791400bd35b8896e12ad1"
+      },
+      {
+        "name": "libicu74",
+        "version": "74.2-1ubuntu3.1",
+        "sha256": "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8"
+      }
+    ]
+  },
+  "dependencies": [
+    {
+      "identity": "swift-asn1",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/apple/swift-asn1.git",
+      "state": {
+        "revision": "3b6410f7dee09eb33cdd26260c5fd47fda19b0e2",
+        "version": "1.7.3"
+      }
+    },
+    {
+      "identity": "swift-crypto",
+      "kind": "remoteSourceControl",
+      "location": "https://github.com/apple/swift-crypto.git",
+      "state": {
+        "revision": "47d3869a7291f085c1fb9fb1e6d3b97a793f45c6",
+        "version": "4.5.1"
+      }
+    }
+  ],
+  "validation": {
+    "command": "./scripts/check-linux-protocol.sh",
+    "environment": {
+      "PATH_prefix": "/tmp/remozio-swift-toolchain/swift-6.2.4-RELEASE-ubuntu24.04/usr/bin",
+      "LD_LIBRARY_PATH": "/tmp/remozio-swift-toolchain/runtime/root/usr/lib/x86_64-linux-gnu",
+      "GIT_CONFIG_GLOBAL": "/dev/null",
+      "REMOZIO_SWIFT_WORK_DIR": "/tmp/remozio-linux-swift",
+      "REMOZIO_SWIFT_JOBS": "4 (default)"
+    },
+    "clean_build_exit_code": 0,
+    "clean_build_tests": 119,
+    "gate_exit_code": 0,
+    "xctest_tests": 119,
+    "xctest_failures": 0,
+    "xctest_suites": 28,
+    "gate_summary": "Executed 119 tests, with 0 failures (0 unexpected) in 0.937 (0.937) seconds",
+    "gate_log_sha256": "358c063045f66fc20f2d86ad818568aa071d539fb00180acf2dc0d5fa25cafaa",
+    "negative_test_cases_passed": [
+      "ApprovalMessageTests.testMalformedUnsupportedAndOversizedCarriersFail",
+      "ApprovalSignatureTests.testMalformedSignaturesAndPointsFail",
+      "AuditBatchTests.testMalformedPagesAndIndependentBoundsFail",
+      "AuditEventMetadataTests.testMalformedMetadataAndIndependentLimitsFail",
+      "AuditHistoryStatusTests.testImpossibleStatesMalformedDescriptorsAndBoundsFail",
+      "CBORTests.testDeterministicMalformedCorpus",
+      "ChannelNegotiationTests.testMalformedAndNoncanonicalOffersFail",
+      "ChannelNegotiationTests.testReflectionWrongScopeAndReusedNonceCloseTheOwner",
+      "ChannelNegotiationTests.testWrongConfirmationAndCrossSessionReplayFailClosed",
+      "CommandCaptureTests.testIndependentResourceBoundsAndValueSemantics",
+      "CommandCaptureTests.testProducerRejectsInvalidTypedContentsAndResourceOverflow",
+      "CommandCaptureTests.testSchemaThreeStreamLayoutAndMalformedBindings",
+      "CommandCaptureTests.testSharedInvalidCapturesFail",
+      "CommandSubmissionTests.testUnknownFieldsAndInvalidInvocationClaimsFail",
+      "DecisionPayloadTests.testConstructionRetainsValueBytesAndRejectsInvalidLengths",
+      "DecisionPayloadTests.testRejectsMalformedAndUnknownFields",
+      "GatewayRecipientTests.testBoundsVersionsAndOtherMessageShapesFail",
+      "GatewayRecipientTests.testSharedMalformedControlsFailClosed",
+      "GatewaySubmissionTests.testMalformedSharedControlsFail",
+      "GatewaySubmissionTests.testVersionsBoundsAndOtherControlTypesFail",
+      "GatewayTokenTests.testBoundsApplyToPayloadAndSigningInput",
+      "GatewayTokenTests.testSharedMalformedCandidatesAndProofsFail",
+      "GatewayTokenTests.testSharedSignaturesRejectOtherKeysPurposesAndApprovalDomain",
+      "IssuedRequestPayloadTests.testBodyCaptureAndSigningBudgetsStayIndependent",
+      "IssuedRequestPayloadTests.testRejectsMalformedUnsupportedAndDigestMismatch",
+      "PairingInvitationTests.testMalformedAndOversizedInvitationsFail",
+      "PairingReceiptFrameTests.testMalformedAndConfusedRecoveryMessagesFail",
+      "PairingTranscriptTests.testMalformedAndIncompatibleTranscriptsFail",
+      "PendingRequestSnapshotFrameTests.testMalformedOrConfusedSnapshotsFail",
+      "PendingRequestSnapshotFrameTests.testSharedTransferBoundariesAndPermanentFailure",
+      "PushDataTests.testConstructorsRejectInvalidLengthsAndDescriptionsRedact",
+      "PushDataTests.testSharedMalformedMixedAndNoncanonicalDataFail",
+      "RequestStatusPayloadTests.testRejectsUnknownFieldsAndInconsistentStateOrTiming",
+      "RequestStatusQueryTests.testVersionShapeAndBoundsAreStrict",
+      "RoutingAwayTests.testMalformedAndSignedForbiddenModesAreRejected",
+      "RoutingAwayTests.testResourceAndVersionBounds",
+      "SessionEnvelopeTests.testIncompatibleAndOversizedEnvelopesFail",
+      "SigningInputTests.testInvalidPayloadAndIndependentBudgets",
+      "SigningInputTests.testUnsupportedVersionsAndCrossPurposeSubstitution"
+    ],
+    "existing_fixture_files": 25,
+    "existing_fixtures_byte_identical_to_base": true,
+    "fixture_sha256": {
+      "protocol/vectors/action-policy-v1.json": "b05a3702e7742aa719628ae7429cd80421614acf768445e4dd1e2175f6dd01f3",
+      "protocol/vectors/approval-signatures-v1.json": "297b207c4c934a3e09655b376b2a8d2b3858c486262f28ca3fcf7f66760d4995",
+      "protocol/vectors/audit-batches-v1.json": "8a92b724f7c2a7b366ae49da8edfd10446a47a0b7e9489b5c04aab00ce989717",
+      "protocol/vectors/audit-history-status-v1.json": "cce3937891421b34cd6596b2a4846db990d0dc3bafd1e051c2c8fd7c973ba062",
+      "protocol/vectors/audit-metadata-v1.json": "14b8c62bc43812087dd061a71027ba9503f5551cf58972d9809c45215dda88ee",
+      "protocol/vectors/cbor-subset-v1.json": "8f86a13d08abd484a9a0a0314d3f48a48f6495d688d410ad1147b3c1f821e2b7",
+      "protocol/vectors/channel-negotiation-v1.json": "490bbea8539f3883c007e98ea8486334389e4ca03746591beb3e10e3f8ac146b",
+      "protocol/vectors/command-capture-v1.json": "4b9308e60f64306c5b88d65249f8418de5505764ddb4d00ffe6f9501899adcca",
+      "protocol/vectors/command-capture-v2.json": "7add3b020161532ad54f710d110968793c8e728fbbe8d9a6385f3882f2289c93",
+      "protocol/vectors/command-capture-v3.json": "843f7ba1e932368290cdaa4ae0d62be271409857d9a5aa90c78312589b8cc48c",
+      "protocol/vectors/decision-payload-v1.json": "fd560f1d3a5b21efe0bfb2d9513121594874431e668c22408b8436c3f3dd127d",
+      "protocol/vectors/gateway-recipient-v1.json": "c49f12eba63d5786f1d4c870c60434f01ec7a33eca603eb249eb5536c7ecbe2a",
+      "protocol/vectors/gateway-submission-v1.json": "e65fd812650a94d665c743d2aa8dcf96711aa91b8ee51a1f4172e499e059335a",
+      "protocol/vectors/gateway-token-v1.json": "76e81ebebee327d698c588438cc47b15b42a3c15788e5ae9582dd4c6f933a7e2",
+      "protocol/vectors/issued-request-v1.json": "a0c9445fbc33e49a4e5b12baaacaf2f4ebb1f2e99c88bc318a60cc1ed9a95c32",
+      "protocol/vectors/lifecycle-v1.json": "38af5b20d833bf84966907a602dc7fd6d5a677fa2237294c04255dc44c4385cb",
+      "protocol/vectors/pairing-invitation-v1.json": "ebecabb218d444e797ac3689e2822396052ca820960dfef74ae61a754c56804d",
+      "protocol/vectors/pairing-receipt-v1.json": "ca5484e46086353bab14db0a202ff2a96323e2995fb201cfce97136b2b32bf2c",
+      "protocol/vectors/pairing-setup-v1.json": "f49976f6f6322d400e6fbf66aab7e77411c19a75d586ff79ff66b40a2c69114a",
+      "protocol/vectors/pairing-v1.json": "f189249486c1dfdba6ed40fe74c0d860cf8689b55d55304ef0d6ff57ddc08297",
+      "protocol/vectors/pending-snapshot-v1.json": "8d23ce7fb010f293d235ce15aa08ea512887393df976f79d3c8690842a5b63a2",
+      "protocol/vectors/push-data-v1.json": "64668fc90c45ae41bb91311b4f2cba3c646adddfc279a4314aa07c0eb4f560ed",
+      "protocol/vectors/request-status-v1.json": "9581fc8f609378e501ba5a5bf9f623914346c4197e8995a356397d36c37c25c5",
+      "protocol/vectors/routing-away-v1.json": "8996c56d3169e6b6c43371048f93b67ee7c84cf5ccb462c0e38ef63ec9be7e3d",
+      "protocol/vectors/signing-input-v1.json": "ca1fa9ff4e4e5e65f3b63af77d7d31bf32f54a509e31598427de3170c0c7f036"
+    }
+  },
+  "proof_limits": [
+    "The Ubuntu 24.04 binary toolchain was actually executed on this Ubuntu 25.10 host with isolated compatibility libraries; this does not establish stock toolchain compatibility on other hosts.",
+    "The macOS manifest branch and CryptoKit imports were inspected; the macOS build and required Mac/Android gates remain pending.",
+    "These protocol tests do not establish Linux caller identity, TPM-backed TLS, privileged dispatch, Android pairing, or a complete Linux product.",
+    "No Linux-specific wire schema was introduced, and no macos/core sources were ported."
+  ],
+  "changed_source_sha256": {
+    "protocol/swift/Package.resolved": "cd58057c8db1c317d4f3e54a472edd2bafcd2275a417510b85f8688df288162a",
+    "protocol/swift/Package.swift": "7c56ac5d07aefe69657b82294bd6ec12d97113f9709e0bdb97d0e65cc165ade0",
+    "protocol/swift/Sources/RemozioProtocol/ApprovalSignature.swift": "bb0726070cd05fb9fa58ab43032e917633ad4e92c566b56373ffa4079df29011",
+    "protocol/swift/Sources/RemozioProtocol/ChannelNegotiation.swift": "3883eeffa64614df1e06f81a06ae9c202aaab31c860aaea00ed942b41713e3d9",
+    "protocol/swift/Sources/RemozioProtocol/IssuedRequestPayload.swift": "cbfab3c78aad139927c140b8d85bc69f525fac8a9df44c4871719fb23ff57d22",
+    "protocol/swift/Sources/RemozioProtocol/P256Verification.swift": "bcf864939f6b4928a717103776b4b444d724b20bf19e68614798d296009e0762",
+    "protocol/swift/Sources/RemozioProtocol/PairingInvitation.swift": "c2d946ec401429f8cbed0b2eea601db087d101eeab80be0f872419c89e2faaad",
+    "protocol/swift/Sources/RemozioProtocol/PairingTranscript.swift": "dae5ec9e70b430c52e1b971049b274f6a2ecc7f4363d7276744370bb862aef2f",
+    "protocol/swift/Tests/RemozioProtocolTests/ApprovalSignatureTests.swift": "34b093d95f1c4a0668f02421570345c0b3981ba43487e8ff0276687a1b65965f",
+    "protocol/swift/Tests/RemozioProtocolTests/AuditBatchTests.swift": "f078f206e3edef2efe2d4818d0b8f3660972b3eeaf7edf4438f8437f6661644b",
+    "protocol/swift/Tests/RemozioProtocolTests/AuditHistoryStatusTests.swift": "746e3cdbc2601be95ff9cd141c5152ccde394592e6643cc96336fce2f0a27ad0",
+    "protocol/swift/Tests/RemozioProtocolTests/DecisionPayloadTests.swift": "79a9df4c7ce016124266c1f0ccf2bccd814cd2481c8cba7711ccef225e3ce05d",
+    "protocol/swift/Tests/RemozioProtocolTests/PairingTranscriptTests.swift": "868c41be67254c860b2ccdce95b4c1889068a8fcc1b42b0fce442a8868c55055",
+    "protocol/swift/Tests/RemozioProtocolTests/RequestStatusPayloadTests.swift": "3db76437d5f617d9f0ad1abc39be1afe28df8923e0b3e34df5278ae6381af3cb",
+    "scripts/check-linux-protocol.sh": "b6323a86f5f134ee17dfa628f3dc64ee3594cac19b47bc0def156d123ab65aa7"
+  },
+  "source_basis": "Base revision plus the listed changed and added protocol files; documentation and CI workflow are not runtime inputs."
+}

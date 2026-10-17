@@ -1,4 +1,8 @@
+#if os(Linux)
+import Crypto
+#else
 import CryptoKit
+#endif
 import Foundation
 
 public enum ChannelRole: UInt64, Sendable { case phone = 0, mac = 1 }

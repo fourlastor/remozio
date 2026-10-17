@@ -16,6 +16,27 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: ./scripts/check.sh
+  linux-protocol:
+    name: Linux Swift protocol
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned Swift toolchain
+        env:
+          SWIFT_ARCHIVE_SHA256: 15608c4fa0364ef906014343d81639cf58169e8a40de2b2d3503c3f35a8bb66d
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libxml2 libicu74
+          curl --fail --location --retry 3 --max-time 300 \
+            https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz \
+            --output "$RUNNER_TEMP/remozio-swift.tar.gz"
+          printf '%s  %s\n' "$SWIFT_ARCHIVE_SHA256" "$RUNNER_TEMP/remozio-swift.tar.gz" | sha256sum --check -
+          mkdir -p "$RUNNER_TEMP/remozio-swift"
+          tar --extract --gzip --file "$RUNNER_TEMP/remozio-swift.tar.gz" \
+            --strip-components=1 --directory "$RUNNER_TEMP/remozio-swift"
+          echo "$RUNNER_TEMP/remozio-swift/usr/bin" >> "$GITHUB_PATH"
+      - run: ./scripts/check-linux-protocol.sh
   mac:
     name: Mac build
     runs-on: macos-26
