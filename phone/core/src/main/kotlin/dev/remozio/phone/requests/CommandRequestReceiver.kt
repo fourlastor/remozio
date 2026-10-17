@@ -52,6 +52,8 @@ class CommandRequestReceiver private constructor(
     private val closed = AtomicBoolean(false)
     private val started = AtomicBoolean(false)
     private val writing = Mutex()
+    @Volatile internal var capacityOmitted = false
+        private set
 
     /** Run once in the host's connection scope. EOF leaves retained request owners intact. */
     suspend fun run() {
@@ -70,7 +72,7 @@ class CommandRequestReceiver private constructor(
                         if (closed.get()) return@coroutineScope
                         val message = ApprovalMessage.decode(bytes, maximumBodyBytes)
                         require(message.type != ApprovalMessageType.DECISION)
-                        enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas)
+                        capacityOmitted = enrollment.deliver(this@CommandRequestReceiver, message, clock(), commandSchemas) || capacityOmitted
                     }
                 } finally { queries.cancelAndJoin() }
             }
@@ -106,11 +108,11 @@ class CommandRequestReceiver private constructor(
         fun bind(enrollment: CommandRequestEnrollment, channel: NegotiatedTLSChannel,
                  phoneID: ByteArray, enrollmentEpoch: ByteArray, queryRetainedOnStart: Boolean = true,
                  clock: () -> ElapsedInstant): CommandRequestReceiver =
-            bind(enrollment, NegotiatedRequestChannel(channel), phoneID, enrollmentEpoch, queryRetainedOnStart, clock)
+            bind(enrollment, NegotiatedRequestChannel(channel), phoneID, enrollmentEpoch, queryRetainedOnStart, clock = clock)
 
         internal fun bind(enrollment: CommandRequestEnrollment, channel: RequestMessageChannel,
                           phoneID: ByteArray, enrollmentEpoch: ByteArray, queryRetainedOnStart: Boolean = false,
-                          clock: () -> ElapsedInstant): CommandRequestReceiver {
+                          replaceExisting: Boolean = true, clock: () -> ElapsedInstant): CommandRequestReceiver {
             try {
                 val expected = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), phoneID, enrollmentEpoch)
                 require(channel.scope == expected)
@@ -120,7 +122,8 @@ class CommandRequestReceiver private constructor(
                 require(maximum in 1..(16_777_216 - ApprovalMessage.OVERHEAD_BYTES))
                 require(channel.maximumPayloadBytes >= maximum + ApprovalMessage.OVERHEAD_BYTES)
                 val receiver = CommandRequestReceiver(enrollment, channel, maximum, schemas, queryRetainedOnStart, clock)
-                enrollment.attach(receiver)
+                if (replaceExisting) enrollment.attach(receiver)
+                else if (!enrollment.attachIfIdle(receiver)) throw IOException("Request receiver already active")
                 return receiver
             } catch (failure: Exception) { channel.close(); throw failure }
         }

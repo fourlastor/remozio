@@ -232,8 +232,11 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         }
         func oversizedHeader() { enqueue(Data([0, 1, 0, 0])) }
         private func enqueue(_ bytes: Data) {
-            if let readReply { self.readReply = nil; readReply.resume(returning: bytes) }
-            else { input.append(bytes) }
+            for start in stride(from: 0, to: bytes.count, by: 32_768) {
+                let chunk = Data(bytes[start..<min(start + 32_768, bytes.count)])
+                if let readReply { self.readReply = nil; readReply.resume(returning: chunk) }
+                else { input.append(chunk) }
+            }
         }
         func expectPayloads(_ count: Int) -> XCTestExpectation {
             let expected = XCTestExpectation(description: "received \(count) frames")
@@ -265,7 +268,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
                          purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
         try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: peer.requests, auditVersions: [],
-            maximumPayloadBytes: peer.maximumPayloadBytes, purpose: purpose)
+            maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose), purpose: purpose)
     }
     func testDefaultHandlerWritesExactSignedFramesAndSkipsAbsentRequests() async throws {
         let (first, key) = try Self.frame(8), second = try Self.frame(10).0
@@ -680,6 +683,195 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         try await host.replaceTrust(driver.trust); driver.finishExchange(status)
         do { try await loop.value; XCTFail("Retired session wrote status") } catch { }
         let output = await phone.payloads; XCTAssertEqual(output, [frame])
+        await service.close()
+    }
+    func testPendingSnapshotDeliversCapturesAndRetainedTerminalStatuses() async throws {
+        let key = P256.Signing.PrivateKey()
+        let first = try Self.frame(8, signingKey: key).0, old = try Self.frame(9, signingKey: key).0
+        let firstStatus = try Self.status(first, signingKey: key), terminal = try Self.status(old, phase: .expired, signingKey: key)
+        let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): first],
+            exchangeSupported: true, statuses: [Self.id(8): firstStatus, Self.id(9): terminal])
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        let query = PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32), maximumFrames: 8,
+            maximumBytes: 32_768, retainedRequestIDs: [Self.id(9)])
+        try await phone.submit(query.encode()); try await factory.run(peer, channel)
+        let output = await phone.payloads, closed = await phone.closed
+        var progress = try PendingRequestSnapshotProgress(query: query)
+        let frames = try output.compactMap { try progress.accept($0) }
+        try progress.requireComplete()
+        XCTAssertEqual(frames, [first, firstStatus, terminal]); XCTAssertTrue(closed)
+        XCTAssertEqual(driver.exchangeQueries.map(\.requestID), [Self.id(8), Self.id(9)])
+        XCTAssertTrue(driver.exchangeQueries.allSatisfy { $0.decisionFrame == nil })
+        XCTAssertEqual(driver.discoveryCount, 1)
+        await service.close()
+    }
+    func testPendingSnapshotMissingIndexedCaptureCannotComplete() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [:], exchangeSupported: true)
+        driver.holdFrame()
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        try await phone.submit(PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32),
+            maximumFrames: 8, maximumBytes: 32_768).encode())
+        let delivery = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.requested], timeout: 2)
+        driver.finishFrame(Data())
+        do { try await delivery.value; XCTFail("Missing indexed capture completed") } catch { }
+        let output = await phone.payloads, closed = await phone.closed
+        XCTAssertTrue(output.isEmpty); XCTAssertTrue(closed); XCTAssertEqual(driver.discoveryCount, 1)
+        await service.close()
+    }
+
+    func testPendingSnapshotReservesFramingWithoutIncreasingTheRawCaptureLimit() async throws {
+        let maximum = 1024
+        for oversized in [false, true] {
+            let frame = try Self.frame(8, bodyBytes: maximum - ApprovalMessage.overheadBytes + (oversized ? 1 : 0)).0
+            let (service, _, _, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): frame],
+                maximum: maximum, exchangeSupported: true)
+            let nonce = Data(repeating: 21, count: 32)
+            XCTAssertGreaterThan(try PendingRequestSnapshotFrame.item(nonce: nonce, ordinal: 0, frame: frame).encode().count, maximum)
+            XCTAssertEqual(peer.channelMaximumPayloadBytes(for: .approvals), maximum)
+            let phone = try Phone(scope: peer.scope, requests: peer.requests,
+                maximum: peer.channelMaximumPayloadBytes(for: .pendingSnapshot), persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+            let query = PendingRequestSnapshotFrame.query(nonce: nonce, maximumFrames: 8, maximumBytes: 32_768)
+            try await phone.submit(query.encode())
+            if oversized {
+                do { try await factory.run(peer, channel); XCTFail("Raw capture limit increased") } catch { }
+                let output = await phone.payloads; XCTAssertTrue(output.isEmpty)
+            } else {
+                try await factory.run(peer, channel)
+                var progress = try PendingRequestSnapshotProgress(query: query)
+                let output = await phone.payloads, frames = try output.compactMap { try progress.accept($0) }
+                try progress.requireComplete(); XCTAssertEqual(frames, [frame])
+            }
+            await service.close()
+        }
+    }
+
+    func testPendingSnapshotKeepsTheRawStatusLimit() async throws {
+        let key = P256.Signing.PrivateKey(), frame = try Self.frame(8, signingKey: key).0
+        let status = try Self.status(frame, signingKey: key)
+        let (service, _, _, factory, peer) = try await setup(ids: [], frames: [:], maximum: 256,
+            exchangeSupported: true, statuses: [Self.id(8): status])
+        let phone = try Phone(scope: peer.scope, requests: peer.requests,
+            maximum: peer.channelMaximumPayloadBytes(for: .pendingSnapshot), persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        try await phone.submit(PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32),
+            maximumFrames: 8, maximumBytes: 32_768, retainedRequestIDs: [Self.id(8)]).encode())
+        do { try await factory.run(peer, channel); XCTFail("Raw status limit increased") } catch { }
+        let output = await phone.payloads; XCTAssertTrue(output.isEmpty)
+        await service.close()
+    }
+
+    func testPendingSnapshotAcceptsTheLargestRetainedQueryWithinItsChannelBudget() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], maximum: 1024, exchangeSupported: true)
+        let phone = try Phone(scope: peer.scope, requests: peer.requests,
+            maximum: peer.channelMaximumPayloadBytes(for: .pendingSnapshot), persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        let ids = (0..<PendingRequestSnapshotFrame.maximumRetainedRequests).map { index -> Data in
+            var value = Data(count: 16); value[14] = UInt8(truncatingIfNeeded: index >> 8)
+            value[15] = UInt8(truncatingIfNeeded: index); return value
+        }
+        let query = PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32),
+            maximumFrames: PendingRequestSnapshotFrame.maximumFrames,
+            maximumBytes: PendingRequestSnapshotFrame.maximumSnapshotBytes, retainedRequestIDs: ids)
+        try await phone.submit(query.encode()); try await factory.run(peer, channel)
+        let output = await phone.payloads
+        var progress = try PendingRequestSnapshotProgress(query: query)
+        for frame in output { _ = try progress.accept(frame) }
+        try progress.requireComplete(); XCTAssertEqual(driver.exchangeQueries.count, ids.count)
+        XCTAssertTrue(driver.exchangeQueries.allSatisfy { $0.decisionFrame == nil })
+        await service.close()
+    }
+
+    func testPendingSnapshotEmptySetHasExplicitCompletion() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:])
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        let nonce = Data(repeating: 21, count: 32)
+        try await phone.submit(PendingRequestSnapshotFrame.query(nonce: nonce, maximumFrames: 1, maximumBytes: 1).encode())
+        try await factory.run(peer, channel)
+        let output = await phone.payloads
+        XCTAssertEqual(output, [try PendingRequestSnapshotFrame.complete(nonce: nonce, frames: 0, bytes: 0).encode()])
+        XCTAssertEqual(driver.discoveryCount, 1); XCTAssertTrue(driver.exchangeQueries.isEmpty)
+        await service.close()
+    }
+    func testPendingSnapshotRejectsReplyFramesBeforeDiscovery() async throws {
+        let nonce = Data(repeating: 21, count: 32)
+        let invalid = [Data([0xa0]), try PendingRequestSnapshotFrame.complete(nonce: nonce, frames: 0, bytes: 0).encode(),
+                       try PendingRequestSnapshotFrame.item(nonce: nonce, ordinal: 0, frame: Data([1])).encode()]
+        for bytes in invalid {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:])
+            let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+            try await phone.submit(bytes)
+            do { try await factory.run(peer, channel); XCTFail("Invalid snapshot query accepted") } catch { }
+            let output = await phone.payloads, closed = await phone.closed
+            XCTAssertTrue(output.isEmpty); XCTAssertTrue(closed); XCTAssertEqual(driver.discoveryCount, 0)
+            await service.close()
+        }
+    }
+    func testPendingSnapshotLimitsNeverProduceCompletionForPartialData() async throws {
+        for itemLimit in [false, true] {
+            let key = P256.Signing.PrivateKey()
+            let frame = try Self.frame(8, signingKey: key).0
+            let status = try Self.status(frame, signingKey: key)
+            let (service, _, _, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): frame],
+                exchangeSupported: true, statuses: [Self.id(8): status])
+            let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+            let query = PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32), maximumFrames: itemLimit ? 1 : 8,
+                maximumBytes: itemLimit ? 32_768 : 1)
+            try await phone.submit(query.encode())
+            do { try await factory.run(peer, channel); XCTFail("Snapshot limit ignored") } catch { }
+            let output = await phone.payloads
+            XCTAssertEqual(output.count, itemLimit ? 1 : 0)
+            var progress = try PendingRequestSnapshotProgress(query: query)
+            for bytes in output { _ = try progress.accept(bytes) }
+            XCTAssertThrowsError(try progress.requireComplete())
+            await service.close()
+        }
+    }
+    func testPendingSnapshotWrongPurposeAndScopeCloseBeforeDiscovery() async throws {
+        for wrongPurpose in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false)
+            let scope = try wrongPurpose ? peer.scope : Self.scope(phone: 5)
+            let phone = try Phone(scope: scope, requests: peer.requests, persistent: true)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: peer.requests,
+                auditVersions: [], maximumPayloadBytes: 4096, purpose: wrongPurpose ? .approvals : .pendingSnapshot)
+            let session = try await host.admit(peer, generation: factory.generation)
+            do { try await service.runPendingRequestSnapshot(for: session, over: channel); XCTFail("Unbound snapshot accepted") } catch { }
+            let closed = await phone.closed
+            XCTAssertTrue(closed); XCTAssertEqual(driver.discoveryCount, 0)
+            await service.close()
+        }
+    }
+    func testPendingSnapshotTrustRetirementCannotWriteLateCapture() async throws {
+        let frame = try Self.frame(8).0
+        let (service, host, driver, factory, peer) = try await setup(ids: [Self.id(8)], frames: [:])
+        driver.holdFrame()
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot)
+        try await phone.submit(PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32), maximumFrames: 8, maximumBytes: 32_768).encode())
+        let delivery = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.requested], timeout: 2)
+        try await host.replaceTrust(driver.trust); driver.finishFrame(frame)
+        do { try await delivery.value; XCTFail("Retired snapshot wrote") } catch { }
+        let output = await phone.payloads, closed = await phone.closed
+        XCTAssertTrue(output.isEmpty); XCTAssertTrue(closed)
+        await service.close()
+    }
+    func testPendingSnapshotBlockedWriteHasDeadline() async throws {
+        let frame = try Self.frame(8).0
+        let (service, host, _, factory, peer) = try await setup(ids: [Self.id(8)], frames: [Self.id(8): frame], automatic: false)
+        let phone = try Phone(scope: peer.scope, requests: peer.requests, holdWrite: true, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pendingSnapshot), session = try await host.admit(peer, generation: factory.generation)
+        try await phone.submit(PendingRequestSnapshotFrame.query(nonce: Data(repeating: 21, count: 32), maximumFrames: 8, maximumBytes: 32_768).encode())
+        let start = ContinuousClock.now
+        do { try await service.runPendingRequestSnapshot(for: session, over: channel, timeoutMilliseconds: 100); XCTFail("Blocked snapshot wrote") } catch { }
+        XCTAssertLessThan(start.duration(to: .now), .seconds(2))
+        let closed = await phone.closed; XCTAssertTrue(closed)
         await service.close()
     }
 }

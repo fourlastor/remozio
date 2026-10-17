@@ -159,12 +159,22 @@ class CommandRequestEnrollment internal constructor(
         previous?.close()
     }
 
+    /** Background delivery can claim only an idle owner. Foreground attachment keeps its existing replacement behavior. */
+    @Synchronized
+    internal fun attachIfIdle(owner: AutoCloseable): Boolean {
+        if (closed) reject(InboxRejection.CLOSED)
+        if (receiver != null) return false
+        receiver = owner
+        limited.value = false
+        return true
+    }
+
     @Synchronized
     internal fun detach(owner: AutoCloseable) { if (receiver === owner) receiver = null }
 
     /** The identity check and state update share the enrollment monitor with replacement and removal. */
     @Synchronized
-    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant, schemas: Set<ULong>) {
+    internal fun deliver(owner: AutoCloseable, message: ApprovalMessage, receivedAt: ElapsedInstant, schemas: Set<ULong>): Boolean {
         if (closed || receiver !== owner) reject(InboxRejection.STALE_ENROLLMENT)
         val body = message.body.copyBytes()
         val signature = message.signature.copyBytes()
@@ -194,6 +204,7 @@ class CommandRequestEnrollment internal constructor(
             }
             ApprovalMessageType.DECISION -> throw IllegalArgumentException("Unexpected inbound decision")
         }
+        return limited.value
     }
 
     /** Snapshot of owned handles, including terminal tombstones. Capture contents remain owned by each session. */

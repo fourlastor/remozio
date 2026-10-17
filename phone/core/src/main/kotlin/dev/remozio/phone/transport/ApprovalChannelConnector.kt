@@ -3,6 +3,7 @@ package dev.remozio.phone.transport
 import dev.remozio.protocol.ChannelRequestCapability
 import dev.remozio.protocol.ChannelScope
 import dev.remozio.protocol.PairingReceiptFrame
+import dev.remozio.protocol.PendingRequestSnapshotFrame
 import java.io.IOException
 import javax.net.ssl.KeyManager
 import kotlinx.coroutines.*
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.*
 
 enum class EnrolledChannelPurpose(val applicationProtocol: String) {
     APPROVALS("remozio/1"), PAIRING_RECEIPT(PairingReceiptFrame.APPLICATION_PROTOCOL),
+    PENDING_SNAPSHOT(PendingRequestSnapshotFrame.APPLICATION_PROTOCOL),
 }
 
 /** Supplies ciphertext only. All routes use the same enrolled identity and peer pin. */

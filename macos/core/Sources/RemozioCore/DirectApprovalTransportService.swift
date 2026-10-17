@@ -62,6 +62,8 @@ public actor DirectApprovalTransportService {
                         try await self.runRequestExchange(for: session, over: channel, timeoutMilliseconds: timeout, refreshMilliseconds: refresh)
                     case .pairingReceipt:
                         try await self.runPairingReceiptRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .pendingSnapshot:
+                        try await self.runPendingRequestSnapshot(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
                 }
             }

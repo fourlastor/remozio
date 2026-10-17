@@ -26,9 +26,10 @@ class CommandRequestReceiverTest {
         var closed = false
         val sent = Channel<ByteArray>(16)
         var onSend: suspend (ByteArray) -> Unit = {}
+        var onClose: () -> Unit = {}
         override suspend fun receive() = queue.receiveCatching().getOrNull()
         override suspend fun send(bytes: ByteArray) { onSend(bytes); sent.send(bytes.copyOf()) }
-        override fun close() { closed = true; queue.cancel() }
+        override fun close() { closed = true; queue.cancel(); onClose() }
     }
     private inner class Mac(val identity: Int = 1) {
         private val key = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
@@ -459,4 +460,131 @@ class CommandRequestReceiverTest {
         assertEquals(1, enrollment.sessions().size)
     }
 
+    private fun snapshot(enrollment: CommandRequestEnrollment, wire: RequestMessageChannel) =
+        CommandSnapshotReceiver.bind(enrollment, wire, id(3), id(4), 8u, 262_144u) { ElapsedInstant(0, 200u) }
+
+    private fun Wire.snapshotReply(frames: List<ByteArray>, complete: Boolean = true) {
+        onSend = { encoded ->
+            val query = assertIs<PendingRequestSnapshotFrame.Query>(PendingRequestSnapshotFrame.decode(encoded))
+            frames.forEachIndexed { index, bytes ->
+                queue.send(PendingRequestSnapshotFrame.Item(query.nonce.copyBytes(), index.toULong(), bytes).encode())
+            }
+            if (complete) queue.send(PendingRequestSnapshotFrame.Complete(query.nonce.copyBytes(), frames.size.toULong(),
+                frames.sumOf { it.size.toLong() }.toULong()).encode())
+            queue.close()
+        }
+    }
+    @Test fun snapshotConnectorBudgetAlsoHoldsTheLargestRetainedQuery() = runBlocking<Unit> {
+        val retained = List(PendingRequestSnapshotFrame.MAXIMUM_RETAINED_REQUESTS) { index ->
+            ByteArray(16).apply { this[14] = (index ushr 8).toByte(); this[15] = index.toByte() }
+        }
+        val query = PendingRequestSnapshotFrame.Query(id(9, 32), PendingRequestSnapshotFrame.MAXIMUM_FRAMES,
+            PendingRequestSnapshotFrame.MAXIMUM_SNAPSHOT_BYTES, retained)
+        val wire = Wire(scope(), maximumPayloadBytes = CommandSnapshotReceiver.requiredChannelPayloadBytes(limits))
+        wire.snapshotReply(emptyList())
+        val channel = PendingSnapshotMessageChannel(wire, query)
+        try {
+            assertNull(channel.receive()); channel.requireComplete()
+            assertEquals(retained.size, (PendingRequestSnapshotFrame.decode(wire.sent.receive()) as PendingRequestSnapshotFrame.Query).retainedRequestIDs.size)
+        } finally { channel.close() }
+    }
+
+    @Test fun snapshotConnectorBudgetReservesBothFrameLayers() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        val foregroundBudget = maxOf(limits.body.maxBytes, limits.status.maxBytes) + ApprovalMessage.OVERHEAD_BYTES
+        val snapshotBudget = CommandSnapshotReceiver.requiredChannelPayloadBytes(limits)
+        assertTrue(snapshotBudget >= foregroundBudget + 128)
+        val tooSmall = Wire(scope(), maximumPayloadBytes = foregroundBudget)
+        assertFails { snapshot(enrollment, tooSmall) }
+        assertTrue(tooSmall.closed); assertTrue(tooSmall.sent.tryReceive().isFailure)
+        val reserved = Wire(scope(), maximumPayloadBytes = snapshotBudget)
+        reserved.snapshotReply(listOf(mac.issued(), mac.status()))
+        snapshot(enrollment, reserved).run()
+        assertTrue(reserved.closed); assertEquals(1, enrollment.sessions().size)
+        enrollment.close()
+    }
+
+    @Test fun snapshotVerifiesEachFrameAndRequiresExactCompletion() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll(); val wire = Wire(scope())
+        wire.snapshotReply(listOf(mac.issued(), mac.status()))
+        snapshot(enrollment, wire).run()
+        val retained = enrollment.sessions().single()
+        assertEquals(RequestPhase.PRESENTED, retained.snapshot(ElapsedInstant(0, 200u)).status!!.status.phase)
+        val query = assertIs<PendingRequestSnapshotFrame.Query>(PendingRequestSnapshotFrame.decode(wire.sent.receive()))
+        assertTrue(query.retainedRequestIDs.isEmpty()); assertTrue(wire.sent.tryReceive().isFailure); assertTrue(wire.closed)
+        enrollment.close()
+    }
+    @Test fun snapshotEarlyEofAndExplicitCloseCannotSucceed() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll(); val partial = Wire(scope())
+        partial.snapshotReply(listOf(mac.issued()), complete = false)
+        assertFailsWith<IOException> { snapshot(enrollment, partial).run() }
+        val retained = enrollment.sessions().single()
+        val closed = Wire(scope()); val receiver = snapshot(enrollment, closed)
+        receiver.close()
+        assertFailsWith<IOException> { receiver.run() }
+        assertSame(retained, enrollment.sessions().single()); assertTrue(closed.sent.tryReceive().isFailure)
+        enrollment.close()
+    }
+    @Test fun snapshotCannotReplaceForegroundAndForegroundCanPreemptIt() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll(); val first = Wire(scope()); val foreground = bind(enrollment, first)
+        val rejected = Wire(scope())
+        assertFailsWith<IOException> { snapshot(enrollment, rejected) }
+        assertFalse(first.closed); assertTrue(rejected.closed)
+        foreground.close()
+        val background = Wire(scope()); val snapshot = snapshot(enrollment, background)
+        val current = Wire(scope()); val next = bind(enrollment, current)
+        assertTrue(background.closed); assertFalse(current.closed)
+        assertFailsWith<IOException> { snapshot.run() }
+        snapshot.close()
+        current.queue.send(mac.issued()); current.queue.send(mac.status()); current.queue.close()
+        next.run(); assertEquals(1, enrollment.sessions().size)
+        enrollment.close()
+    }
+    @Test fun snapshotRefreshesRetainedTerminalStatusWithoutReplacingTheOwner() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        deliver(enrollment, mac, mac.issued(), mac.status())
+        val retained = enrollment.sessions().single(); val wire = Wire(scope())
+        wire.snapshotReply(listOf(mac.status(true)))
+        snapshot(enrollment, wire).run()
+        val query = assertIs<PendingRequestSnapshotFrame.Query>(PendingRequestSnapshotFrame.decode(wire.sent.receive()))
+        assertEquals(listOf(CborValue.Bytes(id(5))), query.retainedRequestIDs)
+        assertSame(retained, enrollment.sessions().single())
+        assertEquals(RequestPhase.EXPIRED, retained.snapshot(ElapsedInstant(0, 200u)).status!!.status.phase)
+        enrollment.close()
+    }
+    @Test fun snapshotEmptySetCannotExpireAnOmittedRetainedRequest() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll()
+        deliver(enrollment, mac, mac.issued(), mac.status())
+        val retained = enrollment.sessions().single(); val wire = Wire(scope()); wire.snapshotReply(emptyList())
+        snapshot(enrollment, wire).run()
+        assertSame(retained, enrollment.sessions().single())
+        assertEquals(RequestPhase.PRESENTED, retained.snapshot(ElapsedInstant(0, 200u)).status!!.status.phase)
+        enrollment.close()
+    }
+    @Test fun snapshotMarkerCannotAuthenticateAFrameFromAnotherKey() = runBlocking<Unit> {
+        val mac = Mac(); val enrollment = mac.enroll(); val wrong = Mac(); val wire = Wire(scope())
+        wire.snapshotReply(listOf(wrong.issued()))
+        assertFailsWith<IOException> { snapshot(enrollment, wire).run() }
+        assertTrue(enrollment.sessions().isEmpty()); assertTrue(wire.closed)
+        enrollment.close()
+    }
+    @Test fun snapshotChannelCannotSendDecisions() = runBlocking<Unit> {
+        val wire = Wire(scope())
+        val channel = PendingSnapshotMessageChannel(wire, PendingRequestSnapshotFrame.Query(ByteArray(32), 8u, 262_144u))
+        assertFailsWith<IOException> { channel.send(decisionCarrier()) }
+        assertTrue(wire.sent.tryReceive().isFailure); channel.close()
+    }
+    @Test fun snapshotCapacityOmissionStaysFailedAfterForegroundResetsTheUiFlag() = runBlocking<Unit> {
+        for (handoff in listOf(false, true)) {
+            val mac = Mac(); val enrollment = mac.enroll(CommandRequestInbox(1, 1)); val first = mac.issued()
+            mac.requestID = 9
+            val wire = Wire(scope()); wire.snapshotReply(listOf(first, mac.issued(), mac.status()))
+            var foreground: CommandRequestReceiver? = null
+            if (handoff) wire.onClose = { foreground = bind(enrollment, Wire(scope())) }
+            assertFailsWith<IOException> { snapshot(enrollment, wire).run() }
+            assertEquals(1, enrollment.sessions().size)
+            assertEquals(!handoff, enrollment.capacityLimited.value)
+            foreground?.close(); enrollment.close()
+        }
+    }
 }

@@ -374,6 +374,58 @@ class TLSInteropTest {
         }
     }
 
+    /** Synthetic echo proves ALPN, pins, scope and encrypted framing. It makes no Root snapshot claim. */
+    @Test fun pendingSnapshotPurposeCrossesNativeTlsDirectlyAndThroughTheRelay(): Unit =
+        Fixture(negotiate = true, commandMessages = true).use { f ->
+            WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                runBlocking {
+                    withTimeout(20_000) {
+                        for (useRelay in listOf(false, true)) {
+                            val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                            val requests = listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet()))
+                            val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                                scope, requests, emptySet(), 65_536, purpose = EnrolledChannelPurpose.PENDING_SNAPSHOT)
+                            val channel = connector.connect(this,
+                                if (useRelay) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+                                    DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                                }), if (!useRelay) null else ApprovalCarrierRoute { owner ->
+                                    relay.connector.connect(owner, relay.endpoint,
+                                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                                })
+                            try {
+                                assertEquals(EnrolledChannelPurpose.PENDING_SNAPSHOT, channel.purpose)
+                                assertEquals(scope, channel.negotiated.peer.scope)
+                                val query = PendingRequestSnapshotFrame.Query(ByteArray(32) { 21 }, 8u, 32_768u,
+                                    listOf(ByteArray(16) { 9 })).encode()
+                                channel.send(query); assertArrayEquals(query, channel.receive())
+                            } finally { channel.closeAndJoin() }
+                        }
+                        assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("dev.remozio.pending.snapshot"))
+                    }
+                }
+            }
+        }
+
+    @Test fun pendingSnapshotPurposeRejectsWrongScopeBeforeApplicationData(): Unit =
+        Fixture(negotiate = true, commandMessages = true).use { f ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 5 }, ByteArray(16) { 4 })
+                    val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                        scope, listOf(ChannelRequestCapability(0u, 1u, 1u, emptySet())), emptySet(), 65_536,
+                        purpose = EnrolledChannelPurpose.PENDING_SNAPSHOT)
+                    var refused = false
+                    try {
+                        connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                        }), null).closeAndJoin()
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_: java.io.IOException) { refused = true }
+                    assertTrue(refused)
+                }
+            }
+        }
+
     @Test fun receiptPurposeCrossesNativeTlsDirectlyAndThroughTheRelay(): Unit =
         Fixture(negotiate = true, receiptRecovery = true).use { f ->
             WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
