@@ -60,6 +60,23 @@ class SigningTemplateTests(unittest.TestCase):
             start.assert_not_called()
 
 
+class VersionMetadataTests(unittest.TestCase):
+    def test_tpm2_version_discards_personal_tool_paths_and_other_fields(self):
+        for path in ("/home/example/private runtime/bin/tpm2", "/tmp/fixture/usr/bin/tpm2"):
+            raw = f'tool="{path}" version="5.7-rc1" tctis="libtss2-tctildr" tcti-default=tcti-abrmd'.encode()
+            self.assertEqual(EXPERIMENT.tpm2_version(raw), "5.7-rc1")
+            self.assertNotIn(path, EXPERIMENT.tpm2_version(raw))
+
+    def test_invalid_or_ambiguous_version_fails_without_echoing_input(self):
+        for raw in (b'tool="/home/example/private"', b'version="/home/example/private"',
+                    b'version="5.7\nprivate"', b'version="5.7" version="5.8"',
+                    b'version="' + b'1' * 65 + b'"', b'x' * 8193):
+            with self.subTest(raw=raw[:30]):
+                with self.assertRaises(EXPERIMENT.Refused) as failure:
+                    EXPERIMENT.tpm2_version(raw)
+                self.assertEqual(str(failure.exception), "invalid-tpm2-version")
+
+
 class ReportTests(unittest.TestCase):
     def test_false_retention_or_cleanup_cannot_pass(self):
         for name in ("simulatorProcessRestartRetention", "temporaryStateRemoved"):

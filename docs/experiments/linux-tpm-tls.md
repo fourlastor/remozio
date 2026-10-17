@@ -1,5 +1,10 @@
 # Linux TPM and real TLS experiment
 
+Version metadata stores only the bounded `tpm2` version field. The report excludes
+the invoked tool path and other raw version fields. Historical evidence keeps its
+original source hashes and generic fixture paths. Synthetic sanitizer controls do
+not establish a new TPM or hardware run.
+
 [Recorded simulator evidence](linux-tpm-tls-evidence.json) demonstrates a TPM-provider
 P-256 signing key completing actual mutual TLS 1.3 through OpenSSL 3.5.3. This is
 **software TPM simulator evidence only**. A subsequent supervised

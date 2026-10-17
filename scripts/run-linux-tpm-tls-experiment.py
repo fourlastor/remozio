@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import ssl
@@ -295,6 +296,16 @@ def validate_checks(checks):
         raise Refused("incomplete-or-failed-check")
 
 
+def tpm2_version(data):
+    """Return only the bounded version field; never preserve the invoked tool path."""
+    if len(data) > 8192:
+        raise Refused("invalid-tpm2-version")
+    values = re.findall(r'(?:^|\s)version="([^"\r\n]*)"(?=\s|$)', data.decode("utf-8"))
+    if len(values) != 1 or re.fullmatch(r"[0-9][A-Za-z0-9.+_-]{0,63}", values[0]) is None:
+        raise Refused("invalid-tpm2-version")
+    return values[0]
+
+
 def run_experiment(args):
     if platform.system() != "Linux" or os.getuid() == 0 or os.getuid() != os.geteuid():
         raise Refused("requires-ordinary-linux-user")
@@ -324,7 +335,7 @@ def run_experiment(args):
             e.start()
             versions = {
                 "opensslCLI": e.run("openssl", "version").stdout.decode().strip(),
-                "tpm2Tools": e.run(tpm2, "--version").stdout.decode().strip(),
+                "tpm2Tools": tpm2_version(e.run(tpm2, "--version").stdout),
                 "swtpm": e.run(swtpm, "--version").stdout.decode().splitlines()[0],
                 "abrmd": e.run(abrmd, "--version").stdout.decode().strip(),
             }
