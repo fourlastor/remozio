@@ -231,6 +231,13 @@ public actor GatewayDeliveryCoordinator {
         return try database.headReply(canonicalQuery: canonicalQuery, sign: sign)
     }
 
+    /// A fresh optional query shares the existing Root control connection and does not change enrollment or provider state.
+    func mappingStateReply(canonicalQuery: Data, sign: @Sendable (Data) throws -> Data) throws -> GatewayMappingStateReply {
+        try recoveryScope(); _ = try current()
+        let (scope, _) = try GatewayMappingStateWire.query(canonicalQuery)
+        return try database.mappingStateReply(query: canonicalQuery, trust: trust(scope.phoneID), sign: sign)
+    }
+
     /// Reads one bounded page on the same actor that applies controls. No token or provider call is involved.
     public func recoveryHistoryReply(canonicalQuery: Data, sign: @Sendable (Data) throws -> Data) throws -> GatewayControlHistoryReply {
         try recoveryScope()

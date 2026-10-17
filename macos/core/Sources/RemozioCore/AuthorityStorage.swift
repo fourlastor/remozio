@@ -10,7 +10,7 @@ final class AuthorityStorage {
     let journal: JournalDatabase
     let continuity: ContinuityStore
 
-    static func open(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil) throws -> AuthorityStorage {
+    static func open(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> AuthorityStorage {
         guard let directory = configuration.continuityDirectory else {
             throw AuthorityServiceConfigurationError.invalidConfiguration
         }
@@ -19,7 +19,7 @@ final class AuthorityStorage {
             try JournalDatabase.open(directoryPath: configuration.journalDirectory,
                 macID: configuration.macID, accountID: configuration.accountID,
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, routingPolicy: routingPolicy)
+                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy)
         }, openContinuity: { journalDirectory in
             try ContinuityStore.open(directoryPath: directory,
                 macID: configuration.macID, accountID: configuration.accountID, excludingDirectory: journalDirectory)

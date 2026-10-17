@@ -73,7 +73,8 @@ public actor AuthorityWakeService {
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         let clock = try AuthorityClock()
-        let journal = try AuthorityService.openJournal(configuration: configuration.request.service)
+        let journal = try AuthorityService.openJournal(configuration: configuration.request.service,
+            gatewayPolicy: configuration.phonePush?.journalPolicy(clockEpoch: clock.epoch))
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: nil, appEndpoint: nil, pairingConfiguration: nil,
             routing: routing, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
@@ -105,7 +106,8 @@ public actor AuthorityWakeService {
         let limits = try CBORLimits(maxBytes: 65_536, maxDepth: 16, maxItems: 4096)
         let policy = try RoutingJournalPolicy(clockEpoch: clock.epoch, challengeLifetimeMillis: 30_000, maximumOperations: 1024,
             payloadLimits: limits, signingLimits: CBORLimits(maxBytes: 131_072, maxDepth: 16, maxItems: 4096))
-        let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy)
+        let journal = try AuthorityService.openJournal(configuration: configuration.request.service, routingPolicy: policy,
+            gatewayPolicy: configuration.phonePush?.journalPolicy(clockEpoch: clock.epoch))
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint, pairingConfiguration: pairingConfiguration,
             routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
@@ -135,15 +137,25 @@ public actor AuthorityWakeService {
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
                     ownerRouting: ownerRouting)
             }
+            let phonePush = try configuration.phonePush.map {
+                try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
+            }
             let executionWorker = try commandExecutionFactory?(journal, clock)
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
-                wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                phonePushRegistration: phonePush?.provider(clock: { try clock.now() }, wall: {
+                    let value = Date().timeIntervalSince1970 * 1000
+                    guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
+                    return UInt64(value)
+                }), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
                 onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
                     _ = executionWorker?.enqueue(notice)
                     onCommandAuthorized(notice)
                 })
+            if let phonePush {
+                try journal.withRequests { owner in try owner.preparePhonePushRegistration(phonePush, now: clock.now()) }
+            }
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock,

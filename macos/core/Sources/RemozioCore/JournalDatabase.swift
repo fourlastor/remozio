@@ -1077,6 +1077,15 @@ public final class JournalTransaction {
             nowUnixMillis: nowUnixMillis, now: now, sign: sign)
     }
 
+    /// Root-only operational state. Derive current phone trust from protected enrollment, never caller-supplied metadata.
+    func currentGatewayTokenState(phoneID: Data, enrollmentEpoch: Data,
+                                  registration: GatewayRegistrationIdentity, registrationActive: Bool,
+                                  expectedTrustRevision: UUID, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayCurrentTokenState? {
+        let trust = try storedGatewayTrust(phoneID: phoneID, epoch: enrollmentEpoch, registration: registration,
+            registrationActive: registrationActive, expectedTrustRevision: expectedTrustRevision)
+        return try withGateway(write: false) { try $0.currentTokenState(trust: trust, wall: nowUnixMillis, now: now) }
+    }
+
     public func pendingGatewayControl(operationID: Data, phoneID: Data, enrollmentEpoch: Data,
                                       registration: GatewayRegistrationIdentity, registrationActive: Bool, expectedTrustRevision: UUID,
                                       nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {

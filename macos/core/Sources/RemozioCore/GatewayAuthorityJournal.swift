@@ -96,6 +96,16 @@ public struct GatewayTrustEvidenceRecovery: Sendable {
     public let restrictedPhoneIDs: Set<Data>
 }
 
+/// Current desired state for a protected Root owner. It contains private provider material and is never phone-fetchable.
+struct GatewayCurrentTokenState: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let candidate: GatewayAuthorityEnvelope
+    let activation: GatewayAuthorityEnvelope?
+    let candidateExpired: Bool
+    var needsRenewal: Bool { activation == nil && candidateExpired }
+    var description: String { "GatewayCurrentTokenState(redacted)" }
+    var debugDescription: String { description }
+}
+
 /// Private table owner. Every call runs within the journal owner's transaction and protected writer lease.
 final class GatewayAuthorityJournal {
     private let db: OpaquePointer
@@ -689,8 +699,8 @@ final class GatewayAuthorityJournal {
         }
     }
 
-    private struct Retained { let value: GatewayTokenCandidate; let consumed: Data? }
-    private func candidate(_ id: Data, trust: GatewayAuthorityTrust, wall: UInt64, now: AuthorityMoment) throws -> Retained {
+    private struct Retained { let value: GatewayTokenCandidate; let consumed: Data?; let state: GatewayCurrentTokenState }
+    private func candidate(_ id: Data, trust: GatewayAuthorityTrust, wall: UInt64, now: AuthorityMoment, allowExpired: Bool = false) throws -> Retained {
         guard try desiredCandidate(trust.enrollment.phoneID) == id else { throw GatewayAuthorityError.superseded }
         return try statement("""
             SELECT c.phone,c.enrollment,c.operation,c.run,c.started,c.deadline,c.consumed,d.candidate
@@ -700,15 +710,21 @@ final class GatewayAuthorityJournal {
             guard try blob($0, 0, maximum: 16) == trust.enrollment.phoneID,
                   try blob($0, 1, maximum: 16) == trust.enrollment.epoch else { throw GatewayAuthorityError.wrongScope }
             guard try blob($0, 7, maximum: 16) == id else { throw GatewayAuthorityError.superseded }
-            guard try blob($0, 3, maximum: 16) == uuid(run), try unsigned(blob($0, 4, maximum: 8)) <= now.milliseconds,
-                  try now.milliseconds < unsigned(blob($0, 5, maximum: 8)) else { throw GatewayAuthorityError.expired }
+            let sameRun = try blob($0, 3, maximum: 16) == uuid(run)
+            let started = try unsigned(blob($0, 4, maximum: 8)), deadline = try unsigned(blob($0, 5, maximum: 8))
+            let liveMoment = sameRun && started <= now.milliseconds && now.milliseconds < deadline
+            if !allowExpired && !liveMoment { throw GatewayAuthorityError.expired }
             guard let entry = try envelope(blob($0, 2, maximum: 16), identity: trust.registration), entry.kind == 1,
                   let token = entry.registrationToken else { throw GatewayAuthorityError.corruptData }
             let value = try storedCandidate(entry.canonicalPayload)
             guard value.binding.candidateID == id, value.binding.phoneID == trust.enrollment.phoneID,
                   value.binding.enrollmentEpoch == trust.enrollment.epoch, value.binding.enrollmentTag == trust.enrollment.tag,
                   value.binding.tokenDigest == Data(SHA256.hash(data: Data(token.utf8))) else { throw GatewayAuthorityError.corruptData }
-            guard value.issuedAtUnixMillis <= wall, wall < value.expiresAtUnixMillis else { throw GatewayAuthorityError.expired }
+            guard deadline > started, deadline - started == value.expiresAtUnixMillis - value.issuedAtUnixMillis else {
+                throw GatewayAuthorityError.corruptData
+            }
+            let liveWall = value.issuedAtUnixMillis <= wall && wall < value.expiresAtUnixMillis
+            if !allowExpired && !liveWall { throw GatewayAuthorityError.expired }
             let consumed = sqlite3_column_type($0, 6) == SQLITE_NULL ? nil : try blob($0, 6, maximum: 16)
             let activation = try statement("SELECT operation FROM main.gateway_outbox_v1 WHERE candidate=? AND kind=2", [id]) { stmt -> GatewayAuthorityEnvelope? in
                 let result = sqlite3_step(stmt)
@@ -721,8 +737,17 @@ final class GatewayAuthorityJournal {
                 return entry
             }
             guard activation?.operationID == consumed else { throw GatewayAuthorityError.corruptData }
-            return Retained(value: value, consumed: consumed)
+            return Retained(value: value, consumed: consumed, state: GatewayCurrentTokenState(candidate: entry, activation: activation,
+                candidateExpired: !liveMoment || !liveWall))
         }
+    }
+
+    /// Expiry is returned as data for explicit renewal. Corrupt signatures and mismatched scope still fail closed.
+    func currentTokenState(trust: GatewayAuthorityTrust, wall: UInt64, now: AuthorityMoment) throws -> GatewayCurrentTokenState? {
+        try authenticate(phone: trust.enrollment.phoneID, epoch: trust.enrollment.epoch, trust: trust)
+        try clock(now); _ = try head(trust.registration)
+        guard let id = try desiredCandidate(trust.enrollment.phoneID) else { return nil }
+        return try candidate(id, trust: trust, wall: wall, now: now, allowExpired: true).state
     }
 
     private func desiredCandidate(_ phone: Data) throws -> Data? {

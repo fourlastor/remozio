@@ -31,6 +31,34 @@ public struct AuthorityPhonePushRegistration: Sendable {
          verifySelf: @escaping @Sendable (JournalTransaction) throws -> Void = { _ in }) {
         self.policy = policy; self.signing = signing; self.verifySelf = verifySelf
     }
+    func configure(transaction: JournalTransaction) throws {
+        try verifySelf(transaction)
+        try transaction.configureGatewayAuthority(policy.registration)
+    }
+    func current(phoneID: Data, enrollmentEpoch: Data, transaction tx: JournalTransaction,
+                 now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        try verifySelf(tx)
+        let revision = try tx.approvalTrustSnapshot().revision
+        return try tx.currentGatewayTokenState(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch,
+            registration: policy.registration, registrationActive: true, expectedTrustRevision: revision,
+            nowUnixMillis: wall, now: now)
+    }
+    func renewExpired(phoneID: Data, enrollmentEpoch: Data, transaction tx: JournalTransaction,
+                      now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        guard let previous = try current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: tx, now: now, wall: wall),
+              previous.needsRenewal else {
+            return try current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: tx, now: now, wall: wall)
+        }
+        let r = policy.registration, revision = try tx.approvalTrustSnapshot().revision
+        _ = try tx.renewDesiredGatewayCandidate(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch,
+            registration: r, registrationActive: true, expectedTrustRevision: revision,
+            expectedHead: tx.gatewayAuthorityHead(r), nowUnixMillis: wall, now: now,
+            sign: { candidate in
+                try signing(GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+                    canonicalPayload: candidate.encode(limits: limits), payloadLimits: limits, inputLimits: limits))
+            })
+        return try current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: tx, now: now, wall: wall)
+    }
     func process(_ request: PhonePushRegistrationFrame, binding: AuthorityPeerBinding, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> PhonePushRegistrationFrame {
         try verifySelf(tx)

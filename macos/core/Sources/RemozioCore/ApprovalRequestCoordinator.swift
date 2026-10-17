@@ -944,6 +944,34 @@ public final class ApprovalRequestCoordinator {
         try? command.sendTerminalOutcome(outcome, request: identity)
     }
 
+    /// Root publisher state only. Private provider data cannot be projected onto an ordinary phone response.
+    func currentPhonePushRegistration(_ provider: AuthorityPhonePushRegistration, phoneID: Data, enrollmentEpoch: Data,
+                                      now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        try running()
+        guard provider.policy.registration.macID == mac, provider.policy.registration.accountID == account else {
+            throw GatewayAuthorityError.wrongScope
+        }
+        try checkClock(now)
+        return try read { try provider.current(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: $0, now: now, wall: wall) }
+    }
+    /// Automatic expiry/restart recovery retains pairing. A new candidate still requires provider possession proof.
+    func renewExpiredPhonePushRegistration(_ provider: AuthorityPhonePushRegistration, phoneID: Data, enrollmentEpoch: Data,
+                                          now: AuthorityMoment, wall: UInt64) throws -> GatewayCurrentTokenState? {
+        let current = try currentPhonePushRegistration(provider, phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, now: now, wall: wall)
+        guard current?.needsRenewal == true else { return current }
+        return try write { try provider.renewExpired(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch, transaction: $0, now: now, wall: wall) }
+    }
+
+    /// Protected startup only. The hardware-bound provider validates Root before initializing its fixed identity.
+    func preparePhonePushRegistration(_ provider: AuthorityPhonePushRegistration, now: AuthorityMoment) throws {
+        try running()
+        guard provider.policy.registration.macID == mac, provider.policy.registration.accountID == account else {
+            throw GatewayAuthorityError.wrongScope
+        }
+        try checkClock(now)
+        try write { try provider.configure(transaction: $0) }
+    }
+
     /// Fixed token registration operations share this owner's current binding and continuity writer.
     /// No candidate result leaves the owner before durable commit. Callbacks cannot await or reenter it.
     func phonePushRegistration(_ request: PhonePushRegistrationFrame, binding: AuthorityPeerBinding,

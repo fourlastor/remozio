@@ -69,17 +69,17 @@ public final class AuthorityService: @unchecked Sendable {
         }
     }
 
-    static func openJournal(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil) throws -> AuthorityJournal {
+    static func openJournal(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> AuthorityJournal {
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
-            journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration, routingPolicy: routingPolicy),
+            journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration, routingPolicy: routingPolicy, gatewayPolicy: gatewayPolicy),
                 macID: configuration.macID, accountID: configuration.accountID)
         } else {
             let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
             journal = try AuthorityJournal(database: JournalDatabase.open(directoryPath: configuration.journalDirectory,
                 macID: configuration.macID, accountID: configuration.accountID,
                 recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, routingPolicy: routingPolicy))
+                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, gatewayPolicy: gatewayPolicy, routingPolicy: routingPolicy))
         }
         return journal
     }
@@ -123,6 +123,7 @@ public final class AuthorityService: @unchecked Sendable {
          pendingRequestIDs: AuthorityPendingRequestsProvider? = nil,
          exchangeRequest: AuthorityRequestExchangeProvider? = nil,
          requestProviders: AuthorityRequestProviders? = nil,
+         phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
@@ -174,6 +175,7 @@ public final class AuthorityService: @unchecked Sendable {
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
+                phonePushRegistration: phonePushRegistration,
                 wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)

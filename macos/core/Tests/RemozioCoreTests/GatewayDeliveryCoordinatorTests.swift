@@ -580,6 +580,40 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(times.isEmpty)
     }
 
+    func testMappingStateRequiresLiveRootLeaseBeforeSigningWithoutProviderWork() async throws {
+        let fixture = try Fixture(), provider = Provider([]), clock = fixture.clock, calls = Counter()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try fixture.coordinator(provider, validateAuthority: { try lease.validate() })
+        let snapshot = try GatewayHostSnapshot(registration: fixture.identity(), rootEpoch: UUID(), sequence: 1,
+            observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200, enrollments: [fixture.enrollment()],
+            active: true, phoneRouting: true)
+        try await coordinator.synchronizeHost(snapshot, lease: lease)
+        let binding = try GatewayTokenBinding(ownerID: id(1), macID: id(2), accountID: id(3), gatewayID: id(4),
+            lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7), candidateID: id(8),
+            tokenDigest: id(9, 32), challenge: id(10, 32), enrollmentTag: id(6, 32))
+        let key = P256.Signing.PrivateKey()
+        let owner = try GatewayMappingQueryOwner(scope: GatewayMappingScope(registration: fixture.identity(), binding: binding),
+            gatewayPublicKey: key.publicKey.x963Representation, clockEpoch: clock.epoch)
+        let first = try owner.query(now: clock.sample().moment)
+        let reply = try await coordinator.mappingStateReply(canonicalQuery: first) {
+            calls.value.withLock { $0 += 1 }; return try key.signature(for: $0).rawRepresentation
+        }
+        XCTAssertNil(try owner.accept(reply, now: clock.sample().moment).activation)
+        clock.advance(100)
+        let expired = try owner.query(now: clock.sample().moment)
+        do {
+            _ = try await coordinator.mappingStateReply(canonicalQuery: expired) {
+                calls.value.withLock { $0 += 1 }; return try key.signature(for: $0).rawRepresentation
+            }
+            XCTFail("Expired Root lease signed mapping state")
+        } catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        XCTAssertEqual(calls.value.withLock { $0 }, 1)
+        let sends = await provider.times
+        XCTAssertTrue(sends.isEmpty)
+        XCTAssertEqual(fixture.refreshes.value.withLock { $0 }, 0)
+        try await coordinator.shutdown()
+    }
+
     func testRecoveryRepliesVerifyAtRootAndContainNoTokenOrProviderWork() async throws {
         let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
         let gatewayKey = P256.Signing.PrivateKey()

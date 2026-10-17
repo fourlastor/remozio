@@ -1413,6 +1413,86 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertEqual(try blockedFixture.scalar("SELECT count(*) FROM gateway_candidates_v1"), 1)
     }
 
+    func testFreshMappingQuerySeparatesCurrentStateFromHistoricalActivationAcrossReopen() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), value = try candidate(), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db, value)
+        let scope = try GatewayMappingScope(registration: identity(), binding: value.binding)
+        func owner() throws -> GatewayMappingQueryOwner {
+            try .init(scope: scope, gatewayPublicKey: gateway.publicKey.x963Representation, clockEpoch: epoch)
+        }
+        let missing = try owner(), query = try missing.query(now: headMoment(1))
+        XCTAssertThrowsError(try db.headReply(canonicalQuery: query) { try gateway.signature(for: $0).rawRepresentation })
+        XCTAssertEqual(try db.head(), 1)
+        let absent = try db.mappingStateReply(query: query, trust: trust(head: 1)) { try gateway.signature(for: $0).rawRepresentation }
+        XCTAssertNil(try missing.accept(absent, now: headMoment(2)).activation)
+        let applied = try activate(db, activation(value), head: 1)
+        let live = try owner(), liveQuery = try live.query(now: headMoment(3))
+        let present = try db.mappingStateReply(query: liveQuery, trust: trust(head: 2)) { try gateway.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try live.accept(present, now: headMoment(4)).activation?.operationID, applied.receipt.operationID)
+        XCTAssertThrowsError(try live.accept(present, now: headMoment(5)))
+        try db.close()
+        let reopened = try open(fixture)
+        let resumed = try owner(), resumedQuery = try resumed.query(now: headMoment(10_000))
+        let retained = try reopened.mappingStateReply(query: resumedQuery, trust: trust(head: 2)) { try gateway.signature(for: $0).rawRepresentation }
+        XCTAssertEqual(try resumed.accept(retained, now: headMoment(10_001)).activation?.operationID, applied.receipt.operationID)
+        let current = try XCTUnwrap(reopened.activeMapping(trust: trust(head: 2)))
+        XCTAssertTrue(try reopened.invalidateMapping(current, trust: trust(head: 2)))
+        let invalidated = try owner(), invalidatedQuery = try invalidated.query(now: headMoment(10_002))
+        let gone = try reopened.mappingStateReply(query: invalidatedQuery, trust: trust(head: 2)) { try gateway.signature(for: $0).rawRepresentation }
+        XCTAssertNil(try invalidated.accept(gone, now: headMoment(10_003)).activation)
+        XCTAssertNotNil(try reopened.recipientReceipt(operationID: applied.receipt.operationID))
+    }
+    func testFreshMappingQueryRejectsForgedRepliesWrongScopeAndMalformedClosedFrames() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), value = try candidate(), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db, value); _ = try activate(db, activation(value), head: 1)
+        let scope = try GatewayMappingScope(registration: identity(), binding: value.binding)
+        let limits = try CBORLimits(maxBytes: 8192, maxDepth: 1, maxItems: 32)
+        for mutation in 0..<8 {
+            let owner = try GatewayMappingQueryOwner(scope: scope, gatewayPublicKey: gateway.publicKey.x963Representation, clockEpoch: epoch)
+            let query = try owner.query(now: headMoment(1))
+            let reply = try db.mappingStateReply(query: query, trust: trust(head: 2)) { try gateway.signature(for: $0).rawRepresentation }
+            guard case .map(var fields) = try DeterministicCBOR.decode(reply.canonicalPayload, limits: limits) else { return XCTFail() }
+            switch mutation {
+            case 0: fields[3] = .bytes(id(99, 32))
+            case 1: fields[4] = .bytes(id(99))
+            case 2: fields[7] = .bytes(id(99, 32))
+            case 3: fields[10] = .bytes(Data(repeating: 0, count: 64))
+            case 4: fields[8] = .unsigned(0)
+            case 5: fields[11] = .null
+            case 6: fields[0] = .unsigned(1)
+            default: fields[8] = .unsigned(2)
+            }
+            let payload = try DeterministicCBOR.encode(.map(fields), limits: limits)
+            let changed = GatewayMappingStateReply(canonicalPayload: payload,
+                signature: try gateway.signature(for: GatewayMappingStateWire.signingInput(payload)).rawRepresentation)
+            XCTAssertThrowsError(try owner.accept(changed, now: headMoment(2)))
+            XCTAssertEqual(try owner.accept(reply, now: headMoment(3)).activation?.binding, value.binding)
+        }
+    }
+    func testMappingQueryExpiryWrongKeyAndOldHeadReplyCannotConfirmAMapping() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), value = try candidate(), gateway = P256.Signing.PrivateKey()
+        _ = try admit(db, value); _ = try activate(db, activation(value), head: 1)
+        let scope = try GatewayMappingScope(registration: identity(), binding: value.binding)
+        for mutation in 0..<4 {
+            let owner = try GatewayMappingQueryOwner(scope: scope, gatewayPublicKey: gateway.publicKey.x963Representation,
+                clockEpoch: epoch, lifetimeMilliseconds: 10)
+            let query = try owner.query(now: headMoment(1))
+            let reply = try db.mappingStateReply(query: query, trust: trust(head: 2)) { try gateway.signature(for: $0).rawRepresentation }
+            switch mutation {
+            case 0: XCTAssertThrowsError(try owner.accept(reply, now: headMoment(11)))
+            case 1: XCTAssertThrowsError(try owner.accept(reply, now: .init(epoch: UUID(), milliseconds: 2)))
+            case 2:
+                let invalid = GatewayMappingStateReply(canonicalPayload: reply.canonicalPayload,
+                    signature: try P256.Signing.PrivateKey().signature(for: GatewayMappingStateWire.signingInput(reply.canonicalPayload)).rawRepresentation)
+                XCTAssertThrowsError(try owner.accept(invalid, now: headMoment(2)))
+            default:
+                let headOwner = try self.headOwner(gateway), oldQuery = try headOwner.makeQuery(now: headMoment(1))
+                let head = try db.headReply(canonicalQuery: oldQuery) { try gateway.signature(for: $0).rawRepresentation }
+                XCTAssertThrowsError(try owner.accept(.init(canonicalPayload: head.canonicalPayload, signature: head.signature), now: headMoment(2)))
+            }
+        }
+    }
+
     private final class Fixture {
         let root: URL
         var directory: String { root.appendingPathComponent("store").path }

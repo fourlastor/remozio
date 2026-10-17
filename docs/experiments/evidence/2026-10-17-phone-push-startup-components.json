@@ -1,0 +1,118 @@
+{
+  "experiment": "phone-push-startup-components",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-17T16:41:16.951232+00:00",
+  "sourceCommit": "9fbca8ac74a4ccfb7b659b303d5180beee42fb31",
+  "sourceBase": "f58989f7d9520a907da2754b47b9873f58bd1577",
+  "sourceBasis": "The source commit contains the listed changed implementation and test files. Later evidence-only commits do not change these executable inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "validation": {
+    "nativePythonGate": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeLogSHA256": "056ccdeb1968e02cc884f8344fde667370d18a8077ea860e3d18877d61df1a86",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCExitCode": 0,
+    "testReports": 716,
+    "testReportFailures": 0,
+    "testReportErrors": 0,
+    "testReportSkips": 0,
+    "assemblyAndLintPassed": true
+  },
+  "relevantPassedMethods": {
+    "AuthorityPhonePushRegistrationTests": [
+      "testCandidateMetadataAndProofResultFollowCheckpointedCommits",
+      "testCheckpointFailureWithholdsMetadataAndProofOutcomes",
+      "testCurrentTokenStateSeparatesAbsentCandidateProofAndExpiry",
+      "testDuplicateProofCannotCreateAnotherActivationOrRetireHealthyStorage",
+      "testExpiredRenewalRetainsEnrollmentAndRequiresAFreshProviderProof",
+      "testHostileResponseRolesNeverCreateControls",
+      "testIncompatibleProviderDoesNotCreateCandidateOrSign",
+      "testLiveCandidateIsNotRenewedAndWrongEnrollmentCannotReadPrivateState",
+      "testProtectedStartupCheckpointFailureRetiresTheOwnerBeforeListenerStart",
+      "testProtectedStartupConfiguresTheFixedIdentityThroughTheCheckpoint",
+      "testProtectedStartupRejectsADifferentAuthorityClockWithoutWriting",
+      "testProtectedStartupRejectsAReplacementIdentityAndKeepsTheOriginalOwnerUsable",
+      "testProtectedStartupValidatesRootBeforeCreatingGatewayState",
+      "testReopenedAuthorityRetainsPairingAndTheCommittedMappingBoundary",
+      "testTransportRejectionAndStaleBindingCannotReachTheSigner"
+    ],
+    "AuthorityPhonePushStartupConfigurationTests": [
+      "testDisabledFormatKeepsVersionOneAndRejectsAnInjectedOption",
+      "testMalformedClosedConfigurationAndResourceBoundsAreRejected",
+      "testOptInRoundTripPreservesProviderAndClockPolicy",
+      "testReceiptKeyCannotBeTheRootAuthorityKey"
+    ],
+    "WakeStartupConfigurationTests": [
+      "testNormalAccountCannotOpenRootServiceOrReadPrivateStartupInputs",
+      "testPresenceConfigurationRejectsInvalidScopeAccountAndRecoveryIntervals",
+      "testPresenceStartupRoundTripKeepsDistinctAccountAndServices",
+      "testPublicPresenceClientConfigurationPinsRootAndRejectsMalformedMetadata",
+      "testRootCanonicalConfigurationPinsHardwareIdentityScopeAndBoundedLease",
+      "testTransportCanonicalCompositionRejectsWrongMachineOrAccountOwner"
+    ],
+    "GatewayRootRegistrationTests": [
+      "testExactOriginalReceiptAndDuplicateAdmissionForBothControls",
+      "testInvalidOutgoingEnvelopeNeverSendsPrivateFields",
+      "testLegacyGatewayRejectsOptionalMappingQueryWithoutLosingTheControlConnection",
+      "testMalformedOrDifferentReceiptRetiresChannelWithoutASecondCall"
+    ],
+    "GatewayRootIPCTests": [
+      "testCommandRoundTripKeepsOriginalWakeScopeAndTimes",
+      "testDisconnectSuppressesLateReplyAndReleasesSharedWorkBudget",
+      "testRechecksInvocationAfterHelloBeforeAsynchronousWork",
+      "testRejectedOptionalInnerQueryDoesNotCloseTheAuthenticatedEndpoint",
+      "testRejectsSensitiveCallsBeforeHandshakeWithoutRunningHandler",
+      "testRootDeliveryRegistrationRequiresVersionThree",
+      "testSnapshotRejectsUnknownFieldsVersionsDuplicatesAndUnsortedEnrollments",
+      "testSubmissionRequiresVersionTwoAndExactBoundedFields"
+    ],
+    "GatewayDatabaseTests": [
+      "testFreshMappingQueryRejectsForgedRepliesWrongScopeAndMalformedClosedFrames",
+      "testFreshMappingQuerySeparatesCurrentStateFromHistoricalActivationAcrossReopen",
+      "testMappingQueryExpiryWrongKeyAndOldHeadReplyCannotConfirmAMapping"
+    ],
+    "GatewayDeliveryCoordinatorTests": [
+      "testMappingStateRequiresLiveRootLeaseBeforeSigningWithoutProviderWork"
+    ]
+  },
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayRootRegistration.swift": "a12f520e4514ee22767569d3271a54d95f1cd231161330dfcb1d6aa3776e6a76",
+    "macos/core/Tests/RemozioCoreTests/GatewayRootRegistrationTests.swift": "a0ff668e31501b2f434b7e036510695acbf84d201956f3f4db10e1bead355012",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushStartupConfiguration.swift": "67a159e1400f873ecf3617a00a4152f270ca1d91955650c66ff01bfa0c6ce3f4",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushStartupConfigurationTests.swift": "f2e97bf78785147662d383e1a38cc6e0378abb081566c0141051e89eb4760b88",
+    "macos/core/Sources/RemozioCore/AuthorityWakeStartupConfiguration.swift": "31073b00777e7149094053d38b488623ce2647872c45aa53736ecb32ac04b497",
+    "macos/core/Sources/RemozioCore/AuthorityStorage.swift": "0ae5f2911257ff08cad60a73a075d255da39517f3542bc47cc917ede88139780",
+    "macos/core/Sources/RemozioCore/AuthorityService.swift": "d88edcad7f6e675848ae1828c1d0f2df9642414ed8539430df8a833870612c9c",
+    "macos/core/Sources/RemozioCore/AuthorityWakeService.swift": "4c6d636c512359ae4196c06ddf87207b8e5fbd9df0ded395ddf4d18f3802f2d4",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushRegistration.swift": "95f645ecb495b58ccb7d0e1d3d5ea1c4dba139251bb5a535155a5647a04a83bf",
+    "macos/core/Sources/RemozioCore/ApprovalRequestCoordinator.swift": "899a96ab7a48c18259216c4e61e1ac79ffd376989888617373f6b5e56c32a482",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushRegistrationTests.swift": "b9866bb31bbfd012be1e3ff16fa52b321ee549cbe7991282ac3bb4b84e7e01ac",
+    "macos/core/Sources/RemozioCore/GatewayAuthorityJournal.swift": "49074377409377a7b4efe44130bab7680f926c0b46d63c6c52f2600ee81f6660",
+    "macos/core/Sources/RemozioCore/JournalDatabase.swift": "d834ec153c15b264027e905d80e150d0675b3306f5a5693addc677ce256ae718",
+    "macos/core/Sources/RemozioCore/GatewayMappingState.swift": "c7f3817edc873b1f537847e9121972946ea0ae78105b6c85744e27bee9314833",
+    "macos/core/Sources/RemozioCore/GatewayDeliveryCoordinator.swift": "f06dcbada0849b4ad53caa749bf6fd8a10c16b58dc711cac2d579c4a453aaf29",
+    "macos/core/Sources/RemozioCore/GatewayService.swift": "028127fe44b1889f569a3121688a58e941dec5592ccd911734db6f409cc5fdf8",
+    "macos/core/Tests/RemozioCoreTests/GatewayDatabaseTests.swift": "d3f0e6154aaea26f039ac5bb37239878c68a4db623b331d154a206da2fe8735b",
+    "macos/core/Tests/RemozioCoreTests/GatewayRootIPCTests.swift": "ae7f7414004b9003ced927800c8a6f4d4a7f0aa5571b5d78450bc6f34f1543fc",
+    "macos/core/Tests/RemozioCoreTests/GatewayDeliveryCoordinatorTests.swift": "588ef0cad9b626bd25aa93870f75e5aa8a48922fcc6993e131191379802f1129"
+  },
+  "usesSoftwareFixtureKeys": true,
+  "hardwareRootStartupTested": false,
+  "installedServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "physicalAndroidTested": false,
+  "limits": [
+    "Component fixtures do not establish hardware key restoration or protected installation.",
+    "The observed runtime is macOS27.0.1; deployment target26.0 does not establish macOS26 runtime behavior.",
+    "Gateway observations do not establish successful phone delivery or grant approval authority.",
+    "Automatic publication, mapping repair, provider challenge processing, phone recovery and settings remain incomplete."
+  ]
+}

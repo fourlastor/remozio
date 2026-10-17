@@ -24,6 +24,10 @@ actor GatewayRootDispatcher {
         try Task.checkCancellation()
         switch command {
         case .head(let query):
+            if GatewayMappingStateWire.isQuery(query) {
+                let result = try await coordinator.mappingStateReply(canonicalQuery: query, sign: receipts.sign)
+                return try GatewayRootCommand.reply([.bytes(result.canonicalPayload), .bytes(result.signature)])
+            }
             let result = try await coordinator.recoveryHeadReply(canonicalQuery: query, sign: receipts.sign)
             return try GatewayRootCommand.reply([.bytes(result.canonicalPayload), .bytes(result.signature)])
         case .history(let query):

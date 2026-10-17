@@ -29,7 +29,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let provider: AuthorityPhonePushRegistration
         let signs = PushSignCount()
         let limits: CBORLimits
-        init() throws {
+        init(configureGateway: Bool = true) throws {
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
             defer { free(canonical) }
             let root = URL(fileURLWithPath: String(cString: canonical)).appendingPathComponent(UUID().uuidString)
@@ -70,7 +70,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
             let registration = try GatewayRegistrationIdentity(ownerID: pushID(40), macID: pushID(1), accountID: pushID(2),
                 gatewayID: pushID(41), lifecycleEpoch: pushID(42), rootPublicKey: key.publicKey.x963Representation)
             self.registration = registration
-            try db.write { try $0.configureGatewayAuthority(registration) }
+            if configureGateway { try db.write { try $0.configureGatewayAuthority(registration) } }
             let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch, generation: 1, authorityGeneration: 3) }
             let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
                 macID: pushID(1), accountID: pushID(2), initialize: initial)
@@ -117,6 +117,151 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
     }
     private func proof(_ candidate: GatewayTokenCandidate) -> PhonePushRegistrationFrame {
         .proof(correlationID: pushID(51), proof: GatewayTokenProof(binding: candidate.binding))
+    }
+    func testReopenedAuthorityRetainsPairingAndTheCommittedMappingBoundary() throws {
+        for committed in [false, true] {
+        let h = try Harness(), metadata = try prepared(h.exchange(h.offer())), original = try h.candidate(metadata)
+        if committed { _ = try h.exchange(proof(original), time: 101) }
+        let before = try h.db.read { try $0.approvalTrustSnapshot().revision }
+        h.owner.close(); try h.db.close(); h.store.close()
+        let epoch = UUID(), root = h.root.path, limits = h.limits, provider = h.provider
+        let storage = try AuthorityStorage(openJournal: {
+            try JournalDatabase(lease: ProtectedJournalLease(anchor: root, relativeDirectory: "store", owner: getuid()),
+                macID: pushID(1), accountID: pushID(2), recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                maximumConsumptions: 30, busyMilliseconds: 100, initialize: false,
+                gatewayPolicy: GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: 30,
+                    candidateLifetimeMillis: 1000, clockEpoch: epoch))
+        }, openContinuity: { _ in
+            try ContinuityStore(lease: ProtectedContinuityLease(anchor: root, relativeDirectory: "continuity", owner: getuid()),
+                macID: pushID(1), accountID: pushID(2), initialize: nil)
+        })
+        let journal = try AuthorityJournal(storage: storage)
+        defer { try? journal.close() }
+        try journal.prepareRequests(clockEpoch: epoch, maximumPayloadBytes: 4096)
+        try journal.withRequests { owner in
+            let stale = try XCTUnwrap(owner.currentPhonePushRegistration(provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+                now: .init(epoch: epoch, milliseconds: 10), wall: 1001))
+            XCTAssertTrue(stale.candidateExpired); XCTAssertEqual(stale.needsRenewal, !committed)
+            let current = try XCTUnwrap(owner.renewExpiredPhonePushRegistration(provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+                now: .init(epoch: epoch, milliseconds: 11), wall: 1002))
+            XCTAssertFalse(current.needsRenewal)
+            let renewed = try GatewayTokenCandidate.decode(current.candidate.canonicalPayload, limits: limits)
+            XCTAssertEqual(renewed.binding.enrollmentEpoch, original.binding.enrollmentEpoch)
+            XCTAssertEqual(renewed.binding.enrollmentTag, original.binding.enrollmentTag)
+            if committed {
+                XCTAssertNotNil(current.activation)
+                XCTAssertEqual(renewed.binding.challenge, original.binding.challenge)
+                XCTAssertEqual(renewed.binding.candidateID, original.binding.candidateID)
+            } else {
+                XCTAssertNil(current.activation)
+                XCTAssertNotEqual(renewed.binding.challenge, original.binding.challenge)
+                XCTAssertNotEqual(renewed.binding.candidateID, original.binding.candidateID)
+            }
+        }
+        XCTAssertEqual(try journal.read { try $0.approvalTrustSnapshot().revision }, before)
+        }
+    }
+    func testCurrentTokenStateSeparatesAbsentCandidateProofAndExpiry() throws {
+        let h = try Harness()
+        func state(_ time: UInt64) throws -> GatewayCurrentTokenState? {
+            try h.owner.currentPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+                now: .init(epoch: h.clock, milliseconds: time), wall: 900 + time)
+        }
+        XCTAssertNil(try state(99))
+        let metadata = try prepared(h.exchange(h.offer()))
+        let pending = try XCTUnwrap(state(101))
+        XCTAssertFalse(pending.needsRenewal); XCTAssertNil(pending.activation)
+        XCTAssertEqual(pending.candidate.operationID, metadata.operationID)
+        XCTAssertEqual(String(describing: pending), "GatewayCurrentTokenState(redacted)")
+        _ = try h.exchange(proof(GatewayTokenCandidate.decode(pending.candidate.canonicalPayload, limits: h.limits)), time: 102)
+        let consumed = try XCTUnwrap(state(103))
+        XCTAssertNotNil(consumed.activation); XCTAssertFalse(consumed.needsRenewal)
+        let expired = try XCTUnwrap(state(1100))
+        XCTAssertTrue(expired.candidateExpired); XCTAssertFalse(expired.needsRenewal); XCTAssertNotNil(expired.activation)
+        XCTAssertEqual(expired.candidate.operationID, metadata.operationID)
+        let before = try h.store.read()
+        let retained = try XCTUnwrap(h.owner.renewExpiredPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+            now: .init(epoch: h.clock, milliseconds: 1101), wall: 2001))
+        XCTAssertEqual(retained.activation?.operationID, consumed.activation?.operationID)
+        XCTAssertEqual(try h.store.read(), before)
+
+    }
+    func testExpiredRenewalRetainsEnrollmentAndRequiresAFreshProviderProof() throws {
+        let h = try Harness(), old = try prepared(h.exchange(h.offer())), oldCandidate = try h.candidate(old)
+        let before = try h.store.read()
+        let renewed = try XCTUnwrap(h.owner.renewExpiredPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+            now: .init(epoch: h.clock, milliseconds: 1101), wall: 2001))
+        XCTAssertFalse(renewed.needsRenewal); XCTAssertNil(renewed.activation)
+        let value = try GatewayTokenCandidate.decode(renewed.candidate.canonicalPayload, limits: h.limits)
+        XCTAssertNotEqual(value.binding.candidateID, oldCandidate.binding.candidateID)
+        XCTAssertNotEqual(value.binding.challenge, oldCandidate.binding.challenge)
+        XCTAssertEqual(value.binding.phoneID, oldCandidate.binding.phoneID)
+        XCTAssertEqual(value.binding.enrollmentEpoch, oldCandidate.binding.enrollmentEpoch)
+        XCTAssertEqual(value.binding.tokenDigest, oldCandidate.binding.tokenDigest)
+        XCTAssertEqual(value.binding.enrollmentTag, oldCandidate.binding.enrollmentTag)
+        XCTAssertEqual(try h.store.read().committed.generation, before.committed.generation + 1)
+        XCTAssertThrowsError(try h.exchange(proof(oldCandidate), time: 1102))
+        _ = try h.exchange(proof(value), time: 1103)
+        XCTAssertEqual(try h.head, 3)
+    }
+    func testLiveCandidateIsNotRenewedAndWrongEnrollmentCannotReadPrivateState() throws {
+        let h = try Harness(), metadata = try prepared(h.exchange(h.offer())), before = try h.store.read()
+        let current = try XCTUnwrap(h.owner.renewExpiredPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(9),
+            now: .init(epoch: h.clock, milliseconds: 101), wall: 1001))
+        XCTAssertEqual(current.candidate.operationID, metadata.operationID)
+        XCTAssertEqual(try h.store.read(), before)
+        XCTAssertThrowsError(try h.owner.currentPhonePushRegistration(h.provider, phoneID: pushID(5), enrollmentEpoch: pushID(99),
+            now: .init(epoch: h.clock, milliseconds: 102), wall: 1002))
+        XCTAssertEqual(try h.store.read(), before)
+        XCTAssertEqual(try h.head, 1)
+    }
+    func testProtectedStartupCheckpointFailureRetiresTheOwnerBeforeListenerStart() throws {
+        for finalize in [false, true] {
+            let h = try Harness(configureGateway: false), before = try h.store.read()
+            try h.failCheckpoint(finalize: finalize)
+            XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: h.clock, milliseconds: 100)))
+            XCTAssertTrue(h.owner.retired)
+            XCTAssertEqual(try h.store.read().committed, before.committed)
+            XCTAssertEqual(try h.store.read().pending != nil, finalize)
+            if finalize { XCTAssertEqual(try h.head, 0) } else { XCTAssertThrowsError(try h.head) }
+            XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: h.clock, milliseconds: 101)))
+        }
+    }
+    func testProtectedStartupRejectsADifferentAuthorityClockWithoutWriting() throws {
+        let h = try Harness(configureGateway: false), before = try h.store.read()
+        XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: UUID(), milliseconds: 100)))
+        XCTAssertEqual(try h.store.read(), before)
+        XCTAssertThrowsError(try h.head)
+    }
+    func testProtectedStartupConfiguresTheFixedIdentityThroughTheCheckpoint() throws {
+        let h = try Harness(configureGateway: false)
+        XCTAssertThrowsError(try h.head)
+        try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: h.clock, milliseconds: 100))
+        XCTAssertEqual(try h.head, 0)
+        let first = try h.store.read()
+        try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: h.clock, milliseconds: 101))
+        XCTAssertEqual(try h.head, 0)
+        XCTAssertGreaterThan(try h.store.read().committed.generation, first.committed.generation)
+        guard case .prepared = try h.exchange(h.offer(), time: 102) else { return XCTFail() }
+    }
+    func testProtectedStartupRejectsAReplacementIdentityAndKeepsTheOriginalOwnerUsable() throws {
+        let h = try Harness(), r = h.registration
+        let changed = try GatewayRegistrationIdentity(ownerID: pushID(99), macID: r.macID, accountID: r.accountID,
+            gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey)
+        let provider = AuthorityPhonePushRegistration(policy: try .init(registration: changed, projectID: "project", senderID: "123", packageName: "dev.remozio.android"),
+            signing: { _ in throw Failure.injected })
+        XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(provider, now: .init(epoch: h.clock, milliseconds: 100)))
+        XCTAssertEqual(try h.head, 0)
+        guard case .prepared = try h.exchange(h.offer(), time: 101) else { return XCTFail() }
+    }
+    func testProtectedStartupValidatesRootBeforeCreatingGatewayState() throws {
+        let h = try Harness(configureGateway: false)
+        let provider = AuthorityPhonePushRegistration(policy: h.provider.policy, signing: { _ in throw Failure.injected },
+            verifySelf: { _ in throw Failure.injected })
+        XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(provider, now: .init(epoch: h.clock, milliseconds: 100)))
+        XCTAssertThrowsError(try h.head)
+        try h.owner.preparePhonePushRegistration(h.provider, now: .init(epoch: h.clock, milliseconds: 101))
+        XCTAssertEqual(try h.head, 0)
     }
     func testCandidateMetadataAndProofResultFollowCheckpointedCommits() throws {
         let f = try Harness(); let before = try f.store.read()

@@ -65,6 +65,25 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
             state.value.withLock { $0.handled += 1 }; return Data([1])
         })
     }
+    func testRejectedOptionalInnerQueryDoesNotCloseTheAuthenticatedEndpoint() async throws {
+        let state = State(), budget = try AuthorityXPCWorkBudget(maximum: 1)
+        let endpoint = try endpoint(state, budget: budget, execute: { command in
+            guard case .head(let query) = command else { throw GatewayServiceError.invalidMessage }
+            state.value.withLock { $0.handled += 1 }
+            if query == Data([2]) { throw GatewayHeadReplyError.unsupportedVersion }
+            return Data([1])
+        })
+        endpoint.hello { XCTAssertEqual($0, 3) }
+        let rejected = expectation(description: "optional query rejected")
+        endpoint.command(try GatewayRootCommand.head(Data([2])).encode()) { XCTAssertNil($0); rejected.fulfill() }
+        await fulfillment(of: [rejected], timeout: 2)
+        let accepted = expectation(description: "legacy command remains usable")
+        endpoint.command(try GatewayRootCommand.head(Data([1])).encode()) { XCTAssertEqual($0, Data([1])); accepted.fulfill() }
+        await fulfillment(of: [accepted], timeout: 2)
+        XCTAssertEqual(state.value.withLock { $0.closed }, 0)
+        XCTAssertEqual(state.value.withLock { $0.handled }, 2)
+        XCTAssertTrue(budget.acquire()); budget.release(); endpoint.close()
+    }
     func testRejectsSensitiveCallsBeforeHandshakeWithoutRunningHandler() throws {
         let state = State(), endpoint = try endpoint(state)
         endpoint.synchronize(try snapshot().canonicalBytes) { XCTAssertFalse($0) }
