@@ -93,3 +93,5 @@ The [pairing invitation](pairing-invitation.md) carries public Mac pins through 
 The [restricted pairing exchange](pairing-setup.md) carries public phone claims, the returned transcript, and purpose-bound proofs through a separate TLS profile.
 
 The [pairing receipt recovery exchange](pairing-receipt.md) retrieves an existing commit proof through a separate enrolled TLS purpose.
+
+The [bounded pending snapshot contract](pending-request-snapshot.md) defines transfer completion and retained status queries. Production adapters remain separate work.
