@@ -139,5 +139,7 @@ The optional Root publisher applies retained gateway candidates and activations 
 Fresh gateway observations control repair; timer expiry alone does not replace a committed mapping.
 
 Still required: actual provider challenge ingress, current-generation join/recovery, production app wiring and real FCM delivery.
-A mapping-status query and recovery contract remain required before the phone can display Mapping confirmed.
+The [schema 2 recovery contract](phone-push-recovery.md) defines a challenge-free current-state query.
+Its internal Root handler distinguishes proof commitment from a recent gateway observation.
+The network/IPC and Android joins remain required before the phone can use that status.
 The first foreground Mac–Pixel approval remains independent of this push-registration work.

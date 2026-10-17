@@ -93,6 +93,15 @@ public final class ApprovalRequestCoordinator {
     private var retainedBytes = 0
     private var deliveryBytes = 0
     private let wakePublication: RetainedWakePublication
+    private struct PhonePushMappingObservation {
+        let session: UUID
+        let trustRevision: UUID
+        let candidateOperation: Data
+        let activationOperation: Data
+        let queriedAt: AuthorityMoment
+        let validUntilMilliseconds: UInt64
+    }
+    private var phonePushMappingObservations: [Data: PhonePushMappingObservation] = [:]
     private struct Entry {
         var state: ApprovalRequestState
         let contract: RequestContract
@@ -228,7 +237,7 @@ public final class ApprovalRequestCoordinator {
             entry.activity?.close()
         }
         entries.removeAll(); expiryNotifications.removeAll(); retainedBytes = 0; deliveryBytes = 0
-        wakePublication.close()
+        wakePublication.close(); phonePushMappingObservations.removeAll()
     }
 
     /// Transfers the command once. Callers cannot reuse the command or its aliases after this call.
@@ -559,7 +568,10 @@ public final class ApprovalRequestCoordinator {
     /// Only the active publisher can acknowledge work. Replacement preserves original grant IDs and deadlines.
     func beginWakePublicationSession(_ id: UUID) throws { try running(); try wakePublication.beginSession(id) }
     func requireWakePublicationSession(_ id: UUID) throws { try running(); try wakePublication.requireSession(id) }
-    func endWakePublicationSession(_ id: UUID) { wakePublication.endSession(id) }
+    func endWakePublicationSession(_ id: UUID) {
+        wakePublication.endSession(id)
+        phonePushMappingObservations = phonePushMappingObservations.filter { $0.value.session != id }
+    }
 
     /// Reconcile queue ownership from current owner state, including terminal states whose capture was released.
     public func reconcileDelivery(requestID: Data, delivery: PendingRequestDelivery, routing: PresenceRouting,
@@ -998,6 +1010,77 @@ public final class ApprovalRequestCoordinator {
         }
         try checkClock(now)
         try write { try provider.configure(transaction: $0) }
+    }
+
+    /// Accept only scoped evidence from the active publisher, while its protected lease remains live.
+    func recordPhonePushMapping(_ provider: AuthorityPhonePushRegistration, observation: VerifiedGatewayMappingState,
+                                session: UUID, expectedTrustRevision: UUID, validUntilMilliseconds: UInt64,
+                                now: AuthorityMoment, wall: UInt64) throws {
+        try requireWakePublicationSession(session); try checkClock(now)
+        guard observation.queriedAt.epoch == now.epoch, observation.receivedAt.epoch == now.epoch,
+              observation.queriedAt.milliseconds <= observation.receivedAt.milliseconds, observation.receivedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - observation.queriedAt.milliseconds < 5000, now.milliseconds < observation.validUntilMilliseconds,
+              now.milliseconds < validUntilMilliseconds,
+              observation.scope.registration == provider.policy.registration else { throw GatewayMappingStateError.expired }
+        let retained = try read { tx in
+            guard try tx.approvalTrustSnapshot().revision == expectedTrustRevision else { throw EnrollmentJournalError.staleRevision }
+            return try provider.current(phoneID: observation.scope.phoneID, enrollmentEpoch: observation.scope.enrollmentEpoch,
+                transaction: tx, now: now, wall: wall)
+        }
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
+        guard let retained, observation.scope.matches(try GatewayTokenCandidate.decode(retained.candidate.canonicalPayload, limits: limits).binding) else {
+            throw GatewayAuthorityError.superseded
+        }
+        phonePushMappingObservations = phonePushMappingObservations.filter { $0.value.trustRevision == expectedTrustRevision }
+        guard let observed = observation.activation else {
+            phonePushMappingObservations.removeValue(forKey: observation.scope.phoneID); return
+        }
+        guard let activation = retained.activation, try observed.encode(limits: limits) == activation.canonicalPayload else {
+            throw GatewayAuthorityError.wrongScope
+        }
+        phonePushMappingObservations[observation.scope.phoneID] = .init(session: session, trustRevision: expectedTrustRevision,
+            candidateOperation: retained.candidate.operationID, activationOperation: activation.operationID,
+            queriedAt: observation.queriedAt, validUntilMilliseconds: min(validUntilMilliseconds, observation.validUntilMilliseconds))
+    }
+
+    private func observedPhonePushRecovery(_ response: PhonePushRecoveryFrame, binding: AuthorityPeerBinding,
+                                          provider: AuthorityPhonePushRegistration, now: AuthorityMoment, wall: UInt64) throws -> PhonePushRecoveryFrame {
+        let phone = binding.scope.phoneID
+        guard case .state(let correlation, let state) = response, state.phase == .proofCommitted else {
+            phonePushMappingObservations.removeValue(forKey: phone); return response
+        }
+        guard let observed = phonePushMappingObservations[phone] else { return response }
+        do { try wakePublication.requireSession(observed.session) }
+        catch { phonePushMappingObservations.removeValue(forKey: phone); return response }
+        guard observed.trustRevision == binding.revision, observed.candidateOperation == state.metadata.operationID,
+              observed.queriedAt.epoch == now.epoch, observed.queriedAt.milliseconds <= now.milliseconds,
+              now.milliseconds - observed.queriedAt.milliseconds < 5000, now.milliseconds < observed.validUntilMilliseconds,
+              let retained = try currentPhonePushRegistration(provider, phoneID: phone, enrollmentEpoch: binding.scope.enrollmentEpoch, now: now, wall: wall),
+              retained.candidate.operationID == observed.candidateOperation, retained.activation?.operationID == observed.activationOperation else {
+            phonePushMappingObservations.removeValue(forKey: phone); return response
+        }
+        return .state(correlationID: correlation, state: try .init(metadata: state.metadata, phase: .mappingObserved,
+            observationAgeMilliseconds: now.milliseconds - observed.queriedAt.milliseconds))
+    }
+
+    /// Read current retained registration before deciding whether a checkpointed mutation is required.
+    /// A lost proof reply never makes this path consume that proof again.
+    func phonePushRecovery(_ request: PhonePushRecoveryFrame, binding: AuthorityPeerBinding,
+                           provider: AuthorityPhonePushRegistration, now: AuthorityMoment, wall: UInt64,
+                           validateTransport: (JournalTransaction) throws -> Void) throws -> PhonePushRecoveryFrame {
+        try running()
+        guard binding.scope.macID == mac, binding.scope.accountID == account else { throw GatewayAuthorityError.wrongScope }
+        guard case .resume = request else { throw AuthorityXPCError.invalidMessage }
+        _ = try request.encode(); try checkClock(now)
+        if let response = try read({ tx in
+            try validateTransport(tx)
+            return try provider.inspectRecovery(request, binding: binding, transaction: tx, now: now, wall: wall)
+        }) { return try observedPhonePushRecovery(response, binding: binding, provider: provider, now: now, wall: wall) }
+        let response = try write { tx in
+            try validateTransport(tx)
+            return try provider.processRecovery(request, binding: binding, transaction: tx, now: now, wall: wall)
+        }
+        return try observedPhonePushRecovery(response, binding: binding, provider: provider, now: now, wall: wall)
     }
 
     /// Fixed token registration operations share this owner's current binding and continuity writer.

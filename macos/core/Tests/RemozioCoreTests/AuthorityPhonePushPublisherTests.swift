@@ -213,6 +213,15 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                 sign: { try key.signature(for: $0).rawRepresentation })
             XCTAssertEqual(try owner.accept(reply, now: clock.now()).evidence.revision, expected, file: file, line: line)
         }
+        func recoveryState() throws -> PhonePushRecoveryState {
+            try journal.withRequests { owner in
+                let request = PhonePushRecoveryFrame.resume(correlationID: Data(repeating: 98, count: 16),
+                    offer: try PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+                guard case .state(_, let state) = try owner.phonePushRecovery(request, binding: root.binding, provider: root.provider,
+                    now: clock.now(), wall: clock.wall(), validateTransport: { _ in }) else { throw CocoaError(.fileReadUnknown) }
+                return state
+            }
+        }
         func publishEarlierControl() async throws {
             let control = try XCTUnwrap(earlierControl)
             if control.kind == 3 {
@@ -305,6 +314,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         XCTAssertNotNil(try f.state()?.activation)
         XCTAssertEqual(f.driver.state.withLock { $0.activations }, 1)
         XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, 0)
+        XCTAssertEqual(try f.recoveryState().phase, .mappingObserved)
         let before = try f.root.store.read()
         try await f.publisher.reconcile()
         XCTAssertEqual(try f.root.store.read(), before)
@@ -314,6 +324,9 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, mappedBeforeExpiry)
         XCTAssertEqual(try f.state()?.candidate.operationID, metadata.operationID)
         XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+        XCTAssertEqual(try f.recoveryState().phase, .mappingObserved)
+        await f.publisher.close()
+        XCTAssertEqual(try f.recoveryState().phase, .proofCommitted)
         await f.close()
     }
     func testProviderInvalidationRepairsWithFreshProofAndRetainsPairing() async throws {

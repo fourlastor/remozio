@@ -232,7 +232,13 @@ public actor AuthorityWakePublisher {
         let reply = try await channel.mappingState(query: owner.query(now: now))
         let current = try liveSample()
         guard current.trust.approval.revision == revision else { throw EnrollmentJournalError.staleRevision }
-        return try owner.accept(reply, now: current.now)
+        let observation = try owner.accept(reply, now: current.now)
+        guard let deadline = lease?.deadline else { throw AuthorityWakePublisherError.expiredLease }
+        try withPhoneOwner(revision) { owner, now in
+            try owner.recordPhonePushMapping(push.provider, observation: observation, session: session,
+                expectedTrustRevision: revision, validUntilMilliseconds: deadline, now: now, wall: push.wallTime())
+        }
+        return observation
     }
     private func repairMissing(_ observation: VerifiedGatewayMappingState, state: GatewayCurrentTokenState,
                                enrollment: StoredApprovalEnrollment, revision: UUID) throws {

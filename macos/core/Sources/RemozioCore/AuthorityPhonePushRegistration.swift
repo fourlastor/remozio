@@ -94,6 +94,42 @@ public struct AuthorityPhonePushRegistration: Sendable {
             transaction: tx, now: now, wall: wall)
     }
 
+    func inspectRecovery(_ request: PhonePushRecoveryFrame, binding: AuthorityPeerBinding, transaction tx: JournalTransaction,
+                         now: AuthorityMoment, wall: UInt64) throws -> PhonePushRecoveryFrame? {
+        try verifySelf(tx); try tx.requireDirectApprovalBinding(binding)
+        guard case .resume(let correlation, let offer) = request else { throw AuthorityXPCError.invalidMessage }
+        let r = policy.registration, scope = binding.scope
+        guard r.macID == scope.macID, r.accountID == scope.accountID else { throw GatewayAuthorityError.wrongScope }
+        guard offer.projectID == policy.projectID, offer.senderID == policy.senderID, offer.packageName == policy.packageName else {
+            return .outcome(correlationID: correlation, failure: .incompatible)
+        }
+        guard let state = try current(phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch,
+            transaction: tx, now: now, wall: wall) else { return nil }
+        let candidate = try GatewayTokenCandidate.decode(state.candidate.canonicalPayload, limits: limits)
+        guard candidate.binding.tokenDigest == Data(SHA256.hash(data: Data(offer.token.utf8))), !state.needsRenewal else { return nil }
+        return .state(correlationID: correlation, state: try .init(metadata: .init(candidate),
+            phase: state.activation == nil ? .awaitingProviderProof : .proofCommitted))
+    }
+
+    func processRecovery(_ request: PhonePushRecoveryFrame, binding: AuthorityPeerBinding, transaction tx: JournalTransaction,
+                         now: AuthorityMoment, wall: UInt64) throws -> PhonePushRecoveryFrame {
+        if let response = try inspectRecovery(request, binding: binding, transaction: tx, now: now, wall: wall) { return response }
+        guard case .resume(let correlation, let offer) = request else { throw AuthorityXPCError.invalidMessage }
+        let scope = binding.scope
+        if let state = try current(phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch, transaction: tx, now: now, wall: wall),
+           state.needsRenewal,
+           try GatewayTokenCandidate.decode(state.candidate.canonicalPayload, limits: limits).binding.tokenDigest == Data(SHA256.hash(data: Data(offer.token.utf8))) {
+            _ = try renewExpired(phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch, transaction: tx, now: now, wall: wall)
+            guard let response = try inspectRecovery(request, binding: binding, transaction: tx, now: now, wall: wall) else {
+                throw AuthorityXPCError.invalidMessage
+            }
+            return response
+        }
+        let response = try process(.offer(correlationID: correlation, offer: offer), binding: binding, transaction: tx, now: now, wall: wall)
+        guard case .prepared(_, let metadata) = response else { throw AuthorityXPCError.invalidMessage }
+        return .state(correlationID: correlation, state: try .init(metadata: metadata, phase: .awaitingProviderProof))
+    }
+
     func process(_ request: PhonePushRegistrationFrame, binding: AuthorityPeerBinding, transaction tx: JournalTransaction,
                  now: AuthorityMoment, wall: UInt64) throws -> PhonePushRegistrationFrame {
         try verifySelf(tx)

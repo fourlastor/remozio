@@ -50,10 +50,14 @@ public struct GatewayMappingStateReply: Sendable, CustomStringConvertible, Custo
 struct VerifiedGatewayMappingState: Sendable {
     let scope: GatewayMappingScope
     let activation: GatewayMappingActivation?
+    let queriedAt: AuthorityMoment
     let receivedAt: AuthorityMoment
+    let validUntilMilliseconds: UInt64
     let queryOwnerID: UUID
-    fileprivate init(scope: GatewayMappingScope, activation: GatewayMappingActivation?, receivedAt: AuthorityMoment, queryOwnerID: UUID) {
-        self.scope = scope; self.activation = activation; self.receivedAt = receivedAt; self.queryOwnerID = queryOwnerID
+    fileprivate init(scope: GatewayMappingScope, activation: GatewayMappingActivation?, queriedAt: AuthorityMoment,
+                     receivedAt: AuthorityMoment, validUntilMilliseconds: UInt64, queryOwnerID: UUID) {
+        self.scope = scope; self.activation = activation; self.queriedAt = queriedAt; self.receivedAt = receivedAt
+        self.validUntilMilliseconds = validUntilMilliseconds; self.queryOwnerID = queryOwnerID
     }
 }
 
@@ -64,7 +68,7 @@ final class GatewayMappingQueryOwner {
     private let epoch: UUID
     private let lifetime: UInt64
     private let identifier = UUID()
-    private var pending: (nonce: Data, deadline: UInt64)?
+    private var pending: (nonce: Data, started: UInt64, deadline: UInt64)?
     private var last: UInt64?
     init(scope: GatewayMappingScope, gatewayPublicKey: Data, clockEpoch: UUID, lifetimeMilliseconds: UInt64 = 5000) throws {
         guard (1...60_000).contains(lifetimeMilliseconds), gatewayPublicKey.count == 65,
@@ -81,7 +85,7 @@ final class GatewayMappingQueryOwner {
         var fields = try scope.fields
         fields[0] = .unsigned(2); fields[1] = .unsigned(4); fields[3] = .bytes(nonce)
         let query = try DeterministicCBOR.encode(.map(fields), limits: GatewayMappingStateWire.queryLimits)
-        pending = (nonce, deadline); return query
+        pending = (nonce, now.milliseconds, deadline); return query
     }
     func accept(_ reply: GatewayMappingStateReply, now: AuthorityMoment) throws -> VerifiedGatewayMappingState {
         try clock(now)
@@ -114,7 +118,8 @@ final class GatewayMappingQueryOwner {
         default: throw GatewayMappingStateError.invalidMessage
         }
         self.pending = nil
-        return VerifiedGatewayMappingState(scope: scope, activation: activation, receivedAt: now, queryOwnerID: identifier)
+        return VerifiedGatewayMappingState(scope: scope, activation: activation, queriedAt: .init(epoch: epoch, milliseconds: pending.started),
+            receivedAt: now, validUntilMilliseconds: pending.deadline, queryOwnerID: identifier)
     }
     private func clock(_ now: AuthorityMoment) throws {
         guard now.epoch == epoch, last.map({ now.milliseconds >= $0 }) ?? true else { throw GatewayMappingStateError.invalidClock }
