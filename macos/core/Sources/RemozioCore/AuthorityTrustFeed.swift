@@ -21,6 +21,7 @@ public actor AuthorityTrustFeed {
     private let lease = AuthorityTrustLease()
     private weak var host: DirectApprovalTransportHost?
     private var channel: AuthorityXPCChannel?
+    private var recoveryLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
     private var lastSnapshot: Data?
@@ -49,7 +50,7 @@ public actor AuthorityTrustFeed {
         self.maximumWaiting = maximumWaiting; self.factory = factory
     }
     deinit {
-        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort()
+        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort()
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -178,6 +179,51 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedPairingReceipt
         } catch { await close(); throw error }
     }
+    /// The transport performs this harmless preflight before accepting private recovery fields.
+    public func requirePhonePushRecoverySupport() async throws {
+        try await acquire(); defer { release() }
+        let link = try await openRecoveryLink()
+        do {
+            try await link.channel.requirePhonePushRecoverySupport()
+            try requireActive()
+            guard recoveryLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+        } catch AuthorityXPCError.unsupportedPhonePushRecovery {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhonePushRecovery
+        } catch { retireRecoveryLink(link.id); try requireActive(); throw error }
+    }
+    public func phonePushRecovery(_ peer: DirectApprovalPeer, revision: UUID,
+                                  frame: PhonePushRecoveryFrame) async throws -> PhonePushRecoveryFrame {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        let binding = AuthorityPeerBinding(peer: peer, revision: revision)
+        try AuthorityPhonePushRecoveryExchange.request(frame, binding: binding)
+        try await acquire(); defer { release() }
+        let link = try await openRecoveryLink()
+        do {
+            let response = try await link.channel.phonePushRecovery(binding: binding, frame: frame)
+            try requireActive()
+            guard recoveryLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+            return response
+        } catch AuthorityXPCError.unsupportedPhonePushRecovery {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhonePushRecovery
+        } catch { retireRecoveryLink(link.id); try requireActive(); throw error }
+    }
+    private func openRecoveryLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
+        try requireActive()
+        if let recoveryLink { return recoveryLink }
+        let id = UUID()
+        let value = try factory { [weak self] in Task { await self?.retireRecoveryLink(id) } }
+        recoveryLink = (id, value)
+        do {
+            try await value.start(); try requireActive()
+            guard recoveryLink?.id == id, value.lifetimeActive else { throw AuthorityXPCError.closed }
+            return (id, value)
+        } catch { retireRecoveryLink(id); throw error }
+    }
+    private func retireRecoveryLink(_ id: UUID) {
+        guard recoveryLink?.id == id else { return }
+        let value = recoveryLink?.channel; recoveryLink = nil; value?.abort()
+    }
+
     /// Serialize optional registration with this authority lease, using a separate RPC connection.
     /// An older Root can reject the optional selector without retiring ordinary approval delivery.
     public func phonePushRegistration(_ peer: DirectApprovalPeer, revision: UUID,
@@ -226,6 +272,7 @@ public actor AuthorityTrustFeed {
             closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
             channel?.abort(); channel = nil; lastSnapshot = nil
             if let id = registrationLink?.id { retireRegistrationLink(id) }
+            if let id = recoveryLink?.id { retireRecoveryLink(id) }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }

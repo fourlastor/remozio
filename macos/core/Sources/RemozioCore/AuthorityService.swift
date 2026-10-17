@@ -124,6 +124,7 @@ public final class AuthorityService: @unchecked Sendable {
          exchangeRequest: AuthorityRequestExchangeProvider? = nil,
          requestProviders: AuthorityRequestProviders? = nil,
          phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
+         phonePushRecovery: AuthorityPhonePushRecoveryProvider? = nil,
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
@@ -175,7 +176,7 @@ public final class AuthorityService: @unchecked Sendable {
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
-                phonePushRegistration: phonePushRegistration,
+                phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery,
                 wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)

@@ -4,13 +4,14 @@ import RemozioProtocol
 
 /// Selected by the enrolled TLS handshake, not by an application payload.
 public enum EnrolledChannelPurpose: Sendable {
-    case approvals, pairingReceipt, pendingSnapshot, pushRegistration
+    case approvals, pairingReceipt, pendingSnapshot, pushRegistration, pushRecovery
     var applicationProtocol: String {
         switch self {
         case .approvals: "remozio/1"
         case .pairingReceipt: PairingReceiptFrame.applicationProtocol
         case .pendingSnapshot: PendingRequestSnapshotFrame.applicationProtocol
         case .pushRegistration: PhonePushRegistrationFrame.applicationProtocol
+        case .pushRecovery: PhonePushRecoveryFrame.applicationProtocol
         }
     }
     init?(applicationProtocol: String) {
@@ -19,6 +20,7 @@ public enum EnrolledChannelPurpose: Sendable {
         case PairingReceiptFrame.applicationProtocol: self = .pairingReceipt
         case PendingRequestSnapshotFrame.applicationProtocol: self = .pendingSnapshot
         case PhonePushRegistrationFrame.applicationProtocol: self = .pushRegistration
+        case PhonePushRecoveryFrame.applicationProtocol: self = .pushRecovery
         default: return nil
         }
     }

@@ -122,6 +122,29 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let request = try PhonePushRegistrationFrame.decode(frame)
             reply(.registration(try PhonePushRegistrationFrame.outcome(correlationID: request.correlationID, outcome: .proofCommitted).encode()))
         }
+        private var recoveryCapability: UInt64? = 0
+        private var recoveryReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var recoveryFrame: Data?
+        private var recoveryCalls = 0
+        let recoverySent = XCTestExpectation(description: "held recovery")
+        var recoveryCount: Int { lock.withLock { recoveryCalls } }
+        func setRecoveryVersion(_ value: UInt64?) { lock.withLock { recoveryCapability = value } }
+        func recoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let version = lock.withLock({ recoveryCapability }) { reply(.recoveryVersion(version)) }
+            else { reply(.failed) }
+        }
+        func recovery(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { recoveryCalls += 1; recoveryFrame = frame; recoveryReply = reply }
+            recoverySent.fulfill()
+        }
+        func finishRecovery() throws {
+            let value = lock.withLock { () -> (Data?, (@Sendable (AuthorityXPCReply) -> Void)?) in
+                let value = (recoveryFrame, recoveryReply); recoveryFrame = nil; recoveryReply = nil; return value
+            }
+            guard let frame = value.0, let reply = value.1 else { return }
+            let request = try PhonePushRecoveryFrame.decode(frame)
+            reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .unavailable).encode()))
+        }
         func close() { lock.withLock { closedCalls += 1 } }
 
     }
@@ -233,6 +256,104 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         do { _ = try await pending.value; XCTFail("Cancelled registration returned success") } catch { }
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         XCTAssertEqual(auxiliary.registrationCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    private func recoveryOffer() throws -> PhonePushRecoveryFrame {
+        try .resume(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+    }
+    func testUnsupportedRecoveryKeepsPrimaryApprovalTrustAlive() async throws {
+        let capabilities: [UInt64?] = [0, nil]
+        for capability in capabilities {
+            let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+            auxiliary.setRecoveryVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { _ = try await feed.phonePushRecovery(trust.peers[0], revision: trust.revision, frame: recoveryOffer()); XCTFail("Expected optional refusal") } catch { }
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.recoveryCount, 0)
+            XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            XCTAssertEqual(factory.count, 2)
+            await feed.close(); await host.close()
+        }
+    }
+    func testRecoveryUsesSeparateRPCAndReturnsOnlyForTheCurrentAuthorityLease() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRecoveryVersion(2)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try recoveryOffer()
+        let pending = Task { try await feed.phonePushRecovery(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.recoverySent], timeout: 2)
+        try auxiliary.finishRecovery()
+        guard case .outcome(let correlation, let result) = try await pending.value else { return XCTFail("Missing status") }
+        XCTAssertEqual(correlation, request.correlationID); XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(primary.recoveryCount, 0); XCTAssertEqual(auxiliary.recoveryCount, 1); XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testPrimaryInterruptionDiscardsLateRecoveryReply() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRecoveryVersion(2)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try recoveryOffer()
+        let pending = Task { try await feed.phonePushRecovery(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.recoverySent], timeout: 2)
+        primary.interrupt(); try auxiliary.finishRecovery()
+        do { _ = try await pending.value; XCTFail("Retired authority returned recovery success") } catch { }
+        do { try await feed.validatePeer(trust.peers[0], revision: trust.revision); XCTFail("Retired primary revived") } catch { }
+        XCTAssertEqual(auxiliary.recoveryCount, 1); XCTAssertGreaterThan(auxiliary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testCancelledRecoveryRetiresOnlyItsOptionalLink() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRecoveryVersion(2)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try recoveryOffer()
+        let pending = Task { try await feed.phonePushRecovery(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.recoverySent], timeout: 2)
+        pending.cancel(); try auxiliary.finishRecovery()
+        do { _ = try await pending.value; XCTFail("Cancelled recovery returned success") } catch { }
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(auxiliary.recoveryCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testAuxiliaryInterruptionDiscardsRecoveryReplyWithoutRetiringPrimary() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRecoveryVersion(2)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try recoveryOffer()
+        let pending = Task { try await feed.phonePushRecovery(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.recoverySent], timeout: 2)
+        auxiliary.interrupt(); try auxiliary.finishRecovery()
+        do { _ = try await pending.value; XCTFail("Retired optional connection returned a result") } catch {}
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.recoveryCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testRecoveryPreflightDoesNotSendPrivateFieldsOrOpenRepeatedConnections() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRecoveryVersion(2)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        try await feed.requirePhonePushRecoverySupport(); try await feed.requirePhonePushRecoverySupport()
+        XCTAssertEqual(auxiliary.recoveryCount, 0); XCTAssertEqual(primary.recoveryCount, 0)
+        XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         await feed.close(); await host.close()
     }
     func testServiceStartsAfterTrustAndRetiresOnClose() async throws {

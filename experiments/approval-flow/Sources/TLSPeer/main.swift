@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let maximumPayloadBytes: Int? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -199,6 +199,32 @@ if setup.negotiate == true {
             case .stopped: break
             }
         }, handler: { _, channel in
+            if setup.pushRecovery == true {
+                guard channel.purpose == .pushRecovery,
+                      let probe = try await channel.receive(maximumBytes: PhonePushRecoveryFrame.maximumBytes),
+                      case .probe(let probeID) = try PhonePushRecoveryFrame.decode(probe) else { throw ProbeError.invalidInput }
+                // Synthetic wire only. This fixture has no configured Root, journal or gateway.
+                if setup.recoverySupported == false {
+                    try await channel.send(PhonePushRecoveryFrame.outcome(correlationID: probeID, failure: .incompatible).encode())
+                    return
+                }
+                try await channel.send(PhonePushRecoveryFrame.ready(correlationID: probeID).encode())
+                guard let bytes = try await channel.receive(maximumBytes: PhonePushRecoveryFrame.maximumBytes),
+                      case .resume(let resumeID, let offer) = try PhonePushRecoveryFrame.decode(bytes), resumeID != probeID else {
+                    throw ProbeError.invalidInput
+                }
+                let binding = try GatewayTokenBinding(ownerID: Data(repeating: 6, count: 16), macID: scope.macID, accountID: scope.accountID,
+                    gatewayID: Data(repeating: 7, count: 16), lifecycleEpoch: Data(repeating: 8, count: 16), phoneID: scope.phoneID,
+                    enrollmentEpoch: scope.enrollmentEpoch, candidateID: Data(repeating: 9, count: 16),
+                    tokenDigest: Data(SHA256.hash(data: Data(offer.token.utf8))), challenge: Data(repeating: 10, count: 32),
+                    enrollmentTag: Data(repeating: 11, count: 32))
+                let candidate = try GatewayTokenCandidate(binding: binding, revision: 1, operationID: Data(repeating: 12, count: 16),
+                    issuedAtUnixMillis: 1000, expiresAtUnixMillis: 2000)
+                let state = try PhonePushRecoveryState(metadata: PhonePushRegistrationMetadata(candidate), phase: .mappingObserved,
+                    observationAgeMilliseconds: 4)
+                try await channel.send(PhonePushRecoveryFrame.state(correlationID: resumeID, state: state).encode())
+                return
+            }
             if setup.pushRegistration == true {
                 guard channel.purpose == .pushRegistration,
                       let payload = try await channel.receive(maximumBytes: PhonePushRegistrationFrame.maximumBytes) else { throw ProbeError.invalidInput }

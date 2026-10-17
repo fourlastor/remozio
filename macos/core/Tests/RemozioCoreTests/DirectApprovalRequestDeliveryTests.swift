@@ -58,6 +58,22 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         private var hold = false
         private var queries: [Data] = []
         private var discoveries = 0
+        var recoveryVersionValue: UInt64? = 0
+        private var recoveryVersions = 0
+        private var recoveryFrames = 0
+        var recoveryCounts: (Int, Int) { lock.withLock { (recoveryVersions, recoveryFrames) } }
+        func recoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { recoveryVersions += 1 }
+            if let recoveryVersionValue { reply(.recoveryVersion(recoveryVersionValue)) } else { reply(.failed) }
+        }
+        func recovery(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { recoveryFrames += 1 }
+            do {
+                let request = try PhonePushRecoveryFrame.decode(frame)
+                guard case .resume = request else { return reply(.failed) }
+                reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .expired).encode()))
+            } catch { reply(.failed) }
+        }
         private var receiptQueries: [Data] = []
         private var receiptReply: (@Sendable (AuthorityXPCReply) -> Void)?
         private var holdReceiptReply = false
@@ -251,12 +267,13 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func setup(ids: [Data], frames: [Data: Data], maximum: Int = 4096, features: Set<UInt64> = [],
                        automatic: Bool = true, exchangeSupported: Bool = false, statuses: [Data: Data] = [:],
-                       decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000,
+                       decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000, recoveryVersion: UInt64? = 0,
                        handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void = { _, _ in }) async throws -> (DirectApprovalTransportService, DirectApprovalTransportHost, Driver, Factory, DirectApprovalPeer) {
         let peer = try DirectApprovalPeer(scope: Self.scope(), transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation,
             requests: [Self.capability(features: features)], auditVersions: [], maximumPayloadBytes: maximum)
         let trust = DirectApprovalTrust(macID: Self.id(1), accountID: Self.id(2), revision: UUID(), peers: [peer])
         let driver = Driver(trust: trust, ids: ids, frames: frames, exchangeSupported: exchangeSupported, statuses: statuses, decisions: decisions), factory = Factory()
+        driver.recoveryVersionValue = recoveryVersion
         let feed = AuthorityTrustFeed(macID: Self.id(1), accountID: Self.id(2), factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
         let host = DirectApprovalTransportHost(macID: Self.id(1), accountID: Self.id(2),
             factory: { generation, _, _, handler in factory.make(generation, handler) },
@@ -267,8 +284,73 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
                          purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
-        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: peer.requests, auditVersions: [],
+        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: purpose == .pushRecovery ? [] : peer.requests, auditVersions: [],
             maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose), purpose: purpose)
+    }
+    private func recoveryResume(_ id: Data = DirectApprovalRequestDeliveryTests.id(32)) throws -> PhonePushRecoveryFrame {
+        try .resume(correlationID: id, offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project",
+            senderID: "123", packageName: "dev.remozio.android"))
+    }
+    func testRecoveryPreflightPrecedesResumeAndUsesTheDefaultPurposeHandler() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], recoveryVersion: 2)
+        let phone = try Phone(scope: peer.scope, requests: [], maximum: 8192, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pushRecovery)
+        let delivery = Task { try await factory.run(peer, channel) }
+        try await phone.submit(PhonePushRecoveryFrame.probe(correlationID: Self.id(31)).encode())
+        await fulfillment(of: [await phone.expectPayloads(1)], timeout: 2)
+        let preflight = await phone.payloads
+        guard case .ready(let id) = try PhonePushRecoveryFrame.decode(preflight[0]) else { return XCTFail("Missing readiness") }
+        XCTAssertEqual(id, Self.id(31)); XCTAssertEqual(driver.recoveryCounts.0, 1); XCTAssertEqual(driver.recoveryCounts.1, 0)
+        try await phone.submit(recoveryResume().encode()); try await delivery.value
+        let replies = await phone.payloads
+        XCTAssertEqual(replies.count, 2)
+        guard case .outcome(let replyID, let failure) = try PhonePushRecoveryFrame.decode(replies[1]) else { return XCTFail("Missing outcome") }
+        XCTAssertEqual(replyID, Self.id(32)); XCTAssertEqual(failure, .expired); XCTAssertEqual(driver.recoveryCounts.1, 1)
+        let closed = await phone.closed; XCTAssertTrue(closed); await service.close()
+    }
+    func testRecoveryDistinguishesUnsupportedAndUnavailableWithoutPrivateInvocation() async throws {
+        for version: UInt64? in [0, 1, 3, nil] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], recoveryVersion: version)
+            let phone = try Phone(scope: peer.scope, requests: [], maximum: 8192, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pushRecovery)
+            try await phone.submit(PhonePushRecoveryFrame.probe(correlationID: Self.id(31)).encode())
+            try await factory.run(peer, channel)
+            let replies = await phone.payloads; XCTAssertEqual(replies.count, 1)
+            guard case .outcome(_, let failure) = try PhonePushRecoveryFrame.decode(replies[0]) else { return XCTFail("Missing refusal") }
+            XCTAssertEqual(failure, version == nil ? .unavailable : .incompatible)
+            XCTAssertEqual(driver.recoveryCounts.1, 0)
+            let admitted = try await host.admit(peer, generation: factory.generation)
+            let ordinaryIDs = try await service.pendingRequestIDs(for: admitted)
+            XCTAssertTrue(ordinaryIDs.isEmpty)
+            await service.close()
+        }
+    }
+    func testRecoveryRejectsPrivateFirstFrameAndRepeatedCorrelationBeforeRoot() async throws {
+        for privateFirst in [false, true] {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], recoveryVersion: 2)
+            let phone = try Phone(scope: peer.scope, requests: [], maximum: 8192, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .pushRecovery)
+            let delivery = Task { try await factory.run(peer, channel) }
+            if !privateFirst {
+                try await phone.submit(PhonePushRecoveryFrame.probe(correlationID: Self.id(31)).encode())
+                await fulfillment(of: [await phone.expectPayloads(1)], timeout: 2)
+            }
+            try await phone.submit(recoveryResume(Self.id(31)).encode())
+            do { try await delivery.value; XCTFail("Invalid exchange accepted") } catch {}
+            XCTAssertEqual(driver.recoveryCounts.0, privateFirst ? 0 : 1); XCTAssertEqual(driver.recoveryCounts.1, 0)
+            let closed = await phone.closed; XCTAssertTrue(closed); await service.close()
+        }
+    }
+    func testRecoveryCancellationAfterReadyDoesNotInventOrReplayResume() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], recoveryVersion: 2)
+        let phone = try Phone(scope: peer.scope, requests: [], maximum: 8192, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .pushRecovery)
+        let delivery = Task { try await factory.run(peer, channel) }
+        try await phone.submit(PhonePushRecoveryFrame.probe(correlationID: Self.id(31)).encode())
+        await fulfillment(of: [await phone.expectPayloads(1)], timeout: 2)
+        delivery.cancel(); do { try await delivery.value; XCTFail("Cancelled exchange completed") } catch {}
+        XCTAssertEqual(driver.recoveryCounts.1, 0)
+        let closed = await phone.closed; XCTAssertTrue(closed); await service.close()
     }
     func testDefaultHandlerWritesExactSignedFramesAndSkipsAbsentRequests() async throws {
         let (first, key) = try Self.frame(8), second = try Self.frame(10).0

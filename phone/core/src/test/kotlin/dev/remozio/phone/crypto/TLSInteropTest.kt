@@ -426,6 +426,64 @@ class TLSInteropTest {
             }
         }
 
+    @Test fun recoveryPurposeCarriesPreflightAndMaximumTokenOverNativeTlsAndOpaqueRelay(): Unit =
+        Fixture(negotiate = true, pushRecovery = true, maximumPayloadBytes = 1024).use { f ->
+            WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                runBlocking {
+                    withTimeout(20_000) {
+                        for (useRelay in listOf(false, true)) {
+                            val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                            val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                                scope, emptyList(), emptySet(), PhonePushRecoveryFrame.MAXIMUM_BYTES,
+                                purpose = EnrolledChannelPurpose.PUSH_RECOVERY)
+                            val channel = connector.connect(this,
+                                if (useRelay) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+                                    DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                                }), if (!useRelay) null else ApprovalCarrierRoute { owner ->
+                                    relay.connector.connect(owner, relay.endpoint,
+                                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                                })
+                            try {
+                                assertEquals(EnrolledChannelPurpose.PUSH_RECOVERY, channel.purpose)
+                                assertTrue(channel.negotiated.peer.requests.isEmpty()); assertTrue(channel.negotiated.peer.auditVersions.isEmpty())
+                                val probeID = ByteArray(16) { 30 }; val resumeID = ByteArray(16) { 31 }
+                                channel.send(PhonePushRecoveryFrame.Probe(probeID).encode())
+                                val ready = PhonePushRecoveryFrame.decode(requireNotNull(channel.receive())) as PhonePushRecoveryFrame.Ready
+                                assertArrayEquals(probeID, ready.correlationID.copyBytes())
+                                val token = "synthetic-private-recovery-token-".repeat(200).take(4096)
+                                channel.send(PhonePushRecoveryFrame.Resume(resumeID, PhonePushTokenOffer(token, "project", "123", "dev.remozio.android")).encode())
+                                val response = PhonePushRecoveryFrame.decode(requireNotNull(channel.receive())) as PhonePushRecoveryFrame.State
+                                assertArrayEquals(resumeID, response.correlationID.copyBytes()); assertEquals(scope, response.state.metadata.scope)
+                                assertArrayEquals(java.security.MessageDigest.getInstance("SHA-256").digest(token.toByteArray()), response.state.metadata.tokenDigest)
+                                assertEquals(PhonePushRecoveryPhase.MAPPING_OBSERVED, response.state.phase)
+                                assertEquals(4uL, response.state.observationAgeMilliseconds)
+                            } finally { channel.closeAndJoin() }
+                        }
+                    }
+                }
+                assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-private-recovery-token-"))
+            }
+        }
+
+    @Test fun recoveryPurposeRefusalPrecedesAnyTokenOverNativeTls(): Unit =
+        Fixture(negotiate = true, pushRecovery = true, recoverySupported = false).use { f ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                    val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                        scope, emptyList(), emptySet(), PhonePushRecoveryFrame.MAXIMUM_BYTES, purpose = EnrolledChannelPurpose.PUSH_RECOVERY)
+                    val channel = connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                        DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                    }), null)
+                    try {
+                        channel.send(PhonePushRecoveryFrame.Probe(ByteArray(16) { 30 }).encode())
+                        val response = PhonePushRecoveryFrame.decode(requireNotNull(channel.receive())) as PhonePushRecoveryFrame.Outcome
+                        assertEquals(PhonePushRecoveryFailure.INCOMPATIBLE, response.failure)
+                    } finally { channel.closeAndJoin() }
+                }
+            }
+        }
+
     @Test fun registrationPurposeCarriesMaximumTokenDirectlyAndThroughTheRelayWithItsOwnBudget(): Unit =
         Fixture(negotiate = true, pushRegistration = true, maximumPayloadBytes = 1024).use { f ->
             WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
@@ -723,7 +781,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val maximumPayloadBytes: Int = 65_536) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -741,7 +799,7 @@ class TLSInteropTest {
                 process = child
                 process.outputStream.bufferedWriter().also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + "}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

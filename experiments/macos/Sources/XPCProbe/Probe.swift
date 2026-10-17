@@ -50,6 +50,17 @@ final class ProbeService: NSObject, ProbeProtocol {
         default: reply(nil)
         }
     }
+    func phonePushRecoveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
+    func phonePushRecovery(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        // This standalone experiment uses synthetic nonces, never provider tokens or enrollment records.
+        print("RECOVERY_RECEIVED \(String(decoding: frame, as: UTF8.self))")
+        fflush(stdout)
+        switch String(decoding: binding, as: UTF8.self) {
+        case "recovery": reply(frame)
+        case "recovery-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
     func phonePushRegistrationVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
     func phonePushRegistration(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) {
         print("REGISTRATION_RECEIVED \(String(decoding: frame, as: UTF8.self))")
@@ -161,7 +172,7 @@ final class Completion: @unchecked Sendable {
             listener.delegate = delegate
             listener.activate()
             withExtendedLifetime((listener, delegate)) { RunLoop.current.run() }
-        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "registration", "registration-empty", "registration-nil", "receipt", "receipt-empty", "receipt-nil", "exchange", "exchange-empty", "exchange-nil",
+        case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "recovery", "recovery-empty", "recovery-nil", "registration", "registration-empty", "registration-nil", "receipt", "receipt-empty", "receipt-nil", "exchange", "exchange-empty", "exchange-nil",
              "setup-progress", "setup-bytes", "setup-empty", "setup-nil",
              "runtime-progress", "runtime-bytes", "runtime-empty", "runtime-nil", "runtime-no-consent",
              "activation-progress", "activation-bytes", "activation-empty", "activation-nil":
@@ -241,6 +252,16 @@ final class Completion: @unchecked Sendable {
                 let mode = args[0], bytes = Data(nonce.utf8)
                 let expected: Data? = mode == "setup-bytes" ? bytes : mode == "setup-empty" ? Data() : nil
                 proxy.prepareServiceAccounts(bytes, authorization: Data(mode.utf8)) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
+                }
+            } else if args[0].hasPrefix("recovery") {
+                let version = Completion()
+                proxy.phonePushRecoveryVersion { @Sendable value in version.finish(value == 2 ? "accepted" : "wrong-version") }
+                guard version.signal.wait(timeout: .now() + 10) == .success,
+                      version.value() == "accepted" else { print("version-failed"); exit(4) }
+                let mode = args[0], frame = Data(nonce.utf8)
+                let expected: Data? = mode == "recovery" ? frame : mode == "recovery-empty" ? Data() : nil
+                proxy.phonePushRecovery(Data(mode.utf8), frame: frame) { @Sendable returned in
                     completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else if args[0].hasPrefix("registration") {

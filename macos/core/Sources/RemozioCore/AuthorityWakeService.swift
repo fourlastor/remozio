@@ -131,9 +131,14 @@ public actor AuthorityWakeService {
             let phonePush = try configuration.phonePush.map {
                 try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
             }
+            let phonePushWall: @Sendable () throws -> UInt64 = {
+                let value = Date().timeIntervalSince1970 * 1000
+                guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
+                return UInt64(value)
+            }
             let phonePublication: AuthorityPhonePushPublication?
             if let phonePush, let options = configuration.phonePush {
-                phonePublication = try AuthorityPhonePushPublication(provider: phonePush, gatewayPublicKey: options.gatewayReceiptPublicKey)
+                phonePublication = try AuthorityPhonePushPublication(provider: phonePush, gatewayPublicKey: options.gatewayReceiptPublicKey, wallTime: phonePushWall)
             } else { phonePublication = nil }
             let hints = try AuthorityWakeHintSource(registration: configuration.registration)
             let retired = AuthorityRequestRetirementSignal()
@@ -148,11 +153,8 @@ public actor AuthorityWakeService {
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
-                phonePushRegistration: phonePush?.provider(clock: { try clock.now() }, wall: {
-                    let value = Date().timeIntervalSince1970 * 1000
-                    guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
-                    return UInt64(value)
-                }), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                phonePushRegistration: phonePush?.provider(clock: { try clock.now() }, wall: phonePushWall),
+                phonePushRecovery: phonePush?.recoveryProvider(clock: { try clock.now() }, wall: phonePushWall), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
                 onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
                     _ = executionWorker?.enqueue(notice)
                     onCommandAuthorized(notice)

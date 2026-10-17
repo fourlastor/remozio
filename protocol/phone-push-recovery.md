@@ -1,9 +1,10 @@
 # Phone push registration recovery, draft schema 2
 
 This contract adds an optional recovery exchange to [version 1 registration](phone-push-registration.md).
-It defines codecs, shared fixtures and internal Root recovery.
-Capability negotiation, transport wiring and Android ingress remain pending.
-No installed component advertises this purpose yet.
+It connects the shared codecs and Root recovery to optional IPC and enrolled native/phone transport handlers.
+The transport performs harmless preflight before accepting a provider token.
+Android provider lifecycle, work scheduling and settings integration remain pending.
+Installed services and provider delivery require separate validation.
 
 ## Negotiation and compatibility
 
@@ -22,6 +23,9 @@ The existing Root selector `phonePushRegistrationVersion` must continue returnin
 Old clients require exact equality.
 A separate optional recovery selector must establish schema 2 support before sensitive application data arrives.
 The codec constant alone establishes no peer capability.
+The independent Root selector `phonePushRecoveryVersion` returns 2 only when its handler is configured.
+The trust feed uses a separate recovery connection and retires that connection after ambiguous failure.
+Ordinary approval and version 1 registration retain their existing connections and version checks.
 
 ```mermaid
 sequenceDiagram
@@ -42,7 +46,7 @@ sequenceDiagram
     end
 ```
 
-This diagram defines the required integration order. The transport handlers are not enabled by this PR.
+This diagram shows the implemented source order. Protected Root configuration still controls the optional recovery capability.
 
 ## Frame
 
@@ -99,6 +103,9 @@ A missing or stale observation returns Proof committed.
 The phone must include exchange elapsed time when interpreting the age.
 Anchor the validity bound to the local request start; do not restart it when the response arrives.
 No clock synchronization is assumed.
+The phone result reads elapsed time again when its `state` is consumed.
+A delayed read cannot restart freshness or revive an observation that already expired.
+A caller must read current state when presenting it and recover again after process restart.
 
 Android joins metadata only with a provider-delivered matching candidate ID and enrollment tag.
 Recheck provider generation, token revision and enrollment incarnation after every suspension.
@@ -111,13 +118,29 @@ Keep tokens and challenges out of descriptions, logs, notifications, audit and w
 Shared controls cover canonical bytes, hostile roles, schema separation, redaction and bounded observation ages.
 Root controls cover idempotent resume, checkpoint failure, lease/session retirement and fresh mapping observations.
 The gateway publication fixture uses a real coordinator and journals with software keys and a synthetic provider.
-These components do not expose a new network purpose or Root IPC selector.
-Authenticated transport recovery, Android ingress and scheduling remain integration work.
+The source now exposes a separate optional Root IPC capability and purpose-bound transport handlers.
+Shared controls cover unsupported capability preflight, delayed replies, retirement and unchanged ordinary approval access.
+A synthetic native TLS peer exercises Probe/Ready/Resume directly and through the opaque relay.
+It supplies fixed state without a configured Root or provider.
+Android provider ingress, orchestration and scheduling remain separate integration work.
 [Recorded component results](../docs/experiments/evidence/2026-10-17-phone-push-recovery-components.json) bind the implementation and tests to source commit `cfdaae3`.
 The local gate passed 2506 native core tests, with one explicit GUI experiment skipped.
 The six required ATC tasks passed 723 test reports, assembly and lint.
 The shared recovery fixtures contain eleven valid and thirty-four invalid frames.
 Version 1 source and fixtures remain byte-identical to the base.
-These results do not exercise an advertised recovery purpose or optional Root IPC.
+That earlier record does not exercise the recovery purpose or optional Root IPC.
 Codec acceptance cannot authenticate a message or establish actual gateway mapping state.
 Installed services, hardware keys, actual FCM delivery and physical Android behavior require separate evidence.
+
+## Transport validation
+
+[The transport record](../docs/experiments/evidence/2026-10-17-phone-push-recovery-transport-components.json) binds the combined implementation and tests to source commit `ad9adfe`.
+The full native/Python gate passed 2525 core tests, with one explicit GUI experiment skipped.
+The six required ATC tasks passed 738 test reports, APK assembly and lint.
+The native TLS peer passed 71 interoperability tests, including recovery directly and through the opaque relay.
+It supplied fixed recovery state without a configured Root or provider.
+
+The live unprivileged XPC experiment passed all 53 controls and confirmed temporary service removal.
+Those controls include matching peers, hostile peer requirements, and nil and empty recovery replies.
+Its ad-hoc identifiers do not establish Developer ID, Team ID or installed Root behavior.
+No physical phone, production provider token or actual FCM delivery was used by these controls.

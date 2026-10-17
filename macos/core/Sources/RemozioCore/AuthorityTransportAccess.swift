@@ -112,6 +112,19 @@ final class AuthorityTransportAccess: Sendable {
         })
     }
 
+    func phonePushRecovery(binding: AuthorityPeerBinding, frame: PhonePushRecoveryFrame,
+                               handler: AuthorityPhonePushRecoveryProvider) throws -> PhonePushRecoveryFrame {
+        try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { owner in
+            try handler(owner, binding, frame, { transaction in
+                try self.requireCurrent(transaction)
+                try transaction.requireDirectApprovalBinding(binding)
+            })
+        })
+    }
+
     private func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {

@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -111,6 +111,11 @@ def experiment(report, swift_build_options=()):
                 ("discovery-bytes", "discovery", trusted, TRUSTED, 0),
                 ("discovery-wrong-server", "discovery", trusted, OTHER, 3),
                 ("discovery-wrong-client", "discovery", other, TRUSTED, 3),
+                ("recovery-bytes", "recovery", trusted, TRUSTED, 0),
+                ("recovery-empty", "recovery-empty", trusted, TRUSTED, 0),
+                ("recovery-nil", "recovery-nil", trusted, TRUSTED, 0),
+                ("recovery-wrong-server", "recovery", trusted, OTHER, 3),
+                ("recovery-wrong-client", "recovery", other, TRUSTED, 3),
                 ("registration-bytes", "registration", trusted, TRUSTED, 0),
                 ("registration-empty", "registration-empty", trusted, TRUSTED, 0),
                 ("registration-nil", "registration-nil", trusted, TRUSTED, 0),

@@ -66,6 +66,8 @@ public actor DirectApprovalTransportService {
                         try await self.runPendingRequestSnapshot(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .pushRegistration:
                         try await self.runPhonePushRegistration(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .pushRecovery:
+                        try await self.runPhonePushRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
                 }
             }
@@ -191,6 +193,26 @@ public actor DirectApprovalTransportService {
         let response: PhonePushRegistrationFrame
         do { response = try await feed.phonePushRegistration(session.peer, revision: session.revision, frame: frame) }
         catch AuthorityXPCError.unsupportedPhonePushRegistration { response = .outcome(correlationID: frame.correlationID, outcome: .incompatible) }
+        try await validate(session)
+        return response
+    }
+
+    /// Preflight sends no provider token. An ambiguous failure remains unavailable.
+    func phonePushRecoveryReadiness(for session: DirectApprovalSession) async throws -> PhonePushRecoveryFailure? {
+        try await validate(session)
+        let failure: PhonePushRecoveryFailure?
+        do { try await feed.requirePhonePushRecoverySupport(); failure = nil }
+        catch AuthorityXPCError.unsupportedPhonePushRecovery { failure = .incompatible }
+        catch is CancellationError { throw CancellationError() }
+        catch { failure = .unavailable }
+        try await validate(session)
+        return failure
+    }
+
+    /// Recovers through the current authority once. An uncertain operation is not replayed.
+    public func phonePushRecovery(for session: DirectApprovalSession, frame: PhonePushRecoveryFrame) async throws -> PhonePushRecoveryFrame {
+        try await validate(session)
+        let response = try await feed.phonePushRecovery(session.peer, revision: session.revision, frame: frame)
         try await validate(session)
         return response
     }

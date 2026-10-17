@@ -141,5 +141,6 @@ Fresh gateway observations control repair; timer expiry alone does not replace a
 Still required: actual provider challenge ingress, current-generation join/recovery, production app wiring and real FCM delivery.
 The [schema 2 recovery contract](phone-push-recovery.md) defines a challenge-free current-state query.
 Its internal Root handler distinguishes proof commitment from a recent gateway observation.
-The network/IPC and Android joins remain required before the phone can use that status.
+The separate optional recovery IPC and native/phone transport handlers are connected in source.
+Android provider lifecycle, challenge joins and scheduling remain required for app integration.
 The first foreground Mac–Pixel approval remains independent of this push-registration work.
