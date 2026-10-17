@@ -9,7 +9,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Swift/Kotlin approval flow | [Synthetic peer harness](approval-flow.md) | Durable admission, real enrollment, encrypted transport, and device keys |
 | Linux protocol portability | [Existing Swift fixtures on Ubuntu](linux-swift-protocol.md) | Mac regression gate, agreed Linux capture contract, installed host integration |
 | Linux caller identity | [Unprivileged peer/message identity, socket transfer, exec and monitor-loss controls](linux-caller.md) | Protected launch and code policy, full adversarial caller coverage, installed authority |
-| Linux TPM and TLS | [Simulator and supervised device checks](linux-tpm-tls.md) | Reboot retention, physical attestation, protected service access, resource bounds, Android peer |
+| Linux TPM and TLS | [Simulator and supervised device checks, including reboot retention](linux-tpm-tls.md) | Physical attestation, protected service access, resource bounds, Android peer |
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
 | Single app and background services | [Bundle checks](macos-packaging.md) and [guarded lifecycle harness](service-lifecycle.md) | Interactive registration, protected placement, notarization and replacement |
 | Release activity barrier | [Nine native lock controls passed](release-activity.md) | Bind all actual activity owners, protect file identity, and integrate durable activation |

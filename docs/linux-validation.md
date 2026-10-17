@@ -15,7 +15,7 @@ On 17 October 2026, Ubuntu 25.10 x86_64, kernel `6.17.0-41-generic`:
 | `scripts/check.sh`, system Python 3.13 | 165 repository tests, six explicit skips; 221 watcher tests passed. Run outside the socket-restricted execution sandbox. |
 | Existing Swift protocol suite | 119 tests passed; all 25 shared fixture files unchanged. |
 | Caller experiment | 31 observations and four cleanup checks passed; all nine focused tests passed with live checks enabled. |
-| TPM/provider TLS and hardware-adapter control | Private simulator controls and eleven focused unit tests passed. Supervised `/dev/tpmrm0` create/reopen, signing and mutual TLS also passed; reboot remains pending. |
+| TPM/provider TLS and hardware-adapter control | Private simulator controls and eleven focused unit tests passed. Supervised `/dev/tpmrm0` create/reopen, signing and mutual TLS also passed, including the same keys after an operator reboot. |
 | Linux-runnable Kotlin/Android tasks | Passed with JDK 21 and SDK 37; Gradle reused unchanged task results. Debug APK and lint tasks succeeded. |
 | Original unconditional Gradle gate | Blocked on Linux by four absent Mac peers; replaced by the host-aware gate below. |
 | Mac checks and remote CI | Not run; the added Linux protocol CI job is prepared only. |
@@ -109,11 +109,16 @@ sessions. A passing local Linux gate does not establish Mac runtime compatibilit
 
 ## Human testing boundary
 
-Supervised `/dev/tpmrm0` creation, fresh-process reopen, signing and mutual TLS
+Supervised `/dev/tpmrm0` creation, fresh-process reopen, signing and mutual TLS,
+including reuse of the same keys after the operator's reboot,
 passed with the operator's temporary per-user device ACL. The
 [device checkpoint](experiments/linux-tpm-tls-device-evidence.json) records all negative
 controls, unchanged retained records and unchanged persistent/NV handle listings.
-The next device-dependent check is reusing those exact keys after an operator reboot.
+The boot identifier changed, and all retained records matched their original hashes
+before and after the reboot test. The same two keys signed and verified, and mutual
+TLS plus all negative controls passed. No replacement keys were generated.
+Protected service access, resource contention and physical cross-machine controls
+remain separate device-dependent checks.
 The [operator procedure](experiments/linux-tpm-tls.md#prepared-human-hardware-gate) requires
 explicit hardware mode, authorized ordinary-user resource-manager access and
 known-empty owner authorization for this provider adapter. Unknown or nonempty
@@ -124,13 +129,14 @@ an existing trusted host identity. Simulator keys and state are disposable fixtu
 they must never be enrolled as a production identity.
 
 Record create/reopen, signing, mutual authentication, negative peers, unavailable
-hardware and bounded resource behavior. Reboot persistence, protected service
-access and copied-record rejection need their own explicit controls. A real TPM
+hardware and bounded resource behavior. The recorded reboot retention applies only
+to the disposable fixture on this selected device. Protected service access and
+physical cross-machine copied-record rejection still need explicit controls. A real TPM
 result does not establish a protected Linux installation or a phone approval flow.
 Using `/dev/tpmrm0` is device-path evidence, not physical-hardware attestation;
 the operator must identify the test platform accurately, including any virtual TPM.
 
-The retained fixture is under the operator's private user state directory,
+For future repeats, the retained fixture is under the operator's private user state directory,
 `~/.local/state/remozio-experiments/tpm-tls-fixture`. Keep it through the reboot;
 reuse must not regenerate either key. Sibling files retain the before-boot identity
 hashes and boot comparison metadata. The `runtime-debs` sibling preserves the

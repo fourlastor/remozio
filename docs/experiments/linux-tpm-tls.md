@@ -4,9 +4,11 @@
 P-256 signing key completing actual mutual TLS 1.3 through OpenSSL 3.5.3. This is
 **software TPM simulator evidence only**. A subsequent supervised
 [/dev/tpmrm0 checkpoint](linux-tpm-tls-device-evidence.json) passed creation,
-fresh-process reuse, signing and mutual TLS on the Ubuntu host. Neither establishes
+fresh-process reuse, signing, mutual TLS and same-key reuse after an operator reboot
+on the Ubuntu host. Neither establishes
 physical TPM
-nonexportability, reboot retention, protected account access or Android interoperability.
+nonexportability, protected account access or Android interoperability. Reboot retention
+is measured for these two disposable keys on this selected device only.
 
 The host used Ubuntu 25.10 amd64, kernel 6.17.0-41-generic. Ubuntu packages were
 downloaded and extracted under `/tmp`; no packages or services were installed.
@@ -119,16 +121,27 @@ timeout 120s python3 experiments/linux-tpm-tls/check_hardware_adapter.py \
 
 ## Prepared human hardware gate
 
-**Creation and fresh-process reuse passed on this host's `/dev/tpmrm0` on
-17 October 2026; the reboot check remains pending.** The operator granted a
+**Creation, fresh-process reuse and reuse after an operator reboot passed on this
+host's `/dev/tpmrm0` on 17 October 2026.** The operator granted a
 per-user read/write ACL for the interactive test. Public capability reads established
 `ownerAuthSet: 0`, `shEnable: 1` and lockout counter zero before using the empty-owner
-adapter. Both runs passed signing, mutual TLS and all negative controls. Independent
+adapter. All three runs passed signing, mutual TLS and all negative controls. Independent
 file hashes confirmed every retained record, including both public identities, was
 unchanged after reuse. Persistent and NV handle listings were unchanged, and the
 lockout counter remained zero; this comparison does not inspect NV contents.
 The [device evidence](linux-tpm-tls-device-evidence.json) contains sanitized results.
 Key records, raw inventories and boot-comparison metadata remain outside the repository.
+
+After the operator reported the reboot, a changed hash of
+`/proc/sys/kernel/random/boot_id` independently distinguished the new boot from the
+recorded initial session. All seven retained fixture files matched their pre-reboot
+hashes before and after `--reuse-fixture --operator-phase after-reboot`; no keys were
+created or replaced. Both keys signed and verified again, mutual TLS and all negative
+controls passed, persistent/NV handle listings were unchanged during the run, and
+the lockout counter remained zero. Runtime packages restored from private storage
+matched their saved checksums. Only comparison booleans are published. The runner's
+`hardwareRebootAutomaticallyVerified: false` is preserved: boot comparison was a
+separate check outside the runner, not physical attestation.
 
 The runner will return 77 before starting tools if `/dev/tpmrm0` access is unavailable.
 An interactive operator must
