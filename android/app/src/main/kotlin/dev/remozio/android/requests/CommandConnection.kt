@@ -28,6 +28,7 @@ internal class CommandConnection(
     retired: RetiredCommandRequests? = null,
     memoryBudget: CommandMemoryBudget? = null,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val openSnapshot: (suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire)? = null,
 ) : AutoCloseable {
     private val inbox = CommandRequestInbox(1, maximumRequests, memoryBudget)
     private val enrollment: CommandRequestEnrollment
@@ -35,8 +36,9 @@ internal class CommandConnection(
     private val running = Mutex()
     private val sending = Mutex()
     private var closed = false
-    private var lifetime: Job? = null
-    private var wire: CommandConnectionWire? = null
+    private class Attempt(val foreground: Boolean, val job: Job) { var wire: CommandConnectionWire? = null }
+    private var attempt: Attempt? = null
+    private var foregroundWaiters = 0
     private val state = MutableStateFlow(CommandConnectionState.DISCONNECTED)
     val connectionState = state.asStateFlow()
     val requests get() = enrollment.requestSessions
@@ -48,37 +50,73 @@ internal class CommandConnection(
         enrollment = inbox.add(e.macID.copyBytes(), e.accountID.copyBytes(), e.authorityPublicKey.copyBytes(), limits, retired)
     }
 
-    /** A foreground or wake owner runs this once per connection attempt. No automatic decision retry occurs. */
+    /** Foreground demand cancels an active snapshot before waiting for its transport cleanup. */
     suspend fun run() {
-        running.lock()
-        var candidate: CommandConnectionWire? = null
+        val preempt = synchronized(monitor) {
+            check(!closed)
+            foregroundWaiters++
+            attempt?.takeIf { !it.foreground }?.let { it.job to it.wire }
+        }
         try {
-            withContext(dispatcher) {
-                coroutineScope {
+            preempt?.first?.cancel()
+            try { preempt?.second?.close() } catch (_: Exception) { }
+            running.withLock { runAttempt(foreground = true, open) }
+        } finally { synchronized(monitor) { foregroundWaiters-- } }
+    }
+
+    /** Returns false when foreground work owns or awaits the connection. No decision wire is published. */
+    suspend fun fetchSnapshot(timeoutMillis: Long = 30_000): Boolean {
+        require(timeoutMillis in 1..60_000)
+        currentCoroutineContext().ensureActive()
+        val opener = checkNotNull(openSnapshot) { "Snapshot transport unavailable" }
+        val acquired = synchronized(monitor) {
+            check(!closed)
+            foregroundWaiters == 0 && running.tryLock()
+        }
+        if (!acquired) return false
+        try {
+            withTimeout(timeoutMillis) { runAttempt(foreground = false, opener) }
+            currentCoroutineContext().ensureActive()
+            synchronized(monitor) { check(!closed) }
+            return true
+        } finally { running.unlock() }
+    }
+
+    private suspend fun runAttempt(foreground: Boolean,
+                                   opener: suspend (CoroutineScope, CommandRequestEnrollment) -> CommandConnectionWire) = withContext(dispatcher) {
+        coroutineScope {
+            val owner = Attempt(foreground, checkNotNull(coroutineContext[Job]))
+            var candidate: CommandConnectionWire? = null
+            try {
+                synchronized(monitor) {
+                    check(!closed && (foreground || foregroundWaiters == 0))
+                    check(attempt == null)
+                    attempt = owner
+                    if (foreground) state.value = CommandConnectionState.CONNECTING
+                }
+                candidate = opener(this, enrollment)
+                ensureActive()
+                synchronized(monitor) {
+                    check(!closed && attempt === owner)
+                    owner.wire = checkNotNull(candidate)
+                    if (foreground) state.value = CommandConnectionState.CONNECTED
+                }
+                checkNotNull(candidate).receive()
+                ensureActive()
+                synchronized(monitor) { check(!closed && attempt === owner) }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { throw IOException("Command connection unavailable") }
+            finally {
+                try { candidate?.close() }
+                finally {
                     synchronized(monitor) {
-                        check(!closed)
-                        lifetime = coroutineContext[Job]
-                        state.value = CommandConnectionState.CONNECTING
+                        if (attempt === owner) {
+                            attempt = null
+                            if (!closed && foreground) state.value = CommandConnectionState.DISCONNECTED
+                        }
                     }
-                    candidate = open(this, enrollment)
-                    ensureActive()
-                    synchronized(monitor) {
-                        check(!closed)
-                        wire = checkNotNull(candidate)
-                        state.value = CommandConnectionState.CONNECTED
-                    }
-                    checkNotNull(candidate).receive()
                 }
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (_: Exception) { throw IOException("Command connection unavailable") }
-        finally {
-            synchronized(monitor) {
-                wire = null
-                lifetime = null
-                if (!closed) state.value = CommandConnectionState.DISCONNECTED
-            }
-            try { candidate?.close() } finally { running.unlock() }
         }
     }
 
@@ -87,7 +125,8 @@ internal class CommandConnection(
     /** Rechecks the retained request and enrolled signing role before writing on this incarnation. */
     internal suspend fun send(session: CommandRequestSession, message: ApprovalMessage) = withContext(dispatcher) {
         sending.withLock {
-            val active = synchronized(monitor) { check(!closed); checkNotNull(wire) }
+            val owner = synchronized(monitor) { check(!closed); checkNotNull(attempt?.takeIf { it.foreground }) }
+            val active = synchronized(monitor) { check(!closed && attempt === owner); checkNotNull(owner.wire) }
             check(enrollment.sessions().any { it === session })
             val e = record.enrollment
             check(message.wireVersion == 1uL && message.type == ApprovalMessageType.DECISION)
@@ -104,10 +143,10 @@ internal class CommandConnection(
                     message.type, message.purpose, body, limits.body, limits.signing))
             }
             ensureActive()
-            synchronized(monitor) { check(!closed && wire === active) }
+            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
             active.send(message.encode(limits.body.maxBytes))
             ensureActive()
-            synchronized(monitor) { check(!closed && wire === active) }
+            synchronized(monitor) { check(!closed && attempt === owner && owner.wire === active) }
         }
     }
 
@@ -116,9 +155,9 @@ internal class CommandConnection(
             if (closed) return
             closed = true
             state.value = CommandConnectionState.CLOSED
-            (wire to lifetime).also { wire = null; lifetime = null }
+            attempt.also { attempt = null }
         }
-        resources.second?.cancel()
-        try { resources.first?.close() } finally { inbox.close() }
+        resources?.job?.cancel()
+        try { resources?.wire?.close() } finally { inbox.close() }
     }
 }
