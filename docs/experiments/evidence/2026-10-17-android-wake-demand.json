@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "recordedDate": "2026-10-17",
+  "sourceBase": "7f79cc617a15bdadf1eb461381eb2f96a8f7d0ce",
+  "sourceHashes": {
+    "phone/core/src/main/kotlin/dev/remozio/phone/push/PendingWakeDemand.kt": "d68761f687e13faa727e86c019ee97bc00a75989e25e7448e190fc86fc3b56f5",
+    "android/app/src/main/kotlin/dev/remozio/android/push/AndroidWakeDemand.kt": "a214be9c7ecb7719701062cc72e79dbf97e8ac6e69eb80a07bbabc4ec6e43739",
+    "android/app/src/androidTest/kotlin/dev/remozio/android/push/WakeDemandAndroidProbeTest.kt": "96acfe2dfbdb89cd07198ea79b0412da94b767eb391e612ab344f488c1a73ddf"
+  },
+  "platform": {
+    "android": 17,
+    "api": 37,
+    "architecture": "arm64-v8a",
+    "hardware": "Pixel 9 emulator",
+    "physicalDevice": false
+  },
+  "buildCoordinator": {
+    "tool": "ATC",
+    "version": "3.0.0"
+  },
+  "controls": [
+    {
+      "name": "appendOrReplaceDoesNotProtectANewDependentFromLaterCancellation",
+      "passed": true
+    },
+    {
+      "name": "persistedGenerationReplacementRejectsOldTickets",
+      "passed": true
+    },
+    {
+      "name": "keepIgnoresNewWorkWhileTheOldWorkerIsActive",
+      "passed": true
+    },
+    {
+      "name": "aNewWakeDuringTheOlderFetchRemainsForTheIndependentSuccessor",
+      "passed": true
+    },
+    {
+      "name": "aWakeAfterJournalClearAndBeforeWorkerTerminationStillHasRunnableWork",
+      "passed": true
+    },
+    {
+      "name": "malformedOversizedAndIncompleteArchivesAreNotReset",
+      "passed": true
+    },
+    {
+      "name": "exclusiveOwnerAndClosedFacadeRefuseUse",
+      "passed": true
+    },
+    {
+      "name": "anIndependentGuardSurvivesCancellationOfTheOlderWorker",
+      "passed": true
+    },
+    {
+      "name": "journalReopenPreservesDemandAndExactRevisionCompletion",
+      "passed": true
+    }
+  ],
+  "tests": 9,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "initialInfrastructureFailures": "Two device-property discovery attempts executed no probe tests. The isolated fixture then used a 60-second ADB timeout.",
+  "runtime": "Actual Android storage and WorkManager testing runtime; fetch callbacks are synthetic.",
+  "cleanup": {
+    "baselineRestored": true,
+    "temporarySnapshotDeleted": true,
+    "leaseFreed": true
+  },
+  "notTested": [
+    "System JobScheduler delivery or quotas",
+    "Process-death recovery",
+    "FCM ingress",
+    "Authenticated network snapshot integration",
+    "Physical Pixel or installed Mac behavior"
+  ],
+  "productRuntimeEnabled": false
+}

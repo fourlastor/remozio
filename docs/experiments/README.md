@@ -5,6 +5,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Work | Status | Next evidence |
 | --- | --- | --- |
 | Android biometric key | [Pixel signing and lifecycle observations](evidence/2026-10-03-pixel-platform.md) | Enrollment retention, reboot continuity, and production approval integration |
+| Android wake demand | [Nine emulator storage and worker controls passed](android-wake-demand.md) | Independent ingress, durable fetch guards, startup reconciliation, FCM and physical delivery |
 | Swift/Kotlin approval flow | [Synthetic peer harness](approval-flow.md) | Durable admission, real enrollment, encrypted transport, and device keys |
 | Swift build and XPC identity checks | [Measured with ad-hoc signing](macos-xpc.md) | macOS 26 and Developer ID repeats |
 | Single app and background services | [Bundle checks](macos-packaging.md) and [guarded lifecycle harness](service-lifecycle.md) | Interactive registration, protected placement, notarization and replacement |
