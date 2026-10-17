@@ -44,7 +44,8 @@ class PushWakeRouter(
     private val entries = linkedMapOf<Scope, Entry>()
     private val tags = mutableMapOf<CborValue.Bytes, WakeEnrollment>()
     private val retiredTags = mutableSetOf<CborValue.Bytes>()
-    private val seen = linkedMapOf<Seen, ULong>()
+    private class SeenState(val receivedAt: ULong, val posted: Boolean) { var retry = false }
+    private val seen = linkedMapOf<Seen, SeenState>()
     private var lastTime: ElapsedInstant? = null
     private var closed = false
 
@@ -102,17 +103,30 @@ class PushWakeRouter(
         if (push is PushData.TokenChallenge) return WakeReceipt(WakeReception.TOKEN_CHALLENGE, enrollment)
         push as PushData.Wake
         val entry = checkNotNull(entries[scope(enrollment)])
-        seen.entries.removeAll { now.milliseconds - it.value >= duplicateLifetimeMillis }
+        seen.entries.removeAll { now.milliseconds - it.value.receivedAt >= duplicateLifetimeMillis }
         val identity = Seen(enrollment, CborValue.Bytes(push.identifier))
-        if (identity in seen) return WakeReceipt(WakeReception.DUPLICATE, enrollment)
-        val alert = entry.lastAlert?.let { now.milliseconds - it >= minimumAlertIntervalMillis } ?: true
+        val previousReceipt = seen[identity]
+        if (previousReceipt != null && !previousReceipt.retry) return WakeReceipt(WakeReception.DUPLICATE, enrollment)
+        val alert = previousReceipt?.posted != true &&
+            (entry.lastAlert?.let { now.milliseconds - it >= minimumAlertIntervalMillis } ?: true)
         val notification = try { notify(enrollment, alert) } catch (_: Exception) { WakeNotificationResult.FAILED }
         if (notification == WakeNotificationResult.POSTED && alert) entry.lastAlert = now.milliseconds
         // This bounded hint cache is not authorization replay state. Eviction never drops fetch demand.
-        if (seen.size >= maximumRememberedWakes) seen.remove(seen.keys.first())
-        seen[identity] = now.milliseconds
+        if (identity !in seen && seen.size >= maximumRememberedWakes) seen.remove(seen.keys.first())
+        seen[identity] = SeenState(previousReceipt?.receivedAt ?: now.milliseconds,
+            previousReceipt?.posted == true || notification == WakeNotificationResult.POSTED)
         entry.pending = true
         return WakeReceipt(WakeReception.ACCEPTED, enrollment, notification)
+    }
+
+    /** Retry one hint after failed persistence without resetting its alert floor or retained fetch demand. */
+    @Synchronized
+    fun retryWake(enrollment: WakeEnrollment, identifier: ByteArray): Boolean {
+        require(identifier.size == 32)
+        if (closed || entries[scope(enrollment)]?.enrollment !== enrollment) return false
+        val receipt = seen[Seen(enrollment, CborValue.Bytes(identifier))] ?: return false
+        receipt.retry = true
+        return true
     }
 
     @Synchronized

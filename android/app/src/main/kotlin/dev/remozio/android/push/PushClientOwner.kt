@@ -31,6 +31,8 @@ internal class PushClientOwner(
 ) {
     private val mutableStatus = MutableStateFlow(PushClientStatus.UNCONFIGURED)
     val status = mutableStatus.asStateFlow()
+    private val mutableGeneration = MutableStateFlow<UUID?>(null)
+    val generationState = mutableGeneration.asStateFlow()
     private var desired: StoredPushConfiguration? = null
     private var started: StoredPushConfiguration? = null
     private var candidate: PushTokenCandidate? = null
@@ -41,7 +43,7 @@ internal class PushClientOwner(
         if (restored) return
         restored = true
         try { desired = storage.read(); apply() }
-        catch (_: Exception) { retire(); mutableStatus.value = PushClientStatus.UNAVAILABLE }
+        catch (_: Exception) { retire(); publish(PushClientStatus.UNAVAILABLE) }
     }
 
     @Synchronized fun import(bytes: ByteArray): PushConfigurationResult {
@@ -56,7 +58,7 @@ internal class PushClientOwner(
             apply()
             if (mutableStatus.value == PushClientStatus.RESTART_REQUIRED) PushConfigurationResult.RESTART_REQUIRED
                 else PushConfigurationResult.IMPORTED
-        } catch (_: Exception) { retire(); desired = null; mutableStatus.value = PushClientStatus.UNAVAILABLE; PushConfigurationResult.FAILED }
+        } catch (_: Exception) { retire(); desired = null; publish(PushClientStatus.UNAVAILABLE); PushConfigurationResult.FAILED }
     }
 
     @Synchronized fun setEnabled(enabled: Boolean): Boolean {
@@ -68,13 +70,13 @@ internal class PushClientOwner(
             storage.replace(next)
             desired = next; candidate = null
             apply(); true
-        } catch (_: Exception) { retire(); desired = null; mutableStatus.value = PushClientStatus.UNAVAILABLE; false }
+        } catch (_: Exception) { retire(); desired = null; publish(PushClientStatus.UNAVAILABLE); false }
     }
 
     @Synchronized fun retry() {
         if (!restored) restore()
         if (desired?.enabled == true && mutableStatus.value != PushClientStatus.RESTART_REQUIRED) {
-            candidate = null; mutableStatus.value = PushClientStatus.REGISTRATION_FAILED; apply()
+            candidate = null; publish(PushClientStatus.REGISTRATION_FAILED); apply()
         }
     }
     @Synchronized fun enabled(): Boolean = desired?.enabled == true
@@ -92,9 +94,18 @@ internal class PushClientOwner(
         return body()
     }
 
+    @Synchronized fun <T> withCurrentOrDisabled(generation: UUID?, body: () -> T): T? {
+        if (current()?.generation != generation) return null
+        return body()
+    }
+
     private fun current(): StoredPushConfiguration? {
         val selected = desired ?: return null
         return selected.takeIf { it.enabled && started?.generation == it.generation && mutableStatus.value != PushClientStatus.UNAVAILABLE }
+    }
+    private fun publish(status: PushClientStatus) {
+        mutableStatus.value = status
+        mutableGeneration.value = current()?.generation
     }
     private fun retire() {
         candidate = null
@@ -102,15 +113,15 @@ internal class PushClientOwner(
     }
     private fun apply() {
         val selected = desired
-        if (selected == null) { mutableStatus.value = PushClientStatus.UNCONFIGURED; return }
-        if (!selected.enabled) { retire(); mutableStatus.value = PushClientStatus.DISABLED; return }
+        if (selected == null) { publish(PushClientStatus.UNCONFIGURED); return }
+        if (!selected.enabled) { retire(); publish(PushClientStatus.DISABLED); return }
         val previous = started
         if (previous != null && !previous.client.sameAs(selected.client)) {
-            retire(); mutableStatus.value = PushClientStatus.RESTART_REQUIRED; return
+            retire(); publish(PushClientStatus.RESTART_REQUIRED); return
         }
         if (previous?.generation == selected.generation && mutableStatus.value in setOf(PushClientStatus.CLIENT_READY, PushClientStatus.INITIALIZING)) return
         started = selected
-        mutableStatus.value = PushClientStatus.INITIALIZING
+        publish(PushClientStatus.INITIALIZING)
         val request = UUID.randomUUID(); attempt = request
         try {
             driver.start(selected.client, { token -> synchronized(this) {
@@ -118,19 +129,19 @@ internal class PushClientOwner(
             } }, {
                 synchronized(this) {
                     if (attempt == request && current()?.generation == selected.generation) {
-                        candidate = null; mutableStatus.value = PushClientStatus.REGISTRATION_FAILED
+                        candidate = null; publish(PushClientStatus.REGISTRATION_FAILED)
                     }
                 }
             })
-        } catch (_: Exception) { retire(); mutableStatus.value = PushClientStatus.UNAVAILABLE }
+        } catch (_: Exception) { retire(); publish(PushClientStatus.UNAVAILABLE) }
     }
     private fun acceptToken(generation: UUID, token: String) {
         val selected = current() ?: return
         if (selected.generation != generation) return
         if (token.length !in 1..4096 || token.any { it.code !in 33..126 }) {
-            candidate = null; mutableStatus.value = PushClientStatus.REGISTRATION_FAILED; return
+            candidate = null; publish(PushClientStatus.REGISTRATION_FAILED); return
         }
         if (candidate?.token != token) candidate = PushTokenCandidate(generation, newGeneration(), selected.client.projectID, token)
-        mutableStatus.value = PushClientStatus.CLIENT_READY
+        publish(PushClientStatus.CLIENT_READY)
     }
 }

@@ -18,20 +18,20 @@ import java.util.UUID
 internal class AndroidWakeDemand private constructor(
     private val storage: WakeDemandFile,
     private val demand: PendingWakeDemand,
-) : AutoCloseable {
+) : WakeDemandStore {
     private var closed = false
 
     /** The caller holds the current provider configuration lock. */
-    @Synchronized fun selectGeneration(generation: UUID) {
+    @Synchronized override fun selectGeneration(generation: UUID) {
         check(!closed); demand.selectGeneration(generation)
     }
-    @Synchronized fun mark(generation: UUID, tag: ByteArray): WakeDemandTicket {
+    @Synchronized override fun mark(generation: UUID, tag: ByteArray): WakeDemandTicket {
         check(!closed); return demand.mark(generation, tag)
     }
-    @Synchronized fun pending(generation: UUID): List<WakeDemandTicket> {
+    @Synchronized override fun pending(generation: UUID): List<WakeDemandTicket> {
         check(!closed); return demand.pending(generation)
     }
-    @Synchronized fun complete(ticket: WakeDemandTicket): Boolean {
+    @Synchronized override fun complete(ticket: WakeDemandTicket): Boolean {
         check(!closed); return demand.complete(ticket)
     }
     @Synchronized override fun close() {

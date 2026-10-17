@@ -1,0 +1,66 @@
+{
+  "date": "2026-10-17",
+  "platform": "Android 17 API 37 arm64 emulator",
+  "sourceBase": "2d00126c8ce010f356a5de0db8e432dd37b504cc",
+  "experiment": "Actual AndroidWakeWork scheduling with synthetic archive and gated worker bodies",
+  "controls": [
+    {
+      "tests": "5",
+      "failures": "0",
+      "errors": "0",
+      "skipped": "0",
+      "time": "122.237",
+      "timestamp": "2026-10-17T14:09:19",
+      "hostname": "localhost"
+    }
+  ],
+  "passed": [
+    "Independent persisted ingress for two hints for the same Mac",
+    "Same revision coalesces; a new revision survives older cancellation; guards do not require validated internet",
+    "Settings resize the existing queue admission owner",
+    "Startup reconciles durable demand and retires queued jobs for an older provider generation",
+    "Retained v1 ingress shares capacity with v2, survives startup and releases capacity after cancellation"
+  ],
+  "notProven": [
+    "FCM receipt or token-possession registration",
+    "Real worker body execution on Android",
+    "System JobScheduler, quota or process-death behavior",
+    "Hardware keystore or physical Pixel behavior",
+    "Real Mac connection or any approval",
+    "Settings screenshots or interaction"
+  ],
+  "inputHashes": {
+    "android/app/src/main/kotlin/dev/remozio/android/RemozioApplication.kt": "9a6b26885dc106d1cb6788b68245126cf29a0680efb868024ebfe96cc695c985",
+    "android/app/src/main/kotlin/dev/remozio/android/push/AndroidWakeDemand.kt": "48bef3505f64736ae8f7dc63ddf78fe149a5f1344c5e1c21419412d202d63164",
+    "android/app/src/main/kotlin/dev/remozio/android/push/AndroidWakeWork.kt": "5f350a7bfbcf1e43e5c691dc9f51c991b2c24f20f09ffae90ab2790fe399a48a",
+    "android/app/src/main/kotlin/dev/remozio/android/push/ApplicationWakeDemand.kt": "224cb7636724b1d91508f2d42bbc77e60f24da7b36b8efa6c467c2769c15e89b",
+    "android/app/src/main/kotlin/dev/remozio/android/push/BoundedWakeWorkAdmission.kt": "4c15b40c53ece78666259d4374add0f60bc05d775a84eb73ad9638a08b129b78",
+    "android/app/src/main/kotlin/dev/remozio/android/push/NotificationSettingsScreen.kt": "e9165a649ea37956c748a62d475fb5ae35a8d44db2a932ec2566779fa731a31e",
+    "android/app/src/main/kotlin/dev/remozio/android/push/PushClientOwner.kt": "17fdabb5d362b29af35e3d1eac3da1f51445485e12e8bab3730317ccd6b5c547",
+    "android/app/src/main/kotlin/dev/remozio/android/push/RemozioMessagingService.kt": "f156829c86e7b2daeb6be4e0a0c47a29fbc8595d174cf527a73e8d36a61dd7fa",
+    "android/app/src/main/kotlin/dev/remozio/android/push/StoredWakeFetches.kt": "b8f82448a79b9854c676ccc08337129997a5cc9fbbac8eb52c7c8361cf949acf",
+    "android/app/src/main/kotlin/dev/remozio/android/push/StoredWakeNotifications.kt": "17196ae413be5d14f7d1eca7df8b93ed4248ded58c254f167a00e35aa332b9a8",
+    "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt": "98f86ad2a19eedbfb2ead7119487512fd81994ce1e6ad8318b45d977b062f464",
+    "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettingsCard.kt": "8f31ac5bb36126d88534fdac297d8c1e332e73e4cd5f6ca2d827fbda89a8f618",
+    "android/app/src/main/res/values/strings.xml": "697bd53a167ab7b5d05b5a0dddd8bd8cb45a6cd0c3cd6495f8bfac1933abc967",
+    "android/app/src/test/kotlin/dev/remozio/android/push/ApplicationWakeDemandTest.kt": "ac91e0d37785936220292ecec69dc7be68139571fb6eef5985e90c0cec53e7df",
+    "android/app/src/test/kotlin/dev/remozio/android/push/BoundedWakeWorkAdmissionTest.kt": "01d113728db644e9c0262922803ed1bdbaeb51be92ff04b7e4e2b1e902c895f1",
+    "android/app/src/test/kotlin/dev/remozio/android/push/PushGenerationObservationTest.kt": "0b3674bd4b84ef7d47813449fa59a1bedbd3eae0e61e22e77afd431da54fd8ba",
+    "android/app/src/test/kotlin/dev/remozio/android/push/StoredWakeFetchesTest.kt": "14754d39d952c781070a5a178fecf969e312198d336e31f77d08bdc35f355560",
+    "android/app/src/test/kotlin/dev/remozio/android/push/StoredWakeNotificationsTest.kt": "2e75adcf9fe709531963366cd151b3c566dbb370659a43bcb9d48098bc39c0f9",
+    "android/app/src/test/kotlin/dev/remozio/android/push/WakePipelineFixture.kt": "cff606140f7ef2d7bbb6002d773d8284ad266c1ec3853d0c0ec4f57c2bdf8750",
+    "experiments/android-wake-demand/AndroidWakeWorkProbeTest.kt": "cc71469e3b74b640d10e195267eeaf56e48defe9adf95c5cafccbd3f7119c648",
+    "phone/core/src/main/kotlin/dev/remozio/phone/push/PendingWakeDemand.kt": "cedb5dd96e16b7afbe2aa328b552840df4a52ce904a8b6fa53babcba0855735a",
+    "phone/core/src/main/kotlin/dev/remozio/phone/push/PushWakeRouter.kt": "031fac961a7146c090889a162aee50b09e0706aa51feb443b62f28c5898da3a4",
+    "phone/core/src/test/kotlin/dev/remozio/phone/push/PushWakeRouterTest.kt": "c715d0b30c463dd4725cd66b0aa4fccbf27c54b48203bf4f27094af7c9589552"
+  },
+  "frameworkVersions": {
+    "WorkManager": "2.12.0",
+    "runner": "1.7.0",
+    "extJUnit": "1.3.0"
+  },
+  "application": "Plain disposable Application; no Firebase project, pairing or authority installed",
+  "networkConstraint": "NOT_REQUIRED; bounded transport attempts support LAN without validated Internet",
+  "baselineRestored": true,
+  "leaseReleased": true
+}

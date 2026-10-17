@@ -2,6 +2,7 @@ package dev.remozio.android
 
 import android.app.Application
 import android.os.SystemClock
+import dev.remozio.android.push.*
 import dev.remozio.android.push.androidPushClient
 import dev.remozio.android.push.AndroidWakeNotifications
 import dev.remozio.android.push.StoredWakeNotifications
@@ -31,17 +32,33 @@ class RemozioApplication : Application() {
     private val enrollmentAccess = Mutex()
     internal val pushDelivery by lazy { PushDeliveryReports(this) }
     internal val pushClient by lazy { androidPushClient(this) }
+    internal val wakeWorkSettings by lazy { WakeWorkSettings(this) }
+    private val wakeDemand by lazy { ApplicationWakeDemand(pushClient) { AndroidWakeDemand.open(this) } }
+    internal val wakeFetches by lazy {
+        StoredWakeFetches(
+            { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
+            enrollmentAccess, pushClient, wakeDemand, { commands.acquire(it) },
+            { wakeWorkSettings.read().snapshotSeconds * 1000L },
+        )
+    }
+    internal val wakeWork by lazy { AndroidWakeWork(this, pushClient, wakeWorkSettings, wakeFetches) { generation, status ->
+        pushClient.withCurrent(generation) { pushDelivery.record(generation, status) }
+    } }
     internal val wakeNotifications by lazy {
         val notifications = AndroidWakeNotifications(this, 60_000)
         StoredWakeNotifications(
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, pushClient, { ElapsedInstant(1, SystemClock.elapsedRealtime().toULong()) },
             notifications::postForRecord, notifications::cancelRecord,
+            admit = { generation, selected, active ->
+                wakeDemand.admit(generation, selected.enrollment.enrollmentTag, active.map { it.enrollment.enrollmentTag }.toSet())
+            },
         )
     }
     override fun onCreate() {
         super.onCreate()
         pushClient.restore()
+        wakeWork.start(scope)
     }
     internal val macs by lazy {
         StoredMacReader({ AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) }, enrollmentAccess = enrollmentAccess)
@@ -58,7 +75,11 @@ class RemozioApplication : Application() {
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, { ids ->
-                try { commands.invalidateRecordsLocked(ids) } finally { wakeNotifications.invalidateRecordsLocked(ids) }
+                try { commands.invalidateRecordsLocked(ids) }
+                finally {
+                    wakeFetches.invalidateRecordsLocked(ids)
+                    wakeNotifications.invalidateRecordsLocked(ids)
+                }
             }, ::validatePairingKeys,
         )
     }

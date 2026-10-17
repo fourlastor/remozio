@@ -11,7 +11,8 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def prepare(destination):
+def prepare(destination, probe="journal"):
+    probe_class = {"journal": "WakeDemandAndroidProbeTest", "work": "AndroidWakeWorkProbeTest"}[probe]
     build = (ROOT / ".build").resolve()
     if not build.is_relative_to(ROOT):
         raise ValueError("The repository build directory must stay inside the checkout")
@@ -45,11 +46,12 @@ def prepare(destination):
         raise ValueError("The Android build configuration changed; inspect before adapting the probe")
     text = text.replace(before, before +
         '        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"\n' +
-        '        testInstrumentationRunnerArguments["class"] = "dev.remozio.android.push.WakeDemandAndroidProbeTest"\n')
+        f'        testInstrumentationRunnerArguments["class"] = "dev.remozio.android.push.{probe_class}"\n')
     text = text.replace('applicationIdSuffix = ".debug"', 'applicationIdSuffix = ".wakeprobe"')
     text = text.replace('    buildFeatures { compose = true }',
         '    installation { timeOutInMs = 60_000 }\n    buildFeatures { compose = true }')
     text = text.replace('dependencies {\n', 'dependencies {\n' +
+        '    androidTestImplementation(testFixtures(project(":phone-core")))\n' +
         '    androidTestImplementation("androidx.test:runner:1.7.0")\n' +
         '    androidTestImplementation("androidx.test.ext:junit:1.3.0")\n' +
         '    androidTestImplementation("androidx.work:work-testing:2.12.0")\n' +
@@ -68,10 +70,13 @@ def prepare(destination):
         '            <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />\n' +
         '        </provider>\n' + anchor)
     manifest.write_text(text)
-    source = fixture / "experiments/android-wake-demand/WakeDemandAndroidProbeTest.kt"
-    target = fixture / "android/app/src/androidTest/kotlin/dev/remozio/android/push/WakeDemandAndroidProbeTest.kt"
+    source = fixture / f"experiments/android-wake-demand/{probe_class}.kt"
+    target = fixture / f"android/app/src/androidTest/kotlin/dev/remozio/android/push/{probe_class}.kt"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
+    if probe == "work":
+        shutil.copy2(fixture / "android/app/src/test/kotlin/dev/remozio/android/push/WakePipelineFixture.kt",
+            target.with_name("WakePipelineFixture.kt"))
     environment = {key: os.environ[key] for key in ("JAVA_HOME", "ANDROID_HOME")}
     for name, tasks, timeout in [
         ("compile", [":android-app:assembleDebug", ":android-app:assembleDebugAndroidTest"], 1800),
@@ -83,7 +88,7 @@ def prepare(destination):
         (destination / (name + "-plan.json")).write_text(json.dumps(plan, indent=2) + "\n")
     proof = {"sourceHead": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "sourceHashes": hashes, "fixture": str(fixture), "package": "dev.remozio.android.wakeprobe",
-        "plainSourceCopy": True, "buildsRun": False, "devicesChanged": False}
+        "probe": probe, "plainSourceCopy": True, "buildsRun": False, "devicesChanged": False}
     (destination / "preparation.json").write_text(json.dumps(proof, indent=2) + "\n")
     print("Prepared isolated source fixture: " + str(destination))
     print("Validate and run compile-plan.json with ATC before claiming an emulator.")
@@ -92,4 +97,6 @@ def prepare(destination):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
-    prepare(parser.parse_args().destination)
+    parser.add_argument("--probe", choices=("journal", "work"), default="journal")
+    args = parser.parse_args()
+    prepare(args.destination, args.probe)

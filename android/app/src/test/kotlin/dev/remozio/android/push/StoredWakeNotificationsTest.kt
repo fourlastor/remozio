@@ -35,15 +35,16 @@ class StoredWakeNotificationsTest {
         }
         fun remove(record: PhoneEnrollment) = open().use { it.remove(record.recordID.copyBytes(), it.snapshot().revision) }
     }
-    private class Fixture {
+    private class Fixture(val admission: ((java.util.UUID, StoredPhoneEnrollment, List<StoredPhoneEnrollment>) -> Unit)? = null) {
         val archive = Archive()
         val client = PushClientFixture().also { it.enable() }
         val mutex = Mutex()
         val posted = mutableListOf<Pair<CborValue.Bytes, Boolean>>()
         val cancelled = mutableListOf<CborValue.Bytes>()
         var time = 100uL
+        var postResult = WakeNotificationResult.POSTED
         val receiver = StoredWakeNotifications(archive::open, mutex, client.owner, { ElapsedInstant(1, time) },
-            { enrollment, alert -> posted += enrollment to alert; WakeNotificationResult.POSTED }, { cancelled += it }, Dispatchers.Unconfined)
+            { enrollment, alert -> posted += enrollment to alert; postResult }, { cancelled += it }, Dispatchers.Unconfined, admit = admission)
         val generation get() = assertNotNull(client.owner.generation())
     }
     private fun id(n: Int) = ByteArray(16) { n.toByte() }
@@ -125,4 +126,56 @@ class StoredWakeNotificationsTest {
         assertEquals(WakeReception.MALFORMED, f.receiver.receive(f.generation, wake(r) + ("endpoint" to "https://synthetic.invalid"))?.reception)
         assertTrue(f.posted.isEmpty())
     }
+    @Test fun backgroundAdmissionUsesTrustedRowsAfterPostingAndUnderBothOwners() = runBlocking {
+        lateinit var f: Fixture; val r = record(1); var marks = 0
+        f = Fixture { generation, selected, active ->
+            assertTrue(f.mutex.isLocked); assertTrue(Thread.holdsLock(f.client.owner))
+            assertEquals(f.generation, generation); assertEquals(r.recordID, selected.enrollment.recordID)
+            assertEquals(listOf(r.recordID), active.map { it.enrollment.recordID })
+            assertEquals(listOf(r.recordID), f.posted.map { it.first }); marks++
+        }
+        f.archive.prepare(r, true)
+        val result = assertNotNull(f.receiver.receiveAndAdmit(f.generation, wake(r)))
+        assertEquals(WakeReception.ACCEPTED, result.receipt.reception)
+        assertEquals(WakeDemandAdmission.CHECK_JOURNAL, result.demand); assertEquals(1, marks)
+    }
+    @Test fun failedMarkKeepsTheNotificationAndAllowsSilentExactRetry() = runBlocking {
+        var marks = 0; val f = Fixture { _, _, _ -> marks++; if (marks == 1) error("synthetic journal failure") }
+        val r = record(1); f.archive.prepare(r, true); val writes = f.archive.writes
+        val first = assertNotNull(f.receiver.receiveAndAdmit(f.generation, wake(r)))
+        assertEquals(WakeDemandAdmission.FAILED, first.demand); assertTrue(f.cancelled.isEmpty())
+        f.time += 31_000u
+        val second = assertNotNull(f.receiver.receiveAndAdmit(f.generation, wake(r)))
+        assertEquals(WakeReception.ACCEPTED, second.receipt.reception)
+        assertEquals(WakeDemandAdmission.CHECK_JOURNAL, second.demand)
+        val duplicate = assertNotNull(f.receiver.receiveAndAdmit(f.generation, wake(r)))
+        assertEquals(WakeReception.DUPLICATE, duplicate.receipt.reception)
+        assertEquals(WakeDemandAdmission.CHECK_JOURNAL, duplicate.demand)
+        assertEquals(2, marks); assertEquals(listOf(true, false), f.posted.map { it.second })
+        assertTrue(f.cancelled.isEmpty()); assertEquals(writes, f.archive.writes)
+    }
+    @Test fun backgroundDemandDoesNotDependOnNotificationPermission() = runBlocking {
+        var marks = 0; val f = Fixture { _, _, _ -> marks++ }; val r = record(1)
+        f.archive.prepare(r, true); f.postResult = WakeNotificationResult.PERMISSION_DENIED
+        val result = assertNotNull(f.receiver.receiveAndAdmit(f.generation, wake(r)))
+        assertEquals(WakeNotificationResult.PERMISSION_DENIED, result.receipt.notification)
+        assertEquals(WakeDemandAdmission.CHECK_JOURNAL, result.demand); assertEquals(1, marks)
+    }
+    @Test fun absentJournalAdapterFailsExplicitlyWithoutCancellingTheAlert() = runBlocking {
+        val f = Fixture(); val r = record(1); f.archive.prepare(r, true)
+        assertEquals(WakeDemandAdmission.FAILED, f.receiver.receiveAndAdmit(f.generation, wake(r))?.demand)
+        assertEquals(WakeDemandAdmission.FAILED, f.receiver.receiveAndAdmit(f.generation, wake(r))?.demand)
+        assertEquals(listOf(true, false), f.posted.map { it.second }); assertTrue(f.cancelled.isEmpty())
+    }
+    @Test fun rejectedOrRetiredProviderHintsNeverReachJournalAdmission() = runBlocking {
+        var marks = 0; val f = Fixture { _, _, _ -> marks++ }; val active = record(1); val prepared = record(2)
+        f.archive.prepare(active, true); f.archive.prepare(prepared, false)
+        for (data in listOf(wake(prepared), wake(record(3)), wake(active) + ("endpoint" to "synthetic"),
+            PushData.TokenChallenge(id(5), ByteArray(32) { 6 }, active.enrollmentTag.copyBytes()).encode())) {
+            assertEquals(WakeDemandAdmission.NONE, f.receiver.receiveAndAdmit(f.generation, data)?.demand)
+        }
+        val old = f.generation; f.client.owner.setEnabled(false)
+        assertNull(f.receiver.receiveAndAdmit(old, wake(active))); assertEquals(0, marks); assertTrue(f.posted.isEmpty())
+    }
+
 }

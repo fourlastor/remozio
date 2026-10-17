@@ -14,7 +14,8 @@ interface WakeDemandStorage {
 /** Opaque scheduling state. It contains no route, request content, authority key or decision. */
 class WakeDemandTicket internal constructor(val generation: UUID, tag: ByteArray, revision: ByteArray) {
     val tag = CborValue.Bytes(tag)
-    internal val revision = CborValue.Bytes(revision)
+    /** Opaque scheduling identity. It grants no authority. */
+    val revision = CborValue.Bytes(revision)
     override fun toString() = "WakeDemandTicket(redacted)"
 }
 

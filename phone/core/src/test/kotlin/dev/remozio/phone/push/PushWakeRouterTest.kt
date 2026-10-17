@@ -135,4 +135,45 @@ class PushWakeRouterTest {
         assertThrows(IllegalStateException::class.java) { add(r, tag = 7) }
         assertEquals("WakeEnrollment(redacted)", e.toString())
     }
+    @Test fun failedPersistenceRetryPreservesAlertFloorAndPendingFetch() {
+        val r = router(); val e = add(r); val alerts = mutableListOf<Boolean>()
+        fun deliver(time: ULong) = r.receive(wake(e), { ElapsedInstant(1, time) }) { _, alert ->
+            alerts += alert; WakeNotificationResult.POSTED
+        }
+        assertEquals(WakeReception.ACCEPTED, deliver(0u).reception)
+        assertTrue(r.retryWake(e, bytes(1, 32)))
+        assertEquals(WakeReception.ACCEPTED, deliver(1u).reception)
+        assertEquals(WakeReception.DUPLICATE, deliver(2u).reception)
+        assertEquals(listOf(true, false), alerts); assertNotNull(r.beginFetch(e))
+    }
+    @Test fun retiredHandleCannotForgetAReplacementHint() {
+        val r = router(); val old = add(r); receive(r, old); r.remove(old)
+        val next = add(r, tag = 9); receive(r, next)
+        assertFalse(r.retryWake(old, bytes(1, 32)))
+        assertEquals(WakeReception.DUPLICATE, receive(r, next).reception)
+        assertFalse(r.retryWake(next, bytes(8, 32)))
+        assertThrows(IllegalArgumentException::class.java) { r.retryWake(next, bytes(1, 31)) }
+        r.close(); assertFalse(r.retryWake(next, bytes(1, 32)))
+    }
+
+    @Test fun delayedPersistenceRetryCannotRingAgainAfterTheAlertFloor() {
+        val r = router(); val e = add(r); val alerts = mutableListOf<Boolean>()
+        fun deliver(time: ULong) = r.receive(wake(e), { ElapsedInstant(1, time) }) { _, alert ->
+            alerts += alert; WakeNotificationResult.POSTED
+        }
+        deliver(0u); assertTrue(r.retryWake(e, bytes(1, 32)))
+        assertEquals(WakeReception.ACCEPTED, deliver(11u).reception)
+        assertEquals(listOf(true, false), alerts)
+        val other = r.receive(wake(e, 2), { ElapsedInstant(1, 12u) }) { _, alert ->
+            assertTrue(alert); WakeNotificationResult.POSTED
+        }
+        assertEquals(WakeReception.ACCEPTED, other.reception)
+    }
+    @Test fun persistenceRetryCanAlertWhenTheOriginalPlatformPostFailed() {
+        val r = router(); val e = add(r)
+        r.receive(wake(e), { ElapsedInstant(1, 0u) }) { _, alert -> assertTrue(alert); WakeNotificationResult.FAILED }
+        assertTrue(r.retryWake(e, bytes(1, 32)))
+        r.receive(wake(e), { ElapsedInstant(1, 11u) }) { _, alert -> assertTrue(alert); WakeNotificationResult.POSTED }
+    }
+
 }

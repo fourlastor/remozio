@@ -476,4 +476,19 @@
     <string name="fcm_delivery_unavailable">The wake check could not finish. Open a Mac inbox to check pending requests.</string>
     <string name="fcm_delivery_capacity">The wake queue reached its limit. Open a Mac inbox to check pending requests.</string>
     <string name="fcm_delivery_ignored">The last wake finished without a new alert.</string>
+    <string name="wake_work_title">Background request checks</string>
+    <string name="wake_work_reason">A push hint posts a generic alert before a separate, authenticated request check. Failed checks retain their saved demand. Android controls when work runs.</string>
+    <string name="wake_ingress_limit">Maximum queued wake hints</string>
+    <string name="wake_fetch_limit">Maximum queued request checks</string>
+    <string name="wake_attempts">Attempts per job</string>
+    <string name="wake_backoff">Initial retry delay (seconds)</string>
+    <string name="wake_snapshot_timeout">Request check timeout (seconds)</string>
+    <string name="wake_reconcile_interval">Recovery interval (minutes)</string>
+    <string name="wake_setting_range">Enter a value from %1$d to %2$d.</string>
+    <string name="wake_settings_save">Save background settings</string>
+    <string name="wake_settings_defaults">Use default values</string>
+    <string name="wake_settings_saved">Saved. Queue limits, attempt limits and timeouts apply as work runs. Existing jobs keep their retry delay. The recovery interval updates now.</string>
+    <string name="wake_settings_failed">Could not save these settings. Keep your values and try again.</string>
+    <string name="wake_settings_show">Advanced background settings</string>
+    <string name="wake_settings_hide">Hide background settings</string>
 </resources>
