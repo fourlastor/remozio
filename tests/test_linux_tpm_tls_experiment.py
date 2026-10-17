@@ -99,6 +99,8 @@ class HardwareGateTests(unittest.TestCase):
             args = SimpleNamespace(tcti=tcti, acknowledge_empty_owner_auth=declaration)
             with self.subTest(tcti=tcti, declaration=declaration), \
                  patch.object(EXPERIMENT.platform, "system", return_value="Linux"), \
+                 patch.object(EXPERIMENT.os, "getuid", return_value=1000), \
+                 patch.object(EXPERIMENT.os, "geteuid", return_value=1000), \
                  patch.object(EXPERIMENT.subprocess, "Popen") as start, \
                  self.assertRaisesRegex(EXPERIMENT.Refused, "explicit-resource-manager"):
                 EXPERIMENT.run_hardware(args)

@@ -4,8 +4,18 @@ The existing `protocol/swift` package builds and passes all 119 XCTest tests on
 Ubuntu 25.10 x86_64. This includes its shared canonical byte fixtures, invalid
 inputs, signature tampering, scope and version substitution, and resource limits.
 All 25 existing `protocol/vectors` files remain byte-identical to the recorded
-base revision. [Recorded evidence](linux-swift-protocol-evidence.json) includes
-the toolchain, dependency revisions, fixture hashes and test result.
+base revision. [Recorded evidence](linux-swift-protocol-evidence.json) preserves
+the initial run and a separate follow-up for the current manifest.
+
+The original `2026-10-17T14:08:50Z` record used the host-conditional manifest
+whose SHA-256 starts `7c56ac5d`; its source hashes, toolchain authentication and
+validation limits describe that historical run. The separate
+`follow_up_observation` covers exact revision
+`67559aef3c615087e4079a3b3ad13f4588364745`, with the platform-stable manifest
+whose SHA-256 starts `fed449e8`. A fresh Linux build passed all 119 tests in that
+follow-up. The forced-version gate preserved the lockfile byte-for-byte, and all
+25 fixture hashes matched the original record. Its log and source hashes are
+recorded separately; the old manifest hash is not evidence for the new manifest.
 
 The package imports Apple's platform CryptoKit on macOS and the official
 [Swift Crypto](https://github.com/apple/swift-crypto) `Crypto` module on Linux.
@@ -41,8 +51,8 @@ Ubuntu 25.10 evidence below.
 
 ## Observed toolchain setup
 
-This host initially had no Swift compiler. The run used the official Swift 6.2.4
-Ubuntu 24.04 x86_64 tarball, following the
+For the historical 14:08:50Z run, this host initially had no Swift compiler. The
+run used the official Swift 6.2.4 Ubuntu 24.04 x86_64 tarball, following the
 [Swift.org tarball instructions](https://www.swift.org/install/linux/tarball/).
 GnuPG verified its detached signature against the Swift 6.x release key
 `52BB7E3DE28A71BE22EC05FFEF80A866B47A981F`, retrieved from Swift.org. The archive
@@ -67,6 +77,13 @@ the public dependencies. It is specific to this setup. The observed success
 establishes execution with these isolated compatibility libraries on this host;
 it does not establish that the Ubuntu 24.04 toolchain runs unmodified on every
 Ubuntu 25.10 installation.
+
+The follow-up restored the isolated toolchain and compatibility runtime after a
+reboot and rechecked their pinned archive/package SHA-256 values. It used a fresh
+build directory at `/tmp/remozio-remote-67559aef/work`, reusing only the dependency
+repository cache. It did not repeat detached-signature or signed APT metadata
+verification; those observations remain scoped to the historical run. The
+follow-up executed Linux protocol tests only.
 
 ## Limits
 

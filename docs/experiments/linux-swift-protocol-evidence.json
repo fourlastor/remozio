@@ -169,5 +169,46 @@
     "protocol/swift/Tests/RemozioProtocolTests/RequestStatusPayloadTests.swift": "3db76437d5f617d9f0ad1abc39be1afe28df8923e0b3e34df5278ae6381af3cb",
     "scripts/check-linux-protocol.sh": "b6323a86f5f134ee17dfa628f3dc64ee3594cac19b47bc0def156d123ab65aa7"
   },
-  "source_basis": "Base revision plus the listed changed and added protocol files; documentation and CI workflow are not runtime inputs."
+  "source_basis": "Base revision plus the listed changed and added protocol files; documentation and CI workflow are not runtime inputs.",
+  "historical_record_scope": "The original top-level fields describe only the 2026-10-17T14:08:50Z run, using the host-conditional Package.swift with SHA-256 7c56ac5d07aefe69657b82294bd6ec12d97113f9709e0bdb97d0e65cc165ade0. Its recorded_at, base_revision, source_basis, hashes, authentication observations and test results are retained unchanged. The platform-stable manifest is covered separately by follow_up_observation.",
+  "follow_up_observation": {
+    "revision": "67559aef3c615087e4079a3b3ad13f4588364745",
+    "source_basis": "Exact git archive export of protocol/ and scripts/check-linux-protocol.sh; all exported tracked bytes were checked against this revision after the gate.",
+    "toolchain_version": "Swift version 6.2.4 (swift-6.2.4-RELEASE)",
+    "toolchain_target": "x86_64-unknown-linux-gnu",
+    "environment": {
+      "PATH_prefix": "/tmp/remozio-swift-toolchain/swift-6.2.4-RELEASE-ubuntu24.04/usr/bin",
+      "LD_LIBRARY_PATH": "/tmp/remozio-swift-toolchain/runtime/root/usr/lib/x86_64-linux-gnu",
+      "GIT_CONFIG_GLOBAL": "/dev/null",
+      "REMOZIO_SWIFT_WORK_DIR": "/tmp/remozio-remote-67559aef/work"
+    },
+    "command": "GIT_CONFIG_GLOBAL=/dev/null /tmp/remozio-remote-67559aef/snapshot/scripts/check-linux-protocol.sh",
+    "clean_build": "Fresh build, module-cache, config and security directories; dependency repository cache reused.",
+    "exit_code": 0,
+    "build_seconds": 29.74,
+    "xctest_tests": 119,
+    "xctest_failures": 0,
+    "gate_summary": "Executed 119 tests, with 0 failures (0 unexpected) in 1.549 (1.549) seconds",
+    "gate_log": "/tmp/remozio-remote-67559aef/gate.log",
+    "gate_log_sha256": "dad4177c83a8d3f82035f72318dbd69a9b45939ac9b62bc9669a3921d1396022",
+    "source_sha256": {
+      "protocol/swift/Package.swift": "fed449e8b67187f62bdbed665518effb423c5ff09ce43c8983442cea239ce824",
+      "protocol/swift/Package.resolved": "cd58057c8db1c317d4f3e54a472edd2bafcd2275a417510b85f8688df288162a",
+      "scripts/check-linux-protocol.sh": "b6323a86f5f134ee17dfa628f3dc64ee3594cac19b47bc0def156d123ab65aa7"
+    },
+    "package_requirement": "Swift Crypto 4.5.1...5.0.1 on every host; Crypto product linked only on Linux.",
+    "lockfile_unchanged": true,
+    "retained_lockfile_origin_hash": "7c56ac5d07aefe69657b82294bd6ec12d97113f9709e0bdb97d0e65cc165ade0",
+    "resolved_versions": {
+      "swift-crypto": "4.5.1",
+      "swift-asn1": "1.7.3"
+    },
+    "fixture_count": 25,
+    "fixture_hashes_match_historical_record": true,
+    "proof_limits": [
+      "This is a Linux protocol follow-up only; it did not rerun native Mac, hardware, TPM or device checks.",
+      "The isolated toolchain and compatibility runtime were restored after reboot and their archive/package SHA-256 pins rechecked; detached signature and signed APT metadata verification were not repeated. Those authentication observations belong to the historical run.",
+      "The historical source hashes and proof limits above describe the 14:08:50Z run, not this changed manifest."
+    ]
+  }
 }
