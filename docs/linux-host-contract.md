@@ -243,26 +243,28 @@ policy to make a test work.
 
 ## Pre-push validation and unresolved ownership
 
-Every push still requires the repository's complete gate, with JDK 21 and
+Every push requires the repository's host-aware local gate, with JDK 21 and
 `ANDROID_HOME` pointing to an SDK with platform 37.0 and build tools 37.0.0:
 
 ```sh
-./scripts/check.sh
-./gradlew :protocol-kotlin:test :phone-core:test :phone-core:approvalFlowTest :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
+./scripts/check-local.sh
 ```
 
-Run the full `scripts/check.sh` on the supported Mac for shared changes, including
-its Darwin-specific native experiments, Swift builds and tests. Its Linux branch
-does not run those checks, and success on Linux is not the full Mac gate. When
+The coordinator runs portable checks on both hosts, adds Swift protocol tests on
+Linux, and retains the full native checks plus Swift/Kotlin interoperability on
+macOS. The [CI coverage table](linux-validation.md#local-gate-and-ci-coverage) maps
+every automated gate to its required PR job. A Linux contributor can push after the
+Linux local gate passes; the Mac build and interoperability jobs must pass on the
+PR revision before merge. Success on Linux does not establish a Mac pass. When
 the XPC experiment changes, run its live checks in a supported Mac GUI session
 and retain the evidence; CI and unit tests do not replace it. See
 [AGENTS.md](../AGENTS.md) and the
 [PR watcher workflow](../.agents/skills/babysit-pr/SKILL.md).
 
-**Unresolved owner:** no Mac validator or interactive device-test operator is
-assigned by this proposal. Phase 0 remains open until the Mac validation owner
-and execution path are agreed, alongside review of caller code assurance and the
-eventual Linux schema. Local preparation can continue; do not push by treating
-unavailable Mac checks as passed. For any open PR, the repository watcher remains
+**Unresolved owner:** protected installation, physical phone tests and any required
+Mac GUI checks still need an interactive operator. Automated Mac validation uses
+the existing CI jobs. Phase 0 also requires review of caller code assurance and the
+eventual Linux schema. Do not treat unavailable interactive checks as passed.
+For any open PR, the repository watcher remains
 the readiness authority. Keep experiments and shared-source changes focused and
 retain their actual validation limits in each review.

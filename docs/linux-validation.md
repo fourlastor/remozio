@@ -17,12 +17,14 @@ On 17 October 2026, Ubuntu 25.10 x86_64, kernel `6.17.0-41-generic`:
 | Caller experiment | 31 observations and four cleanup checks passed; all nine focused tests passed with live checks enabled. |
 | TPM/provider TLS and hardware-adapter control | Private simulator controls and eleven focused unit tests passed. Supervised `/dev/tpmrm0` create/reopen, signing and mutual TLS also passed; reboot remains pending. |
 | Linux-runnable Kotlin/Android tasks | Passed with JDK 21 and SDK 37; Gradle reused unchanged task results. Debug APK and lint tasks succeeded. |
-| Full required Gradle gate | Blocked by the four absent Mac peers described below. |
+| Original unconditional Gradle gate | Blocked on Linux by four absent Mac peers; replaced by the host-aware gate below. |
 | Mac checks and remote CI | Not run; the added Linux protocol CI job is prepared only. |
 
 The linked experiment reports bind their results to source hashes and record the
 limits. These results do not establish a protected installation or real approval
-execution. The current work stays local until the full pre-push gate is satisfied.
+execution. At this checkpoint the original unconditional local gate blocked Linux
+pushes. The host-aware local gate below replaces that requirement while retaining
+Mac CI checks before merge.
 
 ## Independent checks
 
@@ -51,23 +53,59 @@ timeouts, cleanup and untested cases. The [TPM/TLS experiment](experiments/linux
 has separate dependency and invocation instructions; simulator results must remain
 labelled as simulator results. None of these commands installs a production daemon.
 
-## Required upstream gate
+## Local gate and CI coverage
 
-The shorter Gradle command above is the Linux-runnable subset. It does not replace
-the [repository pre-push requirement](../AGENTS.md):
+The [repository pre-push requirement](../AGENTS.md) is one manual command that
+selects the checks executable on the current host. No Git hook is installed:
 
 ```sh
-./scripts/check.sh
-./gradlew :protocol-kotlin:test :phone-core:test :phone-core:approvalFlowTest :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
+./scripts/check-local.sh
 ```
 
-On this Linux checkout the full Gradle command stops because `ApprovalFlowPeer`,
-`TLSPeer`, `HPKEPeer` and `AuditFlowPeer` are absent from `.build/approval-flow`.
-Those are current Mac interoperability executables. Do not substitute empty files,
-skip the task in the required gate, or report it as passed. The Darwin branch of
-`scripts/check.sh` also requires actual Mac execution. Arrange a Mac validator for
-the exact shared-source revision before pushing. No local Linux result establishes
-Mac runtime compatibility.
+It runs `scripts/check.sh` first on both hosts. Linux also runs
+`scripts/check-linux-protocol.sh`. Both run the portable Kotlin/phone tests and
+Android unit tests, debug assembly and lint. macOS additionally runs
+`:phone-core:approvalFlowTest` after `check.sh` has built its native peers.
+Unknown platforms and any failed phase fail the gate immediately.
+
+The complete Linux coordinator passed on this Ubuntu 25.10 host with the prepared
+Swift 6.2.4 runtime, JDK 21 and Android SDK 37: 171 repository tests (six skips),
+221 watcher tests, 119 Swift tests, and all portable Kotlin/Android tasks. Gradle
+reused 60 unchanged tasks and executed lint. The repository tests include six new
+controls for Linux/macOS command selection, running from another directory,
+unsupported hosts and failure propagation. Their stubbed macOS commands test
+selection only; they do not claim a native Mac run for this revision.
+
+`ApprovalFlowPeer`, `TLSPeer`, `HPKEPeer` and `AuditFlowPeer` are macOS executables
+built from `experiments/approval-flow`. Linux does not substitute or skip their
+Gradle task: it runs the portable tasks locally, and the complete native
+interoperability suite remains required in Mac CI before merge. Explicitly invoking
+`:phone-core:approvalFlowTest` still fails when the peers are absent.
+
+All automated local checks map to jobs in
+[checks.yml](../.github/workflows/checks.yml), triggered on pull requests and pushes
+to `main` without path filters:
+
+| Local check | CI job and command |
+| --- | --- |
+| Repository Python and PR-watcher tests | **Python checks**: `./scripts/check.sh` on Ubuntu; also runs on Mac. |
+| Linux Swift protocol fixtures | **Linux Swift protocol**: `./scripts/check-linux-protocol.sh` on Ubuntu 24.04. |
+| Mac native builds, experiments, Swift protocol and core tests | **Mac build**: the complete Darwin branch of `./scripts/check.sh` on macOS 26. |
+| Portable Kotlin protocol and phone tests | **Kotlin protocol**: `:protocol-kotlin:test :phone-core:test`. |
+| Native Swift/Kotlin interoperability | **Mac interoperability**: builds all four peers from the checkout, then runs `:phone-core:test :phone-core:approvalFlowTest`. |
+| Android unit tests, debug assembly and lint | **Android build**: `:android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug`, plus the additional CI-only `:android-app:assembleRelease`. |
+
+The PR watcher's `local_gate` uses the same coordinator and its `required_checks`
+includes all six job names. The original five jobs passed in upstream
+[Checks run 39034970117](https://github.com/rock3r/remozio/actions/runs/39034970117)
+for base revision `2d00126c8ce010f356a5de0db8e432dd37b504cc`. This branch's added
+Linux Swift job has been validated locally but has not yet run remotely.
+CI configuration and historical base results do not establish a pass for this branch.
+
+Mac automated validation therefore does not require a friend's machine before a
+Linux push; it remains a merge gate on the PR revision. The XPC GUI checks and
+device-dependent experiments still require their specified interactive operator
+sessions. A passing local Linux gate does not establish Mac runtime compatibility.
 
 ## Human testing boundary
 

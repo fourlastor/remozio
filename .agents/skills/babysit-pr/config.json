@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "local_gate": "./scripts/check.sh && ./gradlew :protocol-kotlin:test :phone-core:test :phone-core:approvalFlowTest :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug",
+  "local_gate": "./scripts/check-local.sh",
   "required_checks": [
     "Python checks",
+    "Linux Swift protocol",
     "Mac build",
     "Mac interoperability",
     "Kotlin protocol",

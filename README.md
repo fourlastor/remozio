@@ -20,12 +20,26 @@ The repository contains experiments, protocol code, and partial native apps.
 
 ## Local and pull request checks
 
-Run both local checks:
+Run the automated checks for your host:
 
-`./scripts/check.sh`
+```sh
+./scripts/check-local.sh
+```
 
-`./gradlew :protocol-kotlin:test :phone-core:test :phone-core:approvalFlowTest :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug`
+Linux runs Python, Swift protocol, portable Kotlin/phone tests, and Android unit
+tests, debug assembly and lint. macOS also runs the native builds, tests and
+experiments, then the Swift/Kotlin interoperability suite using its freshly built
+Mac peers. Mac interoperability runs in CI for Linux contributions.
 
-These checks require Xcode, JDK 21, and the Android SDK described in the [Android build guide](android/README.md).
+Both hosts require Python 3.11 or later, JDK 21 and the Android SDK described in the
+[Android build guide](android/README.md). Linux additionally needs Swift 6.2 or later
+on `PATH`; see the [Linux Swift setup](docs/experiments/linux-swift-protocol.md).
+macOS needs the supported Xcode toolchain. This command is a manual local gate;
+no Git hook is installed.
 
-Pull requests use the repository's [babysit skill](.agents/skills/babysit-pr/SKILL.md). Required checks cover Python, Mac builds, Mac interoperability, Kotlin protocol tests, Android builds and lint, and Codex review.
+Pull requests use the repository's [babysit skill](.agents/skills/babysit-pr/SKILL.md).
+Required checks cover Python, Linux Swift protocol, Mac builds, Mac interoperability,
+Kotlin protocol tests, Android builds and lint, and Codex review. The
+[CI coverage table](docs/linux-validation.md#local-gate-and-ci-coverage) maps each
+local check to its CI job. Device-dependent and Mac GUI checks still require the
+interactive sessions named in their experiment procedures.
