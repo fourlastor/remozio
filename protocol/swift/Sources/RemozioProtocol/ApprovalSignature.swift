@@ -1,4 +1,8 @@
+#if os(Linux)
+import Crypto
+#else
 import CryptoKit
+#endif
 import Foundation
 
 /// Verify with the public key and context selected from trusted enrollment and retained request state.

@@ -1,4 +1,8 @@
+#if os(Linux)
+import Crypto
+#else
 import CryptoKit
+#endif
 import Foundation
 
 public enum PairingInvitationError: Error { case invalidInvitation, mismatchedTranscript }

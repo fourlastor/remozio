@@ -44,6 +44,11 @@ swift test --package-path protocol/swift --triple arm64-apple-macosx26.0
 
 The macOS gate runs the Swift tests. The Kotlin Gradle task and its required CI job run the Kotlin tests on JDK 21. The Kotlin module has no Android device or UI dependency. Its value objects copy mutable input collections and byte arrays. Its encoder rejects unpaired UTF-16 surrogates instead of replacing them. The encoding subset number is not an authenticated wire version. Both codecs currently pass the same byte fixtures. Release compatibility claims still wait for the signed contract and authenticated negotiation.
 
+On Linux, `./scripts/check-linux-protocol.sh` runs the existing Swift suite using
+Swift Crypto; macOS continues using CryptoKit. See the [Ubuntu portability
+evidence](../docs/experiments/linux-swift-protocol.md) for the toolchain and runtime
+requirements. This adds neither a Linux capture schema nor hardware key custody.
+
 ## Next security layers
 
 Message schemas must reject unknown critical fields, enums, purposes, and versions. Declared optional fields must remain in the signed bytes. Verifiers must bind both the immutable request and the exact action contract, with separate signature domains and enrolled key purposes. Encoding success alone must never select a key class, infer consent, or permit dispatch.
