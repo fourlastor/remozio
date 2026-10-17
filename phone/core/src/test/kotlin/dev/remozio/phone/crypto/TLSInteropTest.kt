@@ -426,6 +426,60 @@ class TLSInteropTest {
             }
         }
 
+    @Test fun registrationPurposeCarriesMaximumTokenDirectlyAndThroughTheRelayWithItsOwnBudget(): Unit =
+        Fixture(negotiate = true, pushRegistration = true, maximumPayloadBytes = 1024).use { f ->
+            WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+                runBlocking {
+                    withTimeout(20_000) {
+                        for (useRelay in listOf(false, true)) {
+                            val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 3 }, ByteArray(16) { 4 })
+                            val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                                scope, emptyList(), emptySet(), PhonePushRegistrationFrame.MAXIMUM_BYTES,
+                                purpose = EnrolledChannelPurpose.PUSH_REGISTRATION)
+                            val channel = connector.connect(this,
+                                if (useRelay) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+                                    DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                                }), if (!useRelay) null else ApprovalCarrierRoute { owner ->
+                                    relay.connector.connect(owner, relay.endpoint,
+                                        RelayAccessCredential(relay.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311)
+                                })
+                            try {
+                                assertEquals(EnrolledChannelPurpose.PUSH_REGISTRATION, channel.purpose)
+                                assertTrue(channel.negotiated.peer.requests.isEmpty()); assertTrue(channel.negotiated.peer.auditVersions.isEmpty())
+                                val token = "synthetic-private-provider-token-".repeat(200).take(4096)
+                                val id = ByteArray(16) { 31 }
+                                channel.send(PhonePushRegistrationFrame.Offer(id, PhonePushTokenOffer(token, "project", "123", "dev.remozio.android")).encode())
+                                val response = PhonePushRegistrationFrame.decode(requireNotNull(channel.receive())) as PhonePushRegistrationFrame.Outcome
+                                assertArrayEquals(id, response.correlationID.copyBytes())
+                                assertEquals(PhonePushRegistrationOutcome.INCOMPATIBLE, response.outcome)
+                            } finally { channel.closeAndJoin() }
+                        }
+                    }
+                }
+                assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("synthetic-private-provider-token-"))
+            }
+        }
+
+    @Test fun registrationPurposeRejectsTheWrongEnrollmentBeforeApplicationData(): Unit =
+        Fixture(negotiate = true, pushRegistration = true).use { f ->
+            runBlocking {
+                withTimeout(10_000) {
+                    val scope = ChannelScope(ByteArray(16) { 1 }, ByteArray(16) { 2 }, ByteArray(16) { 5 }, ByteArray(16) { 4 })
+                    val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+                        scope, emptyList(), emptySet(), PhonePushRegistrationFrame.MAXIMUM_BYTES,
+                        purpose = EnrolledChannelPurpose.PUSH_REGISTRATION)
+                    var refused = false
+                    try {
+                        connector.connect(this, flowOf(ApprovalCarrierRoute { owner ->
+                            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+                        }), null).closeAndJoin()
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                    catch (_: java.io.IOException) { refused = true }
+                    assertTrue(refused)
+                }
+            }
+        }
+
     @Test fun receiptPurposeCrossesNativeTlsDirectlyAndThroughTheRelay(): Unit =
         Fixture(negotiate = true, receiptRecovery = true).use { f ->
             WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
@@ -669,7 +723,7 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false) : AutoCloseable {
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val maximumPayloadBytes: Int = 65_536) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
@@ -687,7 +741,7 @@ class TLSInteropTest {
                 process = child
                 process.outputStream.bufferedWriter().also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + second + "}\n")
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()

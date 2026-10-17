@@ -99,3 +99,4 @@ The signed SDK control checks retained metadata, inode binding and current floor
 It grants no installation or activation authority.
 
 - [Android background request checks](android-background-work.md): integrated ingress, durable recovery and foreground-aware snapshot guards; synthetic framework proof only.
+- [Enrolled phone push registration](../../protocol/phone-push-registration.md): typed transport and checkpointed authority exchange; provider and app integration remain pending.

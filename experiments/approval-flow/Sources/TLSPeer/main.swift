@@ -8,7 +8,7 @@ import RemozioProtocol
 
 // Synthetic loopback echo only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let maximumPayloadBytes: Int? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -182,13 +182,13 @@ if setup.negotiate == true {
         phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
     let enrolled = try DirectApprovalPeer(scope: scope, transportPublicKey: peer,
         requests: setup.commandMessages == true ? [try ChannelRequestCapability(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])] : [],
-        auditVersions: [], maximumPayloadBytes: 65_536)
+        auditVersions: [], maximumPayloadBytes: setup.maximumPayloadBytes ?? 65_536)
     var enrolledPeers = [enrolled]
     if let second = setup.secondPeerPublicKey {
         guard let key = Data(base64Encoded: second) else { throw ProbeError.invalidInput }
         enrolledPeers.append(try DirectApprovalPeer(scope: ChannelScope(macID: Data(repeating: 1, count: 16),
             accountID: Data(repeating: 2, count: 16), phoneID: Data(repeating: 5, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16)),
-            transportPublicKey: key, requests: [], auditVersions: [], maximumPayloadBytes: 65_536))
+            transportPublicKey: key, requests: [], auditVersions: [], maximumPayloadBytes: setup.maximumPayloadBytes ?? 65_536))
     }
     let direct = try DirectApprovalListener(identity: identity, peers: enrolledPeers, binding: .loopback,
         maximumConnections: setup.maximumConnections ?? 8,
@@ -199,6 +199,15 @@ if setup.negotiate == true {
             case .stopped: break
             }
         }, handler: { _, channel in
+            if setup.pushRegistration == true {
+                guard channel.purpose == .pushRegistration,
+                      let payload = try await channel.receive(maximumBytes: PhonePushRegistrationFrame.maximumBytes) else { throw ProbeError.invalidInput }
+                let request = try PhonePushRegistrationFrame.decode(payload)
+                switch request { case .offer, .proof: break; default: throw ProbeError.invalidInput }
+                // Synthetic wire only. No configured Root or gateway is present in this fixture.
+                try await channel.send(PhonePushRegistrationFrame.outcome(correlationID: request.correlationID, outcome: .incompatible).encode())
+                return
+            }
             if setup.receiptRecovery == true {
                 guard channel.purpose == .pairingReceipt,
                       let payload = try await channel.receive(maximumBytes: PairingReceiptFrame.maximumBytes),

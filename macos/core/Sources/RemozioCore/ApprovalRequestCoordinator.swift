@@ -944,6 +944,25 @@ public final class ApprovalRequestCoordinator {
         try? command.sendTerminalOutcome(outcome, request: identity)
     }
 
+    /// Fixed token registration operations share this owner's current binding and continuity writer.
+    /// No candidate result leaves the owner before durable commit. Callbacks cannot await or reenter it.
+    func phonePushRegistration(_ request: PhonePushRegistrationFrame, binding: AuthorityPeerBinding,
+                               provider: AuthorityPhonePushRegistration, now: AuthorityMoment, wall: UInt64,
+                               validateTransport: (JournalTransaction) throws -> Void) throws -> PhonePushRegistrationFrame {
+        try running()
+        guard binding.scope.macID == mac, binding.scope.accountID == account else { throw GatewayAuthorityError.wrongScope }
+        switch request {
+        case .offer, .proof: break
+        default: throw AuthorityXPCError.invalidMessage
+        }
+        _ = try request.encode()
+        try checkClock(now)
+        return try write { tx in
+            try validateTransport(tx)
+            return try provider.process(request, binding: binding, transaction: tx, now: now, wall: wall)
+        }
+    }
+
     private func append(_ tx: JournalTransaction, requestID: Data, category: AuditCategory, kind: AuditEventKind,
                         outcome: AuditOutcome, reason: AuditReason, receiptTimeMs: UInt64?) throws {
         let current = try head(tx)

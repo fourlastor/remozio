@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 @objc public protocol TransportAuthorityXPCProtocol {
     /// Harmless first call. Contains no scope, key, request, or credential material.
@@ -15,6 +16,9 @@ import Foundation
     /// Read-only receipt recovery. Negotiate before sending a retained setup ID or phone binding.
     func pairingReceiptVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func pairingReceipt(_ binding: Data, setupID: Data, reply: @escaping @Sendable (Data?) -> Void)
+    /// Optional token registration. Negotiate before sending an enrollment binding or private token.
+    func phonePushRegistrationVersion(reply: @escaping @Sendable (UInt64) -> Void)
+    func phonePushRegistration(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void)
     /// Optional wake hints. Clients negotiate this extension on their own connection.
     func requestWakeVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func wakeDeliveryHints(reply: @escaping @Sendable (Data?) -> Void)
@@ -22,8 +26,8 @@ import Foundation
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
 
-public enum AuthorityXPCError: Error { case unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+public enum AuthorityXPCError: Error { case unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
+enum AuthorityXPCReply: Sendable { case registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -35,12 +39,16 @@ protocol AuthorityXPCDriver: Sendable {
     func exchange(_ binding: Data, query: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func registrationVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func registration(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func validate(_ binding: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func close()
 }
 
 extension AuthorityXPCDriver {
+    func registrationVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.registrationVersion(0)) }
+    func registration(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func receiptVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.receiptVersion(0)) }
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func exchangeVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.exchangeVersion(0)) }
@@ -110,6 +118,14 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.pairingReceipt(binding, setupID: setupID) { [self] bytes in checked(bytes.map(AuthorityXPCReply.receipt) ?? .failed, reply) }
     }
+    func registrationVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.phonePushRegistrationVersion { [self] version in checked(.registrationVersion(version), reply) }
+    }
+    func registration(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.phonePushRegistration(binding, frame: frame) { [self] bytes in checked(bytes.map(AuthorityXPCReply.registration) ?? .failed, reply) }
+    }
     func snapshot(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.trustSnapshot { [self] data in checked(data.map(AuthorityXPCReply.snapshot) ?? .failed, reply) }
@@ -137,7 +153,8 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private var registrationVersion: UInt64?
     private var receiptVersion: UInt64?
     private var exchangeVersion: UInt64?
     private var discoveryVersion: UInt64?
@@ -264,6 +281,28 @@ public actor AuthorityXPCChannel {
         return bytes.isEmpty ? nil : bytes
     }
 
+    /// The optional capability is checked before any binding or token is sent. Uncertain requests are never replayed.
+    public func phonePushRegistration(binding: AuthorityPeerBinding, frame: PhonePushRegistrationFrame) async throws -> PhonePushRegistrationFrame {
+        try AuthorityPhonePushExchange.request(frame, binding: binding)
+        if registrationVersion == nil {
+            guard case .registrationVersion(let version) = try await perform(.registrationVersion) else { throw AuthorityXPCError.invalidMessage }
+            registrationVersion = version
+        }
+        guard registrationVersion == 1 else { throw AuthorityXPCError.unsupportedPhonePushRegistration }
+        let encoded = try AuthorityTrustCodec.encodeBinding(binding)
+        guard case .registration(let bytes) = try await perform(.registration, binding: encoded, query: frame.encode()) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        do {
+            let result = try PhonePushRegistrationFrame.decode(bytes)
+            try AuthorityPhonePushExchange.response(result, to: frame, binding: binding)
+            return result
+        } catch { finish(.invalidMessage); throw error }
+    }
+
+    // Synchronous driver invalidation must fence results from the optional RPC connection too.
+    nonisolated var lifetimeActive: Bool { cancellation.ifActive({}) }
+
     public nonisolated func abort() {
         cancellation.cancel(); driver.close()
         Task { await self.close() }
@@ -294,6 +333,8 @@ public actor AuthorityXPCChannel {
                 }
                 guard cancellation.ifActive({
                     switch operation {
+                    case .registrationVersion: driver.registrationVersion(reply)
+                    case .registration: driver.registration(binding!, frame: query!, reply)
                     case .receiptVersion: driver.receiptVersion(reply)
                     case .receipt: driver.receipt(binding!, setupID: setupID!, reply)
                     case .exchangeVersion: driver.exchangeVersion(reply)
@@ -322,6 +363,8 @@ public actor AuthorityXPCChannel {
         if case .failed = reply { finish(.failed); return }
         switch (current.operation, reply) {
         case (.hello, .hello(1)), (.validation, .validation), (.deliveryVersion, .deliveryVersion), (.discoveryVersion, .discoveryVersion): break
+        case (.registrationVersion, .registrationVersion): break
+        case (.registration, .registration(let bytes)) where !bytes.isEmpty && bytes.count <= PhonePushRegistrationFrame.maximumBytes: break
         case (.receiptVersion, .receiptVersion): break
         case (.receipt, .receipt(let bytes)) where bytes.isEmpty || bytes.count == 64: break
         case (.exchangeVersion, .exchangeVersion): break

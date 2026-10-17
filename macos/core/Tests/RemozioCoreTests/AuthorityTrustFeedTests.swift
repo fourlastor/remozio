@@ -97,7 +97,33 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             reply?(.validation(allowed))
         }
         func interrupt() { lock.withLock { invalidated }?() }
-        func close() { }
+        private var closedCalls = 0
+        var closeCount: Int { lock.withLock { closedCalls } }
+        private var registrationCapability: UInt64? = 0
+        private var registrationReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var registrationFrame: Data?
+        private var registrationCalls = 0
+        let registrationSent = XCTestExpectation(description: "held registration")
+        var registrationCount: Int { lock.withLock { registrationCalls } }
+        func setRegistrationVersion(_ value: UInt64?) { lock.withLock { registrationCapability = value } }
+        func registrationVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let version = lock.withLock({ registrationCapability }) { reply(.registrationVersion(version)) }
+            else { reply(.failed) }
+        }
+        func registration(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { registrationCalls += 1; registrationFrame = frame; registrationReply = reply }
+            registrationSent.fulfill()
+        }
+        func finishRegistration() throws {
+            let value = lock.withLock { () -> (Data?, (@Sendable (AuthorityXPCReply) -> Void)?) in
+                let value = (registrationFrame, registrationReply); registrationFrame = nil; registrationReply = nil; return value
+            }
+            guard let frame = value.0, let reply = value.1 else { return }
+            let request = try PhonePushRegistrationFrame.decode(frame)
+            reply(.registration(try PhonePushRegistrationFrame.outcome(correlationID: request.correlationID, outcome: .proofCommitted).encode()))
+        }
+        func close() { lock.withLock { closedCalls += 1 } }
+
     }
     private final class Listener: OwnedDirectListener, @unchecked Sendable {
         private let lock = NSLock()
@@ -114,6 +140,18 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         var values: [Listener] { lock.withLock { storage } }
         func make(_ generation: UUID) -> Listener { lock.withLock { currentGeneration = generation; let value = Listener(); storage.append(value); return value } }
     }
+    private final class RegistrationFactory: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        let primary: Driver
+        let auxiliary: Driver
+        init(primary: Driver, auxiliary: Driver) { self.primary = primary; self.auxiliary = auxiliary }
+        var count: Int { lock.withLock { calls } }
+        func make(_ onClose: @escaping @Sendable () -> Void) -> AuthorityXPCChannel {
+            let selected = lock.withLock { calls += 1; return calls == 1 ? primary : auxiliary }
+            return AuthorityXPCChannel(driver: selected, onClose: onClose)
+        }
+    }
     private let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
     private func trust(empty: Bool = false) throws -> DirectApprovalTrust {
         let peer = try DirectApprovalPeer(scope: ChannelScope(macID: mac, accountID: account,
@@ -127,6 +165,75 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
     }
     private func host(_ listeners: Listeners) -> DirectApprovalTransportHost {
         DirectApprovalTransportHost(macID: mac, accountID: account, factory: { generation, _, _, _ in listeners.make(generation) }, validatePeer: { _, _ in })
+    }
+    private func registrationOffer() throws -> PhonePushRegistrationFrame {
+        try .offer(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+    }
+    func testUnsupportedRegistrationKeepsPrimaryApprovalTrustAlive() async throws {
+        let capabilities: [UInt64?] = [0, nil]
+        for capability in capabilities {
+            let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+            auxiliary.setRegistrationVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { _ = try await feed.phonePushRegistration(trust.peers[0], revision: trust.revision, frame: registrationOffer()); XCTFail("Expected optional refusal") } catch { }
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.registrationCount, 0)
+            XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            XCTAssertEqual(factory.count, 2)
+            await feed.close(); await host.close()
+        }
+    }
+    func testRegistrationUsesSeparateRPCAndReturnsOnlyForTheCurrentAuthorityLease() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRegistrationVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try registrationOffer()
+        let pending = Task { try await feed.phonePushRegistration(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.registrationSent], timeout: 2)
+        try auxiliary.finishRegistration()
+        guard case .outcome(let correlation, let result) = try await pending.value else { return XCTFail("Missing status") }
+        XCTAssertEqual(correlation, request.correlationID); XCTAssertEqual(result, .proofCommitted)
+        XCTAssertEqual(primary.registrationCount, 0); XCTAssertEqual(auxiliary.registrationCount, 1); XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testPrimaryInterruptionDiscardsLateRegistrationReply() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRegistrationVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try registrationOffer()
+        let pending = Task { try await feed.phonePushRegistration(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.registrationSent], timeout: 2)
+        primary.interrupt(); try auxiliary.finishRegistration()
+        do { _ = try await pending.value; XCTFail("Retired authority returned registration success") } catch { }
+        do { try await feed.validatePeer(trust.peers[0], revision: trust.revision); XCTFail("Retired primary revived") } catch { }
+        XCTAssertEqual(auxiliary.registrationCount, 1); XCTAssertGreaterThan(auxiliary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testCancelledRegistrationRetiresOnlyItsOptionalLink() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRegistrationVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = try registrationOffer()
+        let pending = Task { try await feed.phonePushRegistration(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.registrationSent], timeout: 2)
+        pending.cancel(); try auxiliary.finishRegistration()
+        do { _ = try await pending.value; XCTFail("Cancelled registration returned success") } catch { }
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(auxiliary.registrationCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
     }
     func testServiceStartsAfterTrustAndRetiresOnClose() async throws {
         let listeners = Listeners(), host = host(listeners), feed = feed(try Driver(trust()))

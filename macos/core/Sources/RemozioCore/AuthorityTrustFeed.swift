@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 /// Invalidation is synchronous, including while actor callbacks are waiting to run.
 final class AuthorityTrustLease: @unchecked Sendable {
@@ -20,6 +21,7 @@ public actor AuthorityTrustFeed {
     private let lease = AuthorityTrustLease()
     private weak var host: DirectApprovalTransportHost?
     private var channel: AuthorityXPCChannel?
+    private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
     private var lastSnapshot: Data?
     private var started = false
@@ -47,7 +49,7 @@ public actor AuthorityTrustFeed {
         self.maximumWaiting = maximumWaiting; self.factory = factory
     }
     deinit {
-        lease.invalidate(); timer?.cancel(); channel?.abort()
+        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort()
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -176,10 +178,54 @@ public actor AuthorityTrustFeed {
             throw AuthorityXPCError.unsupportedPairingReceipt
         } catch { await close(); throw error }
     }
+    /// Serialize optional registration with this authority lease, using a separate RPC connection.
+    /// An older Root can reject the optional selector without retiring ordinary approval delivery.
+    public func phonePushRegistration(_ peer: DirectApprovalPeer, revision: UUID,
+                                      frame: PhonePushRegistrationFrame) async throws -> PhonePushRegistrationFrame {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        let binding = AuthorityPeerBinding(peer: peer, revision: revision)
+        try AuthorityPhonePushExchange.request(frame, binding: binding)
+        try await acquire()
+        defer { release() }
+        let link = try await openRegistrationLink()
+        do {
+            let response = try await link.channel.phonePushRegistration(binding: binding, frame: frame)
+            try requireActive()
+            guard registrationLink?.id == link.id else { throw AuthorityXPCError.closed }
+            return response
+        } catch AuthorityXPCError.unsupportedPhonePushRegistration {
+            try requireActive()
+            throw AuthorityXPCError.unsupportedPhonePushRegistration
+        } catch {
+            retireRegistrationLink(link.id)
+            try requireActive()
+            throw error
+        }
+    }
+    private func openRegistrationLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
+        try requireActive()
+        if let registrationLink { return registrationLink }
+        let id = UUID()
+        let value = try factory { [weak self] in Task { await self?.retireRegistrationLink(id) } }
+        registrationLink = (id, value)
+        do {
+            try await value.start()
+            try requireActive()
+            guard registrationLink?.id == id else { throw AuthorityXPCError.closed }
+            return (id, value)
+        } catch { retireRegistrationLink(id); throw error }
+    }
+    private func retireRegistrationLink(_ id: UUID) {
+        guard registrationLink?.id == id else { return }
+        let value = registrationLink?.channel; registrationLink = nil
+        value?.abort()
+    }
+
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate(); timer?.cancel(); timer = nil
             channel?.abort(); channel = nil; lastSnapshot = nil
+            if let id = registrationLink?.id { retireRegistrationLink(id) }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }
@@ -196,7 +242,7 @@ public actor AuthorityTrustFeed {
     }
     private func requireActive() throws {
         try Task.checkCancellation()
-        guard !closed, lease.isActive else { throw AuthorityXPCError.closed }
+        guard !closed, lease.isActive, channel?.lifetimeActive != false else { throw AuthorityXPCError.closed }
     }
     private func activeChannel() throws -> AuthorityXPCChannel {
         try requireActive()

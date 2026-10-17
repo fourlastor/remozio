@@ -31,6 +31,7 @@ public struct DirectApprovalPeer: Sendable {
 
     /// The authority limit still bounds signed frames. Only the snapshot channel reserves outer framing and query space.
     func channelMaximumPayloadBytes(for purpose: EnrolledChannelPurpose) -> Int {
+        if case .pushRegistration = purpose { return PhonePushRegistrationFrame.maximumBytes }
         guard case .pendingSnapshot = purpose else { return maximumPayloadBytes }
         let signedFrames = min(maximumPayloadBytes, PendingRequestSnapshotFrame.maximumFrameBytes) +
             (PendingRequestSnapshotFrame.maximumBytes - PendingRequestSnapshotFrame.maximumFrameBytes)
@@ -130,7 +131,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt, .pendingSnapshot] {
+        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt, .pendingSnapshot, .pushRegistration] {
             sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
         }
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
@@ -199,7 +200,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
                     throw DirectListenerError.invalidIdentity
                 }
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
-                    requests: peer.requests, auditVersions: peer.auditVersions,
+                    requests: purpose == .pushRegistration ? [] : peer.requests,
+                    auditVersions: purpose == .pushRegistration ? [] : peer.auditVersions,
                     maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose),
                     trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
                 do { try Task.checkCancellation(); try await handler(peer, framed) }

@@ -102,3 +102,15 @@ The probe negotiates the production receipt extension after the harmless hello. 
 Wrong client and server identifiers prevent receipt payload dispatch.
 The service echoes synthetic bytes. It has no committed enrollment, Root journal or authority key.
 These results establish native selector bridging. Installed Root behavior and Pixel receipt recovery remain interactive checks.
+
+## Phone push registration selectors
+
+[The registration evidence](evidence/2026-10-17-push-registration-xpc.json) adds five cases. All 48 cases passed on macOS 27.0.1, targeting macOS 26.
+The temporary GUI service was removed.
+The probe negotiates the production registration selector after the harmless hello.
+Nonempty, empty and nil Data replies remain distinct. Wrong client and server identifiers prevent registration payload dispatch.
+The service echoes synthetic nonces. It does not handle provider tokens, consume a Root proof or contact FCM.
+Installed Root admission, hardware signing and phone delivery remain separate gates.
+
+The runner accepts optional `--scratch-path` and `--cache-path` arguments for isolated SwiftPM storage.
+A separate cache disables the shared dependency cache. It does not change pinned package versions or XPC admission.

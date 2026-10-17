@@ -54,13 +54,13 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
 
 
-def experiment(report):
+def experiment(report, swift_build_options=()):
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise RuntimeError("Requires an Apple Silicon Mac")
     version = command(["/usr/bin/sw_vers", "-productVersion"]).stdout.strip()
@@ -77,10 +77,10 @@ def experiment(report):
     domain = f"gui/{os.getuid()}"
     command(["/bin/launchctl", "print", domain])
     command(["/usr/bin/xcrun", "swift", "build", "--package-path", str(PACKAGE),
-             "--triple", "arm64-apple-macosx26.0"], timeout=300)
+             "--triple", "arm64-apple-macosx26.0", *swift_build_options], timeout=300)
     binary_path = command([
         "/usr/bin/xcrun", "swift", "build", "--package-path", str(PACKAGE),
-        "--triple", "arm64-apple-macosx26.0", "--show-bin-path",
+        "--triple", "arm64-apple-macosx26.0", *swift_build_options, "--show-bin-path",
     ]).stdout.strip()
     source = Path(binary_path) / "remozio-xpc-probe"
     with tempfile.TemporaryDirectory(prefix="remozio-xpc-") as temporary:
@@ -111,6 +111,11 @@ def experiment(report):
                 ("discovery-bytes", "discovery", trusted, TRUSTED, 0),
                 ("discovery-wrong-server", "discovery", trusted, OTHER, 3),
                 ("discovery-wrong-client", "discovery", other, TRUSTED, 3),
+                ("registration-bytes", "registration", trusted, TRUSTED, 0),
+                ("registration-empty", "registration-empty", trusted, TRUSTED, 0),
+                ("registration-nil", "registration-nil", trusted, TRUSTED, 0),
+                ("registration-wrong-server", "registration", trusted, OTHER, 3),
+                ("registration-wrong-client", "registration", other, TRUSTED, 3),
                 ("receipt-bytes", "receipt", trusted, TRUSTED, 0),
                 ("receipt-empty", "receipt-empty", trusted, TRUSTED, 0),
                 ("receipt-nil", "receipt-nil", trusted, TRUSTED, 0),
@@ -164,14 +169,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True,
                         help="New report file; an existing file is never overwritten")
+    parser.add_argument("--scratch-path", type=Path, help="Use a separate SwiftPM build directory")
+    parser.add_argument("--cache-path", type=Path, help="Use a separate SwiftPM cache without the shared repository cache")
     args = parser.parse_args()
+    swift_build_options = []
+    if args.scratch_path:
+        swift_build_options.extend(["--scratch-path", str(args.scratch_path.resolve())])
+    if args.cache_path:
+        swift_build_options.extend(["--cache-path", str(args.cache_path.resolve()), "--disable-dependency-cache"])
+
     # Reserve the evidence file before changing launchd state.
     with args.output.open("x", encoding="utf-8") as output:
         report = {"schemaVersion": 1, "experiment": "macos-xpc-identifiers",
                   "recordedAt": datetime.now(timezone.utc).isoformat(), "status": "running", "cases": []}
         signal.signal(signal.SIGTERM, interrupted)
         try:
-            experiment(report)
+            experiment(report, swift_build_options)
             report["status"] = "passed"
         except (Exception, KeyboardInterrupt) as error:
             report["status"] = "failed"

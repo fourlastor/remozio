@@ -64,6 +64,8 @@ public actor DirectApprovalTransportService {
                         try await self.runPairingReceiptRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .pendingSnapshot:
                         try await self.runPendingRequestSnapshot(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .pushRegistration:
+                        try await self.runPhonePushRegistration(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
                 }
             }
@@ -181,6 +183,16 @@ public actor DirectApprovalTransportService {
                 throw error
             }
         } onCancel: { channel.close() }
+    }
+
+    /// Returns only a bounded registration reply from the current authority. No application request is replayed.
+    public func phonePushRegistration(for session: DirectApprovalSession, frame: PhonePushRegistrationFrame) async throws -> PhonePushRegistrationFrame {
+        try await validate(session)
+        let response: PhonePushRegistrationFrame
+        do { response = try await feed.phonePushRegistration(session.peer, revision: session.revision, frame: frame) }
+        catch AuthorityXPCError.unsupportedPhonePushRegistration { response = .outcome(correlationID: frame.correlationID, outcome: .incompatible) }
+        try await validate(session)
+        return response
     }
 
     /// Returns only the existing commit proof for this admitted phone and retained setup ID.

@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 public enum AuthorityTransportAccessError: Error, Equatable { case unconfigured, policyMismatch }
 
@@ -92,6 +93,19 @@ final class AuthorityTransportAccess: Sendable {
             try transaction.requireDirectApprovalBinding(binding)
         }, body: { owner in
             try handler(owner, binding, setupID, { transaction in
+                try self.requireCurrent(transaction)
+                try transaction.requireDirectApprovalBinding(binding)
+            })
+        })
+    }
+
+    func phonePushRegistration(binding: AuthorityPeerBinding, frame: PhonePushRegistrationFrame,
+                               handler: AuthorityPhonePushRegistrationProvider) throws -> PhonePushRegistrationFrame {
+        try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { owner in
+            try handler(owner, binding, frame, { transaction in
                 try self.requireCurrent(transaction)
                 try transaction.requireDirectApprovalBinding(binding)
             })
