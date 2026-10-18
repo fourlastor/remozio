@@ -10,7 +10,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -49,10 +48,9 @@ class CommandStreamPresentationTest {
         assertTrue(inspectedCommandStreams(capture).isEmpty())
     }
 
-    @Test fun advertisesOnlyTheThreeInspectableCommandContractsWithoutExtraFeatures() {
+    @Test fun advertisesMacAndLinuxInspectableCommandContractsWithoutExtraFeatures() {
         val offers = commandInspectionCapabilities()
-        assertEquals(listOf(1uL, 2uL, 3uL), offers.map { it.schemaVersion })
+        assertEquals(listOf(1uL, 2uL, 3uL, 4uL), offers.map { it.schemaVersion })
         assertTrue(offers.all { it.kind == 0uL && it.wireVersion == 1uL && it.features.isEmpty() })
-        assertFalse(offers.any { it.schemaVersion == 4uL })
     }
 }

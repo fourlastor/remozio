@@ -33,7 +33,7 @@ private class NegotiatedRequestChannel(private val channel: NegotiatedTLSChannel
 internal fun commandChannelSchemas(local: List<ChannelRequestCapability>, localAuditVersions: Set<ULong>,
                                   peerRole: ChannelRole, peer: List<ChannelRequestCapability>): Set<ULong> {
     fun ChannelRequestCapability.known() = kind == 0uL && wireVersion == 1uL &&
-        schemaVersion in CommandCapture.supportedSchemaVersions
+        schemaVersion in CommandCapturePayload.supportedSchemaVersions
     require(peerRole == ChannelRole.MAC && localAuditVersions.isEmpty() && local.all { it.known() && it.features.isEmpty() })
     val shared = local.map { it.schemaVersion }.toSet().intersect(peer.filter { it.known() }.map { it.schemaVersion }.toSet())
     require(shared.isNotEmpty())
@@ -117,7 +117,7 @@ class CommandRequestReceiver private constructor(
                 val expected = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(), phoneID, enrollmentEpoch)
                 require(channel.scope == expected)
                 val schemas = channel.commandSchemas.toSet()
-                require(schemas.isNotEmpty() && CommandCapture.supportedSchemaVersions.containsAll(schemas))
+                require(schemas.isNotEmpty() && CommandCapturePayload.supportedSchemaVersions.containsAll(schemas))
                 val maximum = maxOf(enrollment.limits.body.maxBytes, enrollment.limits.status.maxBytes)
                 require(maximum in 1..(16_777_216 - ApprovalMessage.OVERHEAD_BYTES))
                 require(channel.maximumPayloadBytes >= maximum + ApprovalMessage.OVERHEAD_BYTES)

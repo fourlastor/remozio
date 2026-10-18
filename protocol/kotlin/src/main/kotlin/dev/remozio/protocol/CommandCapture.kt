@@ -37,9 +37,132 @@ data class CapturedAncestor(val pid: UInt, val pidVersion: UInt, val executableP
 data class CapturedAncestry(val completeness: AncestryCompleteness, val entries: List<CapturedAncestor>, val reason: AncestryReason)
 data class CapturedSubmission(val id: CborValue.Bytes, val nonce: CborValue.Bytes, val callerBinding: CborValue.Bytes)
 
+/** All credential values are host assertions; this model supplies no independent OS attestation. */
+class CapturedLinuxCredentials(val realUID: UInt, val effectiveUID: UInt, val savedUID: UInt, val filesystemUID: UInt,
+    val realGID: UInt, val effectiveGID: UInt, val savedGID: UInt, val filesystemGID: UInt,
+    supplementaryGroups: List<UInt>) {
+    val supplementaryGroups: List<UInt> = immutable(supplementaryGroups)
+}
+data class CapturedLinuxRequester(val profile: String, val pid: UInt, val processBinding: CborValue.Bytes,
+    val monitorIncarnation: CborValue.Bytes, val execEpoch: ULong, val executable: CapturedExecutable,
+    val credentials: CapturedLinuxCredentials, val sessionID: UInt?, val codePolicyDigest: CborValue.Bytes)
+
+/** Authenticated transport and issuance are separate from these typed host claims. */
+sealed interface CommandCapturePayload {
+    val schemaVersion: ULong
+    val canonicalBytes: ByteArray
+    val canonicalByteCount: Int
+    val executable: CapturedExecutable
+    val arguments: List<CborValue.Bytes>
+    val directory: CapturedDirectory
+    val target: CommandTarget
+    val environment: List<CapturedEnvironmentEntry>
+    val input: CapturedCommandInput
+    val ioMode: CommandIOMode
+    val stdioLayout: CapturedCommandStdioLayout?
+    val disconnectBehavior: StartedCommandDisconnect
+    val ancestry: CapturedAncestry
+    val unverifiedRationale: String?
+    val submission: CapturedSubmission
+
+    companion object {
+        val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(1u, 2u, 3u, 4u))
+        /** The negotiated outer schema is mandatory; never infer or translate it from capture bytes. */
+        fun decode(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong): CommandCapturePayload =
+            when (expectedSchemaVersion) {
+                1uL, 2uL, 3uL -> CommandCapture(canonicalBytes, limits, expectedSchemaVersion)
+                4uL -> LinuxCommandCapture(canonicalBytes, limits, expectedSchemaVersion)
+                else -> fail(CommandCaptureFailure.VERSION)
+            }
+    }
+}
+
 /** Parses claims only. OS capture, authenticated issuance, and execution are separate responsibilities. */
-class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong = 1u) {
+class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong = 1u) : CommandCapturePayload {
     companion object { val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(1u, 2u, 3u)) }
+    private val parsed = run {
+        ensure(expectedSchemaVersion in supportedSchemaVersions, CommandCaptureFailure.VERSION)
+        ParsedCommandCapture(canonicalBytes, limits, expectedSchemaVersion, ::parseMacRequester) { it.sessionID }
+    }
+    override val schemaVersion: ULong get() = parsed.schemaVersion
+    override val canonicalBytes: ByteArray get() = parsed.canonicalBytes
+    override val canonicalByteCount: Int get() = parsed.canonicalByteCount
+    override val executable: CapturedExecutable get() = parsed.executable
+    override val arguments: List<CborValue.Bytes> get() = parsed.arguments
+    override val directory: CapturedDirectory get() = parsed.directory
+    override val target: CommandTarget get() = parsed.target
+    override val environment: List<CapturedEnvironmentEntry> get() = parsed.environment
+    override val input: CapturedCommandInput get() = parsed.input
+    override val ioMode: CommandIOMode get() = parsed.ioMode
+    override val stdioLayout: CapturedCommandStdioLayout? get() = parsed.stdioLayout
+    override val disconnectBehavior: StartedCommandDisconnect get() = parsed.disconnectBehavior
+    override val ancestry: CapturedAncestry get() = parsed.ancestry
+    override val unverifiedRationale: String? get() = parsed.unverifiedRationale
+    override val submission: CapturedSubmission get() = parsed.submission
+    val requester: CapturedRequester get() = parsed.requester
+}
+
+/** Parses claims only. OS capture, authenticated issuance, and execution are separate responsibilities. */
+class LinuxCommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong) : CommandCapturePayload {
+    companion object { val supportedSchemaVersions: Set<ULong> = Collections.unmodifiableSet(setOf(4u)) }
+    private val parsed = run {
+        ensure(expectedSchemaVersion in supportedSchemaVersions, CommandCaptureFailure.VERSION)
+        ParsedCommandCapture(canonicalBytes, limits, expectedSchemaVersion, ::parseLinuxRequester) { it.sessionID }
+    }
+    override val schemaVersion: ULong get() = parsed.schemaVersion
+    override val canonicalBytes: ByteArray get() = parsed.canonicalBytes
+    override val canonicalByteCount: Int get() = parsed.canonicalByteCount
+    override val executable: CapturedExecutable get() = parsed.executable
+    override val arguments: List<CborValue.Bytes> get() = parsed.arguments
+    override val directory: CapturedDirectory get() = parsed.directory
+    override val target: CommandTarget get() = parsed.target
+    override val environment: List<CapturedEnvironmentEntry> get() = parsed.environment
+    override val input: CapturedCommandInput get() = parsed.input
+    override val ioMode: CommandIOMode get() = parsed.ioMode
+    override val stdioLayout: CapturedCommandStdioLayout? get() = parsed.stdioLayout
+    override val disconnectBehavior: StartedCommandDisconnect get() = parsed.disconnectBehavior
+    override val ancestry: CapturedAncestry get() = parsed.ancestry
+    override val unverifiedRationale: String? get() = parsed.unverifiedRationale
+    override val submission: CapturedSubmission get() = parsed.submission
+    val requester: CapturedLinuxRequester get() = parsed.requester
+
+    init {
+        ensure(ioMode == CommandIOMode.PIPES && disconnectBehavior == StartedCommandDisconnect.TERMINATE,
+            CommandCaptureFailure.FIELDS)
+        ensure(stdioLayout?.terminal == null && stdioLayout?.ptyMask == 0u, CommandCaptureFailure.FIELDS)
+        ensure(ancestry.completeness == AncestryCompleteness.UNAVAILABLE && ancestry.entries.isEmpty() &&
+            ancestry.reason == AncestryReason.UNSUPPORTED, CommandCaptureFailure.ANCESTRY)
+    }
+}
+
+private fun parseMacRequester(requester: CaptureFields): CapturedRequester {
+    val signing = CaptureFields(requester[5u], 4)
+    return CapturedRequester(requester.path(0u), requester.uint32(1u), requester.uint32(2u), requester.pid(3u), requester.uint32(4u),
+        CapturedSigningIdentity(signing.tag(0u, CapturedSigningStatus.entries), signing.optionalText(1u), signing.optionalText(2u), signing.optionalBytes(3u, 20)),
+        requester.optionalUInt32(6u), requester.optionalPath(7u))
+}
+
+private fun parseLinuxRequester(requester: CaptureFields): CapturedLinuxRequester {
+    val profile = requester.text(0u)
+    ensure(profile == "linux-protected-single-thread-v1", CommandCaptureFailure.VERSION)
+    val epoch = requester.uint(4u)
+    ensure(epoch > 0uL, CommandCaptureFailure.TYPE)
+    val executable = CaptureFields(requester[5u], 3)
+    val credentials = CaptureFields(requester[6u], 9)
+    val uid = credentials.uint32(0u)
+    val gid = credentials.uint32(4u)
+    val ids = (0uL..7uL).map { credentials.uint32(it) }
+    ensure(ids.take(4).all { it == uid } && ids.drop(4).all { it == gid }, CommandCaptureFailure.FIELDS)
+    val groups = credentials.array(8u).map { CaptureFields.uint32(it) }
+    ensure(groups.zipWithNext().all { (previous, next) -> previous < next }, CommandCaptureFailure.FIELDS)
+    return CapturedLinuxRequester(profile, requester.pid(1u), requester.bytes(2u, 16), requester.bytes(3u, 16), epoch,
+        CapturedExecutable(executable.path(0u), executable.identity(1u), executable.bytes(2u, 32)),
+        CapturedLinuxCredentials(ids[0], ids[1], ids[2], ids[3], ids[4], ids[5], ids[6], ids[7], groups),
+        if (requester[7u] == CborValue.Null) null else requester.pid(7u), requester.bytes(8u, 32))
+}
+
+private class ParsedCommandCapture<R>(canonicalBytes: ByteArray, limits: CborLimits, expectedSchemaVersion: ULong,
+    parseRequester: (CaptureFields) -> R, requesterSession: (R) -> UInt?) {
     val schemaVersion: ULong
     private val original: CborValue.Bytes
     val canonicalBytes: ByteArray get() = original.copyBytes()
@@ -53,7 +176,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
     val ioMode: CommandIOMode
     val stdioLayout: CapturedCommandStdioLayout?
     val disconnectBehavior: StartedCommandDisconnect
-    val requester: CapturedRequester
+    val requester: R
     val ancestry: CapturedAncestry
     val unverifiedRationale: String?
     val submission: CapturedSubmission
@@ -62,10 +185,9 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
         // Bound input before retaining another copy.
         if (canonicalBytes.size > limits.maxBytes) throw CborException(CborFailure.BYTE_LIMIT)
         original = CborValue.Bytes(canonicalBytes)
-        ensure(expectedSchemaVersion in supportedSchemaVersions, CommandCaptureFailure.VERSION)
-        val root = CaptureFields(DeterministicCbor.decode(original.copyBytes(), limits), if (expectedSchemaVersion == 3uL) 14 else 13)
+        val root = CaptureFields(DeterministicCbor.decode(original.copyBytes(), limits), if (expectedSchemaVersion >= 3uL) 14 else 13)
         schemaVersion = root.uint(0u)
-        ensure(expectedSchemaVersion in supportedSchemaVersions && schemaVersion == expectedSchemaVersion, CommandCaptureFailure.VERSION)
+        ensure(schemaVersion == expectedSchemaVersion, CommandCaptureFailure.VERSION)
         val executable = CaptureFields(root[1u], 3)
         this.executable = CapturedExecutable(executable.path(0u), executable.identity(1u), executable.bytes(2u, 32))
         arguments = immutable(root.array(2u).map { CaptureFields.cString(it) })
@@ -99,11 +221,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
         input = source(root[6u])
         ioMode = root.tag(7u, CommandIOMode.entries)
         disconnectBehavior = root.tag(8u, StartedCommandDisconnect.entries)
-        val requester = CaptureFields(root[9u], 8)
-        val signing = CaptureFields(requester[5u], 4)
-        this.requester = CapturedRequester(requester.path(0u), requester.uint32(1u), requester.uint32(2u), requester.pid(3u), requester.uint32(4u),
-            CapturedSigningIdentity(signing.tag(0u, CapturedSigningStatus.entries), signing.optionalText(1u), signing.optionalText(2u), signing.optionalBytes(3u, 20)),
-            requester.optionalUInt32(6u), requester.optionalPath(7u))
+        requester = parseRequester(CaptureFields(root[9u], if (schemaVersion == 4uL) 9 else 8))
         val ancestry = CaptureFields(root[10u], 3)
         val completeness = ancestry.tag(0u, AncestryCompleteness.entries)
         val reason = ancestry.tag(2u, AncestryReason.entries)
@@ -117,7 +235,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
         unverifiedRationale = root.optionalText(11u)
         val submission = CaptureFields(root[12u], 3)
         this.submission = CapturedSubmission(submission.bytes(0u, 16), submission.bytes(1u, 32), submission.bytes(2u, 16))
-        stdioLayout = if (schemaVersion == 3uL) {
+        stdioLayout = if (schemaVersion >= 3uL) {
             fun stream(value: CborValue): CapturedCommandStream {
                 val fields = CaptureFields(value, 3)
                 val flags = fields.uint(2u)
@@ -135,7 +253,7 @@ class CommandCapture(canonicalBytes: ByteArray, limits: CborLimits, expectedSche
                 val device = value.uint32(2u)
                 ensure(control.access == CommandStreamAccess.READ_WRITE &&
                     control.source.kind in listOf(CommandInputKind.TTY, CommandInputKind.PTY) && control.source.identity != null &&
-                    device != UInt.MAX_VALUE && this.requester.sessionID == session, CommandCaptureFailure.FIELDS)
+                    device != UInt.MAX_VALUE && requesterSession(this.requester) == session, CommandCaptureFailure.FIELDS)
                 CapturedCommandTerminal(control, session, device)
             }
             val mask = fields.uint32(4u)
@@ -179,6 +297,7 @@ private class CaptureFields(value: CborValue, count: Int) {
     fun optionalBytes(field: ULong, count: Int): CborValue.Bytes? = if (get(field) == CborValue.Null) null else bytes(field, count)
     fun path(field: ULong): CborValue.Bytes = cString(get(field)).also { ensure(it.copyBytes().firstOrNull() == 0x2f.toByte(), CommandCaptureFailure.PATH) }
     fun optionalPath(field: ULong): CborValue.Bytes? = if (get(field) == CborValue.Null) null else path(field)
+    fun text(field: ULong): String = (get(field) as? CborValue.Text)?.value ?: fail(CommandCaptureFailure.TYPE)
     fun optionalText(field: ULong): String? = if (get(field) == CborValue.Null) null else (get(field) as? CborValue.Text)?.value ?: fail(CommandCaptureFailure.TYPE)
     fun identity(field: ULong): CapturedFileIdentity = CaptureFields(get(field), 2).let { CapturedFileIdentity(it.uint(0u), it.uint(1u)) }
     fun optionalIdentity(field: ULong): CapturedFileIdentity? = if (get(field) == CborValue.Null) null else identity(field)

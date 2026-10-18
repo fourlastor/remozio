@@ -1,6 +1,10 @@
-# Command capture schemas 1, 2, and 3
+# Command capture schemas 1–4
 
-`CommandCapture` supports approval wire 1 with command capture schemas 1, 2, and 3. Swift and Kotlin retain typed fields and exact canonical bytes.
+`CommandCapture` retains the Mac schemas 1–3. `LinuxCommandCapture` implements the
+distinct Linux schema 4, allocated in [issue #441](https://github.com/rock3r/remozio/issues/441#issuecomment-6253309933).
+All use command kind 0 and approval request wire 1 with no optional features.
+Swift and Kotlin retain typed fields and exact canonical bytes. Linux requester
+data never passes through the Mac requester or signing model.
 
 The caller supplies the expected schema from the authenticated request contract.
 Existing callers default to schema 1.
@@ -29,7 +33,7 @@ Every map has exactly the documented keys. Optional observations use explicit CB
 
 | Key | Field | Type |
 | --- | --- | --- |
-| 0 | Capture schema | Unsigned `1`, `2`, or `3`, matching the signed contract |
+| 0 | Capture schema | Unsigned `1`, `2`, `3`, or `4`, matching the signed contract |
 | 1 | Effective executable | Map below |
 | 2 | Complete argv, including argv[0] | Nonempty array of raw byte strings |
 | 3 | Working directory | Map below |
@@ -38,15 +42,15 @@ Every map has exactly the documented keys. Optional observations use explicit CB
 | 6 | Bound stdin source | Map below |
 | 7 | I/O mode | Pipes `0`, PTY `1` |
 | 8 | Started-command disconnect behavior | Terminate `0`, continue running `1` |
-| 9 | Requester observations | Map below |
+| 9 | Requester observations | Mac map for schemas 1–3; Linux map for schema 4 |
 | 10 | Observed ancestry and limits | Map below |
 | 11 | Unverified caller rationale | Text or null |
 | 12 | Submission bindings | Map below |
-| 13 | Stream layout, schema 3 only | Map below |
+| 13 | Stream layout, schemas 3 and 4 | Map below; schema 4 restrictions apply |
 
 The disconnect field describes an already-started command. It does not add resumable admission, detached approval, or automatic retries. Product defaults and supported I/O combinations belong to the execution adapter.
 
-Schemas 1 and 2 contain exactly fields 0 through 12. Schema 3 contains exactly fields 0 through 13. Legacy bytes stay unchanged.
+Schemas 1 and 2 contain exactly fields 0 through 12. Schemas 3 and 4 contain exactly fields 0 through 13. Legacy bytes stay unchanged.
 
 ## Paths, argv, environment, and credentials
 
@@ -66,15 +70,15 @@ Stdin is `{0: kind, 1: stream binding16|null, 2: observed absolute path bytes|nu
 
 | Kind | Tag | Supported schemas |
 | --- | --- | --- |
-| Null | 0 | 1, 2, 3 |
-| Caller-controlled pipe | 1 | 1, 2, 3 |
-| File | 2 | 1, 2, 3 |
-| Caller-controlled TTY | 3 | 1, 2, 3 |
-| Caller-controlled PTY | 4 | 1, 2, 3 |
-| Caller-controlled socket | 5 | 2, 3 |
-| Directory | 6 | 2, 3 |
-| Caller-controlled device | 7 | 2, 3 |
-| Other caller-controlled source | 8 | 2, 3 |
+| Null | 0 | 1, 2, 3, 4 |
+| Caller-controlled pipe | 1 | 1, 2, 3, 4 |
+| File | 2 | 1, 2, 3, 4 |
+| Caller-controlled TTY | 3 | 1, 2, 3, 4 |
+| Caller-controlled PTY | 4 | 1, 2, 3, 4 |
+| Caller-controlled socket | 5 | 2, 3, 4 |
+| Directory | 6 | 2, 3, 4 |
+| Caller-controlled device | 7 | 2, 3, 4 |
+| Other caller-controlled source | 8 | 2, 3, 4 |
 
 Null input requires all three remaining values to be null. Other kinds require the opaque stream binding. Available path and identity observations remain optional.
 
@@ -130,9 +134,9 @@ It must recheck the original caller, terminal, retained stream identities, and s
 
 These codecs validate the representation. The [retained layout adapter](../docs/macos-command-stdio-layout.md) implements the separate descriptor carrier and OS rechecks.
 The native adapter supports mapped execution. Production frontend integration remains required.
-The Android connection advertises schemas 1, 2, and 3 and shows the complete schema 3 stream layout.
+The Android connection advertises schemas 1–4 and shows all three retained stream observations.
 
-## Requester observations
+## Mac requester observations (schemas 1–3)
 
 Requester fields are:
 
@@ -153,11 +157,61 @@ Each ancestor is `{0: positive PID up to Int32.max, 1: PID-version UInt32, 2: ab
 
 Submission bindings are `{0: ID16, 1: nonce32, 2: caller-channel binding16}`. They are opaque bytes. The service must associate them with its verified IPC peer and retained caller/session lifetime. A supplied identifier is not proof of that association.
 
+## Linux requester and execution shape (schema 4)
+
+Root fields 1–8 and 11–13 preserve their existing encodings and meanings, with
+the restrictions below. Root 9 is a closed map with exactly these mandatory keys:
+
+| Key | Value |
+| --- | --- |
+| 0 | Exact text `linux-protected-single-thread-v1` |
+| 1 | Observed PID, positive UInt32 at most Int32.max; presentation only |
+| 2 | Authority-assigned process binding, bytes16 |
+| 3 | Monitor incarnation, bytes16 |
+| 4 | Positive exec epoch, full UInt64 including UInt64.max |
+| 5 | Frontend executable triple: raw absolute path, device/inode, SHA-256 |
+| 6 | Closed Linux credential map below |
+| 7 | Observed session ID, positive UInt32 at most Int32.max, or explicit null |
+| 8 | Protected frontend/loader admission policy digest, bytes32 |
+
+The credential map has exactly keys 0–8. Keys 0, 1, 2 and 3 hold real, effective,
+saved and filesystem UIDs respectively; keys 4, 5, 6 and 7 hold the corresponding
+GIDs. Every ID is UInt32. Key 8 is a strictly increasing, unique supplementary GID
+array; empty is valid. Keys 0–3 must be equal and keys 4–7 must be equal. UID need
+not equal GID. The host must separately establish unchanged credentials throughout
+admission. Unknown profiles, missing/extra nested keys and out-of-range values fail.
+
+Root 10 must be exactly `{0: 2, 1: [], 2: 4}`: unavailable ancestry with no entries
+and reason unsupported. Root 7 must be pipes `0`, root 8 must be terminate `0`,
+layout terminal must be null and the PTY mask must be zero. Root 6 must equal the
+layout stdin source. Existing access and semantic-flag rules apply to all three
+streams. A caller-controlled TTY/PTY used as an ordinary retained stream does not
+establish private PTY routing. These restrictions do not narrow Mac schemas.
+
+All Linux fields are covered by the capture and issued-request digests. The
+process binding names one locally retained process instance within a monitor
+incarnation. The exec epoch describes continuously observed exec events; it is
+not a PID version or start time. Attempting to advance past UInt64.max retires
+the binding and pending requests. Codec acceptance of those values establishes
+no kernel lifetime, protected launch, trace ownership or dispatch authority.
+
+Android labels the requester “Linux requester” and the policy “Protected frontend
+policy (host assertion)”. It displays the submitting frontend separately from the
+requested command, exposes scoped binding/monitor/epoch values and policy digest
+in exact details, and keeps ancestry visibly unavailable. No Apple signing fields
+or publisher-verification badge are synthesized. A label, schema or digest is not
+attestation of the remote OS, TPM custody or protected caller policy.
+
+This contract implements interpretation and phone admission. Production Linux
+issuance remains disabled until the separate protected caller, hardware identity,
+service and dispatch gates pass. Private PTY routing, continue-running and useful
+Linux ancestry require a separately agreed compatible contract.
+
 ## Integration rules
 
 Verify the issued request and its exact command/wire/schema contract before selecting this parser. Preserve its bytes in the request digest. Successful parsing must not itself enable an unsupported contract.
 
-The Android command connection advertises implemented schemas 1, 2, and 3, with no optional features. The receiver retains their intersection with the authenticated Mac offer. Each new request must use that connection's shared schema. The signed outer schema and inner capture schema must match before inbox admission. Unknown peer contracts remain opaque. Unsupported local advertisements fail.
+The Android command connection advertises implemented schemas 1–4, with no optional features, only alongside their verification, admission and renderer paths. The receiver retains their intersection with the authenticated desktop-host offer. Each new request must use that connection's shared schema. The signed outer schema and inner capture schema must match before inbox admission. Unknown peer contracts remain opaque. Unsupported local advertisements fail. A Mac-only phone remains paired but cannot approve schema 4; other host connections and retained requests remain independent. No display name or unknown feature selects a Linux renderer, and failures never trigger schema translation or fallback.
 
 Existing authenticated request owners survive reconnects. Status messages refer to their retained request digests and do not introduce another capture. A duplicate request still needs a supported contract on the current connection. Direct `open` and `accept` callers keep schema 1 by default.
 
@@ -173,6 +227,12 @@ Schema 1 retains its nine valid and 86 invalid shared fixtures unchanged. Schema
 
 The schema 3 fixtures cover all eight routing masks, all 16 flag combinations, mixed redirects, and malformed nested layouts.
 Both languages verify that routing and append-mode changes alter the issued request digest.
+
+Schema 4's [synthetic shared vectors](vectors/command-capture-v4.json) cover the
+Linux requester, full unsigned epochs, credential roles/groups, exact ancestry,
+pipes-only stream rules and strict nested maps. Requester/stream mutation cases
+bind changes to the issued-request digest. These fixtures are not live Linux
+caller or phone measurements; existing Mac fixture files remain unchanged.
 
 Both parsers require explicit version selection. Phone tests cover signed version mismatches, disjoint offers, unknown contracts, and schema downgrade after reconnect.
 

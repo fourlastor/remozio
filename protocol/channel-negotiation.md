@@ -2,8 +2,15 @@
 
 The Swift and Kotlin `ChannelNegotiation` owners bind capability offers to one fresh, mutually authenticated TLS connection.
 Before creating an owner, the host must authenticate both enrolled transport keys.
-It must retain the expected Mac, account, phone, and enrollment epoch.
+It must retain the expected desktop host, account, phone, and enrollment epoch.
 This protocol does not enroll devices or authenticate an untrusted transport.
+
+Sender role 1 is the enrolled desktop-host side on either platform. The legacy
+`macID` scope position identifies that host; `.mac`/`MAC` source names may remain.
+This [approved interpretation](https://github.com/rock3r/remozio/issues/441#issuecomment-6253309933)
+keeps negotiation 1, pairing transcript 1, tags, proof purposes, ordering and
+canonical bytes unchanged. It creates no role 2 and provides no platform or
+hardware attestation. References to Mac below retain the legacy endpoint name.
 
 ```mermaid
 sequenceDiagram
@@ -37,8 +44,8 @@ Use the existing deterministic CBOR subset. All fields are mandatory; additional
 | Key | Value |
 | --- | --- |
 | 0 | Handshake schema: unsigned 1 |
-| 1 | Sender role: phone 0, Mac 1 |
-| 2 | Array of four 16-byte values: Mac ID, account ID, phone ID, enrollment epoch |
+| 1 | Sender role: phone 0, desktop host 1 (legacy Mac name) |
+| 2 | Array of four 16-byte values: desktop host ID (`macID`), account ID, phone ID, enrollment epoch |
 | 3 | Fresh 32-byte nonce |
 | 4 | Exact supported envelope versions, positive and strictly increasing; 1–16 entries |
 | 5 | Request capability rows, sorted by kind, wire version, then schema version; 0–64 rows |

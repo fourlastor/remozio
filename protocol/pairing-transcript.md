@@ -2,6 +2,11 @@
 
 The transcript binds public setup claims before either host activates an enrollment.
 It does not create trust.
+In this version, the legacy Mac role and `macID` scope position mean the enrolled
+desktop host on either platform, as [agreed for Linux schema 4](https://github.com/rock3r/remozio/issues/441#issuecomment-6253309933).
+Role 1, all field tags, proof purposes, ordering and canonical bytes are unchanged;
+legacy `.mac`/`MAC` names remain source-compatible. This interpretation does not
+attest the host OS or hardware key custody, or enable a Linux pairing service.
 The Mac host must verify administrator authorization, the retained setup attempt, expiry, and the phone biometric proof.
 The phone must independently authenticate the Mac and verify the committed result.
 

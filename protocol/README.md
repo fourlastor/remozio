@@ -47,7 +47,10 @@ The macOS gate runs the Swift tests. The Kotlin Gradle task and its required CI 
 On Linux, `./scripts/check-linux-protocol.sh` runs the existing Swift suite using
 Swift Crypto; macOS continues using CryptoKit. See the [Ubuntu portability
 evidence](../docs/experiments/linux-swift-protocol.md) for the toolchain and runtime
-requirements. This adds neither a Linux capture schema nor hardware key custody.
+requirements. The portability step did not establish hardware key custody.
+[Command capture schema 4](command-capture.md#linux-requester-and-execution-shape-schema-4)
+now defines a separate typed Linux requester for codec and phone interpretation;
+production Linux issuance still requires its separate host gates.
 
 ## Next security layers
 

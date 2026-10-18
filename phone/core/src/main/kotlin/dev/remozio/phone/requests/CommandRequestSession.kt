@@ -15,7 +15,7 @@ data class RequestLimits(
     val signing: CborLimits,
 )
 
-data class CommandRequestSnapshot(val capture: CommandCapture?, val status: TrackedRequestStatus?, val closed: Boolean = false)
+data class CommandRequestSnapshot(val capture: CommandCapturePayload?, val status: TrackedRequestStatus?, val closed: Boolean = false)
 
 /** Opaque identities use content equality and defensive copies. Display names are never keys. */
 @ConsistentCopyVisibility
@@ -30,7 +30,7 @@ data class CommandRequestIdentity internal constructor(
  * The enrollment owner must close this session when its trusted authority changes.
  */
 class CommandRequestSession private constructor(
-    capture: CommandCapture,
+    capture: CommandCapturePayload,
     private val tracker: RequestStatusTracker,
     val identity: CommandRequestIdentity,
     internal val requestDigest: CborValue.Bytes,
@@ -39,14 +39,15 @@ class CommandRequestSession private constructor(
     private val permittedActions: Set<CapturedAction>,
 ) : AutoCloseable {
     private var memory: CommandMemoryBudget.Reservation? = null
-    private var capture: CommandCapture? = capture
+    private var capture: CommandCapturePayload? = capture
 
     @Synchronized
     internal fun retainMemory(budget: CommandMemoryBudget, replacing: CommandMemoryBudget.Reservation? = null, beforeCommit: () -> Unit = {}) {
         check(memory == null && !closure.value)
         val c = checkNotNull(capture)
         val elements = c.arguments.size.toLong() + c.environment.size.toLong() * 3 +
-            c.ancestry.entries.size.toLong() * 2 + c.target.supplementaryGroups.size.toLong()
+            c.ancestry.entries.size.toLong() * 2 + c.target.supplementaryGroups.size.toLong() +
+            (if (c is LinuxCommandCapture) c.requester.credentials.supplementaryGroups.size.toLong() else 0L)
         memory = budget.retain(c.canonicalByteCount.toLong(), elements, replacing, beforeCommit)
     }
     @Synchronized
@@ -81,7 +82,7 @@ class CommandRequestSession private constructor(
         identity.macID == CborValue.Bytes(macID) && identity.accountID == CborValue.Bytes(accountID) &&
             authorityKey == CborValue.Bytes(publicKey)
 
-    /** Runs a bound decision operation under the session monitor. The Mac still decides freshness and the winning phone. */
+    /** Runs a bound decision operation under the session monitor. The enrolled host still decides freshness and the winning phone. */
     @Synchronized
     fun <T> withPendingDecision(
         now: ElapsedInstant,
@@ -130,13 +131,13 @@ class CommandRequestSession private constructor(
                     SigningPurpose.ISSUED_REQUEST, canonical, limits.body, limits.signing)) {
                 throw CommandSessionException(CommandSessionRejection.INVALID_SIGNATURE)
             }
-            require(negotiatedSchemas.isNotEmpty() && CommandCapture.supportedSchemaVersions.containsAll(negotiatedSchemas))
+            require(negotiatedSchemas.isNotEmpty() && CommandCapturePayload.supportedSchemaVersions.containsAll(negotiatedSchemas))
             val capabilities = ContractCapabilities(negotiatedSchemas.associate { RequestContract(RequestKind.COMMAND, 1u, it) to emptySet<ULong>() })
             val request = IssuedRequestPayload.decode(canonical, limits.body, limits.capture, capabilities)
             if (!request.macID.contentEquals(expectedMacID) || !request.accountID.contentEquals(expectedAccountID)) {
                 throw CommandSessionException(CommandSessionRejection.WRONG_AUTHORITY)
             }
-            val capture = CommandCapture(request.canonicalCapture, limits.capture, expectedSchemaVersion = request.contract.schemaVersion)
+            val capture = CommandCapturePayload.decode(request.canonicalCapture, limits.capture, expectedSchemaVersion = request.contract.schemaVersion)
             return CommandRequestSession(capture,
                 RequestStatusTracker(request, key, limits.status, limits.signing, limits.body),
                 CommandRequestIdentity(CborValue.Bytes(request.macID), CborValue.Bytes(request.accountID),

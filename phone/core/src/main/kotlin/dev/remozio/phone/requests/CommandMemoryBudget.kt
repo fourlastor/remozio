@@ -1,6 +1,6 @@
 package dev.remozio.phone.requests
 
-/** Shared across all Mac connections. Bounds retained capture bytes and parsed collection elements. */
+/** Shared across all enrolled host connections. Bounds retained capture bytes and parsed collection elements. */
 class CommandMemoryBudget(private val maximumBytes: Long, private val maximumItems: Long) {
     private val parsing = Any()
     private var bytes = 0L

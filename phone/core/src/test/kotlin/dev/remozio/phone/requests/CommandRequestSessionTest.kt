@@ -103,7 +103,7 @@ class CommandRequestSessionTest {
         assertEquals(IssuedRequestFailure.UNSUPPORTED_CONTRACT, assertFailsWith<IssuedRequestException> {
             negotiated(request(schema = 2u, capture = captureVersion(2u)), setOf(1u))
         }.reason)
-        assertFailsWith<IllegalArgumentException> { negotiated(request, setOf(4u)) }
+        assertFailsWith<IllegalArgumentException> { negotiated(request, setOf(5u)) }
     }
 
     @Test fun schemaThreeRequiresExplicitNegotiationAndExposesTheAuthenticatedStreamLayout() {
@@ -129,6 +129,80 @@ class CommandRequestSessionTest {
         assertEquals(CommandSessionRejection.INVALID_SIGNATURE, assertFailsWith<CommandSessionException> {
             CommandRequestSession.open(altered, signature, mac, account, publicKey(pair), limits, setOf(3u))
         }.reason)
+    }
+
+    @Test fun schemaFourRequiresAuthenticatedSelectedContractAndPreservesLinuxRequester() {
+        val bytes = schemaFourCapture()
+        val issued = request(schema = 4u, capture = bytes)
+        val body = issued.encode(bound)
+        val signature = sign(body)
+        assertEquals(IssuedRequestFailure.UNSUPPORTED_CONTRACT, assertFailsWith<IssuedRequestException> {
+            CommandRequestSession.open(body, signature, mac, account, publicKey(pair), limits)
+        }.reason)
+        CommandRequestSession.open(body, signature, mac, account, publicKey(pair), limits, setOf(4u)).use { session ->
+            val parsed = assertIs<LinuxCommandCapture>(session.snapshot(time()).capture)
+            assertContentEquals(bytes, parsed.canonicalBytes)
+            assertEquals("linux-protected-single-thread-v1", parsed.requester.profile)
+            assertEquals(4uL, parsed.schemaVersion)
+            assertEquals(AncestryReason.UNSUPPORTED, parsed.ancestry.reason)
+            assertNull(parsed.stdioLayout?.terminal)
+            assertFails { session.withPendingDecision(time(), ByteArray(16), ByteArray(16),
+                CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)) { } }
+            val status = RequestStatusPayload(mac, account, issued.requestID, issued.requestDigest(bound, bound), issued.challenge,
+                1u, RequestPhase.PRESENTED, RequestStatusReason.NONE, ByteArray(16) { 5 }, 1000u, 59000u, null, false, null, null)
+            val statusBody = status.encode(bound)
+            session.observe(statusBody, sign(statusBody, status = true), time())
+            session.withPendingDecision(time(), ByteArray(16), ByteArray(16), CapturedAction(ActionChoice.EXECUTE, ActionScope.CurrentRequest)) {
+                assertContentEquals(issued.requestDigest(bound, bound), it.requestDigest)
+                assertContentEquals(issued.macID, it.macID)
+            }
+        }
+        val changed = (DeterministicCbor.decode(bytes, bound) as CborValue.Fields).values.toMutableMap()
+        changed[11u] = CborValue.Text("synthetic changed rationale")
+        val tampered = request(schema = 4u, capture = DeterministicCbor.encode(CborValue.Fields(changed), bound)).encode(bound)
+        assertEquals(CommandSessionRejection.INVALID_SIGNATURE, assertFailsWith<CommandSessionException> {
+            CommandRequestSession.open(tampered, signature, mac, account, publicKey(pair), limits, setOf(4u))
+        }.reason)
+        for ((expectedMac, expectedAccount) in listOf(account to account, mac to mac)) {
+            assertEquals(CommandSessionRejection.WRONG_AUTHORITY, assertFailsWith<CommandSessionException> {
+                CommandRequestSession.open(body, signature, expectedMac, expectedAccount, publicKey(pair), limits, setOf(4u))
+            }.reason)
+        }
+        assertEquals(CommandSessionRejection.INVALID_SIGNATURE, assertFailsWith<CommandSessionException> {
+            CommandRequestSession.open(body, sign(body, key = newKey()), mac, account, publicKey(pair), limits, setOf(4u))
+        }.reason)
+    }
+
+    @Test fun linuxOuterInnerSelectedSchemaAndFeatureMismatchesNeverTranslate() {
+        fun negotiated(issued: IssuedRequestPayload, schemas: Set<ULong>) {
+            val body = issued.encode(bound)
+            CommandRequestSession.open(body, sign(body), mac, account, publicKey(pair), limits, schemas).close()
+        }
+        val linux = schemaFourCapture()
+        for (schema in listOf(1uL, 2uL, 3uL)) {
+            assertFailsWith<IllegalArgumentException> { negotiated(request(schema = schema, capture = linux), setOf(schema, 4u)) }
+            assertFailsWith<IssuedRequestException> { negotiated(request(schema = 4u, capture = linux), setOf(schema)) }
+        }
+        assertFailsWith<CommandCaptureException> { negotiated(request(schema = 4u), setOf(1u, 4u)) }
+        assertEquals(IssuedRequestFailure.UNSUPPORTED_FEATURES, assertFailsWith<IssuedRequestException> {
+            negotiated(request(schema = 4u, features = setOf(1u), capture = linux), setOf(4u))
+        }.reason)
+    }
+
+    @Test fun linuxRequesterSupplementaryGroupsAreChargedToTheSharedItemBudget() {
+        val issued = request(schema = 4u, capture = schemaFourCapture())
+        val body = issued.encode(bound)
+        val session = CommandRequestSession.open(body, sign(body), mac, account, publicKey(pair), limits, setOf(4u))
+        session.use {
+            val capture = assertIs<LinuxCommandCapture>(session.snapshot(time()).capture)
+            val groups = capture.requester.credentials.supplementaryGroups.size.toLong()
+            assertTrue(groups > 0)
+            val common = capture.arguments.size.toLong() + capture.environment.size.toLong() * 3 +
+                capture.ancestry.entries.size.toLong() * 2 + capture.target.supplementaryGroups.size.toLong()
+            val insufficient = CommandMemoryBudget(100000, 64 + common + groups - 1)
+            assertEquals(InboxRejection.CAPACITY, assertFailsWith<InboxException> { session.retainMemory(insufficient) }.reason)
+            session.retainMemory(CommandMemoryBudget(100000, 64 + common + groups))
+        }
     }
 
     @Test fun validTerminalUpdateReleasesCaptureBeforePublishingRevisionAndCannotResurrect() {
