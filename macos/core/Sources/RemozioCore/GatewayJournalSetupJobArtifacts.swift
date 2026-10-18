@@ -10,7 +10,7 @@ enum GatewayJournalSetupJobArtifacts {
 
     static func prepare(configuration: GatewayJournalSetupServiceConfiguration, account: AccountPreparationIntent,
                         machine: PreparationIntentStore, foreground: RuntimeActivationPlan, inventory: InstallationInventory,
-                        release: SignedReleaseEvidence, verifyCurrent: () throws -> Void) throws -> Result {
+                        release: SignedReleaseEvidence, mode: Mode = .preparePending, verifyCurrent: () throws -> Void) throws -> Result {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let expected = GatewayJournalPreparationState(intent: configuration.intent, initialized: false)
         func verify() throws {
@@ -34,7 +34,20 @@ enum GatewayJournalSetupJobArtifacts {
         let jobs = try ProtectedSetupDirectory(anchor: "/", relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
             visibility: .sharedMetadata, createIfMissing: false)
         defer { jobs.close() }
-        return try publish(configuration: configuration, service: service, jobs: jobs, owner: 0, mode: .preparePending, verifyCurrent: verify)
+        return try publish(configuration: configuration, service: service, jobs: jobs, owner: 0, mode: mode, verifyCurrent: verify)
+    }
+    static func validateRetainedJob(_ job: GatewayJournalSetupJobManifest, verifyCurrent: () throws -> Void) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let jobs = try ProtectedSetupDirectory(anchor: "/", relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
+            visibility: .sharedMetadata, createIfMissing: false)
+        defer { jobs.close() }
+        try validateRetainedJob(job, jobs: jobs, owner: 0, verifyCurrent: verifyCurrent)
+    }
+    static func validateRetainedJob(_ job: GatewayJournalSetupJobManifest, jobs: ProtectedSetupDirectory, owner: uid_t,
+                                    verifyCurrent: () throws -> Void) throws {
+        let file = AdministrativeSetupPublication.File.gatewayJournalJob(accountID: job.configuration.intent.accountID, intentID: job.configuration.intent.id)
+        guard file.name == job.label + ".plist" else { throw GatewayPreparationError.invalidRecord }
+        try AdministrativeSetupPublication.validateRetained(job.bytes, file: file, directory: jobs, owner: owner, verify: verifyCurrent)
     }
     static func removeAfterJobAbsent(configuration: GatewayJournalSetupServiceConfiguration, machine: PreparationIntentStore,
                                      verifyCurrent: () throws -> Void) throws -> Removal {

@@ -1,0 +1,68 @@
+{
+  "experiment": "macos-gateway-journal-root-operation",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T17:08:23.790738+00:00",
+  "sourceCommit": "ee5630bb72fae7e54bfd5100d395a13209fe16ca",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupRootScope.swift": "65abb0361fb0dd6151dfdf22b35ad440feffd863d0c3dc0abf8f3ea6a8a76253",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupRootOperation.swift": "70462cc72d4cf752dbfaac26da06c85aead88781a3453f1b2fac569a23fecea3",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupJobArtifacts.swift": "6c48cfff11141cac7032dd5a6afa194da72e835adbcdda673296afe7095d13cd",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupExchangeTests.swift": "48d1637ee52ed36800b159c73ddaac0861dfe1ab9e8e6ef88afcf89dfbe4a717",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupRootOperationTests.swift": "fffd13c8e241299f953f74e332e850c3e4045ffe3b27b6bea99f121706fcd305"
+  },
+  "validation": {
+    "nativeCoreTests": 2659,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "b821d03d9f06fe1a05688437bea873c0a4c1542a186e6911eae8804bcefceba0",
+    "ATCResultSHA256": "b3db3b43b7d9c624355f9f99be5a0fc3644aef45bcb0b2364332d11af75b15b6",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Own one machine lease and release scope throughout the asynchronous setup exchange.",
+    "Complete only from the bound report; historical completion skips initialization.",
+    "Validate exact stopped-job cleanup and preserve uncertain jobs."
+  ],
+  "limits": [
+    "Owned files, SQLite and injected job controls do not prove installed native behavior.",
+    "Root admission, Developer ID peers, dedicated UID isolation and system launchd remain required activation gates in issue286.",
+    "Administrator endpoint and app action are not wired.",
+    "No service or physical device was used."
+  ]
+}

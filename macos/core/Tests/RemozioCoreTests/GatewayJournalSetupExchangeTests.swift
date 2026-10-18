@@ -16,7 +16,7 @@ final class GatewayJournalSetupExchangeTests: XCTestCase, @unchecked Sendable {
         guard process.terminationStatus == 0 else { throw Refused() }
         return String(decoding: bytes, as: UTF8.self)
     }
-    private final class Fixture: @unchecked Sendable {
+    final class Fixture: @unchecked Sendable {
         let runtime: RuntimeActivationFixture
         let intent: GatewayJournalSetupIntent
         let root: URL
@@ -90,7 +90,7 @@ final class GatewayJournalSetupExchangeTests: XCTestCase, @unchecked Sendable {
                 mode: .requireExisting, expected: intent.files, verifyCurrent: {})
         }
     }
-    private final class Driver: GatewayJournalSetupDriver, @unchecked Sendable {
+    final class Driver: GatewayJournalSetupDriver, @unchecked Sendable {
         let endpoint: GatewayJournalSetupXPCEndpoint
         let dropResponse: Bool
         init(fixture: Fixture, dropResponse: Bool = false) throws {
