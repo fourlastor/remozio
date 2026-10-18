@@ -43,6 +43,20 @@ public struct GatewayServiceSettings: Sendable {
         self.maximumCandidateLifetimeMillis = maximumCandidateLifetimeMillis; self.databaseBusyMillis = databaseBusyMillis
     }
 
+    /// Versioned local setup input. This value does not renew a request or candidate deadline.
+    public var setupBytes: Data { get throws {
+        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-gateway-service-settings"), 2: value]), limits: Self.setupLimits)
+    } }
+    public static func decodeSetupBytes(_ bytes: Data) throws -> Self {
+        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: setupLimits), Set(f.keys) == Set(UInt64(0)...2),
+              f[0] == .unsigned(1), f[1] == .text("remozio-gateway-service-settings"), let fields = f[2] else {
+            throw GatewayServiceError.invalidConfiguration
+        }
+        let result = try decode(fields)
+        guard try result.setupBytes == bytes else { throw GatewayServiceError.invalidConfiguration }; return result
+    }
+    private static let setupLimits = try! CBORLimits(maxBytes: 4096, maxDepth: 3, maxItems: 128)
+
     fileprivate var value: CBORValue {
         .map([0: .unsigned(UInt64(maximumOperations)), 1: .unsigned(handshakeTimeoutMillis),
             2: .unsigned(authorityLeaseMillis), 3: .unsigned(providerTimeoutSeconds), 4: .unsigned(schedulerRetryMillis),

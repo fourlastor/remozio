@@ -30,7 +30,7 @@ final class AdministrativeSetupChannelTests: XCTestCase, @unchecked Sendable {
         func invoke(_ call: SetupClientCall, reply: @escaping @Sendable (SetupClientReply) -> Void) {
             let result: SetupClientReply? = lock.withLock {
                 switch call {
-                case .enrollmentHello, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsHello, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeHello, .runtimeProgress, .prepareRuntime, .activationHello, .activationProgress, .activateRuntime: history.append("unexpected enrollment call")
+                case .gatewayHello, .gatewayProgress, .prepareGateway, .resumeGatewayJournal, .enrollmentHello, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsHello, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeHello, .runtimeProgress, .prepareRuntime, .activationHello, .activationProgress, .activateRuntime: history.append("unexpected enrollment call")
                 case .hello: history.append("hello")
                 case .progress: history.append("progress")
                 case .resume: history.append("resume")

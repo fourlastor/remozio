@@ -21,10 +21,10 @@ class ExperimentTests(unittest.TestCase):
     def test_frame_cases_require_dispatch_only_for_matching_peers(self):
         accepted = subprocess.CompletedProcess([], 0, "accepted", "")
         rejected = subprocess.CompletedProcess([], 3, "rejected:NSCocoaErrorDomain:4102", "")
-        for name in ("receipt-bytes", "receipt-empty", "receipt-nil", "frame-bytes", "frame-empty", "frame-nil", "exchange-bytes", "exchange-empty", "exchange-nil", "setup-bytes", "setup-empty", "setup-nil"):
+        for name in ("gateway-bytes", "gateway-empty", "gateway-nil", "gateway-journal-bytes", "gateway-journal-empty", "gateway-journal-nil", "receipt-bytes", "receipt-empty", "receipt-nil", "frame-bytes", "frame-empty", "frame-nil", "exchange-bytes", "exchange-empty", "exchange-nil", "setup-bytes", "setup-empty", "setup-nil"):
             self.assertTrue(runner.case_matches(name, accepted, 0, True))
             self.assertFalse(runner.case_matches(name, accepted, 0, False))
-        for name in ("receipt-wrong-client", "receipt-wrong-server", "frame-wrong-client", "frame-wrong-server", "exchange-wrong-client", "exchange-wrong-server", "setup-wrong-client", "setup-wrong-server"):
+        for name in ("gateway-wrong-client", "gateway-wrong-server", "gateway-journal-wrong-client", "gateway-journal-wrong-server", "receipt-wrong-client", "receipt-wrong-server", "frame-wrong-client", "frame-wrong-server", "exchange-wrong-client", "exchange-wrong-server", "setup-wrong-client", "setup-wrong-server"):
             self.assertTrue(runner.case_matches(name, rejected, 3, False))
             self.assertFalse(runner.case_matches(name, rejected, 3, True))
 
@@ -44,8 +44,9 @@ class ExperimentTests(unittest.TestCase):
 
     def test_setup_progress_has_no_nonce_payload(self):
         accepted = subprocess.CompletedProcess([], 0, "accepted", "")
-        self.assertTrue(runner.case_matches("setup-progress", accepted, 0, False))
-        self.assertFalse(runner.case_matches("setup-progress", accepted, 0, True))
+        for name in ("setup-progress", "gateway-progress"):
+            self.assertTrue(runner.case_matches(name, accepted, 0, False))
+            self.assertFalse(runner.case_matches(name, accepted, 0, True))
 
     def test_crash_and_timeout_are_not_rejections(self):
         for code in (-5, 4):

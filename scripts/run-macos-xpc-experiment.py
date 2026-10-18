@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "gateway-progress", "gateway-wrong-server", "gateway-wrong-client", "gateway-journal-wrong-server", "gateway-journal-wrong-client", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -104,6 +104,17 @@ def experiment(report, swift_build_options=()):
         }))
         with registered_service(domain, service, plist, report):
             cases = [
+                ("gateway-progress", "gateway-progress", trusted, TRUSTED, 0),
+                ("gateway-bytes", "gateway-bytes", trusted, TRUSTED, 0),
+                ("gateway-empty", "gateway-empty", trusted, TRUSTED, 0),
+                ("gateway-nil", "gateway-nil", trusted, TRUSTED, 0),
+                ("gateway-wrong-server", "gateway-bytes", trusted, OTHER, 3),
+                ("gateway-wrong-client", "gateway-bytes", other, TRUSTED, 3),
+                ("gateway-journal-bytes", "gateway-journal-bytes", trusted, TRUSTED, 0),
+                ("gateway-journal-empty", "gateway-journal-empty", trusted, TRUSTED, 0),
+                ("gateway-journal-nil", "gateway-journal-nil", trusted, TRUSTED, 0),
+                ("gateway-journal-wrong-server", "gateway-journal-bytes", trusted, OTHER, 3),
+                ("gateway-journal-wrong-client", "gateway-journal-bytes", other, TRUSTED, 3),
                 ("matching-peers", "ping", trusted, TRUSTED, 0),
                 ("journal-hello", "journal-hello", trusted, TRUSTED, 0),
                 ("journal-bytes", "journal-bytes", trusted, TRUSTED, 0),
@@ -197,7 +208,10 @@ def main():
     # Reserve the evidence file before changing launchd state.
     with args.output.open("x", encoding="utf-8") as output:
         report = {"schemaVersion": 1, "experiment": "macos-xpc-identifiers",
-                  "recordedAt": datetime.now(timezone.utc).isoformat(), "status": "running", "cases": []}
+                  "recordedAt": datetime.now(timezone.utc).isoformat(), "status": "running", "cases": [],
+                  "nativeAdministratorRightsTested": False, "rootServiceTested": False,
+                  "limits": ["Synthetic payloads and ad-hoc identifier policies only.",
+                             "This probe does not validate Developer ID, Team ID, Root UID or native administrator rights."]}
         signal.signal(signal.SIGTERM, interrupted)
         try:
             experiment(report, swift_build_options)

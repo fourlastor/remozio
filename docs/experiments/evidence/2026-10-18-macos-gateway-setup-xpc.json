@@ -1,0 +1,90 @@
+{
+  "experiment": "macos-gateway-setup-xpc",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T22:40:16.871359+00:00",
+  "sourceCommit": "5c890cd7d8cc2b9f6d269667278160887a09d5c1",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewaySetupAccountPreparation.swift": "7ab615fb1f869bc57e3bf15e42f7be00cfe9c5eb2455a1a5cabada1c65955d8b",
+    "macos/core/Sources/RemozioCore/GatewayServiceConfiguration.swift": "a9cc128b6f44f4f6b1c986d1bf1fc09b920c30c85984df8a8c52b340556f77e0",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupXPCEndpoint.swift": "ee6a750f361aebf0723d398195c61650cd82700480ca587f07af39f0f86aa6e0",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupChannel.swift": "7f680ee04457b05a9ad8d539121d74c6d8002de70c73d14d6bb63ed0024a685c",
+    "macos/core/Sources/RemozioCore/SetupAccountOwner.swift": "5035bdce18d18542a35b4ce14bca832a903fd533fc37e8f87ffa25f0e6607248",
+    "experiments/macos/Sources/XPCProbe/Probe.swift": "4e91161cd3ec04ec5acb25452dafb04f084a82ae25aac8f9af181e7ec1ccadf7",
+    "scripts/run-macos-xpc-experiment.py": "8c45eb7b13d8b056b2bfb4e2bd2ef2998fbf3a13e553f6457e8f431b7bd529d2",
+    "tests/test_xpc_runner.py": "cb18d3a1867c2eb0d7d4bbe02536e0a256ee8293f61562944490b6639ceeeba2",
+    "macos/core/Tests/RemozioCoreTests/AdministrativeSetupChannelTests.swift": "10651ba83869511fc1b9c4b5b11693e17ca6570a3e9a64d42a142a44da9cb7f6",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupAsyncOwnerTests.swift": "d756ab588469e3d5b865aeb1fa1968ba6622beb1be73bf9c30f56dbffebcaf3f",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupChoicesTests.swift": "87056c71ff790aab40f05825511ed52b02761a56322cba6a22230714b045c16e",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupXPCTests.swift": "7bcdf66af7947ef460529ab9cf30739129fd5a20ec0f221e56e43e17fc168c7e",
+    "scripts/generate-macos-release-manifest.py": "08a6bdfeb2b90c44451834ac406e2a9a23fa9cce738dcf1a99f84f95cd85e6fc",
+    "tests/test_macos_release_manifest.py": "b9c3dc7bc3af7162a3faede7a2a180c7eb67a4ad4191ed2e886d0625e7d956b2"
+  },
+  "validation": {
+    "nativeCoreTests": 2696,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "55c76cb065f0d67f4b83345fe795c6731ae8bddbea5397e5465ee8064ab82e8b",
+    "ATCResultSHA256": "00c466d54c7533a215f46063adb8eafb3ed90b999bb56d9a5f772a2b1ce1abca",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "nativeXPC": {
+    "cases": 73,
+    "passed": true,
+    "temporaryServiceAbsent": true,
+    "reportSHA256": "b0b8ce0ecffea72badcbbd8218f438ad838c0a3ae79f5a78a7425fe924821703"
+  },
+  "scope": [
+    "Version6 setup action carries bounded choices and imports administrator authorization within the current exported invocation.",
+    "Both machine writer phases retain the live owner reservation; shutdown also joins response encoding and delivery.",
+    "Signed declarations advertise setup1..6 and preparation9; later activation/UI are separate work."
+  ],
+  "limits": [
+    "Owned files and injected invocation/administrator checks do not prove Root native admission.",
+    "The 73-case selector probe uses synthetic data and ad-hoc identifiers, not Developer ID or installed Root peers.",
+    "No installed Remozio service, provider credentials, physical device or frozen recovery artifact was used."
+  ],
+  "publicationModeAdjustment": {
+    "path": "scripts/run-macos-xpc-experiment.py",
+    "validatedSourceMode": "100644",
+    "publishedMode": "100755",
+    "baseMode": "100755",
+    "sourceContentUnchanged": true,
+    "reason": "Preserve the executable mode from the base. Frozen gates invoke the probe through python3 and tested these exact bytes."
+  }
+}

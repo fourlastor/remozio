@@ -58,6 +58,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let prepareRuntime: (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState
     private let activationOperations: RuntimeActivationOperations
     private let asynchronousWork = SetupOwnerAsyncWork()
+    private let setupReplyWork = SetupOwnerAsyncWork()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private var closing = false
     private var closed = false
@@ -130,15 +131,22 @@ public final class SetupAccountOwner: @unchecked Sendable {
     public func close() throws {
         try lock.withLock {
             guard !closed else { return }
-            closing = true; asynchronousWork.closeAdmission()
-            guard asynchronousWork.isIdle else { throw AdministrativeSetupError.unavailable }
+            closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission()
+            guard asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
             try machines.close(); closed = true
         }
     }
     func closeWhenIdle() async throws {
-        lock.withLock { closing = true; asynchronousWork.closeAdmission() }
+        lock.withLock { closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission() }
+        await setupReplyWork.waitUntilIdle()
         await asynchronousWork.waitUntilIdle()
         try close()
+    }
+    func acquireSetupReplyAdmission() throws -> SetupOwnerAsyncWork.Token {
+        try lock.withLock {
+            guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+            return try setupReplyWork.admit()
+        }
     }
     /// The native endpoint retains this reference through response encoding and the reply callback.
     func acquireReleaseActivity() throws -> ReleaseActivityToken? {

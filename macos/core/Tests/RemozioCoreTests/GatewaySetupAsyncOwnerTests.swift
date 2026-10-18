@@ -6,15 +6,15 @@ import XCTest
 
 final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
-    private final class Counter: Sendable { let value = Mutex(0) }
-    private actor Gate {
+    final class Counter: Sendable { let value = Mutex(0) }
+    actor Gate {
         private var continuation: CheckedContinuation<Void, Never>?
         func wait(_ started: XCTestExpectation) async {
             await withCheckedContinuation { continuation in self.continuation = continuation; started.fulfill() }
         }
         func release() { continuation?.resume(); continuation = nil }
     }
-    private final class Backend: @unchecked Sendable {
+    final class Backend: @unchecked Sendable {
         struct State {
             var entered = 0
             var beforeOpenGate: Gate?
@@ -54,7 +54,7 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
             })
         }
     }
-    private final class Harness: @unchecked Sendable {
+    final class Harness: @unchecked Sendable {
         let fixture: GatewayJournalSetupExchangeTests.Fixture
         let activity: ReleaseActivityFixture
         let backend: Backend

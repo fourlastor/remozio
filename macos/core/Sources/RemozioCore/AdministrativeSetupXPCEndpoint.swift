@@ -8,11 +8,16 @@ public enum AdministrativeSetupInterface {
     public static let serviceAccountsVersion: UInt64 = 3
     public static let runtimeVersion: UInt64 = 4
     public static let activationVersion: UInt64 = 5
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion]
+    public static let gatewayVersion: UInt64 = 6
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol AdministrativeSetupXPCProtocol {
+    func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func prepareGateway(_ expected: Data, choices: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+    func resumeGatewayJournal(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     func activationHello(reply: @escaping @Sendable (UInt64) -> Void)
     func activationProgress(reply: @escaping @Sendable (Data?) -> Void)
     func activateRuntime(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -46,6 +51,9 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var serviceAccountsReady = false
     private var activationReady = false
     private var runtimeReady = false
+    private var gatewayReady = false
+    private var asynchronousID: UUID?
+    private var asynchronousTask: Task<Void, Never>?
     private var closed = false
     private var busy = false
 
@@ -74,8 +82,100 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         self.owner = owner; self.verify = verify; self.authorize = authorize; self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     public func close() {
-        let changed = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
-        if changed { invalidate() }
+        let changed = lock.withLock { () -> (Bool, Task<Void, Never>?) in
+            if closed { return (false, nil) }; closed = true; ready = false; return (true, asynchronousTask)
+        }
+        changed.1?.cancel()
+        if changed.0 { invalidate() }
+    }
+    public func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); ready = true; enrollmentReady = true; serviceAccountsReady = true
+                runtimeReady = true; activationReady = true; gatewayReady = true
+            }
+            defer { completed.activity?.close() }
+            onHandshake(); send { reply(AdministrativeSetupInterface.gatewayVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard gatewayReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.gatewayProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
+    }
+    public func prepareGateway(_ expected: Data, choices: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard gatewayReady, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.invalidConfiguration
+                }
+                let progress = try SetupGatewayProgress.decode(expected)
+                guard progress.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                let choices = try GatewaySetupPreparationChoices.decode(choices)
+                try authorize(authorization)
+                return try owner.prepareGateway(callerUID: uid, expected: progress, choices: choices).bytes
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
+    }
+    public func resumeGatewayJournal(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            // XPC invocation and native rights checks occur synchronously on this exported invocation.
+            // The task captures only the authenticated UID, public progress and release activity.
+            let uid = try verify()
+            let reservation = try lock.withLock { () -> (uid: uid_t, progress: SetupGatewayProgress, id: UUID, activity: ReleaseActivityToken?, admission: SetupOwnerAsyncWork.Token) in
+                guard !closed, !busy, ready, gatewayReady, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.unavailable
+                }
+                busy = true
+                let admission: SetupOwnerAsyncWork.Token
+                do { admission = try owner.acquireSetupReplyAdmission() } catch { busy = false; throw error }
+                let activity: ReleaseActivityToken?
+                do { activity = try owner.acquireReleaseActivity() } catch { busy = false; admission.close(); throw error }
+                do {
+                    let progress = try SetupGatewayProgress.decode(expected)
+                    guard progress.ownerUID == uid, progress.journalIntentDigest != nil else { throw AdministrativeSetupError.wrongAccount }
+                    try authorize(authorization); try activity?.validate()
+                    let id = UUID(); asynchronousID = id
+                    return (uid, progress, id, activity, admission)
+                } catch { busy = false; activity?.close(); admission.close(); throw error }
+            }
+            lock.withLock {
+                guard !closed, asynchronousID == reservation.id else {
+                    reservation.activity?.close(); reservation.admission.close(); busy = false; asynchronousID = nil; return
+                }
+                asynchronousTask = Task { [self, reservation, reply] in
+                    defer {
+                        lock.withLock {
+                            if asynchronousID == reservation.id { asynchronousID = nil; asynchronousTask = nil; busy = false }
+                        }
+                        reservation.activity?.close(); reservation.admission.close()
+                    }
+                    do {
+                        try Task.checkCancellation()
+                        let result = try await owner.resumeGatewayJournal(callerUID: reservation.uid, expected: reservation.progress)
+                        try Task.checkCancellation(); try reservation.activity?.validate()
+                        let bytes = try result.bytes
+                        try reservation.activity?.validate()
+                        finishGatewayOperation(reservation.id, bytes: bytes, failed: false, reply: reply)
+                    } catch { finishGatewayOperation(reservation.id, bytes: nil, failed: true, reply: reply) }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+    private func finishGatewayOperation(_ id: UUID, bytes: Data?, failed: Bool, reply: @Sendable (Data?) -> Void) {
+        let terminate = lock.withLock {
+            guard !closed, asynchronousID == id else { return false }
+            asynchronousID = nil; asynchronousTask = nil; busy = false
+            if failed { closed = true; ready = false }
+            // Admission is released before a successful reply. A subsequent client call cannot race a stale busy flag.
+            reply(bytes); return failed
+        }
+        if terminate { invalidate() }
     }
     public func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
