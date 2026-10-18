@@ -8,18 +8,19 @@ final class InstalledAccountJobManifestTests: XCTestCase {
     private let bundle = MachineBootstrap.bundlePath
     private func job(_ role: AuthorityCodeRole = .authority, account: Data? = nil, bundlePath: String? = nil) throws -> InstalledAccountJobManifest {
         let account = account ?? self.account
-        return try .init(accountID: account, role: role, executionUID: role == .authority ? 0 : 20000,
-            userName: role == .authority ? "root" : ServiceAccountClaim.recordName(accountID: account, role: .transport),
+        return try .init(accountID: account, role: role, executionUID: role == .authority ? 0 : role == .notificationGateway ? 20001 : 20000,
+            userName: role == .authority ? "root" : ServiceAccountClaim.recordName(accountID: account, role: role == .notificationGateway ? .gateway : .transport),
             bundlePath: bundlePath ?? bundle)
     }
     // Logical signed-release metadata only. No native signing, installation or launchd admission is claimed.
-    private func release(bundlePath: String? = nil) throws -> SignedReleaseEvidence {
-        let roles: [AuthorityCodeRole] = [.app, .authority, .transport]
+    private func release(bundlePath: String? = nil, includingGateway: Bool = false) throws -> SignedReleaseEvidence {
+        let roles: [AuthorityCodeRole] = [.app, .authority, .transport] + (includingGateway ? [.notificationGateway] : [])
         let components = try roles.map { role -> ReleaseComponent in
             let path: String
             switch role {
             case .app: path = "Contents/MacOS/Remozio"
             case .authority: path = InstalledAuthorityCommandConfiguration.executablePath
+            case .notificationGateway: path = "Contents/Library/LaunchServices/RemozioGateway"
             default: path = "Contents/Library/LaunchServices/RemozioTransport"
             }
             return try .init(role: role, identifier: "dev.remozio.role-\(role.rawValue)", generation: 1, relativePath: path,
@@ -28,13 +29,14 @@ final class InstalledAccountJobManifestTests: XCTestCase {
         return try .init(manifest: .init(release: "1", build: "1", components: components),
             codeDirectoryHashes: Dictionary(uniqueKeysWithValues: roles.map { ($0, Data(repeating: UInt8($0.rawValue), count: 20)) }))
     }
-    private func inventory(account: Data? = nil, bundlePath: String? = nil) throws -> InstallationInventory {
+    private func inventory(account: Data? = nil, bundlePath: String? = nil, includingGateway: Bool = false) throws -> InstallationInventory {
         let account = account ?? self.account, bundlePath = bundlePath ?? bundle
         return try .init(macID: Data(repeating: 2, count: 16), installationID: Data(repeating: 3, count: 16),
-            revision: Data(repeating: 4, count: 16), bundlePath: bundlePath, releaseDigest: InstallationInventory.digest(release()),
+            revision: Data(repeating: 4, count: 16), bundlePath: bundlePath, releaseDigest: InstallationInventory.digest(release(includingGateway: includingGateway)),
             accounts: [.init(accountID: account, ownerUID: 501)],
             services: [job(.authority, account: account, bundlePath: bundlePath).declaration,
-                       job(.transport, account: account, bundlePath: bundlePath).declaration])
+                       job(.transport, account: account, bundlePath: bundlePath).declaration] +
+                (includingGateway ? [job(.notificationGateway, account: account, bundlePath: bundlePath).declaration] : []))
     }
     private func dictionary(_ bytes: Data) throws -> [String: Any] {
         try XCTUnwrap(PropertyListSerialization.propertyList(from: bytes, options: [], format: nil) as? [String: Any])
@@ -60,6 +62,20 @@ final class InstalledAccountJobManifestTests: XCTestCase {
         XCTAssertEqual(Set(try XCTUnwrap(fields["MachServices"] as? [String: Bool]).keys), [paths.pairingService])
         XCTAssertNoThrow(try value.validate(value.bytes, inventory: inventory(), release: release()))
     }
+    func testGatewayJobUsesItsReservedAccountAndBothDistinctEndpoints() throws {
+        let value = try job(.notificationGateway), paths = try RuntimePreparationPaths(accountID: account)
+        let fields = try dictionary(value.bytes)
+        XCTAssertEqual(value.declaration.executionUID, 20001)
+        XCTAssertEqual(value.userName, ServiceAccountClaim.recordName(accountID: account, role: .gateway))
+        XCTAssertEqual(fields["ProgramArguments"] as? [String], [value.executablePath, "--configuration", paths.gatewayConfiguration])
+        XCTAssertEqual(Set(try XCTUnwrap(fields["MachServices"] as? [String: Bool]).keys), [paths.gatewayService, paths.gatewayWakeService])
+        XCTAssertEqual(value.executablePath, bundle + "/Contents/Library/LaunchServices/RemozioGateway")
+        XCTAssertNoThrow(try value.validate(value.bytes, inventory: inventory(includingGateway: true), release: release(includingGateway: true)))
+        XCTAssertThrowsError(try value.validate(value.bytes, inventory: inventory(), release: release()))
+        let file = AdministrativeSetupPublication.File.accountJob(accountID: account, role: .notificationGateway)
+        XCTAssertNoThrow(try file.validate()); XCTAssertEqual(file.name, value.declaration.plistName)
+    }
+
     func testChangedProgramIdentityArgumentsEndpointsOrExtraKeysCannotPass() throws {
         let value = try job(), original = try dictionary(value.bytes)
         let changes: [(String, Any)] = [("Program", "/usr/bin/true"), ("UserName", "nobody"), ("GroupName", "staff"),
@@ -76,7 +92,7 @@ final class InstalledAccountJobManifestTests: XCTestCase {
         XCTAssertThrowsError(try value.validate(value.bytes, inventory: inventory(bundlePath: "/Library/Other.app"), release: release()))
     }
     func testReconstructionKeepsBytesAndAccountNamespacesIndependent() throws {
-        for role: AuthorityCodeRole in [.authority, .transport] {
+        for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway] {
             let first = try job(role), again = try job(role), other = try job(role, account: Data(repeating: 8, count: 16))
             XCTAssertEqual(first.bytes, again.bytes); XCTAssertEqual(first.path, again.path)
             XCTAssertNotEqual(first.path, other.path); XCTAssertNotEqual(first.configurationPath, other.configurationPath)

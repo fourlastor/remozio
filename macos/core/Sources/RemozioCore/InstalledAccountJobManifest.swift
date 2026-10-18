@@ -17,23 +17,28 @@ struct InstalledAccountJobManifest {
     init(accountID: Data, role: AuthorityCodeRole, executionUID: UInt32, userName: String,
          bundlePath: String) throws {
         let paths = try RuntimePreparationPaths(accountID: accountID)
-        guard role == .authority || role == .transport,
+        let serviceRole: ServiceAccountRole = role == .notificationGateway ? .gateway : .transport
+        guard role == .authority || role == .transport || role == .notificationGateway,
               role == .authority ? (executionUID == 0 && userName == "root") :
-                (executionUID > 0 && executionUID < UInt32.max && userName == ServiceAccountClaim.recordName(accountID: accountID, role: .transport)),
+                (executionUID > 0 && executionUID < UInt32.max && userName == ServiceAccountClaim.recordName(accountID: accountID, role: serviceRole)),
               bundlePath.hasPrefix("/"), bundlePath.hasSuffix(".app"), bundlePath.utf8.count < 4096, Self.validXML(bundlePath),
               bundlePath.dropFirst().split(separator: "/", omittingEmptySubsequences: false).allSatisfy({
                   !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255
               }) else { throw InstallationServiceManifestError.invalidExpectation }
-        let label = paths.namespace + (role == .authority ? ".authority" : ".transport")
+        let label = paths.namespace + (role == .authority ? ".authority" : role == .notificationGateway ? ".gateway" : ".transport")
         declaration = try .init(role: role, kind: .daemon, domainUID: nil, executionUID: executionUID,
             label: label, plistName: label + ".plist", accountID: accountID)
         self.bundlePath = bundlePath; self.userName = userName
         groupName = role == .authority ? "wheel" : userName
-        let relative = role == .authority ? InstalledAuthorityCommandConfiguration.executablePath : "Contents/Library/LaunchServices/RemozioTransport"
+        let relative = role == .authority ? InstalledAuthorityCommandConfiguration.executablePath :
+            role == .notificationGateway ? "Contents/Library/LaunchServices/RemozioGateway" : "Contents/Library/LaunchServices/RemozioTransport"
         executablePath = bundlePath + "/" + relative
-        configurationPath = role == .authority ? paths.privateDirectory + "/command-host.cbor" : paths.transportConfiguration
-        arguments = [executablePath, role == .authority ? "--command-configuration" : "--pairing-configuration", configurationPath]
-        machServices = role == .authority ? [paths.authorityService, paths.commandService, paths.presenceService] : [paths.pairingService]
+        configurationPath = role == .authority ? paths.privateDirectory + "/command-host.cbor" :
+            role == .notificationGateway ? paths.gatewayConfiguration : paths.transportConfiguration
+        arguments = [executablePath, role == .authority ? "--command-configuration" :
+            role == .notificationGateway ? "--configuration" : "--pairing-configuration", configurationPath]
+        machServices = role == .authority ? [paths.authorityService, paths.commandService, paths.presenceService] :
+            role == .notificationGateway ? [paths.gatewayService, paths.gatewayWakeService] : [paths.pairingService]
     }
     // Stable XML avoids dictionary-order differences across fresh-process recovery.
     var bytes: Data {

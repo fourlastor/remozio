@@ -46,9 +46,11 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case runtimeRecord, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case runtimeRecord, gatewayMaterial, gatewayConfiguration, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case transportIdentity(ownerUID: uid_t, groupID: gid_t)
+        case gatewayProvider(ownerUID: uid_t, groupID: gid_t), gatewayReceiptKey(ownerUID: uid_t, groupID: gid_t)
+        case transportWakeKey(ownerUID: uid_t, groupID: gid_t)
         case presenceClient(ownerUID: uid_t), pairingClient(ownerUID: uid_t), frontendClient(ownerUID: uid_t)
         var name: String {
             switch self {
@@ -56,11 +58,16 @@ public enum AdministrativeSetupPublication {
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
+            case .gatewayMaterial: "gateway-material.cbor"
+            case .gatewayConfiguration: "gateway-host.cbor"
+            case .gatewayProvider: "gateway-provider.json"
+            case .gatewayReceiptKey: "gateway-receipt-key.cbor"
+            case .transportWakeKey: "transport-wake-key.cbor"
             case .commandConfiguration: "command-runtime.cbor"
             case .commandHost: "command-host.cbor"
             case .accountJob(let account, let role):
                 "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
-                    + (role == .authority ? ".authority.plist" : ".transport.plist")
+                    + (role == .authority ? ".authority.plist" : role == .notificationGateway ? ".gateway.plist" : ".transport.plist")
             case .elevationPolicy: "command-policy.cbor"
             case .transportConfiguration: "transport-host.cbor"
             case .transportIdentity: "transport-identity.cbor"
@@ -71,31 +78,38 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob: 0o644
+            case .gatewayConfiguration, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob: 0o644
             default: 0o600
             }
         }
         var requiresSharedDirectory: Bool {
-            if case .transportIdentity = self { return true }
-            return mode == 0o644
+            switch self {
+            case .transportIdentity, .gatewayProvider, .gatewayReceiptKey, .transportWakeKey: return true
+            default: return mode == 0o644
+            }
         }
         func fileOwner(processOwner: uid_t) -> uid_t {
-            if case .transportIdentity(let uid, _) = self { return uid }
-            return processOwner
+            switch self {
+            case .transportIdentity(let uid, _), .gatewayProvider(let uid, _), .gatewayReceiptKey(let uid, _), .transportWakeKey(let uid, _): return uid
+            default: return processOwner
+            }
         }
         var groupID: gid_t? {
-            if case .transportIdentity(_, let gid) = self { return gid }
-            return nil
+            switch self {
+            case .transportIdentity(_, let gid), .gatewayProvider(_, let gid), .gatewayReceiptKey(_, let gid), .transportWakeKey(_, let gid): return gid
+            default: return nil
+            }
         }
         func validate() throws {
             let uid: uid_t
             switch self {
-            case .transportIdentity(let value, let group):
+            case .transportIdentity(let value, let group), .gatewayProvider(let value, let group),
+                 .gatewayReceiptKey(let value, let group), .transportWakeKey(let value, let group):
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
             case .accountJob(let account, let role):
-                guard account.count == 16, role == .authority || role == .transport else {
+                guard account.count == 16, role == .authority || role == .transport || role == .notificationGateway else {
                     throw AdministrativeSetupPublicationError.invalidArtifact
                 }
                 return

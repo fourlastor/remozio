@@ -1,0 +1,159 @@
+{
+  "experiment": "macos-gateway-material-preparation",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T00:58:09.595988+00:00",
+  "sourceCommit": "a5681deb78bcc1cd921e106e3782b1695d8f77f3",
+  "sourceBase": "3bb10800ba34e8d031e325672de4c0cb29251f4a",
+  "sourceBasis": "The named commit contains the source, tests and initial documentation. Later evidence and prose do not change executable inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/PortableSetup.swift": "e768a4b46888ba03c7c5620608742888c37af41c9059baf72869cfc7f360cac6",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupPublication.swift": "67967a5233105a0f0694bf63af07844ae48b9c179a03a9add20deb059e85bd7d",
+    "macos/core/Sources/RemozioCore/GatewayPreparationMaterial.swift": "74ce8b3d112bcd4657ffefd080086a27d4b760894d22302ce2626d27825cd109",
+    "macos/core/Tests/RemozioCoreTests/GatewayPreparationMaterialTests.swift": "311068beb5436d5ecf294243eca5f43e1a5725443c89dabdb13e92df1eaec10c",
+    "macos/core/Sources/RemozioCore/RuntimeConfigurationBundle.swift": "9464d9c753470b8d7f43d3abfa9f17a0777cd84f19f68359ddd90164919ec471",
+    "macos/core/Sources/RemozioCore/InstalledAccountJobManifest.swift": "de606860c085d8bf226ae9a1ceecc5ead8ac88a49946eef62f7f6d2c93007498",
+    "macos/core/Tests/RemozioCoreTests/InstalledAccountJobManifestTests.swift": "ecbddd7c0a93b7b9e881618821b1a325272a7599419b768fbe16cd5db5fb5658",
+    "macos/core/Sources/RemozioCore/GatewayConfigurationBundle.swift": "c1648077bc3d2962b24f87d2d4cf8f53aa4754bb72d7c3542b0235ca6db62b7e",
+    "macos/core/Tests/RemozioCoreTests/GatewayConfigurationBundleTests.swift": "eb2be070efc1abd057e5eca73321560aa10080ed8f20feccb96eaa02ae994173",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "0b668ccb4f8823124624b4c19c1d9d3b19a63bccc7de718613a40a51c230c750",
+    "macos/core/Sources/RemozioCore/GatewayMaterialPreparationController.swift": "a303fcf3de0ebccc03bd3bc456be9162cad482cecca33ea9a3f9644048d88f1b",
+    "macos/core/Tests/RemozioCoreTests/GatewayPreparationStoreTests.swift": "442b8c97bdba296e83896b9428f1ccb0d6ee446b4a4d4998cb1787f39f87dc3a"
+  },
+  "validation": {
+    "nativePythonCommand": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2556,
+      "skipped": 1,
+      "failures": 0
+    },
+    "nativeLogSHA256": "ddfe8c278494d4f60a0282d56dc8fcfedf329c35e093af424d60a8eb03e7ad35",
+    "trackedInputCount": 1478,
+    "nativeInputSnapshotSHA256": "62196951e7aed0512d7d89619765f5add0d8fe65f4b4dcf0b3c9af8b767b6159",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCBatchID": "batch-mvd3yqdr",
+    "ATCResultSHA256": "0f1241dc1c4f56a58e76d5b80ad2a0337cbc0fdf3e529beacd77e028a84a5566",
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "newLintIssues": 0,
+    "preExistingLintIssues": [
+      {
+        "rule": "ApplySharedPref",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      },
+      {
+        "rule": "GradleDependency",
+        "path": "android/app/build.gradle.kts"
+      },
+      {
+        "rule": "UseKtx",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      }
+    ],
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true,
+    "passedComponentMethods": {
+      "GatewayPreparationMaterialTests": [
+        "testChangedRuntimeAndExpectedReferenceCannotGenerateNewMaterial",
+        "testDifferentRetainedKeyAndChangedProviderInputsAreNotAdopted",
+        "testFailedScopeOrStagingVerificationPublishesNoRecord",
+        "testFileWakeCreationRequiresConsentAndNeverReusesAnotherKeyRole",
+        "testLostAcknowledgmentRetainsMaterialAndLeavesTheRuntimeFileUnchanged",
+        "testMalformedPublicOrLinkedExistingRecordsAreNotReset",
+        "testMissingEstablishedMaterialNeverInvokesTheFactory",
+        "testNativePreparationRefusesOrdinaryIdentityBeforeProtectedAccess",
+        "testPreparedCredentialsLoadThroughTheExistingGatewayContractWithoutNetwork",
+        "testPrivateRecordRejectsUnknownVersionsFieldsAndNoncanonicalProviderJSON",
+        "testPublicReferenceRejectsRootOrTransportKeyReuseAndWrongVersions",
+        "testRoundTripBindsIndependentReceiptKeyAndKeepsPrivateBytesOutOfReference"
+      ],
+      "GatewayConfigurationBundleTests": [
+        "testAllThreeServicesUseTheSameRetainedScopeAndIndependentCredentials",
+        "testAnotherAccountMaterialAndMissingForegroundEnrollmentAreRejected",
+        "testImpossibleLifetimeLeaseAndWakeSettingsCannotProduceAProposal",
+        "testInventoryProposalAddsOnlyTheGatewayAndIsIdempotent",
+        "testOnlyOptionalPushAndWakeFieldsChangeInACustomizedForegroundConfiguration",
+        "testPublicStartupBytesExcludeEveryPrivateRecordAndTLSIdentity",
+        "testReconstructionIsStableAndCannotImplicitlyRotateEstablishedKeys",
+        "testTypedPrivateFilesUseTheCorrectServiceOwnerAndFixedNames"
+      ],
+      "GatewayPreparationStoreTests": [
+        "testControllerRecoversAtEveryStageWithoutReplacingKeysOrRegisteringAnotherJob",
+        "testCorruptIndexesIncludingTheAccountKeyRetireTheReaderInsteadOfHidingMaterial",
+        "testDifferentMaterialForTheSameAccountCannotReplaceTheRetainedReference",
+        "testLegacyReadDoesNotUpgradeAndRetentionLeavesAllForegroundStateUnchanged",
+        "testLostDatabaseAcknowledgmentRetainsSchemaAndReferenceOnReopen",
+        "testMaterialCannotUpgradeStorageBeforeForegroundRegistrationCompletes",
+        "testMissingPrivateFileAfterReferenceRetentionCannotInvokeTheFactory",
+        "testNativeControllerRefusesOrdinaryIdentityBeforeProtectedOperations",
+        "testPrivateCredentialAndKeyRecordsNeverEnterThePublicReference",
+        "testStaleExpectedStateAndChangedScopeCannotCreateMaterial"
+      ],
+      "InstalledAccountJobManifestTests": [
+        "testAuthorityJobBindsTheRootHostAndAllAccountEndpoints",
+        "testChangedProgramIdentityArgumentsEndpointsOrExtraKeysCannotPass",
+        "testGatewayJobUsesItsReservedAccountAndBothDistinctEndpoints",
+        "testReconstructionKeepsBytesAndAccountNamespacesIndependent",
+        "testTransportJobUsesOnlyTheReservedIdentityAndPairingConfiguration",
+        "testUnsupportedRolesIdentitiesAndInvalidPathsAreRejectedBeforePublication",
+        "testXMLPreservesSpecialPathCharactersWithoutAddingPlistKeys"
+      ]
+    }
+  },
+  "scope": [
+    "Retain independent optional gateway material and a public reference.",
+    "Compose a data-only startup proposal while retaining foreground configuration.",
+    "Add explicit machine schema8 material bookkeeping; retain schema1..7 readers.",
+    "Preserve shared setup v1 encoding and require explicit file wake custody."
+  ],
+  "installedMacServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "hardwareKeyCustodyTested": false,
+  "activationImplemented": false,
+  "appSetupConnected": false,
+  "limits": [
+    "The host is macOS27; targeting macOS26 does not prove macOS26 runtime behavior.",
+    "Material fixtures use ordinary-owner storage, synthetic provider credentials and disposable software keys.",
+    "An ordinary-user rejection proves the native Root guard, not Root ownership transfer or service UID isolation.",
+    "The startup bundle is a proposal. It replaces no active file and registers no job.",
+    "The administrator endpoint, protected enable transition, service journal initialization and app settings remain integration work.",
+    "Older binaries do not gain schema8 support. Native activation must verify compatible signed components.",
+    "Additional private-artifact and journal candidates remain excluded from this source commit.",
+    "The frozen interactive package and guarded recovery handoff are unchanged."
+  ]
+}

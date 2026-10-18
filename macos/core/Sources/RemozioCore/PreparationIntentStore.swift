@@ -11,6 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -242,6 +243,80 @@ public final class PreparationIntentStore {
             let registered = sqlite3_column_int64(row, 2) == 1
             guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
             return .init(plan: plan, jobsRegistered: registered)
+        }
+    }
+    func gatewayPreparation(accountID: Data) throws -> GatewayPreparationState {
+        guard accountID.count == 16 else { throw GatewayPreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 8 { return .init(reference: nil) }
+            let state = try loadGatewayPreparation(accountID: accountID)
+            if let reference = state.reference { try requireGatewayMaterialScope(reference) }
+            return state
+        }
+    }
+    // Optional material retention only. This transition never modifies foreground configuration or job registration.
+    func retainGatewayMaterial(_ reference: GatewayMaterialReference) throws {
+        let encoded = try reference.encoded
+        try transaction(write: true) {
+            try identity(macID); try requireGatewayMaterialScope(reference)
+            if try scalar("PRAGMA user_version") == 7 {
+                try exec("CREATE TABLE gateway_preparation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),material BLOB NOT NULL UNIQUE CHECK(length(material)=16),receipt BLOB NOT NULL UNIQUE CHECK(length(receipt)=65),credential BLOB NOT NULL UNIQUE CHECK(length(credential)=16),wake BLOB NOT NULL UNIQUE CHECK(length(wake)=65),digest BLOB NOT NULL CHECK(length(digest)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 16384)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=8")
+            }
+            let current = try loadGatewayPreparation(accountID: reference.runtime.services.accountID)
+            if let retained = current.reference {
+                guard retained == reference else { throw GatewayPreparationError.conflictingMaterial }; return
+            }
+            guard try scalar("SELECT COUNT(*) FROM gateway_preparation_v1") < 64 else { throw GatewayPreparationError.exhausted }
+            try statement("SELECT COUNT(*) FROM gateway_preparation_v1 WHERE material=? OR receipt=? OR credential=? OR wake=?") { row in
+                try bind(reference.materialID, column: 1, row: row); try bind(reference.phonePush.gatewayReceiptPublicKey, column: 2, row: row)
+                try bind(reference.wakeCredentialID, column: 3, row: row); try bind(reference.wakePublicKey, column: 4, row: row)
+                guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 0 else { throw GatewayPreparationError.conflictingMaterial }
+            }
+            try statement("INSERT INTO gateway_preparation_v1 VALUES(?,?,?,?,?,?,?)") { row in
+                try bind(reference.runtime.services.accountID, column: 1, row: row); try bind(reference.materialID, column: 2, row: row)
+                try bind(reference.phonePush.gatewayReceiptPublicKey, column: 3, row: row); try bind(reference.wakeCredentialID, column: 4, row: row)
+                try bind(reference.wakePublicKey, column: 5, row: row); try bind(reference.materialDigest, column: 6, row: row)
+                try bind(encoded, column: 7, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    private func requireGatewayMaterialScope(_ reference: GatewayMaterialReference) throws {
+        try requireRuntimeMaterialScope(reference.runtime)
+        guard try scalar("PRAGMA user_version") >= 7 else { throw GatewayPreparationError.incomplete }
+        let runtime = try loadRuntimePreparation(accountID: reference.runtime.services.accountID)
+        let activation = try loadRuntimeActivation(accountID: reference.runtime.services.accountID)
+        guard runtime.configurationPublished, runtime.reference == reference.runtime, activation.jobsRegistered,
+              let plan = activation.plan, plan.reference == reference.runtime,
+              let inventory = try loadInventoryRecord(), try plan.enrolledInventory(inventory) == inventory else {
+            throw GatewayPreparationError.incomplete
+        }
+        try requireRuntimeActivationScope(plan)
+    }
+    private func loadGatewayPreparation(accountID: Data) throws -> GatewayPreparationState {
+        try statement("SELECT account,material,receipt,credential,wake,digest,record FROM gateway_preparation_v1 ORDER BY account LIMIT 65") { row in
+            var selected: GatewayMaterialReference?, accounts = Set<Data>()
+            while try step(row) == SQLITE_ROW {
+                guard accounts.count < 64 else { throw PreparationStoreError.corruptRecord }
+                let reference: GatewayMaterialReference
+                do { reference = try .decode(blob(row, column: 6, maximum: 16384)) }
+                catch { throw PreparationStoreError.corruptRecord }
+                let account = try blob(row, column: 0, maximum: 16)
+                guard accounts.insert(account).inserted, reference.runtime.services.accountID == account,
+                      reference.runtime.services.macID == macID,
+                      try blob(row, column: 1, maximum: 16) == reference.materialID,
+                      try blob(row, column: 2, maximum: 65) == reference.phonePush.gatewayReceiptPublicKey,
+                      try blob(row, column: 3, maximum: 16) == reference.wakeCredentialID,
+                      try blob(row, column: 4, maximum: 65) == reference.wakePublicKey,
+                      try blob(row, column: 5, maximum: 32) == reference.materialDigest else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                if account == accountID { selected = reference }
+            }
+            return .init(reference: selected)
         }
     }
     func runtimePreparation(accountID: Data) throws -> RuntimePreparationState {
@@ -747,14 +822,14 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, [1, 2, 3, 4, 5, 6, 7].contains(version),
+        guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
             throw PreparationStoreError.incompatibleStore
         }
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 8, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 9, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -768,6 +843,7 @@ public final class PreparationIntentStore {
         if version >= 5 { expected.append("service_accounts_v1") }
         if version >= 6 { expected.append("runtime_preparation_v1") }
         if version >= 7 { expected.append("runtime_activation_v1") }
+        if version >= 8 { expected.append("gateway_preparation_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in

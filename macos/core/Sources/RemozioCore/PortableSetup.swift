@@ -45,6 +45,13 @@ public struct SetupFCMConfiguration: Sendable, CustomStringConvertible, CustomDe
             "client_email": email, "private_key_id": keyID, "private_key": privateKeyPEM,
         ]))
     }
+    /// Protected gateway preparation uses this stable credential record. Shared exports keep their existing format.
+    func gatewayCredentialJSON() throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "type": "service_account", "token_uri": FCMServiceAccount.tokenEndpoint, "project_id": project,
+            "client_email": email, "private_key_id": keyID, "private_key": privateKeyPEM,
+        ], options: [.sortedKeys])
+    }
     public var description: String { "SetupFCMConfiguration(redacted)" }
     public var debugDescription: String { description }
 }

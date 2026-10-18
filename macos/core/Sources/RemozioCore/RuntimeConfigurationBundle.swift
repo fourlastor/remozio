@@ -25,6 +25,12 @@ struct RuntimePreparationPaths: Sendable {
     var presenceService: String { namespace + ".presence" }
     var pairingService: String { namespace + ".pairing" }
     var gatewayService: String { namespace + ".gateway" }
+    var gatewayWakeService: String { namespace + ".gateway.wake" }
+    var gatewayConfiguration: String { serviceDirectory + "/gateway-host.cbor" }
+    var gatewayDirectory: String { serviceDirectory + "/Gateway" }
+    var gatewayProvider: String { serviceDirectory + "/gateway-provider.json" }
+    var gatewayReceiptKey: String { serviceDirectory + "/gateway-receipt-key.cbor" }
+    var transportWakeKey: String { serviceDirectory + "/transport-wake-key.cbor" }
 }
 
 /// Bootstrap configuration only. Construction does not prove protected placement or activate any service.
