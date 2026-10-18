@@ -5,8 +5,11 @@ import RemozioCore
 @main
 struct GatewayMain {
     static func main() async {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--journal-setup" {
+            await journalSetup(path: CommandLine.arguments[2])
+        }
         guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--configuration" else {
-            fail("Usage: RemozioGateway --configuration /absolute/protected/gateway.cbor", code: EX_USAGE)
+            fail("Usage: RemozioGateway --configuration /absolute/protected/gateway.cbor | --journal-setup /absolute/protected/setup-service.cbor", code: EX_USAGE)
         }
         let configuration: GatewayServiceConfiguration
         do { configuration = try GatewayServiceConfiguration.load(path: CommandLine.arguments[2]) }
@@ -39,6 +42,31 @@ struct GatewayMain {
             if Task.isCancelled { throw CancellationError() }
             throw failure
         }
+    }
+    private static func journalSetup(path: String) async -> Never {
+        let service: GatewayJournalSetupService
+        do { service = try GatewayJournalSetupService.open(path: path) }
+        catch { fail("Gateway journal setup requires protected metadata and the configured service account.", code: EX_CONFIG) }
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+        let task = Task {
+            try service.start()
+            while !service.isRetired {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
+        termination.resume(); interruption.resume()
+        defer { termination.cancel(); interruption.cancel() }
+        var failed = false
+        do { try await task.value } catch is CancellationError {} catch { failed = true }
+        // Drain from this uncancelled owner, after the listener task has stopped accepting work.
+        do { try await service.close() }
+        catch { fail("Gateway journal setup could not stop cleanly. Check protected setup progress before retrying.", code: EX_TEMPFAIL) }
+        if failed { fail("Gateway journal setup is unavailable. Check protected setup progress before retrying.", code: EX_TEMPFAIL) }
+        exit(EX_OK)
     }
     private static func fail(_ message: String, code: Int32) -> Never {
         FileHandle.standardError.write(Data((message + "\n").utf8)); exit(code)

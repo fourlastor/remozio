@@ -1,0 +1,85 @@
+{
+  "experiment": "macos-gateway-native-initializer",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T16:06:57.792946+00:00",
+  "sourceCommit": "8fb082c25ab5f5916cf12ff07f6a0a5dc6272974",
+  "feature": "scoped-temporary-gateway-journal-initializer",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupServiceConfiguration.swift": "b3621d34cd44d013893b210c80195461233ca48a1ba281bdf447a9296d17fc86",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupJobManifest.swift": "d39fe7b97766be3b08265cfe8c4443ab83528afc5472b3d0dbbd6f3bdcb8afcd",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupNativeModelTests.swift": "f20d8c8c14def46ea2d085dcac50c3bbf9fe212aaa93b1df89c7063dc74de8e6",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupService.swift": "0370cad3b8ecba1d4d47086ca0e9245345e269e3d8f22d2fcff3ca3a70dbf28c",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupWorkTests.swift": "457abd640bf7b45232d5d0c91822605cfe70828426c18c3f451ec7881946a159",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupPublication.swift": "c1a87be8ffc9aa1d1a9e4b629afc7e8e4eb1de36397d3f71d57233e9b150db23",
+    "macos/app/Gateway/GatewayMain.swift": "6b7348c90e3af638ddf9d10998aa98913ab2dc09cac317233b0d23d61d911006",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupJobRegistration.swift": "c339d0a23fab4a9d4a09ed5403c261d1542696bac27892e4421d3bca8749f246",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupJobRegistrationTests.swift": "4fc60598c5f896897d97e6ef3866c4617d2758e80540d80e78775a7095ae2d7e",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupJobArtifacts.swift": "424f5ffe0de6ec7673384920e81ac3f1e72eb23659aa0e34e77a43a02eb111a9",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupJobArtifactsTests.swift": "92c5422cb6cc95b1438e1d5f7e56a3e8d87b9ed16fe3ee790a1dfa451ccdbb47"
+  },
+  "nativeBoundary": {
+    "temporaryGatewayProcess": true,
+    "authenticatedInitializationRequired": true,
+    "RunAtLoad": false,
+    "KeepAlive": false,
+    "RootOrchestrationIntegrated": false,
+    "installedServiceExercised": false
+  },
+  "validation": {
+    "nativeCoreTests": 2651,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "8b48cbc8a5025a6d6b620e8200ae6e60b9fd1f03bb9213f64fbb59f828aa9264",
+    "ATCResultSHA256": "d25530ccdf7945b6a7c897c0e6cf2bc4f0fa1e7c1bcc219209fd1a6b616bd0e5",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true,
+    "documentationRevisedAfterGates": true,
+    "originalDocumentSHA256": "d6df7b923840e311b1d13d63e96e4f19b57ca6ed98447c5d2809300e1d1c14a4"
+  },
+  "scope": [
+    "Model the exact temporary job, protected artifacts and scoped setup mode.",
+    "Keep authenticated work alive until settlement, including disconnected callers.",
+    "Refuse cleanup while work is running or job state is unknown."
+  ],
+  "limits": [
+    "Owned job and file fixtures do not prove system launchd behavior.",
+    "Developer ID peer validation, Root runtime admission and dedicated UID isolation remain supervised checks.",
+    "Root setup orchestration and the app setup action are not integrated.",
+    "No service was installed and no physical phone was used."
+  ]
+}

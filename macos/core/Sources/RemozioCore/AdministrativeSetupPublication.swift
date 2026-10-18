@@ -46,8 +46,9 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case runtimeRecord, gatewayMaterial, gatewayConfiguration, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
+        case gatewayJournalJob(accountID: Data, intentID: Data)
         case transportIdentity(ownerUID: uid_t, groupID: gid_t)
         case gatewayProvider(ownerUID: uid_t, groupID: gid_t), gatewayReceiptKey(ownerUID: uid_t, groupID: gid_t)
         case transportWakeKey(ownerUID: uid_t, groupID: gid_t)
@@ -60,6 +61,7 @@ public enum AdministrativeSetupPublication {
             case .runtimeRecord: "runtime-material.cbor"
             case .gatewayMaterial: "gateway-material.cbor"
             case .gatewayConfiguration: "gateway-host.cbor"
+            case .gatewayJournalService: GatewayJournalSetupServiceConfiguration.fileName
             case .gatewayProvider: "gateway-provider.json"
             case .gatewayReceiptKey: "gateway-receipt-key.cbor"
             case .transportWakeKey: "transport-wake-key.cbor"
@@ -68,6 +70,9 @@ public enum AdministrativeSetupPublication {
             case .accountJob(let account, let role):
                 "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
                     + (role == .authority ? ".authority.plist" : role == .notificationGateway ? ".gateway.plist" : ".transport.plist")
+            case .gatewayJournalJob(let account, let intent):
+                "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
+                    + ".gateway-journal-setup." + intent.map { String(format: "%02x", $0) }.joined() + ".plist"
             case .elevationPolicy: "command-policy.cbor"
             case .transportConfiguration: "transport-host.cbor"
             case .transportIdentity: "transport-identity.cbor"
@@ -78,7 +83,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .gatewayConfiguration, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob: 0o644
+            case .gatewayConfiguration, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }
@@ -108,6 +113,8 @@ public enum AdministrativeSetupPublication {
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
+            case .gatewayJournalJob(let account, let intent):
+                guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .accountJob(let account, let role):
                 guard account.count == 16, role == .authority || role == .transport || role == .notificationGateway else {
                     throw AdministrativeSetupPublicationError.invalidArtifact
