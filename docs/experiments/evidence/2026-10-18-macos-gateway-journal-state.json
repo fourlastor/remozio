@@ -1,0 +1,135 @@
+{
+  "experiment": "macos-gateway-journal-state",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T04:00:27.018523+00:00",
+  "sourceCommit": "f8d4ada1ec2a4d5695df337bf8c7001f3e0b9df7",
+  "sourceBase": "7c44b69bdf205b3002e7dfed5812a757c15d8a97",
+  "sourceBasis": "The named commit contains the source, tests and initial documentation. Later evidence and prose do not change executable inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "b13abdc671c30ad552268449933f4d76150378b4f4fde82460dadb8ad011a1c9",
+    "macos/core/Tests/RemozioCoreTests/GatewayPreparationStoreTests.swift": "52e4ec6d813329cdba65513392ea6ca2f4143efc27abda87497d83cb74867b91",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupIntent.swift": "6008498dc9b90fa64e74a816ad13f2a2060c88b52f98a33e3dc6c17b4e8a7d0e",
+    "macos/core/Sources/RemozioCore/GatewayJournalPreparationController.swift": "ba386ab623d0f278c2d359fdd80a9c9f9db9256f30b8bb0d06adced064ec14c8",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupStoreTests.swift": "0c0eacfdd16d91b3eeeb9627d2c7790b0b9b3f6064382cc425b8132696dbeadb"
+  },
+  "validation": {
+    "nativePythonCommand": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2593,
+      "skipped": 1,
+      "failures": 0
+    },
+    "nativeLogSHA256": "cbf809c039a02cb10cc714ca3c7e554818f68f44a1bf2986c798bd0db4692b03",
+    "trackedInputCount": 1494,
+    "nativeInputSnapshotSHA256": "df7285972ec56a972b83c8f09633ea1d6cc32b1ff10a4ff7e1f1182b27bf8cb3",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCBatchID": "batch-mvdaowqv",
+    "ATCResultSHA256": "10756aaee22a671c1c07f7518f6c9dd23b2fc210c7d890cf5e81e39fec6e44f0",
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "newLintIssues": 0,
+    "preExistingLintIssues": [
+      {
+        "rule": "ApplySharedPref",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      },
+      {
+        "rule": "GradleDependency",
+        "path": "android/app/build.gradle.kts"
+      },
+      {
+        "rule": "UseKtx",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      }
+    ],
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true,
+    "passedComponentMethods": {
+      "GatewayJournalSetupStoreTests": [
+        "testAnAlreadyDeclaredGatewayCannotAcquireANewInitializationIntent",
+        "testCompletedRetryDoesNotReadMissingJournalAndANewIntentCannotResetCompletion",
+        "testCorruptRecordIndexesIncludingAccountCannotHideEstablishedIntent",
+        "testEveryControllerInterruptionRecoversWithoutReplacingTheJournalOrForegroundState",
+        "testIntentReplacementAndForeignCodePinsCannotReplaceRetainedScope",
+        "testIntentRoundTripContainsNoPrivateCredentialAndRejectsAliasedFiles",
+        "testInvalidCompletionFlagCannotReopenInitialization",
+        "testLostIntentAndCompletionRepliesRetainTheirDurableState",
+        "testMissingOrReplacedFilesCannotReopenCreationPermission",
+        "testReadDoesNotUpgradeAndRetentionPreservesForegroundState",
+        "testWrongHeadAndStaleCallerCannotCompleteInitialization"
+      ],
+      "GatewayPreparationStoreTests": [
+        "testControllerRecoversAtEveryStageWithoutReplacingKeysOrRegisteringAnotherJob",
+        "testCorruptIndexesIncludingTheAccountKeyRetireTheReaderInsteadOfHidingMaterial",
+        "testDifferentMaterialForTheSameAccountCannotReplaceTheRetainedReference",
+        "testLegacyReadDoesNotUpgradeAndRetentionLeavesAllForegroundStateUnchanged",
+        "testLostDatabaseAcknowledgmentRetainsSchemaAndReferenceOnReopen",
+        "testMaterialCannotUpgradeStorageBeforeForegroundRegistrationCompletes",
+        "testMissingPrivateFileAfterReferenceRetentionCannotInvokeTheFactory",
+        "testNativeControllerRefusesOrdinaryIdentityBeforeProtectedOperations",
+        "testPrivateCredentialAndKeyRecordsNeverEnterThePublicReference",
+        "testStaleExpectedStateAndChangedScopeCannotCreateMaterial"
+      ]
+    }
+  },
+  "scope": [
+    "Retain immutable journal setup intent and historical initialization completion per account.",
+    "Read schema1 through schema9 without implicit migration; explicitly migrate schema8 inside intent retention.",
+    "Bind the registered foreground scope, public material and distinct directory/lock/database identities.",
+    "Refuse corrupt records, replaced pending files, stale callers and conflicting intent replacements.",
+    "Return completed setup without opening service storage or granting new creation permission."
+  ],
+  "XcodeCoordination": "The unchanged native check scripts use a scoped PATH adapter for three typed ATC builds. Xcode version queries remain read-only.",
+  "XcodeAdapterSHA256": "9c8c4345642e7ad68c4bbda0c63b02a19d92a5f949fb2b6a2c63c6fe4afd8f0d",
+  "installedMacServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "hardwareKeyCustodyTested": false,
+  "activationImplemented": false,
+  "appSetupConnected": false,
+  "limits": [
+    "The host is macOS27; targeting macOS26 does not prove macOS26 runtime behavior.",
+    "The file and SQLite fixtures use one ordinary owner and disposable software data.",
+    "These fixtures do not prove Root admission, dedicated service isolation or native launch.",
+    "Native callers must authenticate the initializer before retaining completion evidence.",
+    "The authenticated exchange, native listener, temporary job and Root operation drafts are excluded.",
+    "The administrator endpoint and push activation remain integration work.",
+    "Old binaries cannot read schema9. Installed update and settings transitions remain unproven.",
+    "The frozen interactive package and guarded recovery handoff are unchanged."
+  ]
+}

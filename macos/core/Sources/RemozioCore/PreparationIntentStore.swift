@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -243,6 +243,87 @@ public final class PreparationIntentStore {
             let registered = sqlite3_column_int64(row, 2) == 1
             guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
             return .init(plan: plan, jobsRegistered: registered)
+        }
+    }
+    func gatewayJournalPreparation(accountID: Data) throws -> GatewayJournalPreparationState {
+        guard accountID.count == 16 else { throw GatewayPreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 9 { return .init(intent: nil, initialized: false) }
+            let state = try loadGatewayJournalPreparation(accountID: accountID)
+            if let intent = state.intent { try requireGatewayJournalScope(intent) }
+            return state
+        }
+    }
+    func retainGatewayJournalIntent(_ intent: GatewayJournalSetupIntent) throws {
+        let encoded = try intent.encoded, digest = try intent.digest, files = try intent.fileDigest
+        try transaction(write: true) {
+            try identity(macID); try requireGatewayJournalScope(intent)
+            if try scalar("PRAGMA user_version") == 8 {
+                try exec("CREATE TABLE gateway_journal_preparation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),intent BLOB NOT NULL UNIQUE CHECK(length(intent)=16),material BLOB NOT NULL CHECK(length(material)=16),files BLOB NOT NULL UNIQUE CHECK(length(files)=32),digest BLOB NOT NULL CHECK(length(digest)=32),initialized INTEGER NOT NULL CHECK(initialized IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 131072)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=9")
+            }
+            let current = try loadGatewayJournalPreparation(accountID: intent.accountID)
+            if let retained = current.intent {
+                guard retained == intent else { throw GatewayPreparationError.conflictingMaterial }; return
+            }
+            guard let inventory = try loadInventoryRecord(), !inventory.services.contains(where: {
+                $0.accountID == intent.accountID && $0.role == .notificationGateway
+            }) else { throw GatewayPreparationError.changedScope }
+            guard try scalar("SELECT COUNT(*) FROM gateway_journal_preparation_v1") < 64 else { throw GatewayPreparationError.exhausted }
+            try statement("INSERT INTO gateway_journal_preparation_v1 VALUES(?,?,?,?,?,0,?)") { row in
+                try bind(intent.accountID, column: 1, row: row); try bind(intent.id, column: 2, row: row)
+                try bind(intent.material.materialID, column: 3, row: row); try bind(files, column: 4, row: row)
+                try bind(digest, column: 5, row: row); try bind(encoded, column: 6, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    @discardableResult
+    func completeGatewayJournalInitialization(_ intent: GatewayJournalSetupIntent, head: GatewayHeadEvidence) throws -> GatewayJournalPreparationState {
+        try transaction(write: true) {
+            try identity(macID); try requireGatewayJournalScope(intent)
+            guard try scalar("PRAGMA user_version") >= 9 else { throw GatewayPreparationError.incomplete }
+            let current = try loadGatewayJournalPreparation(accountID: intent.accountID)
+            guard current.intent == intent, head.registration == intent.configuration.registration else { throw GatewayPreparationError.changedScope }
+            if current.initialized { return current }
+            guard head.revision == 0, head.receipt == nil else { throw GatewayPreparationError.changedScope }
+            try statement("UPDATE gateway_journal_preparation_v1 SET initialized=1 WHERE account=? AND digest=? AND initialized=0") { row in
+                try bind(intent.accountID, column: 1, row: row); try bind(intent.digest, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+            return .init(intent: intent, initialized: true)
+        }
+    }
+    private func requireGatewayJournalScope(_ intent: GatewayJournalSetupIntent) throws {
+        guard try scalar("PRAGMA user_version") >= 8 else { throw GatewayPreparationError.incomplete }
+        try requireGatewayMaterialScope(intent.material)
+        guard try loadGatewayPreparation(accountID: intent.accountID).reference == intent.material,
+              let foreground = try loadRuntimeActivation(accountID: intent.accountID).plan,
+              let inventory = try loadInventoryRecord() else { throw GatewayPreparationError.incomplete }
+        try intent.validate(foreground: foreground, inventory: inventory)
+    }
+    private func loadGatewayJournalPreparation(accountID: Data) throws -> GatewayJournalPreparationState {
+        try statement("SELECT account,intent,material,files,digest,initialized,record FROM gateway_journal_preparation_v1 ORDER BY account LIMIT 65") { row in
+            var result = GatewayJournalPreparationState(intent: nil, initialized: false), accounts = Set<Data>()
+            while try step(row) == SQLITE_ROW {
+                guard accounts.count < 64 else { throw PreparationStoreError.corruptRecord }
+                let intent: GatewayJournalSetupIntent
+                do { intent = try .decode(blob(row, column: 6, maximum: 131072)) } catch { throw PreparationStoreError.corruptRecord }
+                let account = try blob(row, column: 0, maximum: 16)
+                guard accounts.insert(account).inserted, intent.accountID == account, intent.material.runtime.services.macID == macID,
+                      try blob(row, column: 1, maximum: 16) == intent.id,
+                      try blob(row, column: 2, maximum: 16) == intent.material.materialID,
+                      try blob(row, column: 3, maximum: 32) == intent.fileDigest,
+                      try blob(row, column: 4, maximum: 32) == intent.digest,
+                      sqlite3_column_type(row, 5) == SQLITE_INTEGER, [0, 1].contains(sqlite3_column_int64(row, 5)) else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                if account == accountID { result = .init(intent: intent, initialized: sqlite3_column_int64(row, 5) == 1) }
+            }
+            return result
         }
     }
     func gatewayPreparation(accountID: Data) throws -> GatewayPreparationState {
@@ -829,7 +910,7 @@ public final class PreparationIntentStore {
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 9, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 10, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -844,6 +925,7 @@ public final class PreparationIntentStore {
         if version >= 6 { expected.append("runtime_preparation_v1") }
         if version >= 7 { expected.append("runtime_activation_v1") }
         if version >= 8 { expected.append("gateway_preparation_v1") }
+        if version >= 9 { expected.append("gateway_journal_preparation_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
