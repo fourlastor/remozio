@@ -18,8 +18,10 @@ SOURCES = [
     "macos/core/Package.swift",
     "macos/core/Package.resolved",
     "protocol/swift/Package.swift",
+    "host/shared-core/Package.swift",
+    "host/shared-core/Package.resolved",
 ]
-SOURCE_TREES = ["macos/core/Sources", "protocol/swift/Sources"]
+SOURCE_TREES = ["macos/core/Sources", "protocol/swift/Sources", "host/shared-core/Sources"]
 
 def hashes():
     paths = {REPO / name for name in SOURCES}

@@ -146,7 +146,9 @@ def source_files():
               *(path for path in NATIVE.rglob("*") if path.is_file() and path.suffix in {".c", ".h", ".m", ".mm", ".cpp"}),
               *(ROOT / "macos/core/Sources").glob("*/module.modulemap"),
               *(ROOT / "macos/core/Sources/RemozioCore").glob("*.swift"),
-              *(ROOT / "protocol/swift/Sources/RemozioProtocol").glob("*.swift")]
+              *(ROOT / "protocol/swift/Sources/RemozioProtocol").glob("*.swift"),
+              ROOT / "host/shared-core/Package.swift", ROOT / "host/shared-core/Package.resolved",
+              *(path for path in (ROOT / "host/shared-core/Sources").rglob("*") if path.is_file())]
     return sorted(set(files))
 
 
