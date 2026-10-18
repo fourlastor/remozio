@@ -37,6 +37,7 @@ jobs:
             --strip-components=1 --directory "$RUNNER_TEMP/remozio-swift"
           echo "$RUNNER_TEMP/remozio-swift/usr/bin" >> "$GITHUB_PATH"
       - run: ./scripts/check-linux-protocol.sh
+      - run: ./scripts/check-linux-host.sh
   mac:
     name: Mac build
     runs-on: macos-26

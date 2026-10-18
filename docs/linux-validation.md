@@ -36,6 +36,7 @@ Python earlier on its default PATH is older.
 ```sh
 ./scripts/check.sh
 ./scripts/check-linux-protocol.sh
+./scripts/check-linux-host.sh
 python3 scripts/run-linux-caller-experiment.py
 ./gradlew :protocol-kotlin:test :phone-core:test :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 ```
@@ -63,18 +64,27 @@ selects the checks executable on the current host. No Git hook is installed:
 ```
 
 It runs `scripts/check.sh` first on both hosts. Linux also runs
-`scripts/check-linux-protocol.sh`. Both run the portable Kotlin/phone tests and
-Android unit tests, debug assembly and lint. macOS additionally runs
+`scripts/check-linux-protocol.sh` and `scripts/check-linux-host.sh`. Both run the
+portable Kotlin/phone tests and Android unit tests, debug assembly and lint. macOS additionally runs
 `:phone-core:approvalFlowTest` after `check.sh` has built its native peers.
 Unknown platforms and any failed phase fail the gate immediately.
 
-The complete Linux coordinator passed on this Ubuntu 25.10 host with the prepared
-Swift 6.2.4 runtime, JDK 21 and Android SDK 37: 171 repository tests (six skips),
-221 watcher tests, 119 Swift tests, and all portable Kotlin/Android tasks. Gradle
-reused 60 unchanged tasks and executed lint. The repository tests include six new
-controls for Linux/macOS command selection, running from another directory,
-unsupported hosts and failure propagation. Their stubbed macOS commands test
-selection only; they do not claim a native Mac run for this revision.
+The [shared host core](../host/shared-core/README.md) contains the decision verifier
+and its authority-owned request, enrollment and clock inputs. Its existing verifier
+tests run through the Linux host check and the native Mac check. Mac consumers use
+the same implementation through compatibility type aliases. This extraction does
+not implement a Linux authority, durable decision consumption or command dispatch.
+
+The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
+including the shared-source inventory fix and its regression controls, on this
+Ubuntu 25.10 host with the prepared Swift 6.2.4 runtime, JDK 21 and Android SDK 37:
+178 repository tests (six skips), 221 watcher tests, 130 Swift protocol tests,
+eight shared verifier tests, and all portable Kotlin/Android tasks. The repository
+tests include six controls for Linux/macOS command selection, running from another
+directory, unsupported hosts and failure propagation. Stubbed macOS commands and
+source-change controls test orchestration only; native Mac builds, interoperability
+and live experiments were not executed on this Linux host. Their required Mac
+validation remains separate from this result.
 
 `ApprovalFlowPeer`, `TLSPeer`, `HPKEPeer` and `AuditFlowPeer` are macOS executables
 built from `experiments/approval-flow`. Linux does not substitute or skip their
@@ -89,8 +99,8 @@ to `main` without path filters:
 | Local check | CI job and command |
 | --- | --- |
 | Repository Python and PR-watcher tests | **Python checks**: `./scripts/check.sh` on Ubuntu; also runs on Mac. |
-| Linux Swift protocol fixtures | **Linux Swift protocol**: `./scripts/check-linux-protocol.sh` on Ubuntu 24.04. |
-| Mac native builds, experiments, Swift protocol and core tests | **Mac build**: the complete Darwin branch of `./scripts/check.sh` on macOS 26. |
+| Linux Swift protocol and shared host tests | **Linux Swift protocol**: `./scripts/check-linux-protocol.sh` and `./scripts/check-linux-host.sh` on Ubuntu 24.04. |
+| Mac native builds, experiments, Swift protocol, shared host and core tests | **Mac build**: the complete Darwin branch of `./scripts/check.sh` on macOS 26. |
 | Portable Kotlin protocol and phone tests | **Kotlin protocol**: `:protocol-kotlin:test :phone-core:test`. |
 | Native Swift/Kotlin interoperability | **Mac interoperability**: builds all four peers from the checkout, then runs `:phone-core:test :phone-core:approvalFlowTest`. |
 | Android unit tests, debug assembly and lint | **Android build**: `:android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug`, plus the additional CI-only `:android-app:assembleRelease`. |

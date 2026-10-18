@@ -67,6 +67,76 @@ class TimeoutCleanupTests(unittest.TestCase):
 
 
 class SourceEvidenceTests(unittest.TestCase):
+    shared_inputs = [
+        "host/shared-core/Sources/RemozioHostCore/DecisionVerifier.swift",
+        "host/shared-core/Package.swift",
+        "host/shared-core/Package.resolved",
+    ]
+
+    def shared_fixture(self, root):
+        for name in self.shared_inputs:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("before")
+        for path in RUNNER.source_files():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("before")
+
+    def run_shared_change(self, name, phase):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(RUNNER, "ROOT", root), patch.object(RUNNER, "PACKAGE", root / "experiments/command-frontend"), \
+                    patch.object(RUNNER, "NATIVE", root / "macos/core/Sources/RemozioMach"), \
+                    patch.object(RUNNER, "__file__", str(root / "scripts/run-macos-live-frontend.py")), \
+                    patch.object(RUNNER, "BUILD", root), patch.object(RUNNER.os, "geteuid", return_value=1000):
+                self.shared_fixture(root)
+                def compile_fixture():
+                    if phase == "compilation":
+                        (root / name).write_text("after")
+                    return Path("/unused"), {}
+                def measure_fixture(*_args):
+                    if phase == "measurement":
+                        (root / name).write_text("after")
+                    return {}
+                with patch.object(RUNNER, "build", side_effect=compile_fixture), \
+                        patch.object(RUNNER, "invoke", side_effect=measure_fixture) as invoke, \
+                        patch.object(RUNNER, "measure_forced_cleanup", return_value={}):
+                    with self.assertRaisesRegex(RuntimeError, f"source changed during {phase}"):
+                        RUNNER.main()
+                    if phase == "compilation":
+                        invoke.assert_not_called()
+                self.assertFalse((root / "evidence.json").exists())
+
+    def test_shared_input_change_during_build_stops_before_measurement(self):
+        for name in self.shared_inputs:
+            with self.subTest(name=name):
+                self.run_shared_change(name, "compilation")
+
+    def test_shared_input_change_during_measurement_prevents_evidence(self):
+        for name in self.shared_inputs:
+            with self.subTest(name=name):
+                self.run_shared_change(name, "measurement")
+
+    def test_shared_source_addition_during_build_stops_before_measurement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(RUNNER, "ROOT", root), patch.object(RUNNER, "PACKAGE", root / "experiments/command-frontend"), \
+                    patch.object(RUNNER, "NATIVE", root / "macos/core/Sources/RemozioMach"), \
+                    patch.object(RUNNER, "__file__", str(root / "scripts/run-macos-live-frontend.py")), \
+                    patch.object(RUNNER, "BUILD", root), patch.object(RUNNER.os, "geteuid", return_value=1000):
+                self.shared_fixture(root)
+                def compile_then_add():
+                    source = root / "host/shared-core/Sources/RemozioHostCore/nested/NewVerifier.swift"
+                    source.parent.mkdir(parents=True)
+                    source.write_text("new source")
+                    return Path("/unused"), {}
+                with patch.object(RUNNER, "build", side_effect=compile_then_add), \
+                        patch.object(RUNNER, "invoke") as invoke:
+                    with self.assertRaisesRegex(RuntimeError, "source set changed during compilation"):
+                        RUNNER.main()
+                    invoke.assert_not_called()
+                self.assertFalse((root / "evidence.json").exists())
+
     def test_source_change_during_build_stops_before_measurement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

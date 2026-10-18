@@ -21,6 +21,7 @@ class InventoryEvidenceTests(unittest.TestCase):
             self.write(name, "fixed input")
         self.transitive = [
             "protocol/swift/Sources/RemozioProtocol/DeterministicCBOR.swift",
+            "host/shared-core/Sources/RemozioHostCore/DecisionVerifier.swift",
             "macos/core/Sources/RemozioCore/ReleaseDestinationLease.swift",
             "macos/core/Sources/RemozioMach/include/RemozioMach.h",
             "macos/core/Sources/RemozioMach/channel.c",
@@ -49,6 +50,8 @@ class InventoryEvidenceTests(unittest.TestCase):
         self.assertIn("macos/core/Package.swift", inputs)
         self.assertIn("protocol/swift/Package.swift", inputs)
         self.assertIn("macos/core/Package.resolved", inputs)
+        self.assertIn("host/shared-core/Package.swift", inputs)
+        self.assertIn("host/shared-core/Package.resolved", inputs)
         for name in inputs:
             with self.subTest(name=name):
                 before = PROBE.hashes()
@@ -57,14 +60,16 @@ class InventoryEvidenceTests(unittest.TestCase):
                 self.write(name, "fixed input")
 
     def testAddedAndRemovedSourceFilesAlterEvidence(self):
-        before = PROBE.hashes()
-        name = "protocol/swift/Sources/RemozioProtocol/nested/NewCodec.swift"
-        self.write(name, "new source")
-        added = PROBE.hashes()
-        self.assertIn(name, added)
-        self.assertNotEqual(before, added)
-        (self.root / name).unlink()
-        self.assertEqual(before, PROBE.hashes())
+        for name in ["protocol/swift/Sources/RemozioProtocol/nested/NewCodec.swift",
+                     "host/shared-core/Sources/RemozioHostCore/nested/NewVerifier.swift"]:
+            with self.subTest(name=name):
+                before = PROBE.hashes()
+                self.write(name, "new source")
+                added = PROBE.hashes()
+                self.assertIn(name, added)
+                self.assertNotEqual(before, added)
+                (self.root / name).unlink()
+                self.assertEqual(before, PROBE.hashes())
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,6 +14,7 @@ The repository contains experiments, protocol code, and partial native apps.
 
 - The [experiment sequence](docs/experiments/README.md) and [Mac XPC experiment](docs/experiments/macos-xpc.md) record measured results and reproducible checks.
 - The [protocol modules](protocol/README.md) use shared encoding fixtures in Swift and Kotlin.
+- The [shared host core](host/shared-core/README.md) provides decision verification used by the Mac authority, with tests for both Mac and Linux.
 - The [Linux host proposal](docs/linux-host-contract.md) and [Linux validation guide](docs/linux-validation.md) track Ubuntu experiments and the remaining hardware and integration gates.
 - The [Android app](android/README.md) shows saved Mac records and cached audit history. It does not claim a live connection.
 - The [native Mac app](macos/app/README.md) has a main window, a menu bar entry, and Settings.
@@ -26,9 +27,9 @@ Run the automated checks for your host:
 ./scripts/check-local.sh
 ```
 
-Linux runs Python, Swift protocol, portable Kotlin/phone tests, and Android unit
-tests, debug assembly and lint. macOS also runs the native builds, tests and
-experiments, then the Swift/Kotlin interoperability suite using its freshly built
+Linux runs Python, Swift protocol and shared host tests, portable Kotlin/phone
+tests, and Android unit tests, debug assembly and lint. macOS also runs the native
+builds, tests and experiments, then the Swift/Kotlin interoperability suite using its freshly built
 Mac peers. Mac interoperability runs in CI for Linux contributions.
 
 Both hosts require Python 3.11 or later, JDK 21 and the Android SDK described in the
