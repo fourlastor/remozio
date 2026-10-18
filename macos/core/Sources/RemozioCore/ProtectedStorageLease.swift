@@ -13,6 +13,13 @@ final class ProtectedStorageLease {
         return nodes.filter(\.directory).map { DirectoryIdentity(device: $0.device, inode: $0.inode) }
     }
 
+    // Typed setup compares fixed file identities without exposing descriptors or file contents.
+    func fileIdentity(name: String) throws -> DirectoryIdentity {
+        try validate()
+        guard let node = nodes.first(where: { !$0.directory && $0.name == name }) else { throw JournalLeaseError.invalidPath }
+        return .init(device: node.device, inode: node.inode)
+    }
+
     let databasePath: String
     private struct Node {
         let fd: Int32

@@ -24,6 +24,12 @@ public final class ProtectedGatewayLease {
     /// Recheck process identity, path identities, ownership, modes and ACLs before opening SQLite or committing.
     public func validate() throws { try storage.validate() }
 
+    // Protected setup retains these identities before any gateway journal initialization.
+    func fileIdentity() throws -> GatewayJournalFileIdentity {
+        guard let directory = try storage.directoryIdentities().last else { throw JournalLeaseError.identityChanged }
+        return try .init(directory: directory, writer: storage.fileIdentity(name: "writer.lock"), database: storage.fileIdentity(name: "gateway.sqlite"))
+    }
+
     /// Release descriptors and the lock. This does not delete storage or reset gateway trust.
     public func close() { storage.close() }
 }
