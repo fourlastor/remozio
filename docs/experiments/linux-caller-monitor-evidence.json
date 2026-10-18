@@ -1,0 +1,332 @@
+{
+  "cases": {
+    "bad-ack": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "invalid_ack_rejected": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "bad_ack",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "caller-exit": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "event_between_prepare_and_final_observed": true,
+        "executor_result_received": true,
+        "exit_event_observed": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "exit",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "duplicate-ack": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "invalid_ack_rejected": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "duplicate_ack",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "fork": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "event_between_prepare_and_final_observed": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "fork_event_observed": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "task",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "healthy": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "caller_ptrace_stop_confirmed_at_final": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_frozen_at_final_check": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "prepare_ack_nonce_bound": true,
+        "simulated_acceptance_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "accepted",
+        "productionAdmission": false,
+        "reason": "held_stop",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "memory-modification": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "bootstrap_ptrace_stop_observed": true,
+        "executable_backing_bytes_unchanged": true,
+        "executable_mapping_bytes_changed": true,
+        "executor_result_received": true,
+        "pretrace_memory_descriptor_received": true,
+        "retained_memory_write_succeeded": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "code_mutation",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "monitor-failure": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "executor_observed_monitor_loss": true,
+        "executor_result_received": true,
+        "exitkill_caller_exit_observed": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_killed_after_prepare": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "monitor_loss",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "same-path-exec": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "event_between_prepare_and_final_observed": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "same_path_second_exec_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "exec",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "sender-mismatch": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_mismatch_observed": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "sender_mismatch",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "stop-release": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "caller_stop_released_before_final": true,
+        "executor_detected_missing_stop": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "stop_released",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "thread-clone": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "clone_event_observed": true,
+        "event_between_prepare_and_final_observed": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "task",
+        "trustedCode": false
+      },
+      "passed": true
+    },
+    "vfork": {
+      "checks": {
+        "all_owned_children_reaped": true,
+        "binding_invalidated": true,
+        "event_between_prepare_and_final_observed": true,
+        "executor_result_received": true,
+        "first_exec_matches_fixture": true,
+        "initial_request_stop_observed": true,
+        "kernel_message_identity_received": true,
+        "kernel_sender_matches_admitted_process": true,
+        "monitor_observed_wait_events": true,
+        "monitor_options_set_before_exec": true,
+        "pidfd_retained_before_approved_exec": true,
+        "pre_exec_stop_observed": true,
+        "simulated_rejection_observed": true,
+        "vfork_event_observed": true
+      },
+      "cleanup_reaped_all_fixture_children": true,
+      "observations": {
+        "authorization": "rejected",
+        "productionAdmission": false,
+        "reason": "task",
+        "trustedCode": false
+      },
+      "passed": true
+    }
+  },
+  "experiment": "linux-caller-monitor-v1",
+  "host": {
+    "architecture": "x86_64",
+    "kernelVersion": "6.17.0",
+    "os": "Linux",
+    "policy": {
+      "apparmorEnabled": true,
+      "ptraceScope": 1,
+      "seccompMode": 0
+    },
+    "pythonVersion": "3.13.7",
+    "runsAsRoot": false
+  },
+  "limits": [
+    "owned synthetic fixtures only; no protected installation or production admission",
+    "stopped handoff uses a nonce-bound simulated executor, not command execution",
+    "tracing observes lifecycle events, not trusted code or immutable memory",
+    "no namespaces, privileged credentials, unrelated processes, TPM or phone integration"
+  ],
+  "measuredAtUTC": "2026-10-18T19:48:57.551629+00:00",
+  "passed": true,
+  "productionAdmission": false,
+  "sources": {
+    "experiments/linux-caller-monitor/fixture.c": "f71940d98c0e23c1a1f31d2db5d3dfa16312947318208e2858fc8538ee8c2029",
+    "experiments/linux-caller-monitor/probe.py": "4316fd961b19502e4e87618a2e5328658eabc22ef71d67fbc948d3745bf1636c",
+    "scripts/run-linux-caller-experiment.py": "d5065cf8910b6d65d983b1e86a143564b6ccf32020ec7d06c8ad7bc10039ae12",
+    "scripts/run-linux-caller-monitor-experiment.py": "8a249e751588e932cb4009ba83f0c2fcd0d1b23b02647b42a890d8057d10f9e5"
+  },
+  "trustedCode": false
+}

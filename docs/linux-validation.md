@@ -2,7 +2,9 @@
 
 This work implements experiments and protocol portability, not an installed Linux
 host. The [Phase 0 proposal](linux-host-contract.md) keeps Ubuntu 25.10 compatibility
-in scope and leaves the production caller guarantee and Linux wire extension open.
+in scope and leaves the production caller guarantee open. Linux capture schema 4
+and Android interpretation are now defined by the
+[accepted contract](linux-capture-proposal.md); they do not enable host issuance.
 The updated [contributor guide](https://gist.github.com/rock3r/ef069bbc6f931b83febf2e1c159cdbfa)
 keeps the optional remote ADB bridge separate from the first approval flow.
 
@@ -53,6 +55,13 @@ The [caller experiment](experiments/linux-caller.md) records exact positive chec
 timeouts, cleanup and untested cases. The [TPM/TLS experiment](experiments/linux-tpm-tls.md)
 has separate dependency and invocation instructions; simulator results must remain
 labelled as simulator results. None of these commands installs a production daemon.
+
+The separate [controlled monitor experiment](experiments/linux-caller-monitor.md)
+extends the caller work with supervised fixture launch, event invalidation and a
+simulated stopped handoff. Its native fixture runs independently of a phone or
+TPM; its successful controls still leave protected code and production admission
+unsupported. Enable its live test explicitly as documented there. Existing
+historical checkpoints above remain scoped to their original source revisions.
 
 ## Local gate and CI coverage
 
