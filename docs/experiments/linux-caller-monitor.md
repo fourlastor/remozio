@@ -41,7 +41,8 @@ do not alter system security policy.
 
 Portable runner tests participate in the normal Python gate on Linux and Mac.
 The live kernel experiment is explicitly enabled and its results apply to its
-recorded host. A passing Mac test of report validation does not establish Linux
+recorded host. Its regression test uses a temporary root containing spaces to
+exercise mapped-path parsing. A passing Mac test of report validation does not establish Linux
 kernel behavior, and a Linux fixture run does not replace required native Mac CI.
 
 ## Acceptance controls
@@ -70,9 +71,10 @@ the cleanup claim.
 
 ## Recorded result
 
-The [retained report](linux-caller-monitor-evidence.json), measured on 2026-10-18,
+The [retained report](linux-caller-monitor-evidence.json), measured on 2026-10-18 UTC,
 passed all 12 controls on Ubuntu 25.10 x86_64 with Linux 6.17.0 and Python 3.13.7,
-without elevation. The report binds its results to the runner, probe, native
+without elevation and with a temporary root containing spaces. The report binds
+its results to the runner, probe, native
 fixture and shared cleanup source by SHA-256; it is not evidence for later source
 revisions. The host reported Yama ptrace scope 1, AppArmor enabled, and seccomp
 mode 0 for the runner. These values do not describe every process's confinement.

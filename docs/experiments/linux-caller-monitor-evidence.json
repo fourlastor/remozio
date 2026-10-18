@@ -319,7 +319,7 @@
     "tracing observes lifecycle events, not trusted code or immutable memory",
     "no namespaces, privileged credentials, unrelated processes, TPM or phone integration"
   ],
-  "measuredAtUTC": "2026-10-18T21:04:05.371558+00:00",
+  "measuredAtUTC": "2026-10-18T22:04:34.443589+00:00",
   "passed": true,
   "prerequisites": {
     "procTaskChildrenReadable": true
@@ -327,7 +327,7 @@
   "productionAdmission": false,
   "sources": {
     "experiments/linux-caller-monitor/fixture.c": "f71940d98c0e23c1a1f31d2db5d3dfa16312947318208e2858fc8538ee8c2029",
-    "experiments/linux-caller-monitor/probe.py": "4316fd961b19502e4e87618a2e5328658eabc22ef71d67fbc948d3745bf1636c",
+    "experiments/linux-caller-monitor/probe.py": "234be3033be3587ed86d3019dd65a90e1111ef8fd0585b769733ee9b15d75144",
     "scripts/run-linux-caller-experiment.py": "d5065cf8910b6d65d983b1e86a143564b6ccf32020ec7d06c8ad7bc10039ae12",
     "scripts/run-linux-caller-monitor-experiment.py": "8b9c9620c2846602caa9c748617833347b506a9ad5ef02082453baeffa6dcb72"
   },

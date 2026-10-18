@@ -344,7 +344,7 @@ class Monitor:
             executable_mapping = False
             with open(f"/proc/{self.pid}/maps", encoding="utf-8") as mappings:
                 for line in mappings:
-                    fields = line.split()
+                    fields = line.rstrip("\n").split(maxsplit=5)
                     first, last = (int(part, 16) for part in fields[0].split("-"))
                     if first <= address < last:
                         executable_mapping = "x" in fields[1] and len(fields) >= 6 and os.path.samefile(fields[5], self.binary)

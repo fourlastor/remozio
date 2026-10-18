@@ -348,7 +348,10 @@ class MonitorWorkerCleanupTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("REMOZIO_LINUX_CALLER_MONITOR_LIVE") == "1", "explicit owned-process monitor controls")
 class MonitorLiveTests(unittest.TestCase):
     def test_live_fixture_mechanics_and_all_negative_controls(self):
-        report = EXPERIMENT.measure()
+        # /proc maps leaves pathname spaces intact; exercise the real parser.
+        with tempfile.TemporaryDirectory(prefix="remozio monitor ") as temporary, \
+             patch.object(EXPERIMENT.tempfile, "tempdir", temporary):
+            report = EXPERIMENT.measure()
         self.assertTrue(report["passed"], report["cases"])
         self.assertIs(report["trustedCode"], False)
         self.assertIs(report["productionAdmission"], False)
