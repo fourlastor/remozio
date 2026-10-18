@@ -1,0 +1,141 @@
+{
+  "experiment": "macos-gateway-journal-exchange",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T05:01:20.969841+00:00",
+  "sourceCommit": "e420430210f32f1d6f5ac233cf79a0edd1d5646c",
+  "sourceBase": "38e06fe2d7fe08b537b2ec0735dfc09ec8df6f7e",
+  "sourceBasis": "The named commit contains the source, tests and initial documentation. Later evidence and prose do not change executable inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayJournalPreparationOperation.swift": "174bc43fb06415d64b881c0b451257f4d23a69826832359a76c476c63a0e08dc",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalPreparationOperationTests.swift": "6547f113c878d59c79818eff0f05cc5c976359a0c14ab7fb8070b35fb3f8a2ec",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupXPCEndpoint.swift": "e188095c3598f2416dd18429d6a484d2afb3aacb7a2ea19ea27778d0f81b7f3b",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupXPCEndpointTests.swift": "8ea2ffc153e770394f49c94c0211f514ce69c13dda47c354b4ad898246d71f7e",
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupChannel.swift": "640309f02e601f7574598cc699efe2c1c7e66dd48da644088a9a6436ac72cbde",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupChannelTests.swift": "92d376b00d64775137f817355fbd60354f954fb3610162193408efe4cadc7249",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupExchangeTests.swift": "4cb282430fd33bb133bc8404d1fe1db31b450809c1d7bc52aa44f9bcf8d7d6b7"
+  },
+  "validation": {
+    "nativePythonCommand": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2615,
+      "skipped": 1,
+      "failures": 0
+    },
+    "nativeLogSHA256": "dd338ed19c5d2146ddb772e1db1ee3e40ef24535aa4ffc770cde9ebae48e69a8",
+    "trackedInputCount": 1503,
+    "nativeInputSnapshotSHA256": "b05cf03c8a79acda75d311711ec7fa797a02e375b3144f9df6fd0298a622b84f",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCBatchID": "batch-mvdcwx72",
+    "ATCResultSHA256": "8df9148fd96fc06530698fc0a5171e815c2297631a8d9beb88bd844d7ed1fada",
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "newLintIssues": 0,
+    "preExistingLintIssues": [
+      {
+        "rule": "ApplySharedPref",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      },
+      {
+        "rule": "GradleDependency",
+        "path": "android/app/build.gradle.kts"
+      },
+      {
+        "rule": "UseKtx",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      }
+    ],
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true,
+    "passedComponentMethods": {
+      "GatewayJournalPreparationOperationTests": [
+        "testExplicitOperationReportsCreationThenRestorationWithTheSameScope",
+        "testNonemptyAndForeignHeadsCannotProduceAPreparedReport",
+        "testReportCannotBeAcceptedForAnotherIntentOrModifiedConfiguration",
+        "testUnknownAndOversizedReportsFailWithoutInterpretation"
+      ],
+      "GatewayJournalSetupXPCEndpointTests": [
+        "testAllowsOneOperationAndBindsItsReplyToTheIntentAndFreshChallenge",
+        "testConnectionLossSuppressesLateReplyAndRetainsBudgetUntilWorkEnds",
+        "testRepeatedHandshakeRefusesWithoutStartingInitialization",
+        "testRequiresHandshakeAndRechecksInvocationIdentity",
+        "testResponseCodecRejectsUnknownVersionsUnknownFieldsAndOversizeInput",
+        "testWrongOrMalformedInitializerReportsCannotBecomeSuccessfulReplies",
+        "testWrongScopeAndMalformedChallengesCannotAcquireOrReleaseAnotherOperationBudget"
+      ],
+      "GatewayJournalSetupChannelTests": [
+        "testCancellationWhilePreparingClosesAndIgnoresTheLateReply",
+        "testChangedPendingStateAfterHandshakeOrBeforeCommitRejectsTheExchange",
+        "testHandshakePrecedesTheBoundRequestAndSuccessfulExchangeClosesTheChannel",
+        "testReplayMalformedReplyAndInvalidChallengeRetireTheChannel",
+        "testSetupAddressesSeparateAccountsAndIntentsFromPermanentGatewayServices",
+        "testTimeoutAndLateHelloCannotStartInitialization",
+        "testUnknownVersionNeverSendsInitialization",
+        "testWrongAccountAndCompletedPendingStateNeverActivateTheConnection"
+      ],
+      "GatewayJournalSetupExchangeTests": [
+        "testLostReplyRestoresTheSameJournalBeforeRetainingCompletion",
+        "testOwnedExchangeInitializesTheRetainedFilesAndCompletesProtectedSetup",
+        "testReplacedDatabaseCannotInitializeOrAdvanceTheProtectedCheckpoint"
+      ]
+    }
+  },
+  "scope": [
+    "Add a distinct version1 local setup exchange for a retained pending journal intent.",
+    "Authenticate the Root setup role and gateway role with fixed code and UID policies.",
+    "Bind the report to the intent, scope digest and a fresh 32-byte challenge.",
+    "Bound work, timeouts and canonical framing; reject changed scopes and suppress late replies.",
+    "Use owned real SQLite fixtures for initialization, lost replies and replaced-file refusal."
+  ],
+  "XcodeCoordination": "The unchanged native check scripts use a scoped PATH adapter for three typed ATC builds. Xcode version queries remain read-only.",
+  "XcodeAdapterSHA256": "9c8c4345642e7ad68c4bbda0c63b02a19d92a5f949fb2b6a2c63c6fe4afd8f0d",
+  "installedMacServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "hardwareKeyCustodyTested": false,
+  "activationImplemented": false,
+  "appSetupConnected": false,
+  "limits": [
+    "The host is macOS27; targeting macOS26 does not prove macOS26 runtime behavior.",
+    "The endpoint and driver fixtures inject invocation checks under one ordinary owner.",
+    "No native Root, Developer ID peer admission or dedicated service isolation is established.",
+    "Report bytes alone do not authenticate initialization or grant activation.",
+    "No direct initialization CLI or standalone intent publication is added.",
+    "Native listener, temporary jobs, Root orchestration and app API drafts are excluded.",
+    "The frozen interactive package and guarded recovery handoff are unchanged."
+  ]
+}

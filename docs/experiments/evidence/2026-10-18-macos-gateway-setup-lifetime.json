@@ -1,0 +1,78 @@
+{
+  "experiment": "macos-gateway-setup-lifetime",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T05:23:25.905040+00:00",
+  "sourceCommit": "14bb5d45214b3a3ff0e1571656ef8cb38e246578",
+  "precedingPRHead": "5a398796bfb34d410f8d2abb6971912cf02740c9",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupChannel.swift": "4899776460a870d0200f641bef43c6ca65f9469a974b86e9a3d462b5aff97ae0",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupChannelTests.swift": "4da666992b211dff977a81e295df359c61d37f33891b03e6ea64269469f57b90",
+    "docs/experiments/macos-gateway-journal-exchange.md": "3dc57853454a2a38796218c99951d96a0da6afe9d07e59e23247240495447562"
+  },
+  "reviewComment": "https://github.com/rock3r/remozio/pull/432#discussion_r4305805293",
+  "classification": "in-scope blocker",
+  "change": "Close the shared lifetime and invalidate the driver synchronously before actor cleanup. Gate dispatch, replies and final acceptance.",
+  "regression": {
+    "methods": [
+      "testConnectionLossDuringStartDoesNotSendEvenTheHello",
+      "testConnectionLossAfterHelloCannotSendPreparationBeforeTheActorReceivesClose",
+      "testConnectionLossDuringFinalScopeCheckCannotAcceptTheReport"
+    ],
+    "redTests": 3,
+    "redFailures": 3,
+    "redLogSHA256": "38014fe36da22c86cddf8194426085374b5d81dae319af9b56b29547c4db3530",
+    "greenTests": 25,
+    "greenFailures": 0,
+    "greenLogSHA256": "ca9fed47eae7db85321b7b93453523118e3f4afb8de144fb8efdd97a7ce1106f"
+  },
+  "validation": {
+    "nativeCoreTests": 2618,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "c1c9787781f45eab9ec9befb47cb0b54b987527dddfbb3296d71001c46fe95ba",
+    "ATCResultSHA256": "b317650fae13baf76a7b9bba271f44674513cb9d0066bf4b2b6c52d260389d15",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "limits": [
+    "Driver controls reproduce scheduling races. They do not prove native Root admission or dedicated UID isolation.",
+    "The host is macOS27; deployment target26 does not prove macOS26 runtime behavior.",
+    "No installed services, physical phone, hardware key or real provider delivery was tested.",
+    "The unchanged permanent gateway channel is tracked separately in issue433."
+  ]
+}

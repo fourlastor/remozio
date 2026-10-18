@@ -28,6 +28,20 @@ class ExperimentTests(unittest.TestCase):
             self.assertTrue(runner.case_matches(name, rejected, 3, False))
             self.assertFalse(runner.case_matches(name, rejected, 3, True))
 
+    def test_journal_data_controls_require_observed_native_dispatch(self):
+        accepted = subprocess.CompletedProcess([], 0, "accepted", "")
+        for name in ("journal-bytes", "journal-empty", "journal-nil"):
+            self.assertTrue(runner.case_matches(name, accepted, 0, True))
+            self.assertFalse(runner.case_matches(name, accepted, 0, False))
+        self.assertTrue(runner.case_matches("journal-hello", accepted, 0, False))
+        self.assertFalse(runner.case_matches("journal-hello", accepted, 0, True))
+
+    def test_journal_identifier_uid_and_invocation_refusals_must_precede_payload(self):
+        rejected = subprocess.CompletedProcess([], 3, "rejected:peer", "")
+        for name in ("journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation"):
+            self.assertTrue(runner.case_matches(name, rejected, 3, False))
+            self.assertFalse(runner.case_matches(name, rejected, 3, True))
+
     def test_setup_progress_has_no_nonce_payload(self):
         accepted = subprocess.CompletedProcess([], 0, "accepted", "")
         self.assertTrue(runner.case_matches("setup-progress", accepted, 0, False))

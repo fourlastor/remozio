@@ -1,12 +1,33 @@
 import Foundation
 import RemozioCore
 
-@objc protocol ProbeProtocol: TransportAuthorityXPCProtocol, AdministrativeSetupXPCProtocol {
+@objc protocol ProbeProtocol: TransportAuthorityXPCProtocol, AdministrativeSetupXPCProtocol, GatewayJournalSetupXPCProtocol {
     func ping(_ nonce: String, reply: @escaping (String) -> Void)
 }
 
 final class ProbeService: NSObject, ProbeProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    // Synthetic bytes only. Native identifier admission is separate from this real connection/UID invocation guard.
+    func prepare(_ intentDigest: Data, challenge: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        let mode = String(decoding: intentDigest.prefix { $0 != 0 }, as: UTF8.self)
+        guard let current = NSXPCConnection.current() else { reply(nil); return }
+        do {
+            let expectedUID: uid_t = mode == "journal-client-uid" ? 0 : getuid()
+            let policy = try XPCPeerPolicy(teamID: "SYNTHETIC1", componentIdentifier: "dev.remozio.experiments.xpc-probe",
+                approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: expectedUID)
+            let invocationConnection = mode == "journal-wrong-invocation" ? NSXPCConnection(machServiceName: "dev.remozio.experiments.inactive") : current
+            _ = try XPCInvocationGuard(connection: invocationConnection, policy: policy).verifyInvocation()
+            guard intentDigest.count == 32, challenge.count == 32 else { reply(nil); return }
+        } catch { current.invalidate(); return }
+        print("JOURNAL_RECEIVED \(String(decoding: challenge, as: UTF8.self))")
+        fflush(stdout)
+        switch mode {
+        case "journal-bytes": reply(challenge)
+        case "journal-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
+
     // Synthetic selector checks only. These methods cannot provision accounts or import administrator rights.
     func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
     func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.serviceAccountsVersion) }
@@ -175,7 +196,8 @@ final class Completion: @unchecked Sendable {
         case "ping", "guarded-ping", "frame", "empty", "nil", "discovery", "recovery", "recovery-empty", "recovery-nil", "registration", "registration-empty", "registration-nil", "receipt", "receipt-empty", "receipt-nil", "exchange", "exchange-empty", "exchange-nil",
              "setup-progress", "setup-bytes", "setup-empty", "setup-nil",
              "runtime-progress", "runtime-bytes", "runtime-empty", "runtime-nil", "runtime-no-consent",
-             "activation-progress", "activation-bytes", "activation-empty", "activation-nil":
+             "activation-progress", "activation-bytes", "activation-empty", "activation-nil",
+             "journal-hello", "journal-bytes", "journal-empty", "journal-nil", "journal-server-uid", "journal-client-uid", "journal-wrong-invocation":
             guard args.count == 4 else { exit(2) }
             let nonce = args[3]
             let completion = Completion()
@@ -220,7 +242,25 @@ final class Completion: @unchecked Sendable {
                 let error = error as NSError
                 completion.finish("rejected:\(error.domain):\(error.code)")
             }) as? ProbeProtocol else { exit(2) }
-            if args[0] == "ping" || args[0] == "guarded-ping" {
+            if args[0].hasPrefix("journal-") {
+                do {
+                    let expectedUID: uid_t = args[0] == "journal-server-uid" ? 0 : getuid()
+                    let policy = try XPCPeerPolicy(teamID: "SYNTHETIC1", componentIdentifier: peer,
+                        approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: expectedUID)
+                    _ = try policy.verifyCredentials(connection)
+                } catch { print("rejected:peer-uid"); exit(3) }
+                if args[0] == "journal-hello" { completion.finish("accepted") }
+                else {
+                    var digest = Data(args[0].utf8)
+                    guard digest.count <= 32 else { exit(2) }
+                    digest.append(Data(repeating: 0, count: 32 - digest.count))
+                    let challenge = Data(nonce.utf8)
+                    let expected: Data? = args[0] == "journal-bytes" ? challenge : args[0] == "journal-empty" ? Data() : nil
+                    proxy.prepare(digest, challenge: challenge) { @Sendable returned in
+                        completion.finish(returned == expected ? "accepted" : "wrong-reply")
+                    }
+                }
+            } else if args[0] == "ping" || args[0] == "guarded-ping" {
                 proxy.ping(nonce) { @Sendable returned in
                     completion.finish(returned == nonce ? "accepted" : "wrong-reply")
                 }

@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -63,6 +63,8 @@ def case_matches(name, result, expected_code, reached):
 def experiment(report, swift_build_options=()):
     if sys.platform != "darwin" or platform.machine() != "arm64":
         raise RuntimeError("Requires an Apple Silicon Mac")
+    if os.getuid() == 0:
+        raise RuntimeError("Run this synthetic probe under an ordinary GUI account")
     version = command(["/usr/bin/sw_vers", "-productVersion"]).stdout.strip()
     if int(version.split(".")[0]) < 26:
         raise RuntimeError("Requires macOS 26 or later")
@@ -103,6 +105,15 @@ def experiment(report, swift_build_options=()):
         with registered_service(domain, service, plist, report):
             cases = [
                 ("matching-peers", "ping", trusted, TRUSTED, 0),
+                ("journal-hello", "journal-hello", trusted, TRUSTED, 0),
+                ("journal-bytes", "journal-bytes", trusted, TRUSTED, 0),
+                ("journal-empty", "journal-empty", trusted, TRUSTED, 0),
+                ("journal-nil", "journal-nil", trusted, TRUSTED, 0),
+                ("journal-wrong-server", "journal-bytes", trusted, OTHER, 3),
+                ("journal-wrong-client", "journal-bytes", other, TRUSTED, 3),
+                ("journal-wrong-server-uid", "journal-server-uid", trusted, TRUSTED, 3),
+                ("journal-wrong-client-uid", "journal-client-uid", trusted, TRUSTED, 3),
+                ("journal-wrong-invocation", "journal-wrong-invocation", trusted, TRUSTED, 3),
                 ("wrong-client-identifier", "ping", other, TRUSTED, 3),
                 ("wrong-server-requirement", "ping", trusted, OTHER, 3),
                 ("guarded-wrong-server", "guarded-ping", trusted, OTHER, 3),
