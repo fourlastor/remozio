@@ -1,0 +1,218 @@
+{
+  "experiment": "android-registration-finite-sweep",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T00:03:49.842537+00:00",
+  "sourceCommit": "2bf91c3f52e5e17bb993efbb60834b020706ac46",
+  "sourceBase": "343d45f6ad8599d97c698b734d64a8e348259ff7",
+  "sourceBasis": "The named commit contains the executable source and tests. Later evidence and prose edits do not change those inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTargets": {
+    "macOS": "26.0",
+    "AndroidAPI": 37
+  },
+  "validation": {
+    "nativePythonCommand": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2525,
+      "skipped": 1,
+      "failures": 0
+    },
+    "nativeLogSHA256": "15118e3949e15ad34e8592136755f93c185cb7cfac6c2079f67c736f78d1a342",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCBatchID": "batch-mvd220i9",
+    "ATCResultSHA256": "44c09c4d023c141b17991e345afc7695bfbaaffbf57cf44e446c15d097e086e4",
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "newLintIssues": 0,
+    "preExistingLintIssues": [
+      {
+        "rule": "ApplySharedPref",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      },
+      {
+        "rule": "GradleDependency",
+        "path": "android/app/build.gradle.kts"
+      },
+      {
+        "rule": "UseKtx",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      }
+    ],
+    "inputsUnchangedDuringGates": true
+  },
+  "sourceSHA256": {
+    "android/app/src/main/kotlin/dev/remozio/android/push/AndroidPushRegistrationWork.kt": "10b2607a77c1f54e8d6d400b4685832d8aa07697d2b9d0d513000c8dab96bd68",
+    "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationWorkSweep.kt": "e2b7a92743de0bc2a64319d4a2f0890bd669ac11c670e171557e09adfb90d292",
+    "android/app/src/test/kotlin/dev/remozio/android/push/PushRegistrationWorkSweepTest.kt": "73ec5117dc68673b451533b1784b3d4ce816c78dc4bb160d33227004981398a8",
+    "android/app/src/debug/kotlin/dev/remozio/android/push/PushRegistrationWorkProbeActivity.kt": "1fc850c59e84aa9e029ff47d7f3395d1c185b99908f7c6f37bb944953fa085af"
+  },
+  "passedRegressionMethods": {
+    "dev.remozio.android.push.PushRegistrationReconcileRetryTest": [
+      "failedAdmissionBeforeStartupIsRetainedAndABurstUsesOneSignal",
+      "platformAdmissionExceptionAlsoWakesTheScheduler",
+      "signalDuringReconciliationIsNotLost",
+      "reconciliationFailureRetriesAndAnObsoleteCollectorCancelsImmediately",
+      "fullIngressWakesTheIdleSchedulerAndRetriesBeforeTheChallengeExpires"
+    ],
+    "dev.remozio.android.push.PushRegistrationWorkSweepTest": [
+      "removedRecordsReleaseMemoryAndReenrollmentIsEligible",
+      "moreMacsThanSlotsFinishOneSweepAndThenIdle",
+      "aChallengeDuringAPartialSweepStartsAnotherSweepAfterItCompletes",
+      "onlyConfirmedAdmissionsAreRetiredAndAFreshCollectorStartsANewSweep"
+    ]
+  },
+  "actualAndroidScheduling": {
+    "deviceProfile": {
+      "deviceType": "phone",
+      "deviceName": "pixel_9",
+      "apiLevel": "android-37",
+      "services": "google_apis",
+      "playStore": false,
+      "abi": "arm64-v8a"
+    },
+    "report": {
+      "experiment": "android-push-registration-scheduling",
+      "api": 37,
+      "status": "passed",
+      "cases": [
+        "boot-counter-and-elapsed-clock",
+        "queue-capacity-and-initial-cursor",
+        "cursor-survives-owner-recreation",
+        "work-data-holds-identifiers-only",
+        "full-ingress-signals-immediate-attempt-without-extra-ingress",
+        "finite-small-queue-sweep-idles-after-every-mac",
+        "obsolete-token-cannot-read-or-enqueue",
+        "token-change-and-disable-retire-work"
+      ],
+      "ownedWorkRetired": true,
+      "hardwareKeysCreated": false,
+      "providerDeliveryTested": false,
+      "pairingCreated": false,
+      "networkWorkerBodiesBlocked": true,
+      "productionConfigurationChanged": false
+    },
+    "APK_SHA256": "c15f355ce47e49f5bf6992f7a5b265a3c6bed2064f71496cb7b9834c05b9ac56",
+    "sourceSHA256": {
+      "phone/core/src/main/kotlin/dev/remozio/phone/push/PhonePushProofLedger.kt": "ca91265113c5098b9dea9ef6981ddce4f10c10dc9bffa593ce8c15c34e5f6920",
+      "phone/core/src/test/kotlin/dev/remozio/phone/push/PhonePushProofLedgerTest.kt": "d1a6935736099b04412972bc9db91aca5ee1b9dd4dc0f0036d3e0666a1c39f53",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushClientOwner.kt": "097b716b8f52c5df1b3fb6825d48682129e194d3253f5314c3618ed27240e596",
+      "android/app/src/test/kotlin/dev/remozio/android/push/PushClientOwnerTest.kt": "6a3d4b1dc1d477da0b3a1a21b457aeeadf3024c4d787b9285efb8ae229ceecd2",
+      "android/app/src/main/kotlin/dev/remozio/android/push/ApplicationPushProofs.kt": "8e68225f010a090b9cbccb1cbb062d0a81e16f983b3232ebdee25830d30f02ab",
+      "android/app/src/main/kotlin/dev/remozio/android/push/AndroidPushProofs.kt": "0b3688cd56d4160db21d0943e407ea540d64d6009f2e61aa7225ddadf5829a8a",
+      "android/app/src/test/kotlin/dev/remozio/android/push/ApplicationPushProofsTest.kt": "fbdeb0cc988a3b9987765f80adca7c8a4b4c051101bd8a2f0774552072a880d2",
+      "android/app/src/debug/kotlin/dev/remozio/android/push/ProofHistoryProbeActivity.kt": "602f49fb1736523820a748789c6e74f2d384610dbc273b9f5bb0ff179972e2d6",
+      "android/app/src/debug/AndroidManifest.xml": "162eef6fa4ca87481381989503bb0737c6300f5fd7ce71a1961b5f9e9e6846ee",
+      "phone/core/src/main/kotlin/dev/remozio/phone/push/PendingPushChallenges.kt": "9dd53d205faa337971b33f6bf7d2c5def08c6894564a4a801bf7f61158228ca0",
+      "phone/core/src/test/kotlin/dev/remozio/phone/push/PendingPushChallengesTest.kt": "1001171f3079b503206cb4e49a433176ae66b2c188c6cd147e56eae614475885",
+      "android/app/src/main/kotlin/dev/remozio/android/push/ApplicationPushChallenges.kt": "3aa5865c1ce340a54c7a8f6aa79eedbbf5be5e5da646441b16afdbe7c04c96f3",
+      "android/app/src/main/kotlin/dev/remozio/android/push/AndroidPushChallenges.kt": "6dcd8d46973f2ae250f5cbfd49f00a70380046081275539db405c2455d193ab9",
+      "android/app/src/test/kotlin/dev/remozio/android/push/ApplicationPushChallengesTest.kt": "b294a22fba8f7a9a8dee3bbf4af69e64a5d0b4992e72c99337874ff1f65ca962",
+      "android/app/src/test/kotlin/dev/remozio/android/push/FCMDataRoutingTest.kt": "47dc45cf70753cbf4c8390354fe03e31fa55cf5cfc49eda8e367902881928f56",
+      "android/app/src/main/kotlin/dev/remozio/android/push/RemozioMessagingService.kt": "5d2a825180ae99bdad9a380315762751ad94a1293cc7844f084f60e24ac1e957",
+      "android/app/src/main/kotlin/dev/remozio/android/RemozioApplication.kt": "327451f3ecbcc80802a805533f3c7228d2cc528c3270b6f1c00d021c6477060e",
+      "android/app/src/main/kotlin/dev/remozio/android/push/AndroidPushRegistrationWire.kt": "3681016d8fe8a2274053251ab2f9d911b1a3081a0d80f491771fbd3328f5857d",
+      "android/app/src/main/kotlin/dev/remozio/android/push/StoredPushRegistrations.kt": "5688b6bf778b648fbe6fbae47ba9dae36c0b90d5b5cf1fd5de35a034fc77e5cf",
+      "android/app/src/test/kotlin/dev/remozio/android/push/StoredPushRegistrationsTest.kt": "56049822f6684b992346914edcb5646a84db20ab410166bfad54b8ea2b27b4be",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationWorkSettings.kt": "d2b3c08639ef8e52903231778b25d1710b066cf3d9398e16395be0687814b2c2",
+      "android/app/src/main/kotlin/dev/remozio/android/push/AndroidPushRegistrationWork.kt": "10b2607a77c1f54e8d6d400b4685832d8aa07697d2b9d0d513000c8dab96bd68",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationWorkers.kt": "2631b5b1bc6fe7e342abecc80c776cd5b8dca9ae63df63ed8692bc1478ffdd75",
+      "android/app/src/test/kotlin/dev/remozio/android/push/PushRegistrationWorkPolicyTest.kt": "a42435a6de0a13adcbbe95d319eb4d42308c87ed71f3a435f372f8788cf3f15e",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationWorkSettingsCard.kt": "e9d83526244e1836f210da5d861d8966399aa5b19f1aabe4759c552d1da14fc4",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationStatusCard.kt": "091a3d42686f0ec40bd10e8b521d3662f4db8442d65483c58d836e6b4357e77b",
+      "android/app/src/main/kotlin/dev/remozio/android/push/NotificationSettingsScreen.kt": "e60188e60e3cf7638899c93dc6f07c3d384d9b741ac69b3942bd9763d74bddc3",
+      "android/app/src/main/kotlin/dev/remozio/android/push/FCMClientSettingsCard.kt": "34b9f12460bf8f9684f4bbd3e650b28094794bcd144f70bbfde6ff3aac5383f1",
+      "android/app/src/main/res/values/strings.xml": "d1debb7c5f66112e4804ad3ae4558b9af3cdea216925249d0e8cb0e8009d0daf",
+      "android/app/src/main/kotlin/dev/remozio/android/enrollment/StoredPairingHost.kt": "8336ea43ec5a7cc487ce23ba2db508e364809b0c3f6306316ee6060ad6e775fb",
+      "android/app/src/debug/kotlin/dev/remozio/android/push/PushRegistrationWorkProbeActivity.kt": "1fc850c59e84aa9e029ff47d7f3395d1c185b99908f7c6f37bb944953fa085af",
+      "android/app/src/debug/kotlin/dev/remozio/android/push/RegistrationLayoutPreviewActivity.kt": "c954bfa77cc2995be83a702a5be60063fd59723a3b84bcf0302604b56a510828",
+      "android/app/src/test/kotlin/dev/remozio/android/enrollment/StoredPairingHostTest.kt": "c9b4779e17868778f9a46e73e48567cb566eea27879b5a2f94ac75cd87bd84e7",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationReconcileRetry.kt": "5e05686f54e48bcdc737d5958206a9a5ef55c0364125b1e0659e20a5449e0a01",
+      "android/app/src/test/kotlin/dev/remozio/android/push/PushRegistrationReconcileRetryTest.kt": "28f9e064fe2b064f1856e665401c1c539a1fdbaddb512668dcd4f96747547986",
+      "android/app/src/main/kotlin/dev/remozio/android/push/PushRegistrationWorkSweep.kt": "e2b7a92743de0bc2a64319d4a2f0890bd669ac11c670e171557e09adfb90d292",
+      "android/app/src/test/kotlin/dev/remozio/android/push/PushRegistrationWorkSweepTest.kt": "73ec5117dc68673b451533b1784b3d4ce816c78dc4bb160d33227004981398a8",
+      "android/app/build.gradle.kts": "9093d88b87ff54a07a5005f3a9f41763d709c547bc4340f61dfbd56f4a99b51d"
+    },
+    "packageSuffix": ".registrationsweepprobe",
+    "buildDifference": "Only the debug application ID suffix differs from the reviewed build configuration. All named source inputs match.",
+    "unfinishedAttemptQueueLimit": 1,
+    "syntheticMacCount": 3,
+    "idleObservationMilliseconds": 11000,
+    "distinctWorkerExecutionsObserved": 3,
+    "productionWorkersReachNetwork": false,
+    "firstFixtureAttempt": {
+      "report": {
+        "experiment": "android-push-registration-scheduling",
+        "api": 37,
+        "status": "failed",
+        "cases": [
+          "boot-counter-and-elapsed-clock",
+          "queue-capacity-and-initial-cursor",
+          "cursor-survives-owner-recreation",
+          "work-data-holds-identifiers-only",
+          "full-ingress-signals-immediate-attempt-without-extra-ingress"
+        ],
+        "failureType": "IllegalStateException",
+        "ownedWorkRetired": true,
+        "hardwareKeysCreated": false,
+        "providerDeliveryTested": false,
+        "pairingCreated": false,
+        "networkWorkerBodiesBlocked": true,
+        "productionConfigurationChanged": false
+      },
+      "APK_SHA256": "6a1764468570cc7135644ae753068940b8da029d5115f31bd812c6b4d69acc33",
+      "correction": "After five earlier controls passed, the first probe failed an assertion. The corrected fixture replaces a historical-row-count assumption with distinct observed worker executions and unchanged scheduler reads during idle. No production scheduler statement changed between these APKs."
+    },
+    "cleanup": {
+      "bothPackagesRemoved": true,
+      "bothLeasesReleased": true,
+      "ownedWorkRetired": true,
+      "noATCResources": true
+    }
+  },
+  "physicalAndroidTested": false,
+  "realFCMDeliveryTested": false,
+  "installedMacServicesTested": false,
+  "limits": [
+    "The observed Mac host is macOS27; the deployment target does not establish macOS26 runtime behavior.",
+    "The emulator uses synthetic provider state and enrollment identifiers. Holding workers block all network attempt bodies.",
+    "The full-ingress control invokes changed(), which shares the admission path used by a saved provider challenge. It does not deliver an FCM message.",
+    "The idle observation lasts eleven seconds, beyond one ten-second retry interval. It does not establish long-term Android scheduling or battery behavior.",
+    "Attempt workers finish by controlled cancellation. The experiment does not establish provider registration success.",
+    "The clock control reads boot and elapsed clocks; it does not reboot the emulator.",
+    "No hardware keys, pairing, real provider delivery, physical phone or installed Root path is exercised."
+  ]
+}

@@ -67,11 +67,13 @@ internal class AndroidPushRegistrationWork(
 
     /** A retained cursor keeps a small queue fair across more independently enrolled Macs. */
     @SuppressLint("UseKtx")
-    suspend fun reconcile(generation: UUID, revision: UUID, tag: CborValue.Bytes? = null, trigger: String = "refresh"): Boolean =
+    suspend fun reconcile(generation: UUID, revision: UUID, tag: CborValue.Bytes? = null, trigger: String = "refresh",
+                          sweep: PushRegistrationWorkSweep? = null): Boolean =
         withContext(Dispatchers.IO) {
             val selected = provider.tokenCandidate()
             if (selected?.generation != generation || selected.revision != revision) return@withContext true
-            val selectedRecords = records(generation, revision, tag)
+            val activeRecords = records(generation, revision, tag)
+            val selectedRecords = sweep?.pending(activeRecords) ?: activeRecords
             val after = provider.withCurrentToken(generation, revision) {
                 if (tag == null && cursor.getString("selection", null) == selectionTag(generation, revision))
                     Cursor(registrationIdentifier(cursor.getString("after", null), 16)) else Cursor(null)
@@ -90,6 +92,7 @@ internal class AndroidPushRegistrationWork(
                         .putString("after", recordID.hex()).commit()
                 } ?: return@withContext true
                 if (!admitted) return@withContext false
+                sweep?.admitted(recordID)
             }
             true
         }
@@ -99,6 +102,7 @@ internal class AndroidPushRegistrationWork(
         combine(provider.generationState, provider.tokenRevisionState, settings.state) { generation, revision, policy ->
             Triple(generation, revision, policy)
         }.collectLatest { (generation, revision, policy) ->
+            val sweep = PushRegistrationWorkSweep()
             retry.run {
                 provider.withCurrentTokenOrDisabled(generation, revision) {
                     retireOldWork(generation, revision)
@@ -111,7 +115,9 @@ internal class AndroidPushRegistrationWork(
                         manager.enqueueUniquePeriodicWork(reconcileName, ExistingPeriodicWorkPolicy.UPDATE, request).result.get(1, TimeUnit.SECONDS)
                     }
                 }
-                generation == null || revision == null || reconcile(generation, revision)
+                val complete = generation == null || revision == null || reconcile(generation, revision, sweep = sweep)
+                if (complete) sweep.reset()
+                complete
             }
         }
     }

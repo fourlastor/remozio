@@ -13,6 +13,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -40,8 +41,10 @@ class PushRegistrationWorkProbeActivity : Activity() {
         val policy = PushRegistrationWorkSettings(context)
         val reads = AtomicInteger()
         val records = (1..3).map { CborValue.Bytes(ByteArray(16) { _ -> it.toByte() }) }
+        val available = AtomicReference(records)
         val controls = mutableListOf<String>()
         var failure: String? = null
+        var failureLine: Int? = null
         var cleaned = false
         val configuration = StoredPushConfiguration(UUID.randomUUID(),
             FCMClientConfiguration(packageName, "synthetic-project", "123", "1:123:android:ab", "A" + "b".repeat(38)), true)
@@ -53,16 +56,16 @@ class PushRegistrationWorkProbeActivity : Activity() {
         }, driver).also { it.restore() }
         val jobs = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         fun scheduler() = AndroidPushRegistrationWork(context, provider, policy, { _, _, tag ->
-            check(tag == null); reads.incrementAndGet(); records
+            check(tag == null); reads.incrementAndGet(); available.get()
         }, RegistrationHoldingWorker::class.java, namespace)
         fun work() = manager.getWorkInfosByTag(attemptTag).get(5, TimeUnit.SECONDS)
-        suspend fun await(test: () -> Boolean) = withTimeout(10_000) { while (!test()) delay(50) }
+        suspend fun await(test: () -> Boolean) = withTimeout(15_000) { while (!test()) delay(50) }
         suspend fun cancelAttempts() {
             manager.cancelAllWorkByTag(attemptTag).result.get(5, TimeUnit.SECONDS)
             await { work().all { it.state.isFinished } && RegistrationProbeWorkers.active.values.none { it.namespace == namespace } }
         }
         try {
-            withTimeout(60_000) {
+            withTimeout(90_000) {
                 val clock = AndroidPushChallenges.moment(context)
                 val laterClock = AndroidPushChallenges.moment(context)
                 check(clock.bootEpoch == laterClock.bootEpoch && laterClock.milliseconds >= clock.milliseconds)
@@ -87,6 +90,52 @@ class PushRegistrationWorkProbeActivity : Activity() {
                 check(active.identifiersOnly)
                 controls += "work-data-holds-identifiers-only"
 
+                cancelAttempts()
+                available.set(emptyList())
+                val initialReads = reads.get()
+                val collector = owner.start(jobs)
+                await { reads.get() > initialReads }
+                delay(250)
+                check(work().all { it.state.isFinished })
+                val blocked = OneTimeWorkRequestBuilder<RegistrationHoldingWorker>()
+                    .setInputData(workDataOf(REGISTRATION_GENERATION to first.generation.toString(),
+                        REGISTRATION_REVISION to first.revision.toString(), REGISTRATION_RECORD to records[0].hex()))
+                    .addTag(ingressTag).addTag("$selectionPrefix${first.generation}.${first.revision}").build()
+                manager.enqueueUniqueWork("$namespace.blocked-ingress", ExistingWorkPolicy.KEEP, blocked).result.get(5, TimeUnit.SECONDS)
+                await { RegistrationProbeWorkers.active.containsKey(blocked.id) }
+                available.set(listOf(records[2]))
+                check(!owner.changed())
+                await { work().any { !it.state.isFinished } }
+                check(manager.getWorkInfosByTag(ingressTag).get(5, TimeUnit.SECONDS).count { !it.state.isFinished } == 1)
+                check(work().count { !it.state.isFinished } == 1)
+                controls += "full-ingress-signals-immediate-attempt-without-extra-ingress"
+                collector.cancelAndJoin()
+                manager.cancelAllWorkByTag(ingressTag).result.get(5, TimeUnit.SECONDS)
+                cancelAttempts()
+                available.set(records)
+                owner = scheduler()
+
+                val sweepJobs = mutableSetOf<UUID>()
+                val sweepCollector = owner.start(jobs)
+                for (record in registrationWorkOrder(records, records[2])) {
+                    await { RegistrationProbeWorkers.active.values.any { it.namespace == namespace && it.record == record.hex() } }
+                    check(work().count { !it.state.isFinished } == 1)
+                    check(sweepJobs.add(RegistrationProbeWorkers.active.filterValues {
+                        it.namespace == namespace && it.record == record.hex()
+                    }.keys.single()))
+                    cancelAttempts()
+                }
+                delay(250)
+                val completedReads = reads.get()
+                delay(11_000)
+                check(work().all { it.state.isFinished })
+                check(sweepJobs.size == records.size && reads.get() == completedReads)
+                controls += "finite-small-queue-sweep-idles-after-every-mac"
+                sweepCollector.cancelAndJoin()
+                owner = scheduler()
+                check(!owner.reconcile(first.generation, first.revision))
+                await { RegistrationProbeWorkers.active.values.any { it.namespace == namespace } }
+
                 val before = reads.get(); val count = work().size
                 driver.token?.invoke("synthetic-token-replacement")
                 val next = checkNotNull(provider.tokenCandidate()); check(next.revision != first.revision)
@@ -103,7 +152,7 @@ class PushRegistrationWorkProbeActivity : Activity() {
                 await { manager.getWorkInfosForUniqueWork(reconcileName).get(5, TimeUnit.SECONDS).all { it.state.isFinished } }
                 controls += "token-change-and-disable-retire-work"
             }
-        } catch (problem: Throwable) { failure = problem.javaClass.simpleName }
+        } catch (problem: Throwable) { failure = problem.javaClass.simpleName; failureLine = problem.stackTrace.firstOrNull { it.className.contains("PushRegistrationWorkProbeActivity") }?.lineNumber }
         finally {
             withContext(NonCancellable) {
                 jobs.cancel(); jobs.coroutineContext.job.join()
@@ -117,8 +166,8 @@ class PushRegistrationWorkProbeActivity : Activity() {
                 } catch (problem: Throwable) { failure = failure ?: problem.javaClass.simpleName }
             }
             val report = JSONObject().put("experiment", "android-push-registration-scheduling").put("api", Build.VERSION.SDK_INT)
-                .put("status", if (failure == null && controls.size == 6 && cleaned) "passed" else "failed")
-                .put("cases", JSONArray(controls)).put("failureType", failure).put("ownedWorkRetired", cleaned)
+                .put("status", if (failure == null && controls.size == 8 && cleaned) "passed" else "failed")
+                .put("cases", JSONArray(controls)).put("failureType", failure).put("failureLine", failureLine).put("ownedWorkRetired", cleaned)
                 .put("hardwareKeysCreated", false).put("providerDeliveryTested", false).put("pairingCreated", false)
                 .put("networkWorkerBodiesBlocked", true).put("productionConfigurationChanged", false)
             Log.i("RemozioRegistrationProbe", report.toString())

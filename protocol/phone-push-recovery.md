@@ -193,6 +193,11 @@ A boot or provider change can clear challenge buffers without clearing proof his
 
 The queues have bounded admission and independent names for each Mac and provider revision.
 A retained cursor prevents a small queue from starving later Macs.
+The application collector remembers confirmed admissions during one finite sweep.
+A capacity retry selects only the remaining Macs; it does not restart that sweep.
+After the sweep finishes, the collector waits for another trigger.
+A challenge received during a partial sweep retains a trigger for the next sweep.
+Provider changes and process restart start a fresh sweep from retained enrollment and cursor state.
 If ingress admission fails, one coalesced process signal wakes the scheduler.
 It retries a full or unavailable queue every ten seconds without adding queue entries.
 Restart reconciles the encrypted journal even if the process signal was lost.
@@ -226,3 +231,8 @@ The actual status and limit cards were inspected in portrait with default text s
 Those captures use an empty Mac inventory and default settings. They do not establish data-entry or paired-Mac behavior.
 The isolated packages were removed and their device leases were released.
 Actual FCM delivery, hardware challenge keys and installed Mac-Pixel operation remain separate gates.
+
+[The finite-sweep record](../docs/experiments/evidence/2026-10-18-android-registration-finite-sweep.json) covers source commit `2bf91c3`.
+Its four new regression tests and eight actual API37 controls passed.
+The full local gate passed 804 Kotlin/Android reports, native checks, assembly and lint.
+The record retains the first fixture failure, its correction and the successful disposable APK hash.
