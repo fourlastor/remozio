@@ -264,6 +264,45 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return progress
         }
     }
+    func gatewayProgress(callerUID: uid_t) throws -> SetupGatewayProgress? {
+        try withMachine { machine in
+            _ = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard try machine.runtimeActivation(accountID: account.accountID).jobsRegistered else { return nil }
+            let progress = try gatewayProgress(machine: machine, account: account)
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            return progress
+        }
+    }
+    // The endpoint must authenticate the UID and current administrator rights before this explicit operation.
+    func prepareGateway(callerUID: uid_t, expected: SetupGatewayProgress, choices: GatewaySetupPreparationChoices) throws -> SetupGatewayProgress {
+        try prepareGateway(callerUID: callerUID, expected: expected) { machine, account, verify in
+            try GatewaySetupAccountPreparation.prepare(machine: machine, account: account, choices: choices, verifyCurrent: verify)
+        }
+    }
+    // Owned fixtures keep the real machine store and account checks. The injected preparation proves neither Root admission nor service isolation.
+    func prepareGateway(callerUID: uid_t, expected: SetupGatewayProgress,
+                        prepare: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> Void) throws -> SetupGatewayProgress {
+        try withMachine { machine in
+            guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard try gatewayProgress(machine: machine, account: account) == expected else { throw AdministrativeSetupError.staleProgress }
+            if expected.journalInitialized { return expected }
+            try prepare(machine, account, { try self.verifyEnrollment(account, callerUID: callerUID, machine: machine) })
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let progress = try gatewayProgress(machine: machine, account: account)
+            try progress.validatePreparation(of: expected)
+            return progress
+        }
+    }
+    private func gatewayProgress(machine: PreparationIntentStore, account: AccountPreparationIntent) throws -> SetupGatewayProgress {
+        try .init(account: account, runtime: machine.runtimePreparation(accountID: account.accountID),
+            activation: machine.runtimeActivation(accountID: account.accountID),
+            material: machine.gatewayPreparation(accountID: account.accountID), journal: machine.gatewayJournalPreparation(accountID: account.accountID))
+    }
     func activationProgress(callerUID: uid_t) throws -> SetupActivationProgress? {
         try withMachine { machine in
             _ = try currentInventory(machine)

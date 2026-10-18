@@ -1,0 +1,68 @@
+{
+  "experiment": "macos-gateway-setup-owner",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T19:35:43.004928+00:00",
+  "sourceCommit": "265bd3e6f733690dd1fe7c932a62deef6b8c6598",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/SetupAccountOwner.swift": "877c93d814c09d44aa9b30618b16d1be144c0fb07a49e80b8d62fd0affbbc4fb",
+    "macos/core/Sources/RemozioCore/GatewaySetupAccountPreparation.swift": "babdf760bcab849b433421fae26f4be3c0bc792b27cdf91602bdc2884f5236d8",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupOwnerTests.swift": "107db4d0723cc58f6df08fa5a3975d9b2d41e6e16cb9ba1186e0e949248cfd6d",
+    "macos/core/Sources/RemozioCore/SetupGatewayProgress.swift": "98b04a1e02c45436efaa3b050c2daf18073e16dcc855a1a826cf7d25a81e5d38",
+    "macos/core/Tests/RemozioCoreTests/SetupGatewayProgressTests.swift": "7b60ce61788453240eb0f640dc8fc258bdfbd3754f8b1ea69acc4ad34db1cc7d"
+  },
+  "validation": {
+    "nativeCoreTests": 2673,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "ba881e418cac6f3b420831740f4832f1be0d04e95faac7d48475594b322cec5c",
+    "ATCResultSHA256": "e18bb8b733f0436ab997c11a4c547135a6803be79f0b1dee7255872b8ee613b7",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Expose passive account-bound Gateway setup progress and explicit initial preparation.",
+    "Pending retries validate retained inputs and files; completed retries return retained progress.",
+    "Asynchronous journal initialization and the app-facing interface follow separately."
+  ],
+  "limits": [
+    "Owned files, SQLite and injected job controls do not prove installed native behavior.",
+    "Root admission, Developer ID peers, dedicated UID isolation and system launchd remain required activation gates in issue286.",
+    "Administrator endpoint and app action are not wired.",
+    "No service or physical device was used."
+  ]
+}
