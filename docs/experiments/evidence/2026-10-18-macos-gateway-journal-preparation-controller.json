@@ -1,0 +1,65 @@
+{
+  "experiment": "macos-gateway-journal-preparation-controller",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T18:04:48.619177+00:00",
+  "sourceCommit": "20e75f5b2cafc54db18cb32c619bcf5ca10f3d9a",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayJournalSetupPreparation.swift": "42e31f7bce9bd15a4b4337b39b1fcf96a52222d25322267f59355c73d592125c",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupPreparationTests.swift": "29f6790626eac10d6d337239fca9a226ccdab08b1d146bb3c28543c0d1d7d74e"
+  },
+  "validation": {
+    "nativeCoreTests": 2658,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "a76745fea162caffc77fdb5dfbff1e5ca31e8ae6d2b8eeedd60381e71167d112",
+    "ATCResultSHA256": "f552a9c42519e8889f505b2eff4d4ef24692d129b243a7d9140f1e71ccf97759",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Compose private publication, file provisioning and immutable intent retention.",
+    "Pending retries require existing identities; completed retries do not touch active journal storage.",
+    "The asynchronous operation and administrator owner remain separate."
+  ],
+  "limits": [
+    "Owned files, SQLite and injected job controls do not prove installed native behavior.",
+    "Root admission, Developer ID peers, dedicated UID isolation and system launchd remain required activation gates in issue286.",
+    "Administrator endpoint and app action are not wired.",
+    "No service or physical device was used."
+  ]
+}
