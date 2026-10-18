@@ -5,7 +5,7 @@ import RemozioProtocol
 public enum GatewayRootChannelError: Error, Equatable { case invalidConfiguration, closed, busy, timedOut, rejected, invalidMessage, unsupportedVersion }
 enum GatewayRootCall: Sendable { case hello, synchronize(Data), command(Data) }
 enum GatewayRootResponse: Sendable { case version(UInt64), synchronized(Bool), command(Data?), failed }
-protocol GatewayRootDriver: Sendable {
+protocol GatewayRootDriver: AnyObject, Sendable {
     func start(closed: @escaping @Sendable () -> Void)
     func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void)
     func close()
@@ -40,6 +40,14 @@ private final class NativeGatewayRootDriver: GatewayRootDriver, @unchecked Senda
     deinit { connection.invalidate() }
 }
 
+private final class GatewayRootLifetime: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private var closed = false
+    @discardableResult
+    func close() -> Bool { lock.withLock { guard !closed else { return false }; closed = true; return true } }
+    func ifOpen(_ body: () -> Void) -> Bool { lock.withLock { guard !closed else { return false }; body(); return !closed } }
+}
+
 /// Root-side control client. A harmless authenticated handshake precedes every sensitive call on a new connection.
 /// The caller must independently verify recovery signatures and reconcile its retained journal before enabling delivery.
 public actor GatewayRootChannel {
@@ -47,6 +55,7 @@ public actor GatewayRootChannel {
     private let driver: any GatewayRootDriver
     private let timeout: UInt64
     private let verifyAccount: @Sendable () throws -> Void
+    private let lifetime = GatewayRootLifetime()
     private var state = State.new
     private var peerVersion: UInt64?
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewayRootResponse, any Error>)?
@@ -65,13 +74,17 @@ public actor GatewayRootChannel {
          verifyAccount: @escaping @Sendable () throws -> Void = {}) {
         self.driver = driver; timeout = timeoutMilliseconds; self.verifyAccount = verifyAccount
     }
-    deinit { timer?.cancel(); driver.close() }
+    deinit { timer?.cancel(); if lifetime.close() { driver.close() } }
 
     public func start() async throws {
         try verifyAccount()
         guard state == .new else { throw GatewayRootChannelError.closed }
         state = .opening
-        driver.start { [weak self] in Task { await self?.close() } }
+        let lifetime = lifetime, driver = driver
+        driver.start { [weak self, weak driver] in
+            if lifetime.close() { driver?.close() }
+            Task { await self?.close() }
+        }
         do {
             guard case .version(let version) = try await perform(.hello), (1...3).contains(version), state == .opening else { throw GatewayRootChannelError.invalidMessage }
             peerVersion = version
@@ -158,7 +171,8 @@ public actor GatewayRootChannel {
     }
     public func close() {
         guard state != .closed else { return }
-        state = .closed; timer?.cancel(); timer = nil; driver.close()
+        state = .closed; timer?.cancel(); timer = nil
+        if lifetime.close() { driver.close() }
         let previous = pending; pending = nil; previous?.continuation.resume(throwing: GatewayRootChannelError.closed)
     }
     private func perform(_ call: GatewayRootCall) async throws -> GatewayRootResponse {
@@ -167,21 +181,34 @@ public actor GatewayRootChannel {
         case .hello: guard state == .opening else { throw GatewayRootChannelError.closed }
         case .synchronize, .command: guard state == .open else { throw GatewayRootChannelError.closed }
         }
+        guard lifetime.ifOpen({}) else { close(); throw GatewayRootChannelError.closed }
         guard pending == nil else { throw GatewayRootChannelError.busy }
-        let id = UUID()
-        return try await withTaskCancellationHandler {
+        let id = UUID(), lifetime = lifetime, driver = driver
+        let result = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = (id, continuation)
                 timer = Task { [weak self, timeout] in
                     do { try await Task.sleep(for: .milliseconds(timeout)) } catch { return }
                     await self?.expire(id)
                 }
-                driver.invoke(call) { [weak self] result in Task { await self?.complete(id, result: result) } }
+                guard lifetime.ifOpen({
+                    driver.invoke(call) { [weak self, weak driver] result in
+                        if case .failed = result, lifetime.close() { driver?.close() }
+                        Task { await self?.complete(id, result: result) }
+                    }
+                }) else { close(); return }
             }
-        } onCancel: { [weak self] in Task { await self?.close() } }
+        } onCancel: { [weak self] in
+            if lifetime.close() { driver.close() }
+            Task { await self?.close() }
+        }
+        try Task.checkCancellation()
+        guard state != .closed, lifetime.ifOpen({}) else { close(); throw GatewayRootChannelError.closed }
+        return result
     }
     private func complete(_ id: UUID, result: GatewayRootResponse) {
         guard let pending, pending.id == id, state != .closed else { return }
+        guard lifetime.ifOpen({}) else { close(); return }
         self.pending = nil; timer?.cancel(); timer = nil
         if case .failed = result { pending.continuation.resume(throwing: GatewayRootChannelError.closed); close() }
         else { pending.continuation.resume(returning: result) }

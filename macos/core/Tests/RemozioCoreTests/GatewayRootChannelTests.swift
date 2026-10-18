@@ -10,13 +10,19 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
         struct State {
             var calls: [GatewayRootCall] = []
             var closed = 0
+            var closeDuringStart = false
+            var lost: (@Sendable () -> Void)?
             var version: UInt64 = 1
             var hold = false
             var response: Data?
             var reply: (@Sendable (GatewayRootResponse) -> Void)?
         }
         let value = Mutex(State())
-        func start(closed: @escaping @Sendable () -> Void) {}
+        func start(closed: @escaping @Sendable () -> Void) {
+            let lose = value.withLock { $0.lost = closed; return $0.closeDuringStart }
+            if lose { closed() }
+        }
+        func disconnect() { value.withLock { $0.lost }?() }
         func invoke(_ call: GatewayRootCall, reply: @escaping @Sendable (GatewayRootResponse) -> Void) {
             let result: GatewayRootResponse? = value.withLock { state in
                 state.calls.append(call)
@@ -37,6 +43,45 @@ final class GatewayRootChannelTests: XCTestCase, @unchecked Sendable {
             lifecycleEpoch: id, rootPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
         return try GatewayHostSnapshot(registration: identity, rootEpoch: UUID(), sequence: 1, observedAtMilliseconds: 100,
             leaseDeadlineMilliseconds: 200, enrollments: [], active: false, phoneRouting: false)
+    }
+    func testStartedDriverIsReleasedAfterExplicitCloseOrOwnerDeinitialization() async throws {
+        for explicitClose in [false, true] {
+            var driver: Driver? = Driver()
+            weak var released = driver
+            var channel: GatewayRootChannel? = GatewayRootChannel(driver: try XCTUnwrap(driver))
+            try await channel?.start()
+            if explicitClose { await channel?.close() }
+            channel = nil; driver = nil
+            XCTAssertNil(released, "The stored close callback must not retain its own driver")
+            released = nil
+        }
+    }
+    func testRetainedReplyDoesNotKeepDriverAliveAfterTimeout() async throws {
+        var driver: Driver? = Driver()
+        driver?.value.withLock { $0.hold = true }
+        weak var released = driver
+        var channel: GatewayRootChannel? = GatewayRootChannel(driver: try XCTUnwrap(driver), timeoutMilliseconds: 20)
+        do { try await channel?.start(); XCTFail() } catch {
+            XCTAssertEqual(error as? GatewayRootChannelError, .timedOut)
+        }
+        channel = nil; driver = nil
+        XCTAssertNil(released, "The stored reply callback must not retain its own driver")
+        released = nil
+    }
+    func testConnectionLossDuringStartCannotSendHello() async throws {
+        let driver = Driver(); driver.value.withLock { $0.closeDuringStart = true }
+        let channel = GatewayRootChannel(driver: driver)
+        do { try await channel.start(); XCTFail() } catch { XCTAssertEqual(error as? GatewayRootChannelError, .closed) }
+        XCTAssertEqual(driver.value.withLock { $0.calls.count }, 0)
+    }
+    func testConnectionLossDuringSensitiveCallValidationCannotDispatchBeforeActorCleanup() async throws {
+        let driver = Driver(), armed = Mutex(false)
+        let channel = GatewayRootChannel(driver: driver, verifyAccount: {
+            if armed.withLock({ $0 }) { driver.disconnect() }
+        })
+        try await channel.start(); armed.withLock { $0 = true }
+        do { try await channel.synchronize(snapshot()); XCTFail() } catch { XCTAssertEqual(error as? GatewayRootChannelError, .closed) }
+        XCTAssertEqual(driver.value.withLock { $0.calls.count }, 1)
     }
     func testSensitiveCallsCannotPrecedeHandshakeOrFollowUnknownVersion() async throws {
         let driver = Driver(), channel = GatewayRootChannel(driver: driver)

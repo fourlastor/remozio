@@ -1,0 +1,74 @@
+{
+  "experiment": "macos-gateway-control-ownership",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T07:09:56.253578+00:00",
+  "sourceCommit": "6ae281a7e1e31e7236a7d95458586494fa9f1865",
+  "reviewComment": "https://github.com/rock3r/remozio/pull/435#discussion_r4306053454",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayRootChannel.swift": "4d305a7f04397f2a6a09993d6ffddade47408736bcf1c53e978a2e2612468763",
+    "macos/core/Tests/RemozioCoreTests/GatewayRootChannelTests.swift": "1f540bb10021f095f1386fe93f88490ad73b8a517fe67ebf23c7af3fcc6f5d16"
+  },
+  "regression": {
+    "oldSourceReference": "d33d3102990eb8951a97810af4782ead67cb0d99",
+    "redTests": 1,
+    "redFailures": 2,
+    "redLogSHA256": "891dee8c03490fa5d4cca8758b1e0225d4577a89ec490e395675a7b5adb1364f",
+    "focusedAndRelatedPassingTests": 85,
+    "focusedLogSHA256": "623fb3378e8f3d2a87be2c6f5565d47770b517ad35ab1a426e8a3c7622c77c31"
+  },
+  "validation": {
+    "nativeCoreTests": 2621,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "abd0e6f67e582c30221dce9eab06b20096e6fb868e2f725184e7a5824f972bfd",
+    "ATCResultSHA256": "776c57dc6b7daf3fcd09d5304f15bd7ee9ac6b323516d7e420232dc7822aa102",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Retire the channel synchronously before scheduling actor cleanup.",
+    "Refuse hello and sensitive dispatch after connection loss.",
+    "Accept driver cleanup once across loss, cancellation and actor teardown.",
+    "Capture the class-bound driver weakly so a stored close callback cannot retain it."
+  ],
+  "limits": [
+    "Injected driver and owned SQLite fixtures do not prove native Developer ID or Root/dedicated UID admission.",
+    "No native selector or installed gateway activation changes.",
+    "No installed service, real provider or physical phone used."
+  ]
+}
