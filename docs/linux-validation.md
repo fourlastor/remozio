@@ -75,13 +75,16 @@ tests run through the Linux host check and the native Mac check. Mac consumers u
 the same implementation through compatibility type aliases. This extraction does
 not implement a Linux authority, durable decision consumption or command dispatch.
 
-The complete Linux coordinator passed for the shared verifier extraction on this
+The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
+including the shared-source inventory fix and its regression controls, on this
 Ubuntu 25.10 host with the prepared Swift 6.2.4 runtime, JDK 21 and Android SDK 37:
-175 repository tests (six skips), 221 watcher tests, 130 Swift protocol tests,
+178 repository tests (six skips), 221 watcher tests, 130 Swift protocol tests,
 eight shared verifier tests, and all portable Kotlin/Android tasks. The repository
 tests include six controls for Linux/macOS command selection, running from another
-directory, unsupported hosts and failure propagation. Their stubbed macOS commands
-test selection only; they do not claim a native Mac run for this revision.
+directory, unsupported hosts and failure propagation. Stubbed macOS commands and
+source-change controls test orchestration only; native Mac builds, interoperability
+and live experiments were not executed on this Linux host. Their required Mac
+validation remains separate from this result.
 
 `ApprovalFlowPeer`, `TLSPeer`, `HPKEPeer` and `AuditFlowPeer` are macOS executables
 built from `experiments/approval-flow`. Linux does not substitute or skip their
