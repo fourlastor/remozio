@@ -48,7 +48,7 @@ struct SetupMain {
             while true { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(250)) }
         } catch {
             let failure = error
-            try service.close()
+            try await service.close()
             throw failure
         }
     }

@@ -83,7 +83,7 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
 public final class AdministrativeSetupService {
     private let owner: SetupAccountOwner
     private let listener: AdministrativeSetupXPCListener
-    private let placement: ReleaseDestinationLease
+    private let shutdown: AdministrativeSetupShutdown
     private var closed = false
 
     public static func open(configurationPath: String) throws -> AdministrativeSetupService {
@@ -140,7 +140,8 @@ public final class AdministrativeSetupService {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
-                accountCodePolicy: configuration.codePolicy, releaseActivity: activity)
+                accountCodePolicy: configuration.codePolicy, releaseActivity: activity,
+                gatewayJournalOperation: .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID))
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                 teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,
@@ -150,12 +151,16 @@ public final class AdministrativeSetupService {
     }
 
     private init(owner: SetupAccountOwner, listener: AdministrativeSetupXPCListener, placement: ReleaseDestinationLease) {
-        self.owner = owner; self.listener = listener; self.placement = placement
+        self.owner = owner; self.listener = listener; shutdown = .init(owner: owner, placement: placement)
     }
     public func start() throws { guard !closed else { throw AdministrativeSetupError.unavailable }; try listener.start() }
-    public func close() throws {
+    public func close() async throws {
         guard !closed else { return }
-        listener.close(); try owner.close(); placement.close(); closed = true
+        listener.close(); try await shutdown.close(); closed = true
     }
-    deinit { listener.close(); try? owner.close(); placement.close() }
+    deinit {
+        listener.close()
+        let pending = shutdown
+        Task { try? await pending.close() }
+    }
 }

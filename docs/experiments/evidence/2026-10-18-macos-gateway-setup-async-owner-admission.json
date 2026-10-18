@@ -1,0 +1,67 @@
+{
+  "experiment": "macos-gateway-setup-async-owner-admission",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T20:57:45.193063+00:00",
+  "sourceCommit": "191e2cc5e2654e97356542aeeca1829bd94ea1e4",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/SetupAccountOwner.swift": "f473642f940ecf00e6f6a60c35aeba039773d3b588860e418d3f4b158bde351c",
+    "macos/core/Sources/RemozioCore/SetupOwnerAsyncWork.swift": "a23ee53cb0caa64ab624f0606ab6db8186ea944cf86695821625d03d06849202",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupAsyncOwnerTests.swift": "0c267f15dc445783f633c6d7aed752200507742cd1d0fba8120bcafb523645ec",
+    "docs/experiments/macos-gateway-setup-async-owner.md": "5f70bcdd6e06c1d6581bcfd095e268395e18eb27ee07709ddc2fbb9f5baa5d88"
+  },
+  "validation": {
+    "nativeCoreTests": 2683,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "8c0a7f5f841bbb8064df636f3ddf8b1462a8790a5e140009b9478932bcd22f7e",
+    "ATCResultSHA256": "80bca876b3899e1f3e61621e65c25ba01b02155ef35493bec31b10e98e54f2fa",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Reserve machine access against all competing owner operations during asynchronous journal setup.",
+    "Allow only the live owner-bound token to enter the initializer validation writer phases.",
+    "Retain release activity through actual settlement, cancellation and shutdown."
+  ],
+  "limits": [
+    "Owned files, SQLite and injected job controls do not prove installed native behavior.",
+    "Root admission, Developer ID peers, dedicated UID isolation and system launchd remain required activation gates in issue286.",
+    "Administrator endpoint and app action are not wired.",
+    "No service or physical device was used."
+  ]
+}

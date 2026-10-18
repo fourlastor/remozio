@@ -1,0 +1,70 @@
+{
+  "experiment": "macos-gateway-setup-async-owner",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T20:35:51.218214+00:00",
+  "sourceCommit": "459e7998894a4095b331923e58271d90ec489f26",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/SetupOwnerAsyncWork.swift": "2ea841b18f2db78225fb2ecde42a2b5e6469529b306e5d401e55011b9053ad6f",
+    "macos/core/Sources/RemozioCore/GatewaySetupJournalOperations.swift": "aa0565171a17c8b28c0e0602101acccb58f832dec12d2e618dc08fb3b27e3bc9",
+    "macos/core/Sources/RemozioCore/SetupAccountOwner.swift": "3f2c9814966385b6a5ef6b0fa9500e1689f95126345236258e43374bb21e2a24",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupService.swift": "85e96e19b59e96be1cb5f30873ff447426a1372348e29f80708aeaeb17866de5",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupShutdown.swift": "093648c996dcf4044028b84f817e8b2232b1c2f5e9ab5e744fe7c8bb13073877",
+    "macos/app/Setup/SetupMain.swift": "4769d344fa0f2790c736ba75bbf5615cf8db0d9955287e76d97bd12af2a7b46a",
+    "macos/core/Tests/RemozioCoreTests/GatewaySetupAsyncOwnerTests.swift": "ce46a00f229123a9e2ee408dbda4277dbadb299fcbd591b6869dae0a3bfe2301"
+  },
+  "validation": {
+    "nativeCoreTests": 2681,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "dbfe072fa8d9e8ab712e051c51b18e0eb4a6b0eb387316da07954b7036faf7c6",
+    "ATCResultSHA256": "60b166db5ead8d871919488d3b126c1e7bf628734b9fcf2ec3933cad0a717b59",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Run the retained Gateway journal initializer outside the first machine writer.",
+    "Retain the release activity through backend settlement, cancellation and shutdown.",
+    "Report journal completion separately from temporary job cleanup; app-facing admission follows separately."
+  ],
+  "limits": [
+    "Owned files, SQLite and injected job controls do not prove installed native behavior.",
+    "Root admission, Developer ID peers, dedicated UID isolation and system launchd remain required activation gates in issue286.",
+    "Administrator endpoint and app action are not wired.",
+    "No service or physical device was used."
+  ]
+}
