@@ -158,7 +158,8 @@ class MonitorReportTests(unittest.TestCase):
 
     def test_source_hashes_use_fixed_relative_names_and_content_only(self):
         with tempfile.TemporaryDirectory(prefix="private-do-not-publish-") as temporary:
-            root = Path(temporary)
+            # Match the real module's resolved ROOT, including macOS /var symlinks.
+            root = Path(temporary).resolve()
             paths = [root / name for name in ("scripts/runner.py", "experiments/probe.py",
                                                "experiments/fixture.c", "scripts/cleanup.py")]
             for path in paths:
