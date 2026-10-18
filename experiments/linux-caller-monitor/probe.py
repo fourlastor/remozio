@@ -70,6 +70,23 @@ def status(pid):
     return result
 
 
+def fixture_mapping_matches(line, address, fixture_stat):
+    # Read only fixed numeric columns. The pathname can contain whitespace,
+    # escaped newlines or undecodable bytes and is not an identity field here.
+    fields = line.split(maxsplit=5)
+    if len(fields) < 5:
+        return False
+    try:
+        first, last = (int(part, 16) for part in fields[0].split(b"-"))
+        major, minor = (int(part, 16) for part in fields[3].split(b":"))
+        inode = int(fields[4], 10)
+    except ValueError:
+        return False
+    return (first <= address < last and b"x" in fields[1] and inode != 0 and
+            inode == fixture_stat.st_ino and
+            (major, minor) == (os.major(fixture_stat.st_dev), os.minor(fixture_stat.st_dev)))
+
+
 def send(channel, value, fds=()):
     data = json.dumps(value, separators=(",", ":"), sort_keys=True).encode("ascii")
     if len(data) > 4096:
@@ -341,14 +358,9 @@ class Monitor:
             if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(data) != 8 or len(imported) != 1:
                 raise ValueError("memory descriptor")
             address = struct.unpack("=Q", data)[0]
-            executable_mapping = False
-            with open(f"/proc/{self.pid}/maps", encoding="utf-8") as mappings:
-                for line in mappings:
-                    fields = line.rstrip("\n").split(maxsplit=5)
-                    first, last = (int(part, 16) for part in fields[0].split("-"))
-                    if first <= address < last:
-                        executable_mapping = "x" in fields[1] and len(fields) >= 6 and os.path.samefile(fields[5], self.binary)
-                        break
+            fixture_stat = os.stat(self.binary)
+            with open(f"/proc/{self.pid}/maps", "rb") as mappings:
+                executable_mapping = any(fixture_mapping_matches(line, address, fixture_stat) for line in mappings)
             if not executable_mapping:
                 raise RuntimeError("not fixture executable mapping")
             with open(self.binary, "rb") as source:

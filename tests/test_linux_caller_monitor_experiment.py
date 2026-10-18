@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import mock_open, patch
 
@@ -34,17 +35,21 @@ def ordinary_linux():
         yield
 
 
+def pure_monitor_probe():
+    spec = importlib.util.spec_from_file_location("linux_caller_monitor_probe_unit_test", EXPERIMENT.PROBE)
+    probe = importlib.util.module_from_spec(spec)
+    # Stub library loading so pure helpers work on Mac without Linux libc calls.
+    with patch("ctypes.CDLL"), patch("os.fork", create=True) as fork, patch("subprocess.Popen") as spawn:
+        spec.loader.exec_module(probe)
+    fork.assert_not_called()
+    spawn.assert_not_called()
+    return probe
+
+
 class AcknowledgmentLeaseTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        spec = importlib.util.spec_from_file_location("linux_caller_monitor_probe_ack_test", EXPERIMENT.PROBE)
-        cls.probe = importlib.util.module_from_spec(spec)
-        # Only the pure ACK receiver is exercised. Stub library loading so this
-        # import also works on Mac and never touches Linux libc or live processes.
-        with patch("ctypes.CDLL"), patch("os.fork", create=True) as fork, patch("subprocess.Popen") as spawn:
-            spec.loader.exec_module(cls.probe)
-        fork.assert_not_called()
-        spawn.assert_not_called()
+        cls.probe = pure_monitor_probe()
 
     def acknowledgment(self, generation=7):
         return {"phase": "ack", "nonce": "11" * 32, "binding": "22" * 16, "generation": generation}
@@ -92,6 +97,52 @@ class AcknowledgmentLeaseTests(unittest.TestCase):
                 lease = self.lease()
                 self.assertIs(lease.accept(acknowledgment), False)
                 self.assertIs(lease.accept(self.acknowledgment()), False)
+
+
+class FixtureMappingTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.probe = pure_monitor_probe()
+
+    def fixture_stat(self):
+        return SimpleNamespace(st_dev=os.makedev(0xAB, 0xCD), st_ino=123456)
+
+    def mapping(self, pathname=b"/synthetic/bin/fixture", permissions=b"r-xp", device=b"ab:cd", inode=b"123456"):
+        return b"1000-2000 " + permissions + b" 00001000 " + device + b" " + inode + b" " + pathname + b"\n"
+
+    def test_mapping_identity_does_not_depend_on_pathname_bytes(self):
+        paths = (b"/synthetic/bin/fixture", b"/synthetic/a path\twith whitespace",
+                 b"/synthetic/line\\012break", b"/synthetic/nonutf8-\xff\xfe",
+                 b"/unrelated/name (deleted)", b"")
+        for pathname in paths:
+            with self.subTest(pathname=pathname):
+                self.assertIs(self.probe.fixture_mapping_matches(self.mapping(pathname), 0x1800, self.fixture_stat()), True)
+
+    def test_wrong_device_or_decimal_inode_is_rejected(self):
+        for device, inode in ((b"ac:cd", b"123456"), (b"ab:ce", b"123456"), (b"ab:cd", b"123457")):
+            with self.subTest(device=device, inode=inode):
+                self.assertIs(self.probe.fixture_mapping_matches(
+                    self.mapping(device=device, inode=inode), 0x1800, self.fixture_stat()), False)
+
+    def test_mapping_must_be_executable_and_contain_address(self):
+        for permissions in (b"r--p", b"rw-p", b"---p"):
+            with self.subTest(permissions=permissions):
+                self.assertIs(self.probe.fixture_mapping_matches(
+                    self.mapping(permissions=permissions), 0x1800, self.fixture_stat()), False)
+        for address, expected in ((0xFFF, False), (0x1000, True), (0x1FFF, True), (0x2000, False), (0x2001, False)):
+            with self.subTest(address=address):
+                self.assertIs(self.probe.fixture_mapping_matches(self.mapping(), address, self.fixture_stat()), expected)
+
+    def test_anonymous_mapping_with_zero_inode_is_never_a_fixture_match(self):
+        anonymous = SimpleNamespace(st_dev=os.makedev(0, 0), st_ino=0)
+        self.assertIs(self.probe.fixture_mapping_matches(
+            self.mapping(pathname=b"", device=b"00:00", inode=b"0"), 0x1800, anonymous), False)
+
+    def test_malformed_fixed_fields_are_rejected_without_using_path(self):
+        for line in (b"", b"1000-2000 r-xp\n", b"bad-range r-xp 0 ab:cd 123456 /synthetic/fixture\n",
+                     self.mapping(device=b"ab:invalid"), self.mapping(inode=b"not-decimal")):
+            with self.subTest(line=line):
+                self.assertIs(self.probe.fixture_mapping_matches(line, 0x1800, self.fixture_stat()), False)
 
 
 class MonitorPrerequisiteTests(unittest.TestCase):
@@ -348,8 +399,9 @@ class MonitorWorkerCleanupTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("REMOZIO_LINUX_CALLER_MONITOR_LIVE") == "1", "explicit owned-process monitor controls")
 class MonitorLiveTests(unittest.TestCase):
     def test_live_fixture_mechanics_and_all_negative_controls(self):
-        # /proc maps leaves pathname spaces intact; exercise the real parser.
-        with tempfile.TemporaryDirectory(prefix="remozio monitor ") as temporary, \
+        # /proc maps leaves spaces intact but escapes newlines; identity must
+        # follow fixed device/inode fields rather than pathname spelling.
+        with tempfile.TemporaryDirectory(prefix="remozio monitor \n") as temporary, \
              patch.object(EXPERIMENT.tempfile, "tempdir", temporary):
             report = EXPERIMENT.measure()
         self.assertTrue(report["passed"], report["cases"])

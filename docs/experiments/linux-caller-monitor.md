@@ -41,8 +41,9 @@ do not alter system security policy.
 
 Portable runner tests participate in the normal Python gate on Linux and Mac.
 The live kernel experiment is explicitly enabled and its results apply to its
-recorded host. Its regression test uses a temporary root containing spaces to
-exercise mapped-path parsing. A passing Mac test of report validation does not establish Linux
+recorded host. Its regression test uses a temporary root containing spaces and a
+newline to exercise mapping identification without pathname parsing. A passing
+Mac test of report validation does not establish Linux
 kernel behavior, and a Linux fixture run does not replace required native Mac CI.
 
 ## Acceptance controls
@@ -73,7 +74,7 @@ the cleanup claim.
 
 The [retained report](linux-caller-monitor-evidence.json), measured on 2026-10-18 UTC,
 passed all 12 controls on Ubuntu 25.10 x86_64 with Linux 6.17.0 and Python 3.13.7,
-without elevation and with a temporary root containing spaces. The report binds
+without elevation and with a temporary root containing spaces and a newline. The report binds
 its results to the runner, probe, native
 fixture and shared cleanup source by SHA-256; it is not evidence for later source
 revisions. The host reported Yama ptrace scope 1, AppArmor enabled, and seccomp
@@ -108,7 +109,11 @@ A separate memory-modification control deliberately uses an already-running
 bootstrap that retains a writable memory descriptor before tracing. That case is
 not admitted through the main controlled-exec path. A separate same-account
 writer, which is not the tracer, uses that earlier handle; the monitor checks the
-changed executable mapping and unchanged executable file. A descriptor opened
+changed executable mapping and unchanged executable file. It identifies the
+mapping by address range, execute permission, device and inode from the fixed
+procfs columns, compared with the fixture file's stat identity; it does not use
+the printed pathname. This remains a backing-file observation, not protected-code
+authentication. A descriptor opened
 before an exec refers to the old address space; it cannot be used as evidence of access to
 the replacement image. The report must preserve this distinction.
 
