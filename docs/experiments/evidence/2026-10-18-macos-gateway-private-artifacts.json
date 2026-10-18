@@ -1,0 +1,116 @@
+{
+  "experiment": "macos-gateway-private-artifacts",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T02:09:58.462365+00:00",
+  "sourceCommit": "3fb459e2f130f459fcbe83cf8c2e043feab5c79b",
+  "sourceBase": "8863371f622e1e0558897bf44676970d8fe5d729",
+  "sourceBasis": "The named commit contains the source, tests and initial documentation. Later evidence and prose do not change executable inputs.",
+  "hostMacOS": "27.0.1",
+  "deploymentTarget": "26.0",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayPrivateArtifactPublication.swift": "c43de34172e47e9da3d7b5fa4abc85d45ecc89f6bf5d7485ab21387b8f945eeb",
+    "macos/core/Tests/RemozioCoreTests/GatewayPrivateArtifactPublicationTests.swift": "dbdad51edf601baeea06ba0d4f1416b5d05fcf5a56b88414f2060c2224205a63"
+  },
+  "validation": {
+    "nativePythonCommand": "./scripts/check.sh",
+    "nativePythonExitCode": 0,
+    "nativeCoreTests": {
+      "tests": 2565,
+      "skipped": 1,
+      "failures": 0
+    },
+    "nativeLogSHA256": "1ca61e8ce01fdd9b5875324ec97e9d29e4e40c5137c26c990bf18a8b25dab7f2",
+    "trackedInputCount": 1483,
+    "nativeInputSnapshotSHA256": "3d14e9b4c8bc7b69cf3c01668c0f1c8a5cfb95cb14671a29fd3bbc9a38a84adb",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "ATCBatchID": "batch-mvd6jnc6",
+    "ATCResultSHA256": "79b733cfc94e06f816660ba5fd406c22fb1e0782ce7215a354f294abb673d0ff",
+    "ATCExitCode": 0,
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "newLintIssues": 0,
+    "preExistingLintIssues": [
+      {
+        "rule": "ApplySharedPref",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      },
+      {
+        "rule": "GradleDependency",
+        "path": "android/app/build.gradle.kts"
+      },
+      {
+        "rule": "UseKtx",
+        "path": "android/app/src/main/kotlin/dev/remozio/android/push/WakeWorkSettings.kt"
+      }
+    ],
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true,
+    "passedComponentMethods": {
+      "GatewayPrivateArtifactPublicationTests": [
+        "testChangedReferenceOrScopeCannotPublishAndPermissionsAreNeverRepaired",
+        "testEveryInterruptedSubsetResumesWithoutReplacingMaterialOrForegroundState",
+        "testFinalValidationDetectsAnEarlierArtifactChange",
+        "testNativeEntryRefusesOrdinaryIdentityBeforeAnyProtectedOperation",
+        "testOrdinaryFixtureCannotPublishForAnotherServiceOwner",
+        "testPreflightRejectsConflictingOrUnsafeSiblingsBeforeCreatingOtherFiles",
+        "testPublishesOnlyRoleSpecificPrivateRecordsAndRetainsTheirInodes",
+        "testRetentionCannotCreateMissingFiles"
+      ]
+    }
+  },
+  "scope": [
+    "Publish retained provider and receipt records for the gateway owner.",
+    "Publish the independent wake key for the transport owner.",
+    "Preflight existing siblings and resume interrupted publication without replacing retained records.",
+    "Validation mode cannot create missing files or repair changed permissions."
+  ],
+  "XcodeCoordination": "The unchanged native check scripts use a scoped PATH adapter for the three typed ATC builds. Xcode version queries remain read-only.",
+  "XcodeAdapterSHA256": "9c8c4345642e7ad68c4bbda0c63b02a19d92a5f949fb2b6a2c63c6fe4afd8f0d",
+  "installedMacServicesTested": false,
+  "realFCMDeliveryTested": false,
+  "hardwareKeyCustodyTested": false,
+  "activationImplemented": false,
+  "appSetupConnected": false,
+  "limits": [
+    "The host is macOS27; targeting macOS26 does not prove macOS26 runtime behavior.",
+    "The publisher fixtures use ordinary-owner files, disposable keys and synthetic provider data.",
+    "The Root rejection test does not prove ownership transfer or dedicated service isolation.",
+    "The caller must authorize pending setup and verify the signed release before permitting creation.",
+    "No administrator endpoint invokes this publisher yet.",
+    "Journal initialization, native activation and app settings remain integration work.",
+    "The later ignored journal drafts and entry point are excluded from this source commit.",
+    "The frozen interactive package and guarded recovery handoff are unchanged."
+  ]
+}
