@@ -75,7 +75,8 @@ class CommandRequestReceiverTest {
         assertEquals(setOf(2uL), commandChannelSchemas(listOf(offer(2u)), emptySet(), ChannelRole.MAC, listOf(offer(2u, setOf(1u)))))
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(2u, setOf(1u))), emptySet(), ChannelRole.MAC, listOf(offer(2u))) }
         assertEquals(setOf(3uL), commandChannelSchemas(listOf(offer(3u)), emptySet(), ChannelRole.MAC, listOf(offer(3u))))
-        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(4u)), emptySet(), ChannelRole.MAC, listOf(offer(4u))) }
+        assertEquals(setOf(4uL), commandChannelSchemas(listOf(offer(4u)), emptySet(), ChannelRole.MAC, listOf(offer(4u))))
+        assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(5u)), emptySet(), ChannelRole.MAC, listOf(offer(5u))) }
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), setOf(1u), ChannelRole.MAC, listOf(offer(1u))) }
         assertFailsWith<IllegalArgumentException> { commandChannelSchemas(listOf(offer(1u)), emptySet(), ChannelRole.PHONE, listOf(offer(1u))) }
     }
@@ -97,6 +98,48 @@ class CommandRequestReceiverTest {
         assertFailsWith<IOException> { bind(enrollment, downgrade).run() }
         assertSame(retained, enrollment.sessions().single())
         enrollment.close()
+    }
+
+    @Test fun mixedHostsAndReconnectsKeepLinuxRequestsScopedWithoutSchemaFallback() = runBlocking<Unit> {
+        val inbox = CommandRequestInbox(2, 4)
+        val mac = Mac()
+        val linux = Mac(8).apply { schema = 4u; captureBytes = schemaFourCapture() }
+        val macEnrollment = mac.enroll(inbox)
+        val linuxEnrollment = linux.enroll(inbox)
+        suspend fun receiveLinux(schemas: Set<ULong>, vararg messages: ByteArray) {
+            val wire = Wire(scope(8), commandSchemas = schemas)
+            messages.forEach { wire.queue.send(it) }; wire.queue.close()
+            try { bind(linuxEnrollment, wire).run() } finally { assertTrue(wire.closed) }
+        }
+        deliver(macEnrollment, mac, mac.issued(), mac.status())
+        val macOwner = macEnrollment.sessions().single()
+        assertIs<CommandCapture>(macOwner.snapshot(ElapsedInstant(0, 100u)).capture)
+        assertFailsWith<IOException> { receiveLinux(setOf(1u), linux.issued()) }
+        assertTrue(linuxEnrollment.sessions().isEmpty())
+        receiveLinux(setOf(4u), linux.issued(), linux.status())
+        val linuxOwner = linuxEnrollment.sessions().single()
+        assertIs<LinuxCommandCapture>(linuxOwner.snapshot(ElapsedInstant(0, 100u)).capture)
+        assertEquals(macOwner.identity.requestID, linuxOwner.identity.requestID)
+        assertNotEquals(macOwner.identity.macID, linuxOwner.identity.macID)
+        assertFailsWith<IOException> { receiveLinux(setOf(1u, 2u, 3u), linux.issued()) }
+        assertSame(linuxOwner, linuxEnrollment.sessions().single())
+        assertSame(macOwner, macEnrollment.sessions().single())
+        receiveLinux(setOf(4u), linux.issued())
+        assertSame(linuxOwner, linuxEnrollment.sessions().single())
+        // A signed schema-4 body cannot acquire Mac requester semantics after a reconnect.
+        linux.schema = 1u
+        assertFailsWith<IOException> { receiveLinux(setOf(1u, 4u), linux.issued()) }
+        assertSame(linuxOwner, linuxEnrollment.sessions().single())
+        linux.schema = 4u
+        val malformed = (DeterministicCbor.decode(linux.captureBytes, bound) as CborValue.Fields).values.toMutableMap()
+        malformed[8u] = CborValue.Unsigned(1u) // continue-running is outside this Linux profile.
+        linux.captureBytes = DeterministicCbor.encode(CborValue.Fields(malformed), bound)
+        linux.requestID = 9
+        assertFailsWith<IOException> { receiveLinux(setOf(4u), linux.issued()) }
+        assertEquals(listOf(linuxOwner), linuxEnrollment.sessions())
+        assertSame(macOwner, macEnrollment.sessions().single())
+        assertFalse(macOwner.closed.value)
+        inbox.close()
     }
 
     @Test fun reconnectQueriesRetainedPendingAndTerminalOwnersWithoutSendingDecisions() = runBlocking<Unit> {

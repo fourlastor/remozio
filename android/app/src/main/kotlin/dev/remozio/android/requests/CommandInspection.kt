@@ -39,12 +39,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import dev.remozio.android.R
-import dev.remozio.protocol.AncestryCompleteness
-import dev.remozio.protocol.AncestryReason
 import dev.remozio.protocol.CapturedFileIdentity
 import dev.remozio.protocol.CapturedSigningStatus
 import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.CommandCapture
+import dev.remozio.protocol.CommandCapturePayload
+import dev.remozio.protocol.LinuxCommandCapture
 import dev.remozio.protocol.CommandIOMode
 import dev.remozio.protocol.CommandInputKind
 import dev.remozio.protocol.CapturedCommandStream
@@ -56,7 +56,7 @@ import dev.remozio.protocol.StartedCommandDisconnect
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun CommandInspection(
-    capture: CommandCapture?,
+    capture: CommandCapturePayload?,
     macName: String,
     accountName: String,
     onDismiss: () -> Unit,
@@ -89,13 +89,14 @@ internal fun CommandInspection(
 
 @Composable
 private fun InspectionContent(
-    capture: CommandCapture?, macName: String, accountName: String, sample: Boolean, onDismiss: () -> Unit,
+    capture: CommandCapturePayload?, macName: String, accountName: String, sample: Boolean, onDismiss: () -> Unit,
     status: TrackedRequestStatus?,
     modifier: Modifier = Modifier,
     actions: (@Composable () -> Unit)? = null,
 ) {
     var raw by remember { mutableStateOf(false) }
     val layout = capture?.stdioLayout
+    val linuxRequester = (capture as? LinuxCommandCapture)?.let(::linuxRequesterPresentation)
     Column(modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(when {
@@ -115,7 +116,7 @@ private fun InspectionContent(
             if (status != null) item { RequestStatusCard(status) }
             item {
                 Section(R.string.request_context) {
-                    TextValue(R.string.mac_label, macName, raw)
+                    TextValue(R.string.host_label, macName, raw)
                     TextValue(R.string.account_label, accountName, raw)
                 }
             }
@@ -124,7 +125,7 @@ private fun InspectionContent(
             }
             else {
                 item {
-                    Section(R.string.invocation) {
+                    Section(if (capture is LinuxCommandCapture) R.string.requested_command else R.string.invocation) {
                         BytesValue(R.string.executable_label, capture.executable.path, raw)
                         BytesValue(R.string.directory_label, capture.directory.path, raw)
                         Text(stringResource(R.string.display_not_shell), style = MaterialTheme.typography.bodySmall)
@@ -210,7 +211,7 @@ private fun InspectionContent(
                         Text(stringResource(if (capture.disconnectBehavior == StartedCommandDisconnect.TERMINATE) R.string.disconnect_terminate else R.string.disconnect_continue))
                     }
                 }
-                item {
+                if (capture is CommandCapture) item {
                     Section(R.string.requester) {
                         BytesValue(R.string.requester_executable, capture.requester.executablePath, raw)
                         Numeric(R.string.real_uid, capture.requester.realUID.toString())
@@ -230,20 +231,29 @@ private fun InspectionContent(
                         BytesValue(R.string.tty_path, capture.requester.ttyPath, raw)
                     }
                 }
+                if (linuxRequester != null) {
+                    item {
+                        Section(R.string.linux_requester) {
+                            Text(stringResource(R.string.linux_frontend_notice), style = MaterialTheme.typography.bodySmall)
+                            LinuxFields(linuxRequester.observations, raw)
+                        }
+                    }
+                    item {
+                        Section(R.string.linux_frontend_policy) {
+                            Text(stringResource(R.string.linux_policy_assertion_notice), style = MaterialTheme.typography.bodySmall)
+                            LinuxFields(linuxRequester.policy, raw)
+                        }
+                    }
+                    item {
+                        Section(R.string.linux_scoped_identity) {
+                            Text(stringResource(R.string.linux_scope_notice), style = MaterialTheme.typography.bodySmall)
+                            LinuxFields(linuxRequester.scope, raw)
+                        }
+                    }
+                }
                 item {
                     Section(R.string.process_ancestry) {
-                        Text(stringResource(when (capture.ancestry.completeness) {
-                            AncestryCompleteness.COMPLETE -> R.string.ancestry_complete
-                            AncestryCompleteness.PARTIAL -> R.string.ancestry_partial
-                            AncestryCompleteness.UNAVAILABLE -> R.string.ancestry_unavailable
-                        }))
-                        if (capture.ancestry.reason != AncestryReason.NONE) Text(stringResource(when (capture.ancestry.reason) {
-                            AncestryReason.EXITED -> R.string.ancestry_exited
-                            AncestryReason.PERMISSION -> R.string.ancestry_permission
-                            AncestryReason.TRUNCATED -> R.string.ancestry_truncated
-                            AncestryReason.UNSUPPORTED -> R.string.ancestry_unsupported
-                            AncestryReason.NONE -> R.string.none_label
-                        }))
+                        commandAncestryNotices(capture).forEach { Text(stringResource(it)) }
                         Text(stringResource(R.string.ancestry_identity_limit), style = MaterialTheme.typography.bodySmall)
                     }
                 }
@@ -270,7 +280,7 @@ private fun InspectionContent(
                             Identity(R.string.input_identity, capture.input.identity)
                             Numeric(R.string.input_binding, capture.input.streamBinding?.copyBytes()?.let(ByteText::hex))
                         } else Numeric(R.string.terminal_routing_mask, layout.ptyMask.toString())
-                        Numeric(R.string.code_directory_hash, capture.requester.signing.cdHash?.copyBytes()?.let(ByteText::hex))
+                        if (capture is CommandCapture) Numeric(R.string.code_directory_hash, capture.requester.signing.cdHash?.copyBytes()?.let(ByteText::hex))
                         Numeric(R.string.submission_id, ByteText.hex(capture.submission.id.copyBytes()))
                         Numeric(R.string.submission_nonce, ByteText.hex(capture.submission.nonce.copyBytes()))
                         Numeric(R.string.caller_binding, ByteText.hex(capture.submission.callerBinding.copyBytes()))
@@ -281,6 +291,20 @@ private fun InspectionContent(
         actions?.invoke()
         TextButton(onClick = onDismiss, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(stringResource(R.string.close_details))
+        }
+    }
+}
+
+@Composable
+private fun LinuxFields(fields: List<LinuxInspectionField>, raw: Boolean) {
+    fields.forEach { field ->
+        when (field) {
+            is LinuxInspectionField.Bytes -> BytesValue(field.label, field.value, raw)
+            is LinuxInspectionField.Hex -> Numeric(field.label, ByteText.hex(field.value.copyBytes()))
+            is LinuxInspectionField.Text -> TextValue(field.label, field.value, raw)
+            is LinuxInspectionField.Number -> Numeric(field.label,
+                if (field.label == R.string.groups_label && field.value.isNullOrEmpty()) stringResource(R.string.none_label) else field.value)
+            is LinuxInspectionField.Identity -> Identity(field.label, field.value)
         }
     }
 }

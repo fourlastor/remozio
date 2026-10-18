@@ -5,6 +5,13 @@ They neither implement nor authenticate a handshake.
 The [channel negotiation owner](channel-negotiation.md) binds offers and confirms their transcript over an enrolled TLS connection.
 Native host integration remains unfinished.
 
+Host scope includes independently enrolled Mac and Linux desktops. The existing
+`macID` slot and role 1 have the [desktop-host meaning](channel-negotiation.md)
+without changing wire bytes. Linux command schema 4 is an exact contract, not a
+feature or inferred platform label. Its unavailability must affect only that
+host's command operation. No failure or reconnect translates retained requests
+into a Mac schema, changes their digest or creates another consumption opportunity.
+
 | Selection | Rule |
 | --- | --- |
 | Connection envelope | Highest exact version in both supported sets, at or above the trusted local minimum |

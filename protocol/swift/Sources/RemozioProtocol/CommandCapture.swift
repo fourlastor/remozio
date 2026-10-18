@@ -168,18 +168,6 @@ public struct CommandCapture: Equatable, Sendable {
                 ancestry: CapturedAncestry, unverifiedRationale: String?, submission: CapturedSubmission,
                 stdioLayout: CapturedCommandStdioLayout? = nil, limits: CBORLimits) throws {
         guard Self.supportedSchemaVersions.contains(schemaVersion) else { throw CommandCaptureError.version }
-        func identity(_ value: CapturedFileIdentity) -> CBORValue {
-            .map([0: .unsigned(value.device), 1: .unsigned(value.inode)])
-        }
-        let executableValue: CBORValue = .map([0: .bytes(executable.path), 1: identity(executable.identity), 2: .bytes(executable.sha256)])
-        let directoryValue: CBORValue = .map([0: .bytes(directory.path), 1: identity(directory.identity)])
-        let targetValue: CBORValue = .map([0: .unsigned(UInt64(target.uid)), 1: .unsigned(UInt64(target.gid)),
-            2: .array(target.supplementaryGroups.map { .unsigned(UInt64($0)) }), 3: target.observedName.map { .text($0) } ?? .null])
-        let environmentValue: CBORValue = .array(environment.map {
-            .map([0: .bytes($0.name), 1: .bytes($0.value), 2: .unsigned($0.source.rawValue)])
-        })
-        let inputValue: CBORValue = .map([0: .unsigned(input.kind.rawValue), 1: input.streamBinding.map { .bytes($0) } ?? .null,
-            2: input.observedPath.map { .bytes($0) } ?? .null, 3: input.identity.map(identity) ?? .null])
         let signingValue: CBORValue = .map([0: .unsigned(requester.signing.status.rawValue),
             1: requester.signing.identifier.map { .text($0) } ?? .null, 2: requester.signing.team.map { .text($0) } ?? .null,
             3: requester.signing.cdHash.map { .bytes($0) } ?? .null])
@@ -191,24 +179,12 @@ public struct CommandCapture: Equatable, Sendable {
             .map([0: .unsigned(UInt64($0.pid)), 1: .unsigned(UInt64($0.pidVersion)),
                 2: $0.executablePath.map { .bytes($0) } ?? .null, 3: .unsigned(UInt64($0.uid))])
         }), 2: .unsigned(ancestry.reason.rawValue)])
-        let submissionValue: CBORValue = .map([0: .bytes(submission.id), 1: .bytes(submission.nonce), 2: .bytes(submission.callerBinding)])
         guard (schemaVersion == 3) == (stdioLayout != nil) else { throw CommandCaptureError.fields }
-        var fields: [UInt64: CBORValue] = [0: .unsigned(schemaVersion), 1: executableValue, 2: .array(arguments.map { .bytes($0) }),
-            3: directoryValue, 4: targetValue, 5: environmentValue, 6: inputValue, 7: .unsigned(ioMode.rawValue),
-            8: .unsigned(disconnectBehavior.rawValue), 9: requesterValue, 10: ancestryValue,
-            11: unverifiedRationale.map { .text($0) } ?? .null, 12: submissionValue]
-        func source(_ value: CapturedCommandInput) -> CBORValue {
-            .map([0: .unsigned(value.kind.rawValue), 1: value.streamBinding.map { .bytes($0) } ?? .null,
-                2: value.observedPath.map { .bytes($0) } ?? .null, 3: value.identity.map(identity) ?? .null])
-        }
-        func stream(_ value: CapturedCommandStream) -> CBORValue {
-            .map([0: source(value.source), 1: .unsigned(value.access.rawValue), 2: .unsigned(value.flags.rawValue)])
-        }
-        if let layout = stdioLayout {
-            fields[13] = .map([0: stream(layout.input), 1: stream(layout.output), 2: stream(layout.error),
-                3: layout.terminal.map { .map([0: stream($0.stream), 1: .unsigned(UInt64($0.sessionID)),
-                    2: .unsigned(UInt64($0.terminalDevice))]) } ?? .null, 4: .unsigned(UInt64(layout.ptyMask))])
-        }
+        var fields = CommandCaptureCodec.invocationFields(schemaVersion: schemaVersion, executable: executable,
+            arguments: arguments, directory: directory, target: target, environment: environment, input: input,
+            ioMode: ioMode, disconnectBehavior: disconnectBehavior, unverifiedRationale: unverifiedRationale, submission: submission)
+        fields[9] = requesterValue; fields[10] = ancestryValue
+        if let layout = stdioLayout { fields[13] = CommandCaptureCodec.layoutValue(layout) }
         try self.init(canonicalBytes: DeterministicCBOR.encode(.map(fields), limits: limits), limits: limits, expectedSchemaVersion: schemaVersion)
     }
 
@@ -219,40 +195,10 @@ public struct CommandCapture: Equatable, Sendable {
         guard Self.supportedSchemaVersions.contains(expectedSchemaVersion), schemaVersion == expectedSchemaVersion else {
             throw CommandCaptureError.version
         }
-        let executable = try CaptureFields(root[1], count: 3)
-        self.executable = try CapturedExecutable(path: executable.path(0), identity: executable.identity(1), sha256: executable.bytes(2, count: 32))
-        self.arguments = try root.array(2).map { try CaptureFields.cString($0) }
-        guard !arguments.isEmpty else { throw CommandCaptureError.bytes }
-        let directory = try CaptureFields(root[3], count: 2)
-        self.directory = try CapturedDirectory(path: directory.path(0), identity: directory.identity(1))
-        let target = try CaptureFields(root[4], count: 4)
-        self.target = try CommandTarget(uid: target.uint32(0), gid: target.uint32(1),
-            supplementaryGroups: target.array(2).map { try CaptureFields.uint32($0) }, observedName: target.optionalText(3))
-        var environment: [CapturedEnvironmentEntry] = []
-        var previous: Data?
-        for value in try root.array(5) {
-            let entry = try CaptureFields(value, count: 3)
-            let name = try CaptureFields.cString(entry[0])
-            guard !name.isEmpty, !name.contains(0x3d), previous == nil || previous!.lexicographicallyPrecedes(name) else {
-                throw CommandCaptureError.environment
-            }
-            environment.append(try CapturedEnvironmentEntry(name: name, value: CaptureFields.cString(entry[1]), source: entry.tag(2)))
-            previous = name
-        }
-        self.environment = environment
-        func source(_ value: CBORValue) throws -> CapturedCommandInput {
-            let fields = try CaptureFields(value, count: 4)
-            let kind: CommandInputKind = try fields.tag(0)
-            guard expectedSchemaVersion >= kind.minimumSchemaVersion else { throw CommandCaptureError.enumeration }
-            let binding = try fields.optionalBytes(1, count: 16), path = try fields.optionalPath(2), identity = try fields.optionalIdentity(3)
-            if kind == .null {
-                guard binding == nil, path == nil, identity == nil else { throw CommandCaptureError.fields }
-            } else { guard binding != nil else { throw CommandCaptureError.bytes } }
-            return CapturedCommandInput(kind: kind, streamBinding: binding, observedPath: path, identity: identity)
-        }
-        self.input = try source(root[6])
-        self.ioMode = try root.tag(7)
-        self.disconnectBehavior = try root.tag(8)
+        let invocation = try CommandCaptureInvocation(root: root, schemaVersion: schemaVersion)
+        executable = invocation.executable; arguments = invocation.arguments; directory = invocation.directory
+        target = invocation.target; environment = invocation.environment; input = invocation.input
+        ioMode = invocation.ioMode; disconnectBehavior = invocation.disconnectBehavior
         let requester = try CaptureFields(root[9], count: 8)
         let signing = try CaptureFields(requester[5], count: 4)
         self.requester = try CapturedRequester(executablePath: requester.path(0), realUID: requester.uint32(1),
@@ -271,42 +217,9 @@ public struct CommandCapture: Equatable, Sendable {
             throw CommandCaptureError.ancestry
         }
         self.ancestry = CapturedAncestry(completeness: completeness, entries: entries, reason: reason)
-        self.unverifiedRationale = try root.optionalText(11)
-        let submission = try CaptureFields(root[12], count: 3)
-        self.submission = try CapturedSubmission(id: submission.bytes(0, count: 16), nonce: submission.bytes(1, count: 32),
-            callerBinding: submission.bytes(2, count: 16))
-        if schemaVersion == 3 {
-            func stream(_ value: CBORValue) throws -> CapturedCommandStream {
-                let fields = try CaptureFields(value, count: 3)
-                let flags = try fields.uint(2)
-                guard flags <= 15 else { throw CommandCaptureError.enumeration }
-                return try CapturedCommandStream(source: source(fields[0]), access: fields.tag(1), flags: .init(rawValue: flags))
-            }
-            let fields = try CaptureFields(root[13], count: 5)
-            let input = try stream(fields[0]), output = try stream(fields[1]), error = try stream(fields[2])
-            let terminal: CapturedCommandTerminal?
-            if fields[3] == .null { terminal = nil }
-            else {
-                let value = try CaptureFields(fields[3], count: 3)
-                let control = try stream(value[0]), session = try value.pid(1), device = try value.uint32(2)
-                guard control.access == .readWrite, [.tty, .pty].contains(control.source.kind),
-                      control.source.identity != nil, device != UInt32.max, self.requester.sessionID == session else {
-                    throw CommandCaptureError.fields
-                }
-                terminal = CapturedCommandTerminal(stream: control, sessionID: session, terminalDevice: device)
-            }
-            let mask = try fields.uint32(4)
-            guard mask <= 7, input.source == self.input, input.access != .writeOnly,
-                  output.access != .readOnly, error.access != .readOnly,
-                  ioMode == .pty || (mask == 0 && terminal == nil), terminal != nil || mask == 0 else {
-                throw CommandCaptureError.fields
-            }
-            for (index, value) in [input, output, error].enumerated() where mask & (1 << index) != 0 {
-                guard [.tty, .pty].contains(value.source.kind), let identity = value.source.identity,
-                      identity == terminal?.stream.source.identity else { throw CommandCaptureError.fields }
-            }
-            stdioLayout = CapturedCommandStdioLayout(input: input, output: output, error: error, terminal: terminal, ptyMask: mask)
-        } else { stdioLayout = nil }
+        unverifiedRationale = invocation.unverifiedRationale; submission = invocation.submission
+        stdioLayout = schemaVersion == 3 ? try CommandCaptureCodec.layout(root[13], schemaVersion: schemaVersion,
+            input: input, ioMode: ioMode, requesterSessionID: self.requester.sessionID) : nil
         self.canonicalBytes = canonicalBytes
     }
 }

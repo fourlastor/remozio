@@ -195,11 +195,13 @@ creation of a replacement trusted host.
 ## Protocol and shared-source boundary
 
 Keep existing Mac schemas, role names, field tags and canonical bytes unchanged.
-No new Linux schema number, feature bit or wire tag is approved by this document.
-A Linux capture/negotiation extension remains a separate design with host
-encoding, Android verification/rendering and shared valid/invalid fixtures.
-The [capture agreement proposal](linux-capture-proposal.md) specifies its proposed
-logical fields, existing negotiation path and fixture matrix without allocating tags.
+[Issue #441](https://github.com/rock3r/remozio/issues/441#issuecomment-6253309933)
+approved Linux capture schema 4, its closed requester/credential field allocation,
+and the desktop-host interpretation of existing role 1 and `macID` without changing
+negotiation or pairing bytes. The [protocol contract](../protocol/command-capture.md)
+defines codec and Android interpretation; it does not approve production issuance.
+The [capture proposal](linux-capture-proposal.md) retains the design history and
+fixture matrix.
 Linux process handles, start times, namespaces and package provenance must not
 masquerade as Mac PID versions, Apple signing identities, team identifiers or
 cdhashes. Unknown/disjoint contracts must fail explicitly per enrolled host.

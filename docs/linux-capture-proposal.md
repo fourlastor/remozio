@@ -1,5 +1,15 @@
 # Linux command capture: agreement proposal
 
+The proposal was **accepted with explicit allocations on 18 October 2026** in
+[issue #441](https://github.com/rock3r/remozio/issues/441#issuecomment-6253309933).
+`L` is now schema 4; requester and credential keys 0–8, desktop-role semantics,
+initial pipes/terminate-only behavior and Android wording are defined in the
+[protocol contract](../protocol/command-capture.md#linux-requester-and-execution-shape-schema-4).
+Interpretation and codec/UI work are approved; production Linux issuance is not.
+The original unallocated proposal below is retained as design history.
+
+## Original proposal (17 October 2026)
+
 Status: proposal only, 17 October 2026. No schema number, field tag or feature ID
 is allocated here. `L` below denotes a future Linux command-capture schema,
 distinct from the existing Mac schemas 1–3. It is not an encodable version today.
