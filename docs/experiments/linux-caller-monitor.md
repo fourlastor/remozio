@@ -16,7 +16,15 @@ invalidation before a simulated executor accepts a handoff.
 Use an ordinary Linux x86_64 session with Python 3.11 or later, a C compiler at
 `cc`, procfs, Unix sequenced-packet sockets, kernel-provided message pidfds, and
 permission to trace owned children. The runner rejects root and differing real
-and effective IDs. It builds the native fixture in a private temporary directory
+and effective IDs. Cleanup also requires readable procfs task-child enumeration
+at `/proc/self/task/<pid>/children`, an optional kernel facility. The runner checks
+this prerequisite before starting the compiler or any fixture. If the entry is
+missing or inaccessible, it exits with status 2 and a fixed prerequisite message;
+it does not attempt the experiment or publish a passing report. Successful reports
+record `prerequisites.procTaskChildrenReadable: true`. A mounted procfs alone does
+not establish this requirement.
+
+It builds the native fixture in a private temporary directory
 using a fixed compiler invocation, then runs each case with a deadline:
 
 ```sh
@@ -68,6 +76,8 @@ without elevation. The report binds its results to the runner, probe, native
 fixture and shared cleanup source by SHA-256; it is not evidence for later source
 revisions. The host reported Yama ptrace scope 1, AppArmor enabled, and seccomp
 mode 0 for the runner. These values do not describe every process's confinement.
+The prerequisite check confirmed readable procfs task-child enumeration. This
+run does not establish support for kernels or procfs mounts without that facility.
 
 Only the healthy control accepted the simulated handoff. All ten other lifecycle,
 sender and handoff controls rejected it; the separate memory-modification control
@@ -125,3 +135,7 @@ kill option. All task-creation event classes matter; watching clone alone does n
 cover every way a task can be created. The [Yama documentation](https://www.kernel.org/doc/html/latest/admin-guide/LSM/Yama.html)
 describes additional access restrictions. The experiment measures operations on
 the selected host rather than treating documented API availability as a pass.
+The [task-children manual](https://www.man7.org/linux/man-pages/man5/proc_tid_children.5.html)
+documents the optional `CONFIG_PROC_CHILDREN` facility required by this
+experiment's cleanup path. The preflight checks access to the entry itself rather
+than inferring availability from a kernel version or configuration file.

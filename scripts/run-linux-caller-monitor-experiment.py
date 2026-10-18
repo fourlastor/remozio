@@ -73,6 +73,21 @@ class OutputLimitError(Exception):
     pass
 
 
+class PrerequisiteUnavailable(RuntimeError):
+    pass
+
+
+def check_prerequisites():
+    # Task-child enumeration is optional even when procfs itself is mounted.
+    # Check before starting anything that would depend on it during cleanup.
+    try:
+        with Path(f"/proc/self/task/{os.getpid()}/children").open("rb") as stream:
+            stream.read(1)
+    except OSError:
+        raise PrerequisiteUnavailable() from None
+    return {"procTaskChildrenReadable": True}
+
+
 def _unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -242,6 +257,7 @@ def measure(timeout=15):
         raise RuntimeError("run without elevation or credential transition")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 60:
         raise ValueError("timeout must be greater than zero and at most 60 seconds")
+    prerequisites = check_prerequisites()
     with subreaper(), tempfile.TemporaryDirectory(prefix="remozio-caller-monitor-") as temporary:
         directory = Path(temporary)
         binary = build_fixture(directory, min(30, timeout))
@@ -253,6 +269,7 @@ def measure(timeout=15):
     return {"experiment": "linux-caller-monitor-v1",
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "trustedCode": False, "productionAdmission": False,
+            "prerequisites": prerequisites,
             "host": host_metadata(), "sources": source_hashes(), "cases": results,
             "passed": all(result["passed"] for result in results.values()),
             "limits": ["owned synthetic fixtures only; no protected installation or production admission",
@@ -275,6 +292,8 @@ def main():
             report = measure(args.timeout)
         except KeyboardInterrupt:
             parser.exit(130, "Caller monitor experiment cancelled.\n")
+        except PrerequisiteUnavailable:
+            parser.exit(2, "Caller monitor experiment requires readable procfs task-children support; no fixtures started.\n")
         except (RuntimeError, ValueError, OSError):
             parser.exit(2, "Caller monitor experiment unavailable; no raw diagnostic data published.\n")
     finally:

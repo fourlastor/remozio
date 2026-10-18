@@ -1,5 +1,7 @@
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -7,7 +9,7 @@ import platform
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run-linux-caller-monitor-experiment.py"
@@ -19,6 +21,17 @@ SPEC.loader.exec_module(EXPERIMENT)
 def valid_report(case="healthy"):
     return {"passed": True, "checks": dict.fromkeys(EXPERIMENT.EXPECTED[case], True),
             "observations": EXPERIMENT.OBSERVATIONS[case].copy()}
+
+
+@contextlib.contextmanager
+def ordinary_linux():
+    with contextlib.ExitStack() as stack:
+        for owner, name, value in (
+                (EXPERIMENT.platform, "system", "Linux"), (EXPERIMENT.platform, "machine", "x86_64"),
+                (EXPERIMENT.os, "getuid", 1000), (EXPERIMENT.os, "geteuid", 1000),
+                (EXPERIMENT.os, "getgid", 1000), (EXPERIMENT.os, "getegid", 1000)):
+            stack.enter_context(patch.object(owner, name, return_value=value))
+        yield
 
 
 class AcknowledgmentLeaseTests(unittest.TestCase):
@@ -79,6 +92,76 @@ class AcknowledgmentLeaseTests(unittest.TestCase):
                 lease = self.lease()
                 self.assertIs(lease.accept(acknowledgment), False)
                 self.assertIs(lease.accept(self.acknowledgment()), False)
+
+
+class MonitorPrerequisiteTests(unittest.TestCase):
+    def test_readable_task_children_reports_boolean_only_and_reads_one_byte(self):
+        # A readable empty children file is valid too. Contents are not metadata.
+        for contents in (b"", b"12345 67890\n"):
+            with self.subTest(contents=contents):
+                reader = mock_open(read_data=contents)
+                with patch.object(EXPERIMENT.Path, "open", reader):
+                    result = EXPERIMENT.check_prerequisites()
+                self.assertEqual(result, {"procTaskChildrenReadable": True})
+                reader.assert_called_once_with("rb")
+                reader().read.assert_called_once_with(1)
+                self.assertNotIn("12345", json.dumps(result))
+
+    def test_missing_or_denied_task_children_never_starts_any_fixture(self):
+        for error in (FileNotFoundError("/private/missing-procfs"), PermissionError("/private/denied-profile")):
+            with self.subTest(error=type(error).__name__), ordinary_linux(), \
+                 patch.object(EXPERIMENT.Path, "open", side_effect=error), \
+                 patch.object(EXPERIMENT, "subreaper") as reaper, \
+                 patch.object(EXPERIMENT, "build_fixture") as build, \
+                 patch.object(EXPERIMENT, "invoke_worker") as worker, \
+                 patch.object(EXPERIMENT.subprocess, "Popen") as spawn, \
+                 patch.object(EXPERIMENT.tempfile, "TemporaryDirectory") as directory:
+                with self.assertRaises(EXPERIMENT.PrerequisiteUnavailable):
+                    EXPERIMENT.measure()
+                reaper.assert_not_called()
+                build.assert_not_called()
+                worker.assert_not_called()
+                spawn.assert_not_called()
+                directory.assert_not_called()
+
+    def test_invalid_host_and_timeout_refuse_before_procfs_access(self):
+        with patch.object(EXPERIMENT.platform, "system", return_value="Darwin"), \
+             patch.object(EXPERIMENT, "check_prerequisites") as check:
+            with self.assertRaises(RuntimeError):
+                EXPERIMENT.measure()
+            check.assert_not_called()
+        with ordinary_linux(), patch.object(EXPERIMENT, "check_prerequisites") as check:
+            with self.assertRaises(ValueError):
+                EXPERIMENT.measure(0)
+            check.assert_not_called()
+
+    def test_successful_report_retains_prerequisite_metadata_without_file_contents(self):
+        prerequisites = {"procTaskChildrenReadable": True}
+        with ordinary_linux(), patch.object(EXPERIMENT, "check_prerequisites", return_value=prerequisites), \
+             patch.object(EXPERIMENT, "subreaper", side_effect=contextlib.nullcontext), \
+             patch.object(EXPERIMENT.tempfile, "TemporaryDirectory", side_effect=lambda **_kwargs: contextlib.nullcontext("/synthetic/private-fixture")), \
+             patch.object(EXPERIMENT, "build_fixture", return_value=Path("/synthetic/private-fixture/binary")), \
+             patch.object(EXPERIMENT, "invoke_worker", side_effect=lambda _args, _timeout, case: valid_report(case)), \
+             patch.object(EXPERIMENT, "host_metadata", return_value={}), \
+             patch.object(EXPERIMENT, "source_hashes", return_value={}):
+            report = EXPERIMENT.measure()
+        self.assertEqual(report["prerequisites"], prerequisites)
+        self.assertNotIn("/synthetic", json.dumps(report))
+
+    def test_cli_preflight_diagnostic_is_fixed_and_contains_no_private_data(self):
+        stderr, stdout = io.StringIO(), io.StringIO()
+        with patch.object(EXPERIMENT.sys, "argv", [str(SCRIPT)]), ordinary_linux(), \
+             patch.object(EXPERIMENT.Path, "open", side_effect=PermissionError("/private/secret-profile")), \
+             patch.object(EXPERIMENT, "build_fixture") as build, \
+             patch.object(EXPERIMENT, "invoke_worker") as worker, \
+             patch.object(EXPERIMENT.sys, "stderr", stderr), patch.object(EXPERIMENT.sys, "stdout", stdout), \
+             self.assertRaises(SystemExit) as raised:
+            EXPERIMENT.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(stderr.getvalue(), "Caller monitor experiment requires readable procfs task-children support; no fixtures started.\n")
+        self.assertEqual(stdout.getvalue(), "")
+        build.assert_not_called()
+        worker.assert_not_called()
 
 
 class MonitorReportTests(unittest.TestCase):
