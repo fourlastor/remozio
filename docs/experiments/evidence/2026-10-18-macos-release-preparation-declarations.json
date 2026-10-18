@@ -1,0 +1,98 @@
+{
+  "experiment": "macos-release-preparation-declarations",
+  "evidenceFormat": 1,
+  "recordedAtUTC": "2026-10-18T15:10:05.357361+00:00",
+  "sourceCommit": "066488dd610312d98569efc868b91ad19337c5c0",
+  "issue": "https://github.com/rock3r/remozio/issues/434",
+  "sourceSHA256": {
+    "scripts/generate-macos-release-manifest.py": "de2cd76f2f8156f3e45325aeef8496fd38b0710893607ecf48fbed279a239bc4",
+    "tests/test_macos_release_manifest.py": "5d034415ee762371ac2b3df93d9f5dd2affe3c8cb695d8a951bfc2c23ad4f69c",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "64d892c8b069008e6b6568a2e918ddc9503056eeb3fbc05907074551f549043b"
+  },
+  "declarationCoverage": {
+    "oldPreparationVersions": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "currentPreparationVersions": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9
+    ],
+    "storageRoles": [
+      "authority",
+      "setup-controller"
+    ],
+    "actualAppArtifacts": [
+      "Debug",
+      "Release"
+    ],
+    "compiledStoreComparison": true,
+    "migrationDeclarationsUnchanged": true
+  },
+  "validation": {
+    "nativeCoreTests": 2622,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "8cc77cbc1c2f6b4eae01de809ef4299791930e5651f68a48c2c171c99068f09c",
+    "ATCResultSHA256": "7a58d2d63648b8096ba397ac299330347c5668089884355754b48c0f87070050",
+    "ATCTasks": [
+      ":protocol-kotlin:test",
+      ":phone-core:test",
+      ":phone-core:approvalFlowTest",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "testReports": {
+      "protocol": {
+        "tests": 132,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 277,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 324,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Declare every compiled preparation schema for both storage roles.",
+    "Inspect both signed app builds and compare exact reader/writer sets with the compiled store.",
+    "Preserve explicit migration and activation boundaries."
+  ],
+  "limits": [
+    "Ad-hoc artifact inspection does not prove Developer ID production installation or Root runtime admission.",
+    "No storage schema, native selector or installed service changes.",
+    "No physical phone used."
+  ]
+}
