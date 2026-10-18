@@ -16,5 +16,6 @@ if [ "$host" = Darwin ]; then
     set -- "$@" :phone-core:approvalFlowTest
 else
     ./scripts/check-linux-protocol.sh
+    ./scripts/check-linux-host.sh
 fi
 ./gradlew "$@" :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug

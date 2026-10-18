@@ -1,6 +1,10 @@
+#if os(Linux)
+import Crypto
+#else
 import CryptoKit
+#endif
 import Foundation
-import RemozioCore
+import RemozioHostCore
 import RemozioProtocol
 import XCTest
 
