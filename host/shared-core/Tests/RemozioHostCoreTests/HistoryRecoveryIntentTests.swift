@@ -1,7 +1,7 @@
 import Foundation
 import XCTest
 import RemozioProtocol
-@testable import RemozioCore
+import RemozioHostCore
 
 final class HistoryRecoveryIntentTests: XCTestCase {
     private let authority = Data(repeating: 1, count: 32)

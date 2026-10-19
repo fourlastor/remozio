@@ -78,11 +78,14 @@ portable Kotlin/phone tests and Android unit tests, debug assembly and lint. mac
 `:phone-core:approvalFlowTest` after `check.sh` has built its native peers.
 Unknown platforms and any failed phase fail the gate immediately.
 
-The [shared host core](../host/shared-core/README.md) contains the decision verifier
-and its authority-owned request, enrollment and clock inputs. Its existing verifier
-tests run through the Linux host check and the native Mac check. Mac consumers use
-the same implementation through compatibility type aliases. This extraction does
-not implement a Linux authority, durable decision consumption or command dispatch.
+The [shared host core](../host/shared-core/README.md) contains the decision verifier,
+its authority-owned request, enrollment and clock inputs, checkpoint and history-intent
+codecs, and pure storage-reconciliation selection. These tests run through the Linux
+host check and the native Mac check. Mac consumers use the same value implementations
+through compatibility type aliases. Recovery selections are data-only recommendations;
+the Mac adapter retains its serialized journal reads and protected-store transitions,
+with its existing store integration tests. This extraction does not implement Linux
+protected persistence, an authority, durable decision consumption or command dispatch.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
