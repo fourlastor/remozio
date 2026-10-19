@@ -10,7 +10,7 @@ protocol GatewaySettingsConsumerEndpointBuilding: Sendable {
 private struct NativeGatewaySettingsConsumerEndpointBuilder: GatewaySettingsConsumerEndpointBuilding {
     let setupCode: AuthorityCodeEntry
     let access: GatewaySettingsConsumerAccess
-    let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
+    let acquireActivity: @Sendable () throws -> any OwnedReleaseActivity
     func make(connection: NSXPCConnection, budget: AuthorityXPCWorkBudget,
               onHandshake: @escaping @Sendable () -> Void,
               onClose: @escaping @Sendable () -> Void) throws -> GatewaySettingsConsumerXPCEndpoint {
@@ -44,7 +44,7 @@ final class GatewaySettingsConsumerXPCListener: NSObject, NSXPCListenerDelegate,
 
     convenience init(consumerCode: AuthorityCodeEntry, setupCode: AuthorityCodeEntry,
                      release: SignedReleaseEvidence, access: GatewaySettingsConsumerAccess,
-                     acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?) throws {
+                     acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity) throws {
         try access.requireNativeProcess()
         try GatewaySettingsConsumerReleaseValidation.validate(release, role: access.binding.role, consumer: consumerCode, setup: setupCode)
         let localPolicy = try XPCPeerPolicy(teamID: consumerCode.teamID, componentIdentifier: consumerCode.identifier,

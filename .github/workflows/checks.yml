@@ -27,7 +27,7 @@ jobs:
           SWIFT_ARCHIVE_SHA256: 15608c4fa0364ef906014343d81639cf58169e8a40de2b2d3503c3f35a8bb66d
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libxml2 libicu74
+          sudo apt-get install --yes --no-install-recommends libxml2 libicu74 libsqlite3-dev
           curl --fail --location --retry 3 --max-time 300 \
             https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz \
             --output "$RUNNER_TEMP/remozio-swift.tar.gz"
@@ -154,6 +154,31 @@ jobs:
         with:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
+  ios:
+    name: iOS build
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Verify wrapper JAR
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
+          assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
+          PYTHON
+      - run: xcodebuild -version
+      - name: Kotlin tests on the iOS simulator
+        run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
+      - name: Build the iOS app for the simulator
+        env:
+          REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
+        run: ./scripts/build-ios-app.sh
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest
@@ -172,7 +197,7 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
-      - run: ./gradlew :protocol-kotlin:test :phone-core:test
+      - run: ./gradlew :protocol-kotlin:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
   android:
     name: Android build
     runs-on: ubuntu-24.04

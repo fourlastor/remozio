@@ -31,7 +31,9 @@ Mac CI checks before merge.
 ## Independent checks
 
 Use Python 3.11 or later, Swift 6.2 or later, JDK 21, and an Android SDK containing
-platform `android-37.0` and build tools `37.0.0`. The shell's `python3` must select
+platform `android-37.0` and build tools `37.0.0`. The shared-host SQLite tests also
+require development headers and library (`libsqlite3-dev` on Ubuntu), discoverable
+through `pkg-config`. The shell's `python3` must select
 the intended interpreter; this machine's `/usr/bin/python3` is 3.13, while another
 Python earlier on its default PATH is older.
 
@@ -78,11 +80,14 @@ portable Kotlin/phone tests and Android unit tests, debug assembly and lint. mac
 `:phone-core:approvalFlowTest` after `check.sh` has built its native peers.
 Unknown platforms and any failed phase fail the gate immediately.
 
-The [shared host core](../host/shared-core/README.md) contains the decision verifier
-and its authority-owned request, enrollment and clock inputs. Its existing verifier
-tests run through the Linux host check and the native Mac check. Mac consumers use
-the same implementation through compatibility type aliases. This extraction does
-not implement a Linux authority, durable decision consumption or command dispatch.
+The [shared host core](../host/shared-core/README.md) contains the decision verifier,
+its authority-owned request, enrollment and clock inputs, and the SQLite audit
+journal tables. Shared verifier and table tests run through the Linux host check
+and native Mac check; Mac tests also retain audit signing integration. Mac consumers
+use the same implementations through compatibility type aliases. The table owner
+still supplies protected storage, durability configuration and outer transactions.
+These extractions do not implement a Linux authority, durable decision consumption
+or command dispatch.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
@@ -110,12 +115,13 @@ to `main` without path filters:
 | Repository Python and PR-watcher tests | **Python checks**: `./scripts/check.sh` on Ubuntu; also runs on Mac. |
 | Linux Swift protocol and shared host tests | **Linux Swift protocol**: `./scripts/check-linux-protocol.sh` and `./scripts/check-linux-host.sh` on Ubuntu 24.04. |
 | Mac native builds, experiments, Swift protocol, shared host and core tests | **Mac build**: the complete Darwin branch of `./scripts/check.sh` on macOS 26. |
-| Portable Kotlin protocol and phone tests | **Kotlin protocol**: `:protocol-kotlin:test :phone-core:test`. |
+| Portable Kotlin protocol and phone tests | **Kotlin protocol**: `:protocol-kotlin:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test`. |
 | Native Swift/Kotlin interoperability | **Mac interoperability**: builds all four peers from the checkout, then runs `:phone-core:test :phone-core:approvalFlowTest`. |
+| Kotlin tests on the iOS simulator (macOS only) and the iOS app build | **iOS build**: `:protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test`, then an unsigned simulator build of `ios/Remozio.xcodeproj` on macOS 26. |
 | Android unit tests, debug assembly and lint | **Android build**: `:android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug`, plus the additional CI-only `:android-app:assembleRelease`. |
 
 The PR watcher's `local_gate` uses the same coordinator and its `required_checks`
-includes all six job names. The original five jobs passed in upstream
+includes all seven job names. The original five jobs passed in upstream
 [Checks run 39034970117](https://github.com/rock3r/remozio/actions/runs/39034970117)
 for base revision `2d00126c8ce010f356a5de0db8e432dd37b504cc`. This branch's added
 Linux Swift job has been validated locally but has not yet run remotely.

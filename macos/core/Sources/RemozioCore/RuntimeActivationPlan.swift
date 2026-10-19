@@ -32,6 +32,8 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
     }
     private init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
                  transport: TransportPairingStartupConfiguration) throws {
+        // Activity metadata cannot select jobs until both native consumers retain their lifetime scopes.
+        guard reference.serviceActivity == nil else { throw RuntimeActivationError.unavailable }
         let services = reference.services, paths = try RuntimePreparationPaths(accountID: services.accountID)
         guard let claim = services.claims.first(where: { $0.role == .transport }),
               let gateway = services.claims.first(where: { $0.role == .gateway }),

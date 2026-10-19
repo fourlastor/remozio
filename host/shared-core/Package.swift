@@ -7,6 +7,11 @@ let cryptoTargets: [Target.Dependency] = [
     .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
 ]
 
+// macOS uses its SDK module; Linux exposes the system SQLite headers through CSQLite.
+let sqliteTargets: [Target.Dependency] = [
+    .target(name: "CSQLite", condition: .when(platforms: [.linux])),
+]
+
 let package = Package(
     name: "RemozioHostCore",
     platforms: [.macOS(.v26)],
@@ -16,8 +21,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", "4.5.1"..."5.0.1"),
     ],
     targets: [
-        .target(name: "RemozioHostCore", dependencies: [.product(name: "RemozioProtocol", package: "swift")]),
+        .systemLibrary(name: "CSQLite", pkgConfig: "sqlite3", providers: [.apt(["libsqlite3-dev"])]),
+        .target(name: "RemozioHostCore", dependencies: [.product(name: "RemozioProtocol", package: "swift")] + sqliteTargets),
         .testTarget(name: "RemozioHostCoreTests", dependencies: ["RemozioHostCore",
-            .product(name: "RemozioProtocol", package: "swift")] + cryptoTargets),
+            .product(name: "RemozioProtocol", package: "swift")] + cryptoTargets + sqliteTargets),
     ]
 )

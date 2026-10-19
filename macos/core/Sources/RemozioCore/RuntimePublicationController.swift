@@ -9,6 +9,7 @@ enum RuntimePublicationController {
 
     static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent,
                         expected: RuntimePreparationState, fileCustodyAccepted: Bool,
+                        serviceActivityEnabled: Bool = false,
                         verifyCurrent: () throws -> Void) throws -> RuntimePreparationState {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
@@ -25,7 +26,9 @@ enum RuntimePublicationController {
                     accountID: account.accountID, expectedPublicKey: services.authorityPublicKey)
             }, restoreMaterial: { services, reference, verify in
                 try RuntimeMaterialPreparation.prepareFileIdentity(account: account, services: services, expected: reference,
-                    fileCustodyAccepted: fileCustodyAccepted, verifyCurrent: verify)
+                    fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: serviceActivityEnabled, verifyCurrent: verify)
+            }, verifyActivity: { activity in
+                try RuntimeMaterialPreparation.validateServiceActivity(account: account, activity: activity, verifyCurrent: verify)
             }, publish: { bundle, material, verify in
                 try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
             })
@@ -38,6 +41,7 @@ enum RuntimePublicationController {
                         verifyServices: @escaping (ServiceAccountPlan) throws -> Void,
                         verifyAuthority: (ServiceAccountPlan) throws -> Void,
                         restoreMaterial: (ServiceAccountPlan, RuntimeMaterialReference?, () throws -> Void) throws -> RuntimePreparationMaterial,
+                        verifyActivity: @escaping (ServiceReleaseActivityReference) throws -> Void = { _ in throw RuntimePreparationError.incomplete },
                         publish: (RuntimeConfigurationBundle, RuntimePreparationMaterial, () throws -> Void) throws -> Void,
                         didStage: (Stage) throws -> Void = { _ in }) throws -> RuntimePreparationState {
         try verifyCurrent(); try machine.validateAccountPreparation(account)
@@ -56,6 +60,7 @@ enum RuntimePublicationController {
                 throw RuntimePreparationError.changedScope
             }
             try verifyServices(services)
+            if let activity = retainedReference?.serviceActivity { try verifyActivity(activity) }
         }
         try verify(); try verifyAuthority(services); try verify()
         let material = try restoreMaterial(services, retainedReference, verify)
@@ -67,6 +72,9 @@ enum RuntimePublicationController {
             guard retainedReference != nil else { throw RuntimePreparationError.incomplete }
             return expected
         }
+        // Recheck the actual files after material recovery and immediately before retaining their identities.
+        try verify()
+        if let activity = reference.serviceActivity { try verifyActivity(activity) }
         try machine.retainRuntimeMaterial(reference)
         retainedReference = reference
         try didStage(.referenceRetained); try verify()

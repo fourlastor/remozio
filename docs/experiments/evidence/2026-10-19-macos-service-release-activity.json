@@ -1,0 +1,117 @@
+{
+  "experiment": "macos-service-release-activity",
+  "evidenceFormat": 1,
+  "sourceCommit": "7836801c29f95c8280b87382b6b9af0a6d810b89",
+  "recordedAtUTC": "2026-10-19T18:14:00.922961+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerXPCEndpoint.swift": "c47e75ecd8ca40ae38329922cdde00a860146030bdbb76f7554bcdff7eaf32b8",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerXPCListener.swift": "03b301adaf8d3bfed1a64988b3422d4b4da35bcb7f464def298ea6ac252c5fcf",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerListenerTests.swift": "226272f612f3455bfda4efa7bb97430a38356245c288bd703b50b49ddf469e42",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerPreflightTests.swift": "ce5d512c299377b3510a4479e12a47a952d75d96d71311ed1e1565aa2c8755da",
+    "macos/core/Sources/RemozioCore/ServiceReleaseActivityBarrier.swift": "aad0bde72a52c6b2dfbfd822b2a21f2e512cba64a1595d6a213fbac8b3ba0a69",
+    "macos/core/Tests/RemozioCoreTests/ServiceReleaseActivityBarrierTests.swift": "cea5b932396b15f80db524c32bd9269b07569f5a95fcabb64f6dbbb789e9f139",
+    "macos/core/Sources/RemozioCore/ServiceReleaseActivityFileProvisioning.swift": "d17aced5b45d01373ec3c38ca39e7f6072eed3b50a3c3c30b05989a232ff61fa",
+    "macos/core/Tests/RemozioCoreTests/ServiceReleaseActivityFileProvisioningTests.swift": "bdf29503fcf60422ecad73a66dd80019910e8cc8609ca6c16525172d23b243bf",
+    "macos/core/Sources/RemozioCore/ServiceReleaseActivityReference.swift": "0bc3ad3cb30f06b4c8aa313d61de1dfce0db487a4d1ddb99e96beb72e1379f59",
+    "macos/core/Sources/RemozioCore/RuntimePreparationMaterial.swift": "aa8501b541d1cdad447af15834d977ec0b947bae0adfd2832d24fb64fc418c69",
+    "macos/core/Sources/RemozioCore/RuntimeActivationPlan.swift": "82fcb4ee18fdd52b24b5bdc754ac8d3306424170cb837f477f96f00c9cc7e148",
+    "macos/core/Sources/RemozioCore/PreparationIntentRecord.swift": "882550053f077931af1fec754871381b304141e4df8705217ecd8ae95bc85915",
+    "macos/core/Tests/RemozioCoreTests/ServiceReleaseActivityReferenceTests.swift": "380c6a63975d54b25b22f835d0f14a54ca7dc4dd05a2c5d6ec9900dcf2a93510",
+    "macos/core/Sources/RemozioCore/RuntimePublicationController.swift": "4b486494754c033c4e2d8d21c42a9fe316771eaa3312a838c9e09c9292e3222c",
+    "macos/core/Tests/RemozioCoreTests/RuntimeServiceActivityPreparationTests.swift": "89674e0eb8967726ca3544af7779a1e17cd83e80367498ac99dec0c5cee9bfa0",
+    "scripts/generate-macos-release-manifest.py": "2835fbf12b8caed2ea91cd48ebc84a7521de4ea41cad08e7b12c7c1e25946fff",
+    "tests/test_macos_release_manifest.py": "0fffd3788e292e0bff573854e52274ff3188e4cbd41d33d5ddbc661b6ae55dda",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "557938d92d38464d1a55c16de7a862de8b38bac5bb37f626b649ae73d91ebbb4",
+    "docs/experiments/macos-service-activity.md": "bf6da758bc2c60b213dee747c850275e328174af0c6efadc4656173acd5fa6e0"
+  },
+  "validation": {
+    "nativeCoreTests": 2995,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "7836801c29f95c8280b87382b6b9af0a6d810b89",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "d2271c1464ea37c1dcc340589744f791717eadcbf55ae18e95c447e87452bc89",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewaySettingsConsumerListenerTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "RuntimeServiceActivityPreparationTests": {
+          "tests": 11,
+          "failures": 0,
+          "skipped": 0
+        },
+        "ServiceReleaseActivityBarrierTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        },
+        "ServiceReleaseActivityFileProvisioningTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        },
+        "ServiceReleaseActivityReferenceTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        },
+        "SignedReleaseInspectionTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "3c0eff9877b8fb2879fbfdad9489862f3b0ace0e56c3d89f46a63703b957920e",
+    "nativeLogSHA256": "d2271c1464ea37c1dcc340589744f791717eadcbf55ae18e95c447e87452bc89",
+    "ATCResultSHA256": "70db67bc08f9b72b8b36177db3158eb7a174c58d4da47c8365b8a39e5d435a4d",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Retain dedicated service activity and disconnected native work until their actual lifetimes end.",
+    "Provision and retain exact role lock identities only after explicit preparation opt-in.",
+    "Declare exact directional public and private material codec sets while retaining legacy bytes."
+  ],
+  "limits": [
+    "Activity metadata does not authorize an update or establish complete installed participation.",
+    "Fresh native host selection remains disabled until both consumers and recovery participate.",
+    "No installed services, production secrets, physical devices or frozen recovery artifacts were used."
+  ]
+}

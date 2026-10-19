@@ -10,12 +10,15 @@ case "$host" in
 esac
 
 ./scripts/check.sh
-set -- :protocol-kotlin:test :phone-core:test
+set -- :protocol-kotlin:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
 if [ "$host" = Darwin ]; then
     # check.sh builds the native Mac peers required by this integration task.
-    set -- "$@" :phone-core:approvalFlowTest
+    set -- "$@" :phone-core:approvalFlowTest :protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
 else
     ./scripts/check-linux-protocol.sh
     ./scripts/check-linux-host.sh
 fi
 ./gradlew "$@" :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
+if [ "$host" = Darwin ]; then
+    ./scripts/build-ios-app.sh
+fi

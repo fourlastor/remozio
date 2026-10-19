@@ -162,3 +162,20 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
+
+    def test_service_activity_records_declare_directional_public_and_private_codecs(self):
+        by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}
+                   for role, *_ in MANIFEST.COMPONENTS}
+        reference = 'runtime.material-reference'
+        activity = 'runtime.service-release-activity-reference'
+        material = 'runtime.preparation-material'
+        for role, declarations in by_role.items():
+            for name, versions in ((reference, [1, 2]), (activity, [1])):
+                if role in (2, 4, 6, 8):
+                    self.assertEqual(declarations[name], {0: name, 1: versions, 2: versions if role == 8 else [], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)
+            if role in (2, 8):
+                self.assertEqual(declarations[material], {0: material, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(material, declarations)

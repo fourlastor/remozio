@@ -13,7 +13,7 @@ final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsume
     private let binding: GatewaySettingsConsumerBinding
     private let verify: () throws -> Void
     private let verifyCurrent: @Sendable () throws -> Void
-    private let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
+    private let acquireActivity: @Sendable () throws -> (any OwnedReleaseActivity)?
     private let budget: AuthorityXPCWorkBudget
     private let execute: @Sendable (GatewaySettingsConsumerRequest) async throws -> GatewaySettingsConsumerObservation
     private let onHandshake: @Sendable () -> Void
@@ -26,7 +26,7 @@ final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsume
 
     convenience init(connection: NSXPCConnection, setupCode: AuthorityCodeEntry, access: GatewaySettingsConsumerAccess,
                      budget: AuthorityXPCWorkBudget,
-                     acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
+                     acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity,
                      onHandshake: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void) throws {
         try access.requireNativeProcess()
         guard setupCode.role == .setupController, setupCode.active else {
@@ -48,7 +48,7 @@ final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsume
     // Owned invocation controls cannot prove native UID or code admission.
     init(binding: GatewaySettingsConsumerBinding, verify: @escaping () throws -> Void,
          verifyCurrent: @escaping @Sendable () throws -> Void,
-         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
+         acquireActivity: @escaping @Sendable () throws -> (any OwnedReleaseActivity)? = { nil },
          budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void = {},
          invalidate: @escaping () -> Void,
          execute: @escaping @Sendable (GatewaySettingsConsumerRequest) async throws -> GatewaySettingsConsumerObservation) {
