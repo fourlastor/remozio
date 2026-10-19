@@ -34,6 +34,23 @@ class CommonCborTest {
         val array = CborValue.ArrayValue(listOf(CborValue.Unsigned(1u)))
         assertFails { @Suppress("UNCHECKED_CAST") (array.values as MutableList<CborValue>).add(CborValue.Null) }
         val fields = CborValue.Fields(mapOf(1uL to CborValue.Null))
-        assertFails { @Suppress("UNCHECKED_CAST") (fields.values as MutableMap<ULong, CborValue>)[2uL] = CborValue.Null }
+        assertFails { @Suppress("UNCHECKED_CAST") (fields.values as MutableMap<ULong, CborValue>).put(2uL, CborValue.Null) }
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test fun viewsOfDecodedCollectionsCannotBeMutatedThroughCasts() {
+        val list = CborValue.ArrayValue(listOf(CborValue.Unsigned(1u), CborValue.Unsigned(2u))).values
+        assertFails { (list.subList(0, 1) as MutableList<CborValue>).clear() }
+        assertFails { (list.iterator() as MutableIterator<CborValue>).apply { next() }.remove() }
+        assertFails { (list.listIterator() as MutableListIterator<CborValue>).apply { next() }.set(CborValue.Null) }
+        assertFails { (list.listIterator(1) as MutableListIterator<CborValue>).add(CborValue.Null) }
+        val map = CborValue.Fields(mapOf(1uL to CborValue.Null, 2uL to CborValue.Unsigned(3u))).values
+        assertFails { (map.keys as MutableSet<ULong>).clear() }
+        assertFails { (map.values as MutableCollection<CborValue>).clear() }
+        assertFails { (map.entries as MutableSet<Map.Entry<ULong, CborValue>>).clear() }
+        assertFails { (map.keys.iterator() as MutableIterator<ULong>).apply { next() }.remove() }
+        assertFails { (map.entries.first() as MutableMap.MutableEntry<ULong, CborValue>).setValue(CborValue.Unsigned(4u)) }
+        assertTrue(list == listOf(CborValue.Unsigned(1u), CborValue.Unsigned(2u)))
+        assertTrue(map == mapOf(1uL to CborValue.Null, 2uL to CborValue.Unsigned(3u)))
     }
 }

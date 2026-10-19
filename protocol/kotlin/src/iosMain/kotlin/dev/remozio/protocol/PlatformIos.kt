@@ -59,14 +59,45 @@ internal actual fun pairingPoint(bytes: ByteArray) {
     require(accepted)
 }
 
-// Native has no mutable view of these classes, so a MutableList or MutableMap cast fails.
+// Native has no mutable view of these classes, so a MutableList or MutableMap cast fails. Every view and
+// iterator they return is wrapped as well, so no cast reaches the backing copy.
+private class ReadOnlyIterator<T>(delegate: Iterator<T>) : Iterator<T> by delegate
+
+private class ReadOnlyListIterator<T>(delegate: ListIterator<T>) : ListIterator<T> by delegate
+
 private class ReadOnlyList<T>(private val delegate: List<T>) : List<T> by delegate {
+    override fun iterator(): Iterator<T> = ReadOnlyIterator(delegate.iterator())
+    override fun listIterator(): ListIterator<T> = ReadOnlyListIterator(delegate.listIterator())
+    override fun listIterator(index: Int): ListIterator<T> = ReadOnlyListIterator(delegate.listIterator(index))
+    override fun subList(fromIndex: Int, toIndex: Int): List<T> = ReadOnlyList(delegate.subList(fromIndex, toIndex))
     override fun equals(other: Any?): Boolean = delegate == other
     override fun hashCode(): Int = delegate.hashCode()
     override fun toString(): String = delegate.toString()
 }
 
+private class ReadOnlyCollection<T>(private val delegate: Collection<T>) : Collection<T> by delegate {
+    override fun iterator(): Iterator<T> = ReadOnlyIterator(delegate.iterator())
+    override fun toString(): String = delegate.toString()
+}
+
+private class ReadOnlySet<T>(private val delegate: Set<T>) : Set<T> by delegate {
+    override fun iterator(): Iterator<T> = ReadOnlyIterator(delegate.iterator())
+    override fun equals(other: Any?): Boolean = delegate == other
+    override fun hashCode(): Int = delegate.hashCode()
+    override fun toString(): String = delegate.toString()
+}
+
+private class ReadOnlyEntry<K, V>(override val key: K, override val value: V) : Map.Entry<K, V> {
+    override fun equals(other: Any?): Boolean = other is Map.Entry<*, *> && key == other.key && value == other.value
+    override fun hashCode(): Int = key.hashCode() xor value.hashCode()
+    override fun toString(): String = "$key=$value"
+}
+
 private class ReadOnlyMap<K, V>(private val delegate: Map<K, V>) : Map<K, V> by delegate {
+    override val keys: Set<K> get() = ReadOnlySet(delegate.keys)
+    override val values: Collection<V> get() = ReadOnlyCollection(delegate.values)
+    override val entries: Set<Map.Entry<K, V>>
+        get() = ReadOnlySet(delegate.entries.mapTo(LinkedHashSet()) { ReadOnlyEntry(it.key, it.value) })
     override fun equals(other: Any?): Boolean = delegate == other
     override fun hashCode(): Int = delegate.hashCode()
     override fun toString(): String = delegate.toString()
