@@ -1,11 +1,20 @@
 """Shared checks for local, ad-hoc signed Mac build artifacts."""
+import os
 import plistlib
 import re
 import subprocess
+import sys
+import time
 
 
 def run(*args, check=True):
+    started = time.monotonic()
     result = subprocess.run(args, text=True, capture_output=True)
+    tool = os.path.basename(os.fspath(args[0]))
+    if tool in {"swift", "xcodebuild"}:
+        operation = "path query" if "--show-bin-path" in args else "build" if "build" in args else "command"
+        print(f"Command timing: {tool} {operation}: {time.monotonic() - started:.3f}s (exit {result.returncode})",
+              file=sys.stderr, flush=True)
     if check and result.returncode != 0:
         raise RuntimeError(f"{args[0]} exited {result.returncode}: {result.stderr.strip()}")
     return result

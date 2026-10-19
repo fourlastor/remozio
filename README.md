@@ -44,3 +44,6 @@ Kotlin protocol tests, Android builds and lint, and Codex review. The
 [CI coverage table](docs/linux-validation.md#local-gate-and-ci-coverage) maps each
 local check to its CI job. Device-dependent and Mac GUI checks still require the
 interactive sessions named in their experiment procedures.
+
+The [Mac CI cache guide](docs/ci-build-cache.md) explains compiler reuse, timestamp
+validation, and how to compare cold and cached runs without skipping checks.
