@@ -7,12 +7,13 @@ public enum AdministrativeSetupChannelError: Error, Equatable {
 }
 enum SetupClientCall: Sendable {
     case hello, progress(Data), resume(SetupAccountProgress, Data)
+    case gatewayActivationHello, gatewayActivationProgress, activateGateway(SetupGatewayActivationProgress, GatewayRuntimeActivationSettings, Data)
     case gatewayHello, gatewayProgress, prepareGateway(SetupGatewayProgress, GatewaySetupPreparationChoices, Data), resumeGatewayJournal(SetupGatewayProgress, Data)
     case activationHello, activationProgress, activateRuntime(SetupActivationProgress, Data)
     case runtimeHello, runtimeProgress, prepareRuntime(SetupRuntimeProgress, Bool, Data)
     case serviceAccountsHello, serviceAccountsProgress, prepareServiceAccounts(SetupServiceAccountProgress, Data)
     case enrollmentHello, enrollmentProgress, beginEnrollment(Data, Data), resumeEnrollment(SetupAccountEnrollmentProgress, Data)
-    var handshake: Bool { switch self { case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello, .gatewayHello: true; default: false } }
+    var handshake: Bool { switch self { case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello, .gatewayHello, .gatewayActivationHello: true; default: false } }
 }
 enum SetupClientReply: Sendable { case version(UInt64), progress(Data?), failed }
 protocol SetupClientDriver: Sendable {
@@ -41,6 +42,11 @@ private final class NativeSetupClientDriver: SetupClientDriver, @unchecked Senda
             reply(.failed); return
         }
         switch call {
+        case .gatewayActivationHello: proxy.gatewayActivationHello { [self] in checked(.version($0), reply: reply) }
+        case .gatewayActivationProgress: proxy.gatewayActivationProgress { [self] in checked(.progress($0), reply: reply) }
+        case .activateGateway(let expected, let settings, let form):
+            do { proxy.activateGateway(try expected.bytes, settings: try settings.bytes, authorization: form) { [self] in checked(.progress($0), reply: reply) } }
+            catch { reply(.failed) }
         case .gatewayHello: proxy.gatewayHello { [self] in checked(.version($0), reply: reply) }
         case .gatewayProgress: proxy.gatewayProgress { [self] in checked(.progress($0), reply: reply) }
         case .prepareGateway(let expected, let choices, let form):
@@ -99,6 +105,7 @@ public actor AdministrativeSetupChannel {
     private let ownerUID: uid_t
     private let activation: Bool
     private let gateway: Bool
+    private let gatewayActivation: Bool
     private let gatewayOperationTimeout: UInt64
     private let runtime: Bool
     private let serviceAccounts: Bool
@@ -110,16 +117,16 @@ public actor AdministrativeSetupChannel {
     private var pending: (id: UUID, continuation: CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
 
-    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false,
+    public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false,
                 gatewayOperationTimeoutMilliseconds: UInt64 = 60_000, timeoutMilliseconds: UInt64 = 5000, onClose: @escaping @Sendable () -> Void = {}) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
-              (!(serviceAccounts || runtime || activation || gateway) || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
+              (!(serviceAccounts || runtime || activation || gateway || gatewayActivation) || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
               (1...60_000).contains(timeoutMilliseconds), (1...300_000).contains(gatewayOperationTimeoutMilliseconds) else { throw AdministrativeSetupChannelError.invalidConfiguration }
         guard getuid() == ownerUID, geteuid() == ownerUID else { throw AdministrativeSetupChannelError.wrongAccount }
         let processID = getpid()
         driver = NativeSetupClientDriver(serviceName: serviceName, policy: rootPolicy)
-        self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation || gateway; self.runtime = runtime || activation || gateway; self.activation = activation || gateway; self.gateway = gateway; gatewayOperationTimeout = gatewayOperationTimeoutMilliseconds; timeout = timeoutMilliseconds; self.onClose = onClose
+        self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation || gateway || gatewayActivation; self.runtime = runtime || activation || gateway || gatewayActivation; self.activation = activation || gateway || gatewayActivation; self.gateway = gateway || gatewayActivation; self.gatewayActivation = gatewayActivation; gatewayOperationTimeout = gatewayOperationTimeoutMilliseconds; timeout = timeoutMilliseconds; self.onClose = onClose
         verifyAccount = {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else {
                 throw AdministrativeSetupChannelError.wrongAccount
@@ -127,9 +134,9 @@ public actor AdministrativeSetupChannel {
         }
     }
     // Logical lifecycle controls do not prove native signing, service registration or administrator consent.
-    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayOperationTimeoutMilliseconds: UInt64 = 60_000, timeoutMilliseconds: UInt64 = 5000,
+    init(driver: any SetupClientDriver, accountID: Data? = nil, ownerUID: uid_t = getuid(), serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false, gatewayOperationTimeoutMilliseconds: UInt64 = 60_000, timeoutMilliseconds: UInt64 = 5000,
          verifyAccount: @escaping @Sendable () throws -> Void = {}, onClose: @escaping @Sendable () -> Void = {}) {
-        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation || gateway; self.runtime = runtime || activation || gateway; self.activation = activation || gateway; self.gateway = gateway; gatewayOperationTimeout = gatewayOperationTimeoutMilliseconds; timeout = timeoutMilliseconds
+        self.driver = driver; self.accountID = accountID; self.ownerUID = ownerUID; self.serviceAccounts = serviceAccounts || runtime || activation || gateway || gatewayActivation; self.runtime = runtime || activation || gateway || gatewayActivation; self.activation = activation || gateway || gatewayActivation; self.gateway = gateway || gatewayActivation; self.gatewayActivation = gatewayActivation; gatewayOperationTimeout = gatewayOperationTimeoutMilliseconds; timeout = timeoutMilliseconds
         self.verifyAccount = verifyAccount; self.onClose = onClose
     }
     deinit { timer?.cancel(); driver.close() }
@@ -137,9 +144,9 @@ public actor AdministrativeSetupChannel {
         guard state == .new else { throw AdministrativeSetupChannelError.closed }
         state = .opening
         do {
-            let expected = gateway ? AdministrativeSetupInterface.gatewayVersion : activation ? AdministrativeSetupInterface.activationVersion : runtime ? AdministrativeSetupInterface.runtimeVersion : serviceAccounts ? AdministrativeSetupInterface.serviceAccountsVersion :
+            let expected = gatewayActivation ? AdministrativeSetupInterface.gatewayActivationVersion : gateway ? AdministrativeSetupInterface.gatewayVersion : activation ? AdministrativeSetupInterface.activationVersion : runtime ? AdministrativeSetupInterface.runtimeVersion : serviceAccounts ? AdministrativeSetupInterface.serviceAccountsVersion :
                 (accountID == nil ? AdministrativeSetupInterface.enrollmentVersion : AdministrativeSetupInterface.storageVersion)
-            let call: SetupClientCall = gateway ? .gatewayHello : activation ? .activationHello : runtime ? .runtimeHello : serviceAccounts ? .serviceAccountsHello : (accountID == nil ? .enrollmentHello : .hello)
+            let call: SetupClientCall = gatewayActivation ? .gatewayActivationHello : gateway ? .gatewayHello : activation ? .activationHello : runtime ? .runtimeHello : serviceAccounts ? .serviceAccountsHello : (accountID == nil ? .enrollmentHello : .hello)
             guard case .version(let version) = try await perform(call), version == expected else {
                 throw AdministrativeSetupChannelError.unsupportedVersion
             }
@@ -229,6 +236,34 @@ public actor AdministrativeSetupChannel {
             let value = try SetupGatewayProgress.decode(bytes)
             guard value.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
             if let expected { try value.validatePreparation(of: expected) }
+            return value
+        } catch { finish(.invalidMessage); throw AdministrativeSetupChannelError.invalidMessage }
+    }
+    public func gatewayActivationProgress() async throws -> SetupGatewayActivationProgress? {
+        guard gatewayActivation, accountID == nil else { throw AdministrativeSetupChannelError.unsupportedVersion }
+        return try decodeGatewayActivation(await perform(.gatewayActivationProgress), expected: nil, settings: nil)
+    }
+    public func activateGateway(_ expected: SetupGatewayActivationProgress, settings: GatewayRuntimeActivationSettings,
+                                authorization: Data) async throws -> SetupGatewayActivationProgress {
+        guard gatewayActivation, accountID == nil, expected.setup.ownerUID == ownerUID, expected.setup.journalInitialized,
+              expected.settings == nil || expected.settings == settings,
+              authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AdministrativeSetupChannelError.invalidMessage }
+        guard let value = try decodeGatewayActivation(await perform(.activateGateway(expected, settings, authorization)), expected: expected, settings: settings) else {
+            close(); throw AdministrativeSetupChannelError.invalidMessage
+        }
+        return value
+    }
+    private func decodeGatewayActivation(_ reply: SetupClientReply, expected: SetupGatewayActivationProgress?,
+                                         settings: GatewayRuntimeActivationSettings?) throws -> SetupGatewayActivationProgress? {
+        do {
+            guard case .progress(let bytes) = reply, let bytes, bytes.count <= 1280 else { throw AdministrativeSetupChannelError.invalidMessage }
+            if bytes.isEmpty { guard expected == nil else { throw AdministrativeSetupChannelError.invalidMessage }; return nil }
+            let value = try SetupGatewayActivationProgress.decode(bytes)
+            guard value.setup.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
+            if let expected {
+                guard let settings else { throw AdministrativeSetupChannelError.invalidMessage }
+                try value.validateActivation(of: expected, selectedSettings: settings)
+            }
             return value
         } catch { finish(.invalidMessage); throw AdministrativeSetupChannelError.invalidMessage }
     }
@@ -333,12 +368,12 @@ public actor AdministrativeSetupChannel {
         do { try verifyAccount() } catch { close(); throw error }
         try Task.checkCancellation()
         switch call {
-        case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello, .gatewayHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
-        case .gatewayProgress, .prepareGateway, .resumeGatewayJournal, .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeProgress, .prepareRuntime, .activationProgress, .activateRuntime: guard state == .open else { throw AdministrativeSetupChannelError.closed }
+        case .hello, .enrollmentHello, .serviceAccountsHello, .runtimeHello, .activationHello, .gatewayHello, .gatewayActivationHello: guard state == .opening else { throw AdministrativeSetupChannelError.closed }
+        case .gatewayActivationProgress, .activateGateway, .gatewayProgress, .prepareGateway, .resumeGatewayJournal, .progress, .resume, .enrollmentProgress, .beginEnrollment, .resumeEnrollment, .serviceAccountsProgress, .prepareServiceAccounts, .runtimeProgress, .prepareRuntime, .activationProgress, .activateRuntime: guard state == .open else { throw AdministrativeSetupChannelError.closed }
         }
         guard pending == nil else { throw AdministrativeSetupChannelError.busy }
         let requestTimeout: UInt64
-        switch call { case .prepareGateway, .resumeGatewayJournal: requestTimeout = gatewayOperationTimeout; default: requestTimeout = timeout }
+        switch call { case .prepareGateway, .resumeGatewayJournal, .activateGateway: requestTimeout = gatewayOperationTimeout; default: requestTimeout = timeout }
         let lifetime = lifetime, driver = driver, id = UUID()
         let value = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in

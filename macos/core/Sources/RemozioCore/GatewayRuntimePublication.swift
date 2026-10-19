@@ -22,7 +22,8 @@ enum GatewayRuntimePublication {
 
     // Owned fixtures exercise publication ordering. The native entry fixes the owner, path and validated setup scope.
     static func publish(_ pair: GatewayRuntimeExtensions, directory: ProtectedSetupDirectory, owner: uid_t, mode: Mode,
-                        verifyCurrent: () throws -> Void, didPublish: (Artifact) throws -> Void = { _ in }) throws -> Result {
+                        verifyCurrent: () throws -> Void, willCommit: () throws -> Void = {},
+                        didPublish: (Artifact) throws -> Void = { _ in }) throws -> Result {
         let files: [(Artifact, Data, AdministrativeSetupPublication.File)] = [
             (.authority, try pair.authority.encoded, .authorityGatewayRuntime),
             (.transport, try pair.transport.encoded, .transportGatewayRuntime),
@@ -53,6 +54,7 @@ enum GatewayRuntimePublication {
                 for (_, roleBytes, roleFile) in files.prefix(2) {
                     try AdministrativeSetupPublication.validateRetained(roleBytes, file: roleFile, directory: directory, owner: owner, verify: verify)
                 }
+                try willCommit(); try verify()
             }
             if retained {
                 try AdministrativeSetupPublication.validateRetained(bytes, file: file, directory: directory, owner: owner, verify: verify)

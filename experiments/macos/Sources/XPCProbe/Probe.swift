@@ -29,6 +29,19 @@ final class ProbeService: NSObject, ProbeProtocol {
     }
 
 
+    func gatewayActivationHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.gatewayActivationVersion) }
+    func gatewayActivationProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(Data()) }
+    func activateGateway(_ expected: Data, settings: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        print("GATEWAY_ACTIVATION_RECEIVED \(String(decoding: expected, as: UTF8.self))")
+        fflush(stdout)
+        guard !settings.isEmpty, authorization == Data("synthetic-no-rights".utf8) else { reply(nil); return }
+        switch String(decoding: settings, as: UTF8.self) {
+        case "gateway-activation-bytes": reply(expected)
+        case "gateway-activation-empty": reply(Data())
+        default: reply(nil)
+        }
+    }
+
     func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AdministrativeSetupInterface.gatewayVersion) }
     func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(Data()) }
     func prepareGateway(_ expected: Data, choices: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
@@ -219,6 +232,7 @@ final class Completion: @unchecked Sendable {
              "runtime-progress", "runtime-bytes", "runtime-empty", "runtime-nil", "runtime-no-consent",
              "activation-progress", "activation-bytes", "activation-empty", "activation-nil",
              "journal-hello", "journal-bytes", "journal-empty", "journal-nil", "journal-server-uid", "journal-client-uid", "journal-wrong-invocation",
+             "gateway-activation-progress", "gateway-activation-bytes", "gateway-activation-empty", "gateway-activation-nil", "gateway-activation-bad-settings", "gateway-activation-bad-auth",
              "gateway-progress", "gateway-bytes", "gateway-empty", "gateway-nil", "gateway-journal-bytes", "gateway-journal-empty", "gateway-journal-nil":
             guard args.count == 4 else { exit(2) }
             let nonce = args[3]
@@ -234,7 +248,11 @@ final class Completion: @unchecked Sendable {
                     let error = error as NSError
                     handshake.finish("rejected:\(error.domain):\(error.code)")
                 }) as? ProbeProtocol else { exit(2) }
-                if args[0].hasPrefix("gateway-") {
+                if args[0].hasPrefix("gateway-activation-") {
+                    helloProxy.gatewayActivationHello { @Sendable accepted in
+                        handshake.finish(accepted == AdministrativeSetupInterface.gatewayActivationVersion ? "accepted" : "wrong-reply")
+                    }
+                } else if args[0].hasPrefix("gateway-") {
                     helloProxy.gatewayHello { @Sendable accepted in
                         handshake.finish(accepted == AdministrativeSetupInterface.gatewayVersion ? "accepted" : "wrong-reply")
                     }
@@ -289,6 +307,16 @@ final class Completion: @unchecked Sendable {
             } else if args[0] == "ping" || args[0] == "guarded-ping" {
                 proxy.ping(nonce) { @Sendable returned in
                     completion.finish(returned == nonce ? "accepted" : "wrong-reply")
+                }
+            } else if args[0] == "gateway-activation-progress" {
+                proxy.gatewayActivationProgress { @Sendable returned in completion.finish(returned == Data() ? "accepted" : "wrong-reply") }
+            } else if args[0].hasPrefix("gateway-activation-") {
+                let mode = args[0], bytes = Data(nonce.utf8)
+                let expected: Data? = mode == "gateway-activation-bytes" ? bytes : mode == "gateway-activation-empty" ? Data() : nil
+                let settings = mode == "gateway-activation-bad-settings" ? Data() : Data(mode.utf8)
+                let authorization = Data((mode == "gateway-activation-bad-auth" ? "wrong" : "synthetic-no-rights").utf8)
+                proxy.activateGateway(bytes, settings: settings, authorization: authorization) { @Sendable returned in
+                    completion.finish(returned == expected ? "accepted" : "wrong-reply")
                 }
             } else if args[0] == "gateway-progress" {
                 proxy.gatewayProgress { @Sendable returned in completion.finish(returned == Data() ? "accepted" : "wrong-reply") }

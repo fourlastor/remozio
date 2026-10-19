@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -245,6 +245,125 @@ public final class PreparationIntentStore {
             return .init(plan: plan, jobsRegistered: registered)
         }
     }
+    func gatewayRuntimeActivation(accountID: Data) throws -> GatewayRuntimeActivationState {
+        guard accountID.count == 16 else { throw GatewayPreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            if try scalar("PRAGMA user_version") < 10 { return .init(plan: nil, filesPublished: false, jobRegistered: false) }
+            let state = try loadGatewayRuntimeActivation(accountID: accountID)
+            if let plan = state.plan { _ = try requireGatewayRuntimeActivationScope(plan) }
+            return state
+        }
+    }
+    func retainGatewayRuntimeActivation(_ plan: GatewayRuntimeActivationPlan) throws {
+        let encoded = try plan.encoded, digest = try plan.digest
+        try transaction(write: true) {
+            try identity(macID)
+            let scope = try requireGatewayRuntimeActivationScope(plan)
+            let version = try scalar("PRAGMA user_version")
+            if version >= 10, let retained = try loadGatewayRuntimeActivation(accountID: plan.accountID).plan {
+                guard try retained.encoded == encoded else { throw GatewayPreparationError.conflictingMaterial }; return
+            }
+            guard !scope.inventory.services.contains(where: { $0.accountID == plan.accountID && $0.role == .notificationGateway }) else {
+                throw GatewayPreparationError.changedScope
+            }
+            if version == 9 {
+                try exec("CREATE TABLE gateway_runtime_activation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),journal BLOB NOT NULL UNIQUE CHECK(length(journal)=16),material BLOB NOT NULL CHECK(length(material)=16),digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),published INTEGER NOT NULL CHECK(published IN (0,1)),registered INTEGER NOT NULL CHECK(registered IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 270336),CHECK(registered=0 OR published=1)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=10")
+            }
+            guard try scalar("SELECT COUNT(*) FROM gateway_runtime_activation_v1") < 64 else { throw GatewayPreparationError.exhausted }
+            try statement("INSERT INTO gateway_runtime_activation_v1 VALUES(?,?,?,?,0,0,?)") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.journalIntentID, column: 2, row: row)
+                try bind(plan.extensions.authority.material.materialID, column: 3, row: row)
+                try bind(digest, column: 4, row: row); try bind(encoded, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            try identity(macID)
+        }
+    }
+    /// The authorized setup controller verifies every exact artifact before setting this historical marker.
+    func markGatewayRuntimePublished(_ plan: GatewayRuntimeActivationPlan) throws {
+        try transaction(write: true) {
+            try identity(macID); _ = try requireGatewayRuntimeActivationScope(plan)
+            guard try scalar("PRAGMA user_version") >= 10 else { throw GatewayPreparationError.incomplete }
+            let current = try loadGatewayRuntimeActivation(accountID: plan.accountID)
+            guard let retained = current.plan, try retained.encoded == plan.encoded else { throw GatewayPreparationError.changedScope }
+            if current.filesPublished { return }
+            try statement("UPDATE gateway_runtime_activation_v1 SET published=1 WHERE account=? AND digest=? AND published=0") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.digest, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+    }
+    @discardableResult
+    func enrollGatewayRuntimeActivation(_ plan: GatewayRuntimeActivationPlan) throws -> InstallationInventory {
+        let values = try transaction(write: false) {
+            try identity(macID)
+            let scope = try requireGatewayRuntimeActivationScope(plan)
+            guard try scalar("PRAGMA user_version") >= 10 else { throw GatewayPreparationError.incomplete }
+            let current = try loadGatewayRuntimeActivation(accountID: plan.accountID)
+            guard current.filesPublished, let retained = current.plan, try retained.encoded == plan.encoded else {
+                throw GatewayPreparationError.incomplete
+            }
+            let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
+            return (before: scope.inventory, after: try proposal.enrolledInventory(scope.inventory))
+        }
+        if values.before == values.after { return values.before }
+        return try writeInventory(values.after, expectedRevision: values.before.revision)
+    }
+    /// The controller must verify the native job independently. This flag asserts no live process or consumer health.
+    func markGatewayRuntimeRegistered(_ plan: GatewayRuntimeActivationPlan) throws {
+        try transaction(write: true) {
+            try identity(macID)
+            let scope = try requireGatewayRuntimeActivationScope(plan)
+            guard try scalar("PRAGMA user_version") >= 10 else { throw GatewayPreparationError.incomplete }
+            let current = try loadGatewayRuntimeActivation(accountID: plan.accountID)
+            let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
+            guard current.filesPublished, let retained = current.plan, try retained.encoded == plan.encoded,
+                  try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw GatewayPreparationError.incomplete }
+            if current.jobRegistered { return }
+            try statement("UPDATE gateway_runtime_activation_v1 SET registered=1 WHERE account=? AND digest=? AND registered=0") { row in
+                try bind(plan.accountID, column: 1, row: row); try bind(plan.digest, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+    }
+    private func requireGatewayRuntimeActivationScope(_ plan: GatewayRuntimeActivationPlan) throws
+        -> (journal: GatewayJournalPreparationState, foreground: RuntimeActivationPlan, inventory: InstallationInventory) {
+        guard try scalar("PRAGMA user_version") >= 9 else { throw GatewayPreparationError.incomplete }
+        let journal = try loadGatewayJournalPreparation(accountID: plan.accountID)
+        let activation = try loadRuntimeActivation(accountID: plan.accountID)
+        guard journal.initialized, let intent = journal.intent, activation.jobsRegistered, let foreground = activation.plan,
+              let inventory = try loadInventoryRecord(), intent.id == plan.journalIntentID,
+              try intent.digest == plan.journalIntentDigest else { throw GatewayPreparationError.incomplete }
+        try requireGatewayJournalScope(intent)
+        _ = try plan.proposal(journal: journal, foreground: foreground, inventory: inventory)
+        return (journal, foreground, inventory)
+    }
+    private func loadGatewayRuntimeActivation(accountID: Data) throws -> GatewayRuntimeActivationState {
+        try statement("SELECT account,journal,material,digest,published,registered,record FROM gateway_runtime_activation_v1 ORDER BY account LIMIT 65") { row in
+            var result = GatewayRuntimeActivationState(plan: nil, filesPublished: false, jobRegistered: false), accounts = Set<Data>()
+            while try step(row) == SQLITE_ROW {
+                guard accounts.count < 64 else { throw PreparationStoreError.corruptRecord }
+                let plan: GatewayRuntimeActivationPlan
+                do { plan = try .decode(blob(row, column: 6, maximum: GatewayRuntimeActivationPlan.maximumBytes)) }
+                catch { throw PreparationStoreError.corruptRecord }
+                let account = try blob(row, column: 0, maximum: 16), published = sqlite3_column_int64(row, 4), registered = sqlite3_column_int64(row, 5)
+                guard accounts.insert(account).inserted, plan.accountID == account,
+                      plan.extensions.authority.material.runtime.services.macID == macID,
+                      try blob(row, column: 1, maximum: 16) == plan.journalIntentID,
+                      try blob(row, column: 2, maximum: 16) == plan.extensions.authority.material.materialID,
+                      try blob(row, column: 3, maximum: 32) == plan.digest,
+                      sqlite3_column_type(row, 4) == SQLITE_INTEGER, sqlite3_column_type(row, 5) == SQLITE_INTEGER,
+                      [0,1].contains(published), [0,1].contains(registered), registered == 0 || published == 1 else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                if account == accountID { result = .init(plan: plan, filesPublished: published == 1, jobRegistered: registered == 1) }
+            }
+            return result
+        }
+    }
+
     func gatewayJournalPreparation(accountID: Data) throws -> GatewayJournalPreparationState {
         guard accountID.count == 16 else { throw GatewayPreparationError.invalidRecord }
         return try transaction(write: false) {
@@ -910,7 +1029,7 @@ public final class PreparationIntentStore {
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 10, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 11, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -926,6 +1045,7 @@ public final class PreparationIntentStore {
         if version >= 7 { expected.append("runtime_activation_v1") }
         if version >= 8 { expected.append("gateway_preparation_v1") }
         if version >= 9 { expected.append("gateway_journal_preparation_v1") }
+        if version >= 10 { expected.append("gateway_runtime_activation_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in

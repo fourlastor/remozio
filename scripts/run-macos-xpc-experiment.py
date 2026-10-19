@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "gateway-progress", "gateway-wrong-server", "gateway-wrong-client", "gateway-journal-wrong-server", "gateway-journal-wrong-client", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("gateway-activation-progress", "gateway-activation-wrong-server", "gateway-activation-wrong-client", "journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "gateway-progress", "gateway-wrong-server", "gateway-wrong-client", "gateway-journal-wrong-server", "gateway-journal-wrong-client", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -104,6 +104,14 @@ def experiment(report, swift_build_options=()):
         }))
         with registered_service(domain, service, plist, report):
             cases = [
+                ("gateway-activation-progress", "gateway-activation-progress", trusted, TRUSTED, 0),
+                ("gateway-activation-bytes", "gateway-activation-bytes", trusted, TRUSTED, 0),
+                ("gateway-activation-empty", "gateway-activation-empty", trusted, TRUSTED, 0),
+                ("gateway-activation-nil", "gateway-activation-nil", trusted, TRUSTED, 0),
+                ("gateway-activation-bad-settings", "gateway-activation-bad-settings", trusted, TRUSTED, 0),
+                ("gateway-activation-bad-auth", "gateway-activation-bad-auth", trusted, TRUSTED, 0),
+                ("gateway-activation-wrong-server", "gateway-activation-bytes", trusted, OTHER, 3),
+                ("gateway-activation-wrong-client", "gateway-activation-bytes", other, TRUSTED, 3),
                 ("gateway-progress", "gateway-progress", trusted, TRUSTED, 0),
                 ("gateway-bytes", "gateway-bytes", trusted, TRUSTED, 0),
                 ("gateway-empty", "gateway-empty", trusted, TRUSTED, 0),

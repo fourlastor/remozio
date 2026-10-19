@@ -28,6 +28,17 @@ class ExperimentTests(unittest.TestCase):
             self.assertTrue(runner.case_matches(name, rejected, 3, False))
             self.assertFalse(runner.case_matches(name, rejected, 3, True))
 
+    def test_gateway_activation_controls_distinguish_data_dispatch_and_peer_refusal(self):
+        accepted = subprocess.CompletedProcess([], 0, "accepted", "")
+        rejected = subprocess.CompletedProcess([], 3, "rejected:peer", "")
+        for name in ("gateway-activation-bytes", "gateway-activation-empty", "gateway-activation-nil", "gateway-activation-bad-settings", "gateway-activation-bad-auth"):
+            self.assertTrue(runner.case_matches(name, accepted, 0, True))
+            self.assertFalse(runner.case_matches(name, accepted, 0, False))
+        for name in ("gateway-activation-progress", "gateway-activation-wrong-server", "gateway-activation-wrong-client"):
+            result, code = (accepted, 0) if name.endswith("progress") else (rejected, 3)
+            self.assertTrue(runner.case_matches(name, result, code, False))
+            self.assertFalse(runner.case_matches(name, result, code, True))
+
     def test_journal_data_controls_require_observed_native_dispatch(self):
         accepted = subprocess.CompletedProcess([], 0, "accepted", "")
         for name in ("journal-bytes", "journal-empty", "journal-nil"):

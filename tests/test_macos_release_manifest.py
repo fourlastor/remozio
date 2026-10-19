@@ -81,7 +81,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9], 3: {1: 2}})
+        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -90,8 +90,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5, 6]))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9])
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7]))
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])

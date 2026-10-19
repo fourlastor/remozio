@@ -9,11 +9,15 @@ public enum AdministrativeSetupInterface {
     public static let runtimeVersion: UInt64 = 4
     public static let activationVersion: UInt64 = 5
     public static let gatewayVersion: UInt64 = 6
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion]
+    public static let gatewayActivationVersion: UInt64 = 7
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol AdministrativeSetupXPCProtocol {
+    func gatewayActivationHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func gatewayActivationProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func activateGateway(_ expected: Data, settings: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
     func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void)
     func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void)
     func prepareGateway(_ expected: Data, choices: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -52,6 +56,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var activationReady = false
     private var runtimeReady = false
     private var gatewayReady = false
+    private var gatewayActivationReady = false
     private var asynchronousID: UUID?
     private var asynchronousTask: Task<Void, Never>?
     private var closed = false
@@ -87,6 +92,25 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         }
         changed.1?.cancel()
         if changed.0 { invalidate() }
+    }
+    public func gatewayActivationHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); ready = true; enrollmentReady = true; serviceAccountsReady = true
+                runtimeReady = true; activationReady = true; gatewayReady = true; gatewayActivationReady = true
+            }
+            defer { completed.activity?.close() }
+            onHandshake(); send { reply(AdministrativeSetupInterface.gatewayActivationVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func gatewayActivationProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard gatewayActivationReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.gatewayActivationProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
     }
     public func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
@@ -158,6 +182,52 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
                     do {
                         try Task.checkCancellation()
                         let result = try await owner.resumeGatewayJournal(callerUID: reservation.uid, expected: reservation.progress)
+                        try Task.checkCancellation(); try reservation.activity?.validate()
+                        let bytes = try result.bytes
+                        try reservation.activity?.validate()
+                        finishGatewayOperation(reservation.id, bytes: bytes, failed: false, reply: reply)
+                    } catch { finishGatewayOperation(reservation.id, bytes: nil, failed: true, reply: reply) }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+    public func activateGateway(_ expected: Data, settings: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            // XPC invocation and native rights checks occur synchronously on this exported invocation.
+            // The task captures only the authenticated UID, public progress and release activity.
+            let uid = try verify()
+            let reservation = try lock.withLock { () -> (uid: uid_t, progress: SetupGatewayActivationProgress, settings: GatewayRuntimeActivationSettings, id: UUID, activity: ReleaseActivityToken?, admission: SetupOwnerAsyncWork.Token) in
+                guard !closed, !busy, ready, gatewayActivationReady, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
+                    throw AdministrativeSetupError.unavailable
+                }
+                busy = true
+                let admission: SetupOwnerAsyncWork.Token
+                do { admission = try owner.acquireSetupReplyAdmission() } catch { busy = false; throw error }
+                let activity: ReleaseActivityToken?
+                do { activity = try owner.acquireReleaseActivity() } catch { busy = false; admission.close(); throw error }
+                do {
+                    let progress = try SetupGatewayActivationProgress.decode(expected)
+                    let selected = try GatewayRuntimeActivationSettings.decode(settings)
+                    guard progress.setup.ownerUID == uid, progress.setup.journalInitialized else { throw AdministrativeSetupError.wrongAccount }
+                    try authorize(authorization); try activity?.validate()
+                    let id = UUID(); asynchronousID = id
+                    return (uid, progress, selected, id, activity, admission)
+                } catch { busy = false; activity?.close(); admission.close(); throw error }
+            }
+            lock.withLock {
+                guard !closed, asynchronousID == reservation.id else {
+                    reservation.activity?.close(); reservation.admission.close(); busy = false; asynchronousID = nil; return
+                }
+                asynchronousTask = Task { [self, reservation, reply] in
+                    defer {
+                        lock.withLock {
+                            if asynchronousID == reservation.id { asynchronousID = nil; asynchronousTask = nil; busy = false }
+                        }
+                        reservation.activity?.close(); reservation.admission.close()
+                    }
+                    do {
+                        try Task.checkCancellation()
+                        let result = try await owner.resumeGatewayActivation(callerUID: reservation.uid, expected: reservation.progress, settings: reservation.settings)
                         try Task.checkCancellation(); try reservation.activity?.validate()
                         let bytes = try result.bytes
                         try reservation.activity?.validate()

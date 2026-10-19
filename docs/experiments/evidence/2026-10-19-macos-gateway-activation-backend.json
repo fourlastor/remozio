@@ -1,0 +1,100 @@
+{
+  "experiment": "macos-gateway-activation-backend",
+  "evidenceFormat": 1,
+  "sourceCommit": "d87666f0fe47e0a2936d2661506a2fd1d7bfda53",
+  "recordedAtUTC": "2026-10-19T02:59:01.040095+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationPlan.swift": "367c273ed1842feec4ec533483a56375ec673e9f2fac69309b61f50e9c47e5cf",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationPlanTests.swift": "c5ade73fca1f90837ddf02ee598911d6119bee4205ff77cf79205fee99678a45",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "f14f378c5bd44c9493813d42525f30dbbfcc509577f536282c17ec23865ccc3b",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationStoreTests.swift": "735e14fd5ed3814261080793b8a5a2c7e43c95d9310d0212240829b37e0124c5",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupStoreTests.swift": "50923a6af383c8bb7b064e275367ae0a1526659086bc96cb474afaeffbbd6d8e",
+    "macos/core/Tests/RemozioCoreTests/GatewayPreparationStoreTests.swift": "7e2794f15096401d2769d4392683c5e91afb3ae38f96501600c3f44b9f442ca7",
+    "scripts/generate-macos-release-manifest.py": "11453f22d4458d0cf2a8b35df44bfec98d4969fb8eb309ac588cc29593225dbb",
+    "tests/test_macos_release_manifest.py": "55d834ad22451b11580b16fe58a5ea2c5882750e1aa37ca976725c2ef325d85f",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "64d892c8b069008e6b6568a2e918ddc9503056eeb3fbc05907074551f549043b",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationFiles.swift": "fd733b244d844ecbaf124e24aacb2c4c5a17dcd6f1ed2b192b33221409c4f9bd",
+    "macos/core/Sources/RemozioCore/GatewayRuntimePublication.swift": "436e7e0e563b48201f7cca45d5cb2c76ab02bd611211eba4989762ff7cb20d84",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationFilesTests.swift": "345ddfd5e3cc11fe8eb0aa3ca4da59a1c797a5c79a892260cabaa8461d7c147d",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationOperation.swift": "92c2f743d93e47f6a187b1284d137fd0e2760467b30442806f9063c529a5a75e",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationOperationTests.swift": "7b9559edf08544f885042b41b1a2d32355883e3e7b71b20be6fb97a633ba5bce",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationPrerequisites.swift": "ab4344657f7ddbea4604f391a1c43c2f94a93b067bb452196a137251d88e4f03",
+    "macos/core/Sources/RemozioCore/SetupGatewayActivationProgress.swift": "75d6daff706ebe37dcf9e6d5632dc33be6f93e7b7ffa4b80f41f9dff5fb09ecf",
+    "macos/core/Tests/RemozioCoreTests/SetupGatewayActivationProgressTests.swift": "22c343a1332ddb8988e5d81c0e7d11e1e54e9343f6cbe9b51a9a65c7538531b9",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationRootOperation.swift": "4ea42fe13967e2c9a2b514c8941cff812ddddbe5ae47f0332f914ee2c72f6b72",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationRootOperationTests.swift": "cf096e1590d049edaf48fb3b3558a418783e65c4a3c67885742257ca9023ce37",
+    "macos/core/Sources/RemozioCore/SetupAccountOwner.swift": "a6e2e6aa9861f019a3ed0779aee3df9ca861b8e2b7ed60e6bc2a0bcda545a4a1",
+    "macos/core/Sources/RemozioCore/GatewaySetupActivationOperations.swift": "00ef6bc4292901ff3571215703934249a474564a80cd2b19adbbbb3cb207b319",
+    "macos/core/Tests/RemozioCoreTests/GatewayActivationAsyncOwnerTests.swift": "7364982c73df31a68fd2c5884a361954d7f643600847590330230744b74cc427",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupXPCEndpoint.swift": "f23656e594e6494eaa37f2db7fbe061869bd5efe2d9da94b8fc7cd373b900f74",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupChannel.swift": "a768dac08477a97d471abc0a4e9c043769ac0bedda4a3d1bbcc62609267358b3",
+    "experiments/macos/Sources/XPCProbe/Probe.swift": "2375446a8de91a2c9bcc013a9635191109c9220195cc39d649caadb364f26f7c",
+    "scripts/run-macos-xpc-experiment.py": "f2550fd0a0861757a642df38221bf37da6097367d5e33e6ad7d977e7267e1fff",
+    "tests/test_xpc_runner.py": "c20c08242d0c0bdddaa28d41870e7b2027fc5d4f07e39ce2b514ca249695e85b",
+    "macos/core/Tests/RemozioCoreTests/AdministrativeSetupChannelTests.swift": "27de9ba4fb0e5f75d10e36f25ceb3a69a3a5ad5c721f606a0d6299b249d09eeb",
+    "macos/core/Tests/RemozioCoreTests/GatewayActivationXPCTests.swift": "b6ddd7cca80ab07416b7a6ee95ee3af28e96f767244084de3765eaa64b89fada",
+    "docs/experiments/macos-gateway-activation-backend.md": "a72b278c07cbf0672bfd2b79c590c11bdf3a2d7d426c27bb91d613471da96669"
+  },
+  "validation": {
+    "nativeCoreTests": 2796,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "liveXPC": {
+      "sourceCommit": "d87666f0fe47e0a2936d2661506a2fd1d7bfda53",
+      "recordedAtUTC": "2026-10-19T02:58:33.868815+00:00",
+      "exitCode": 0,
+      "status": "passed",
+      "cases": 81,
+      "activationCases": 8,
+      "allPassed": true,
+      "serviceAbsent": true,
+      "inputsUnchanged": true,
+      "elapsedSeconds": 37.34,
+      "reportSHA256": "5fcf7f141be4dbba94b54c14e13bc56b269cb08f582374807fa6f1fe03ea6158",
+      "nativeAdministratorRightsTested": false,
+      "rootServiceTested": false
+    },
+    "focusedTestsPassed": true,
+    "focusedLogSHA256": "ad0d7f36617fd0c182d51c9fc5349c2db4fec443ff21848e1eee9dcef6c7ca3e",
+    "nativeLogSHA256": "2508c5726fa1581684ad79d132944597b55c55e7ced5cd6329555b4837b9f30a",
+    "ATCResultSHA256": "f466f80ff2d2ced0607a92b19370cac1b159f35864c5cac8614a39ce4302c8bd",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Retain exact Gateway activation plans, publish validated files, enroll inventory and register the exact job through authenticated Setup IPC7.",
+    "Preserve the public setup reservation guard across asynchronous Gateway activation and cancellation."
+  ],
+  "limits": [
+    "Saved publication and registration markers do not establish current runtime or phone health.",
+    "Production native factory selection and visible app controls follow separately.",
+    "No installed service, secret, physical device or frozen recovery artifact was used."
+  ]
+}
