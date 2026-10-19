@@ -22,6 +22,8 @@ targets:
       path: Remozio/Info.plist
       properties:
         CFBundleDisplayName: Remozio
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: Remozio uses the camera to scan the pairing QR code that your computer shows.

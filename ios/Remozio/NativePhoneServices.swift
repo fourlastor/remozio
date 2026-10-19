@@ -38,10 +38,15 @@ final class NativePhoneServices: NSObject, PhoneServices {
 /// Full-screen camera view that returns the first QR code it reads, or nil on Cancel.
 private final class QRScannerController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     private let session = AVCaptureSession()
+    // startRunning and stopRunning block, so they run on this queue and never on the main thread.
+    private let sessionQueue = DispatchQueue(label: "dev.remozio.scanner")
+    private let preview: AVCaptureVideoPreviewLayer
+    private var configured = false
     private var onFinish: ((String?) -> Void)?
 
     init(onFinish: @escaping (String?) -> Void) {
         self.onFinish = onFinish
+        preview = AVCaptureVideoPreviewLayer(session: session)
         super.init(nibName: nil, bundle: nil)
         modalPresentationStyle = .fullScreen
     }
@@ -51,19 +56,7 @@ private final class QRScannerController: UIViewController, AVCaptureMetadataOutp
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        guard let camera = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: camera),
-              session.canAddInput(input) else { return finish(nil) }
-        session.addInput(input)
-        let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return finish(nil) }
-        session.addOutput(output)
-        output.setMetadataObjectsDelegate(self, queue: .main)
-        output.metadataObjectTypes = [.qr]
-
-        let preview = AVCaptureVideoPreviewLayer(session: session)
         preview.videoGravity = .resizeAspectFill
-        preview.frame = view.layer.bounds
         view.layer.addSublayer(preview)
 
         let cancel = UIButton(type: .system, primaryAction: UIAction(title: "Cancel") { [weak self] _ in self?.finish(nil) })
@@ -74,8 +67,30 @@ private final class QRScannerController: UIViewController, AVCaptureMetadataOutp
             cancel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
             cancel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
         ])
+
+        guard let camera = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: camera),
+              session.canAddInput(input) else { return }
+        session.addInput(input)
+        let output = AVCaptureMetadataOutput()
+        guard session.canAddOutput(output) else { return }
+        session.addOutput(output)
+        output.setMetadataObjectsDelegate(self, queue: .main)
+        output.metadataObjectTypes = [.qr]
+        configured = true
         let session = session
-        DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
+        sessionQueue.async { session.startRunning() }
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        preview.frame = view.layer.bounds
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        // A failed camera setup can only be dismissed once the presentation has finished.
+        if !configured { finish(nil) }
     }
 
     func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput objects: [AVMetadataObject], from connection: AVCaptureConnection) {
@@ -86,7 +101,10 @@ private final class QRScannerController: UIViewController, AVCaptureMetadataOutp
     private func finish(_ text: String?) {
         guard let onFinish else { return }
         self.onFinish = nil
-        session.stopRunning()
-        dismiss(animated: true) { onFinish(text) }
+        let session = session
+        sessionQueue.async {
+            session.stopRunning()
+            DispatchQueue.main.async { self.dismiss(animated: true) { onFinish(text) } }
+        }
     }
 }
