@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import RemozioHostCore
 
 /// A local diagnostic for the last publication turn. It does not confirm a mapping or phone delivery.
 public enum AuthorityPhonePushPublicationDiagnostic: Sendable, Equatable {
