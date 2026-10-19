@@ -15,6 +15,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -23,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -92,13 +92,20 @@ private fun push(forward: Boolean): ContentTransform {
 @Composable
 private fun ComputersScreen(onAdd: () -> Unit) {
     val palette = LocalPalette.current
-    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-        Spacer(Modifier.height(44.dp))
-        BasicText("Computers", style = Type.largeTitle.copy(color = palette.text))
+    // The screen scrolls, so at the largest text sizes Add computer stays reachable; when there is room, the
+    // empty state sits in the middle of the screen.
+    BoxWithConstraints(Modifier.fillMaxSize()) {
         Column(
-            Modifier.weight(1f).fillMaxWidth(),
+            Modifier.fillMaxWidth().heightIn(min = maxHeight).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.SpaceBetween,
+        ) {
+        Column {
+            Spacer(Modifier.height(44.dp))
+            BasicText("Computers", style = Type.largeTitle.copy(color = palette.text))
+        }
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
         ) {
             Badge(Icons.laptop, size = 96.dp, iconSize = 44.dp)
             Spacer(Modifier.height(20.dp))
@@ -110,7 +117,8 @@ private fun ComputersScreen(onAdd: () -> Unit) {
             )
             Spacer(Modifier.height(28.dp))
             PrimaryButton("Add computer", "add-computer", onClick = onAdd)
-            Spacer(Modifier.height(56.dp))
+        }
+        Spacer(Modifier.height(56.dp))
         }
     }
 }
@@ -134,8 +142,9 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
         withFrameNanos { }
         scroll.animateScrollTo(scroll.maxValue)
     }
-    // A tap outside the text field closes the keyboard, and the content scrolls above it while it is open.
-    Column(Modifier.fillMaxSize().imePadding().pointerInput(Unit) { detectTapGestures { focus.clearFocus() } }) {
+    // A tap outside the text field closes the keyboard. The root safeDrawingPadding includes the keyboard inset,
+    // so the content scrolls above the keyboard while it is open.
+    Column(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures { focus.clearFocus() } }) {
         // Back stays outside the scrolling column, so scrolling to a result never hides it.
         Row(
             Modifier.padding(start = 8.dp, top = 4.dp).clip(RoundedCornerShape(8.dp)).testTag("back")
@@ -164,10 +173,16 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
                     if (text.isEmpty()) BasicText("remozio-pairing:v1:…", style = Type.code.copy(color = palette.secondary))
                     BasicTextField(
                         value = text,
-                        onValueChange = {
-                            // A complete invitation typed or pasted into the field is read at once; anything else
-                            // waits for Read invitation, so a half-typed text never shows as invalid.
-                            if (previewInvitation(it) is InvitationPreview.Parsed) show(it) else { text = it; preview = null }
+                        onValueChange = { input ->
+                            val parsed = previewWhileTyping(input)
+                            if (parsed != null) {
+                                focus.clearFocus()
+                                text = input
+                                preview = parsed
+                            } else {
+                                text = input
+                                preview = null
+                            }
                         },
                         textStyle = Type.code.copy(color = palette.text),
                         cursorBrush = SolidColor(palette.link),
@@ -177,7 +192,7 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
             }
             PrimaryButton("Read invitation", "read", enabled = text.isNotBlank()) { show(text) }
             // Fade only: an expanding result would still grow while the screen scrolls to its end.
-            AnimatedVisibility(preview != null, enter = fadeIn(tween(250))) {
+            AnimatedVisibility(preview != null, enter = fadeIn(tween(250)), exit = fadeOut(tween(150))) {
                 when (val current = preview) {
                     null -> Unit
                     InvitationPreview.Invalid -> InvalidInvitation()
@@ -289,8 +304,8 @@ private fun Badge(icon: ImageVector, size: Dp, iconSize: Dp) {
 private fun Tile(icon: ImageVector, label: String, tag: String, modifier: Modifier, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Column(
-        modifier.clip(CardShape).testTag(tag).clickable(role = Role.Button, onClick = onClick)
-            .background(palette.surface).padding(vertical = 18.dp),
+        modifier.clip(CardShape).testTag(tag).background(palette.surface)
+            .clickable(role = Role.Button, onClick = onClick).padding(vertical = 18.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -304,7 +319,7 @@ private fun PrimaryButton(label: String, tag: String, enabled: Boolean = true, o
     val palette = LocalPalette.current
     Box(
         Modifier.fillMaxWidth().height(50.dp).clip(CardShape).testTag(tag).alpha(if (enabled) 1f else 0.4f)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick).background(palette.accent),
+            .background(palette.accent).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         BasicText(label, style = Type.button.copy(color = palette.onAccent))
