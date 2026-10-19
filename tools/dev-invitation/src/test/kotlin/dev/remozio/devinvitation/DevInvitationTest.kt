@@ -1,6 +1,7 @@
 package dev.remozio.devinvitation
 
 import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
 import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
@@ -59,7 +60,8 @@ class DevInvitationTest {
         val pixels = IntArray(image.width * image.height)
         image.getRGB(0, 0, image.width, image.height, pixels, 0, image.width)
         val bitmap = BinaryBitmap(HybridBinarizer(RGBLuminanceSource(image.width, image.height, pixels)))
-        assertEquals(text, QRCodeReader().decode(bitmap).text)
+        // The image is generated, so skip ZXing's finder-pattern search; it misses about 1 in 30 random codes.
+        assertEquals(text, QRCodeReader().decode(bitmap, mapOf(DecodeHintType.PURE_BARCODE to true)).text)
     }
 
     private fun onP256(point: ByteArray): Boolean {
