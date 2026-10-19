@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-core:test"]
+COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-core:test", ":dev-invitation:test"]
 ANDROID_TASKS = [":android-app:testDebugUnitTest", ":android-app:assembleDebug", ":android-app:lintDebug"]
 
 

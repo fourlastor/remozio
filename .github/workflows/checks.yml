@@ -172,7 +172,7 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
-      - run: ./gradlew :protocol-kotlin:jvmTest :phone-core:test
+      - run: ./gradlew :protocol-kotlin:jvmTest :phone-core:test :dev-invitation:test
   android:
     name: Android build
     runs-on: ubuntu-24.04

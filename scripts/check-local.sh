@@ -10,7 +10,7 @@ case "$host" in
 esac
 
 ./scripts/check.sh
-set -- :protocol-kotlin:jvmTest :phone-core:test
+set -- :protocol-kotlin:jvmTest :phone-core:test :dev-invitation:test
 if [ "$host" = Darwin ]; then
     # check.sh builds the native Mac peers required by this integration task.
     set -- "$@" :phone-core:approvalFlowTest
