@@ -19,7 +19,7 @@ final class GatewaySettingsConsumerPreflightTests: XCTestCase, @unchecked Sendab
                 formats.append(control)
                 if code != .app {
                     let writers: Set<UInt64> = code == .setupController ? [1] : []
-                    let fence = try ReleaseFormat(name: GatewayRuntimeSettingsFence.formatName, readers: [1], writers: writers)
+                    let fence = try ReleaseFormat(name: GatewayRuntimeSettingsFence.formatName, readers: GatewayRuntimeSettingsFence.supportedVersions, writers: writers)
                     formats.append(fence)
                 }
             }
@@ -112,7 +112,7 @@ final class GatewaySettingsConsumerPreflightTests: XCTestCase, @unchecked Sendab
             let owner = try f.owner(role: role), access = try GatewaySettingsConsumerAccess(owner: owner, services: services,
                 verifyCurrent: { XCTFail("Dedicated process guard must precede scope access") })
             XCTAssertThrowsError(try GatewaySettingsConsumerXPCListener(consumerCode: entry(role.codeRole), setupCode: entry(.setupController),
-                release: release(role: role), access: access, acquireActivity: { XCTFail(); return nil }))
+                release: release(role: role), access: access, acquireActivity: { XCTFail(); throw JournalLeaseError.invalidated }))
             try await owner.close()
         }
     }

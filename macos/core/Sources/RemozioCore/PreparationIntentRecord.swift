@@ -4,7 +4,7 @@ import Foundation
 enum PreparationRecordError: Error, Equatable { case invalidRecord, corruptRecord }
 enum PreparationRecordPhase: UInt64, Codable { case intent = 1, copyRecorded = 2, abandoned = 3 }
 
-struct PreparationFileIdentity: Codable, Equatable {
+struct PreparationFileIdentity: Codable, Equatable, Sendable {
     let device: UInt32
     let inode: UInt64
 }
