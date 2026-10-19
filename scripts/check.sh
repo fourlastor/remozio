@@ -27,6 +27,7 @@ run_stage 'PR watcher Python tests' python3 -m unittest discover -s .agents/skil
 if [ "$(uname -s)" = Darwin ]; then
     run_stage 'Swift build: experiments/macos' swift build --package-path experiments/macos --triple arm64-apple-macosx26.0
     run_stage 'Swift build: experiments/key-custody' swift build --package-path experiments/key-custody --triple arm64-apple-macosx26.0 --disable-keychain --disable-netrc
+    run_stage 'Swift test: experiments/system-keychain' swift test --package-path experiments/system-keychain --triple arm64-apple-macosx26.0 --disable-keychain --disable-netrc
     run_stage run-native-approval-relay-experiment python3 scripts/run-native-approval-relay-experiment.py
     run_stage check-enclave-timeout python3 scripts/check-enclave-timeout.py
     run_stage run-transport-file-tls-experiment python3 scripts/run-transport-file-tls-experiment.py
