@@ -4,6 +4,11 @@ This experiment establishes a few Linux caller primitives with disposable, ordin
 It does **not** establish a complete production caller identity mechanism, current executable
 incarnation guarantee, or parity with the macOS audit-token checks.
 
+The later [controlled monitor experiment](linux-caller-monitor.md) exercises
+supervised fixture launch, continuous event invalidation and a simulated stopped
+handoff. It has separate source-bound evidence and does not extend the claims of
+this original four-case report.
+
 ## Reproduce
 
 The measured configuration is Ubuntu 25.10, x86_64, Linux 6.17.0-41-generic, without elevation.
