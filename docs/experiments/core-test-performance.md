@@ -55,3 +55,39 @@ trace, privilege change or memory dump is used. Test output and exit status,
 wall/child CPU, sampling status and the stack text are retained. Sampling failure
 fails the diagnostic without hiding the actual test result. This is another
 measurement, not a change to the production verification sequence.
+
+## Owned stack sample
+
+[Run 39249168553](https://github.com/fourlastor/remozio/actions/runs/39249168553)
+on `d202c966e22688c1b8773631e8efd7a77ba13ad2` sampled the unchanged
+complete-operation method and passed its single selected test in 58.232 seconds.
+The sample targeted the recorded owned XCTest PID, covered ten seconds of its
+early execution, and retained 6,714 main-thread observations. This instrumented
+run is not a timing baseline: sampling adds overhead and does not cover every
+phase of the test.
+
+Counting each observation once per function (without recursive double counting),
+`loadRuntimeActivation` appeared in 38.8% of main-thread observations, CBOR decode
+in 23.0%, CBOR encode in 21.2%, XPC policy construction in 22.1%, and native
+requirement parsing in 10.7%. These paths overlap. The evidence points toward
+repeated canonical plan reconstruction, not fixture setup or SQL execution as
+the dominant cost. No scope check or durability setting has been removed.
+
+## First bounded computation experiment
+
+The first candidate replaces the CBOR reader's temporary five-element array and
+`contains` call with an integer switch at the same point in parsing. The sampled
+stacks directly include allocation and generic collection work at that line.
+The allowed major types, special simple-value handling, argument parsing order,
+limits and error precedence remain unchanged. New regressions exhaust unsupported
+major-type headers and the accepted major-7 headers; all existing vectors and
+malformed-input checks continue to run.
+
+A standalone debug-build A/B benchmark compares the exact baseline decoder with
+this candidate on fixed synthetic scalar-heavy and nested canonical inputs. It
+builds outside timing, warms both executables, alternates balanced trial order,
+and retains input hashes, result checksums, raw timings and toolchain details.
+These are synthetic decoder measurements, not retained-state or full-suite
+speedups. A native test-class comparison is required before attributing any
+check-time improvement to this change. Memoizing plans or policy decisions is
+outside this first experiment.

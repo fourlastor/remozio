@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 2
       - name: Record host and build the native tests
         run: |
           mkdir -p .build/core-test-profile
@@ -33,6 +35,19 @@ jobs:
             python3 scripts/profile-core-test.py \
             --bundle macos/core/.build/debug/RemozioCorePackageTests.xctest \
             --output .build/core-test-profile/sample
+      - name: Test shared protocol regressions
+        run: |
+          set -o pipefail
+          swift test --package-path protocol/swift \
+            --triple arm64-apple-macosx26.0 --jobs 4 --force-resolved-versions \
+            2>&1 | tee .build/core-test-profile/protocol-tests.log
+      - name: Compare baseline and candidate CBOR decoding
+        run: |
+          python3 scripts/benchmark-cbor-decode.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --baseline d202c966e22688c1b8773631e8efd7a77ba13ad2 \
+            --target arm64-apple-macosx26.0 \
+            --output .build/core-test-profile/cbor-decode
       - name: Retain profile and failure diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
