@@ -14,11 +14,11 @@ import kotlin.test.assertTrue
 
 class DevInvitationTest {
     @Test fun exportedTextRoundTripsThroughTheStrictParser() {
-        val invitation = newInvitation("money-maker (dev)")
+        val invitation = newInvitation("dev-box (dev)")
         val imported = PairingInvitation.importText(invitation.exportText())
         assertEquals(invitation.fingerprint(), imported.fingerprint())
         assertEquals(hex(invitation.macID.copyBytes()), hex(imported.macID.copyBytes()))
-        assertEquals("money-maker (dev)", imported.label)
+        assertEquals("dev-box (dev)", imported.label)
         assertEquals(1uL, imported.minimumEnvelopeVersion)
     }
 
@@ -43,7 +43,7 @@ class DevInvitationTest {
     }
 
     @Test fun hostnameLabelsAlwaysPassTheParserRules() {
-        val hostnames = listOf(null, "", "   ", "money-maker", "host\u0007name", "evil‮eman", "café x",
+        val hostnames = listOf(null, "", "   ", "dev-box", "host\u0007name", "evil‮eman", "café x",
             "\u0000\u0085‏", "x".repeat(400), "😀emoji")
         for (hostname in hostnames) {
             val label = labelFromHostname(hostname)
