@@ -9,7 +9,7 @@ appId: dev.remozio.ios
 - tapOn:
     id: "invitation-text"
 - inputText: "remozio-pairing:v1:pwABAVABAQEBAQEBAQEBAQEBAQEBAlACAgICAgICAgICAgICAgICA2ZTdHVkaW8EWEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9QVYQQR88nsYjQNPfopSOAMEtRrDwIlp4nfyGzWmC0j8R2aZeAd3VRDbjtBAKT2axp90MNu6fa3mPOmCKZ4Et50ieHPRBgE"
-- tapOn: "Read invitation"
+# A complete invitation is read as soon as it is entered, and the keyboard closes.
 - assertVisible: "Studio"
 - assertVisible: "01010101010101010101010101010101"
 - assertVisible: "02020202020202020202020202020202"
@@ -33,6 +33,8 @@ appId: dev.remozio.ios
 - tapOn:
     id: "invitation-text"
 - inputText: "remozio-pairing:v2:not-an-invitation"
+# A tap outside the field closes the keyboard, which covers Read invitation.
+- tapOn: "Invitation text"
 - tapOn: "Read invitation"
 - assertVisible: "This is not a valid Remozio invitation."
 - assertNotVisible: "Studio"

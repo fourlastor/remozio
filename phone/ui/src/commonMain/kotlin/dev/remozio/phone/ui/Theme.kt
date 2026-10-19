@@ -53,7 +53,7 @@ internal object Type {
     val caption = TextStyle(fontSize = 13.sp, lineHeight = 18.sp)
     val chip = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
     val code = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp)
-    val fingerprint = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+    val fingerprint = TextStyle(fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Medium, lineHeight = 28.sp)
 }
 
 @Composable

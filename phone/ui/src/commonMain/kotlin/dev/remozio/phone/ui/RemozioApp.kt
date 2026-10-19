@@ -4,7 +4,6 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -13,6 +12,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
@@ -47,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -132,7 +134,8 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
         withFrameNanos { }
         scroll.animateScrollTo(scroll.maxValue)
     }
-    Column(Modifier.fillMaxSize()) {
+    // A tap outside the text field closes the keyboard, and the content scrolls above it while it is open.
+    Column(Modifier.fillMaxSize().imePadding().pointerInput(Unit) { detectTapGestures { focus.clearFocus() } }) {
         // Back stays outside the scrolling column, so scrolling to a result never hides it.
         Row(
             Modifier.padding(start = 8.dp, top = 4.dp).clip(RoundedCornerShape(8.dp)).testTag("back")
@@ -161,7 +164,11 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
                     if (text.isEmpty()) BasicText("remozio-pairing:v1:…", style = Type.code.copy(color = palette.secondary))
                     BasicTextField(
                         value = text,
-                        onValueChange = { text = it; preview = null },
+                        onValueChange = {
+                            // A complete invitation typed or pasted into the field is read at once; anything else
+                            // waits for Read invitation, so a half-typed text never shows as invalid.
+                            if (previewInvitation(it) is InvitationPreview.Parsed) show(it) else { text = it; preview = null }
+                        },
                         textStyle = Type.code.copy(color = palette.text),
                         cursorBrush = SolidColor(palette.link),
                         modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp).testTag("invitation-text"),
@@ -169,7 +176,8 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
                 }
             }
             PrimaryButton("Read invitation", "read", enabled = text.isNotBlank()) { show(text) }
-            AnimatedVisibility(preview != null, enter = fadeIn(tween(250)) + expandVertically(tween(250))) {
+            // Fade only: an expanding result would still grow while the screen scrolls to its end.
+            AnimatedVisibility(preview != null, enter = fadeIn(tween(250))) {
                 when (val current = preview) {
                     null -> Unit
                     InvitationPreview.Invalid -> InvalidInvitation()
@@ -198,7 +206,7 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed) {
             }
             Separator()
             // The fingerprint is the value the user compares with the computer, so it comes right after the name,
-            // in groups of eight that can be read one at a time, with that comparison as its helper line.
+            // in a grid of eight-character groups that can be compared one at a time, with that comparison as its helper line.
             BasicText("Fingerprint", style = Type.caption.copy(color = palette.secondary))
             Fingerprint(preview.fingerprint)
             BasicText("Must match the fingerprint that the computer shows.", style = Type.caption.copy(color = palette.secondary))
@@ -225,9 +233,10 @@ private fun Fingerprint(fingerprint: String) {
     val palette = LocalPalette.current
     val groups = fingerprint.split('-')
     Column(Modifier.fillMaxWidth().testTag("fingerprint"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (row in groups.chunked(4)) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                for (group in row) BasicText(group, style = Type.fingerprint.copy(color = palette.text))
+        // Two groups per row: four groups of eight do not fit the width of a phone at this size.
+        for (row in groups.chunked(2)) {
+            Row(Modifier.fillMaxWidth()) {
+                for (group in row) BasicText(group, Modifier.weight(1f), style = Type.fingerprint.copy(color = palette.text))
             }
         }
     }
