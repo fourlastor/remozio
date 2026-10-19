@@ -148,4 +148,35 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
         XCTAssertNotNil(cap.publication); XCTAssertTrue(try journal.validatePeer(h.binding)); try h.assertCheckpoint()
     }
 
+    func testSuspensionStopsAdmissionsAndMatchingRestorationKeepsTheProviderAndCandidate() throws {
+        let h = try AuthorityPhonePushRegistrationTests.Harness(configureGateway: false, gatewayLedgerEnabled: false)
+        let journal = AuthorityJournal(requests: h.owner); defer { try? journal.close() }
+        let constructions = PushSignCount()
+        let cap = capability(h, journal, make: { _ in constructions.increment(); return h.provider }), options = try options(h)
+        let handler = cap.registrationProvider(), recovery = cap.recoveryProvider(), offer = try h.offer()
+        try cap.install(options, commitDigest: commit, verifyCurrent: {})
+        guard case .prepared(_, let original) = try journal.withRequests({ try handler($0, h.binding, offer, { _ in }) }) else { return XCTFail() }
+        let checkpoint = try h.store.read()
+        cap.suspend(); XCTAssertNil(cap.publication); XCTAssertNil(cap.installedCommitDigest)
+        guard case .outcome(_, .unavailable) = try journal.withRequests({ try handler($0, h.binding, offer, { _ in }) }) else { return XCTFail() }
+        XCTAssertEqual(try h.store.read(), checkpoint)
+        XCTAssertThrowsError(try cap.install(self.options(h), commitDigest: commit, verifyCurrent: {}))
+        XCTAssertTrue(try cap.install(options, commitDigest: commit, verifyCurrent: {})); XCTAssertEqual(constructions.value, 1)
+        let resume = PhonePushRecoveryFrame.resume(correlationID: offer.correlationID,
+            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+        guard case .state(_, let retained) = try journal.withRequests({ try recovery($0, h.binding, resume, { _ in }) }) else { return XCTFail() }
+        XCTAssertEqual(retained.metadata, original); try h.assertCheckpoint(); XCTAssertTrue(try journal.validatePeer(h.binding))
+    }
+
+    func testInitiallyConfiguredLegacyStartupKeepsItsExistingOwnerContract() throws {
+        let h = try AuthorityPhonePushRegistrationTests.Harness(configureGateway: false, checkpointed: false)
+        let journal = AuthorityJournal(requests: h.owner); defer { try? journal.close() }
+        XCTAssertThrowsError(try h.owner.requirePairingCheckpoint())
+        let cap = capability(h, journal), options = try options(h)
+        XCTAssertTrue(try cap.installInitialConfiguration(options, configurationDigest: commit))
+        let handler = cap.registrationProvider(), offer = try h.offer()
+        guard case .prepared = try journal.withRequests({ try handler($0, h.binding, offer, { _ in }) }) else { return XCTFail() }
+        XCTAssertTrue(try journal.validatePeer(h.binding))
+    }
+
 }

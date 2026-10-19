@@ -7,6 +7,11 @@ struct TransportWakeAttempt: Sendable {
     let start: @Sendable () async throws -> Void
     let poll: @Sendable () async throws -> Void
     let close: @Sendable () async -> Void
+    let intervalMilliseconds: UInt64?
+    init(start: @escaping @Sendable () async throws -> Void, poll: @escaping @Sendable () async throws -> Void,
+         close: @escaping @Sendable () async -> Void, intervalMilliseconds: UInt64? = nil) {
+        self.start = start; self.poll = poll; self.close = close; self.intervalMilliseconds = intervalMilliseconds
+    }
 }
 
 private final class TransportWakeOwnership: Sendable {
@@ -139,6 +144,8 @@ public actor TransportWakeRunner {
             do {
                 let attempt = try await makeAttempt()
                 guard try ownership.retain(attempt) else { return }
+                let pollInterval = attempt.intervalMilliseconds ?? interval
+                guard (10...60_000).contains(pollInterval) else { throw TransportWakeRuntimeError.invalidConfiguration }
                 try Task.checkCancellation()
                 try await attempt.start()
                 guard !ownership.stopping, !Task.isCancelled else { return }
@@ -146,7 +153,7 @@ public actor TransportWakeRunner {
                 while !ownership.stopping, !Task.isCancelled {
                     try await attempt.poll()
                     retry = initialRetry
-                    try await Task.sleep(for: .milliseconds(interval))
+                    try await Task.sleep(for: .milliseconds(pollInterval))
                 }
                 return
             } catch {

@@ -46,7 +46,8 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit
+        case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
         case transportIdentity(ownerUID: uid_t, groupID: gid_t)
@@ -55,12 +56,16 @@ public enum AdministrativeSetupPublication {
         case presenceClient(ownerUID: uid_t), pairingClient(ownerUID: uid_t), frontendClient(ownerUID: uid_t)
         var name: String {
             switch self {
+            case .authorityGatewayRuntime: "authority-gateway-runtime.cbor"
+            case .transportGatewayRuntime: "transport-gateway-runtime.cbor"
+            case .gatewayRuntimeCommit: "gateway-runtime-commit.cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .gatewayMaterial: "gateway-material.cbor"
             case .gatewayConfiguration: "gateway-host.cbor"
+            case .gatewayJournalSetup: "gateway-journal-setup.cbor"
             case .gatewayJournalService: GatewayJournalSetupServiceConfiguration.fileName
             case .gatewayProvider: "gateway-provider.json"
             case .gatewayReceiptKey: "gateway-receipt-key.cbor"
@@ -83,7 +88,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .gatewayConfiguration, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }

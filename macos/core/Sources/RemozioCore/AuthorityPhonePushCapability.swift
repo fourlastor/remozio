@@ -12,6 +12,7 @@ final class AuthorityPhonePushCapability: Sendable {
     }
     private struct State {
         var installed: Installed?
+        var available = false
         var installing = false
         var closed = false
     }
@@ -27,15 +28,25 @@ final class AuthorityPhonePushCapability: Sendable {
          makeProvider: @escaping @Sendable (AuthorityPhonePushStartupConfiguration) throws -> AuthorityPhonePushRegistration) {
         self.journal = journal; self.registration = registration; self.clock = clock; self.wall = wall; self.makeProvider = makeProvider
     }
-    var publication: AuthorityPhonePushPublication? { state.withLock { $0.closed ? nil : $0.installed?.publication } }
-    var installedCommitDigest: Data? { state.withLock { $0.closed ? nil : $0.installed?.commitDigest } }
+    var publication: AuthorityPhonePushPublication? { state.withLock { ($0.closed || !$0.available) ? nil : $0.installed?.publication } }
+    var installedCommitDigest: Data? { state.withLock { ($0.closed || !$0.available) ? nil : $0.installed?.commitDigest } }
 
     /// Install once without changing request deadlines, pairing, listener ownership or the running clock.
     /// Matching retries keep the existing provider. Settings changes need a separate explicit transition.
     @discardableResult
     func install(_ options: AuthorityPhonePushStartupConfiguration, commitDigest: Data,
                  verifyCurrent: () throws -> Void) throws -> Bool {
+        try install(options, commitDigest: commitDigest, configureLedger: true, verifyCurrent: verifyCurrent)
+    }
+    /// Startup already opened the configured ledger. Preserve its existing request-owner and legacy startup behavior.
+    @discardableResult
+    func installInitialConfiguration(_ options: AuthorityPhonePushStartupConfiguration, configurationDigest: Data) throws -> Bool {
+        try install(options, commitDigest: configurationDigest, configureLedger: false, verifyCurrent: {})
+    }
+    private func install(_ options: AuthorityPhonePushStartupConfiguration, commitDigest: Data, configureLedger: Bool,
+                         verifyCurrent: () throws -> Void) throws -> Bool {
         guard commitDigest.count == 32 else { throw GatewayPreparationError.invalidRecord }
+        try Task.checkCancellation()
         let previous = try state.withLock { state in
             guard !state.closed else { throw AuthorityWakePublisherError.closed }
             guard !state.installing else { throw AuthorityWakePublisherError.busy }
@@ -44,15 +55,16 @@ final class AuthorityPhonePushCapability: Sendable {
                     throw GatewayPreparationError.changedScope
                 }
             }
-            state.installing = true; return state.installed
+            state.installing = true; return (installed: state.installed, available: state.available)
         }
         defer { state.withLock { $0.installing = false } }
         try verifyCurrent()
-        if previous != nil {
+        if previous.installed != nil, previous.available {
             try state.withLock { guard !$0.closed else { throw AuthorityWakePublisherError.closed } }
             return false
         }
-        let provider = try makeProvider(options), expected = try options.registrationPolicy(registration)
+        let provider = try previous.installed?.publication.provider ?? makeProvider(options)
+        let expected = try options.registrationPolicy(registration)
         guard provider.policy.registration == expected.registration, provider.policy.projectID == expected.projectID,
               provider.policy.senderID == expected.senderID, provider.policy.packageName == expected.packageName else {
             throw GatewayPreparationError.changedScope
@@ -60,13 +72,16 @@ final class AuthorityPhonePushCapability: Sendable {
         let publication = try AuthorityPhonePushPublication(provider: provider, gatewayPublicKey: options.gatewayReceiptPublicKey, wallTime: wall)
         let moment = try clock()
         try state.withLock { guard !$0.closed else { throw AuthorityWakePublisherError.closed } }
-        _ = try journal.enableGatewayPolicy(options.journalPolicy(clockEpoch: moment.epoch), macID: registration.macID,
-            accountID: registration.accountID, verifyCurrent: verifyCurrent)
+        if configureLedger {
+            _ = try journal.enableGatewayPolicy(options.journalPolicy(clockEpoch: moment.epoch), macID: registration.macID,
+                accountID: registration.accountID, verifyCurrent: verifyCurrent)
+        }
         try journal.withRequests { [clock] owner in try owner.preparePhonePushRegistration(provider, now: clock()) }
-        try verifyCurrent()
+        try verifyCurrent(); try Task.checkCancellation()
         try state.withLock {
             guard !$0.closed else { throw AuthorityWakePublisherError.closed }
             $0.installed = Installed(options: options, publication: publication, commitDigest: commitDigest)
+            $0.available = true
         }
         return true
     }
@@ -89,5 +104,7 @@ final class AuthorityPhonePushCapability: Sendable {
         }
     }
     /// Stop future optional admissions. The service still owns any admitted journal work until it settles.
-    func close() { state.withLock { $0.closed = true; $0.installed = nil } }
+    func close() { state.withLock { $0.closed = true; $0.available = false; $0.installed = nil } }
+    /// A missing or invalid optional record stops future admissions. Matching verified metadata can restore the same provider.
+    func suspend() { state.withLock { $0.available = false } }
 }

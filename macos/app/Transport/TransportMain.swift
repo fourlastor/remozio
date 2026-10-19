@@ -27,7 +27,8 @@ struct TransportMain {
             }
         }
         catch { fail("Transport startup requires protected configuration and the configured service account.", code: EX_CONFIG) }
-        let task = Task { try await run(configuration, wake: wake, relayPort: relayPort, pairing: pairing) }
+        let optionalWakePath = CommandLine.arguments[1] == "--pairing-configuration" && wake == nil ? CommandLine.arguments[2] : nil
+        let task = Task { try await run(configuration, wake: wake, relayPort: relayPort, pairing: pairing, optionalWakePath: optionalWakePath) }
         signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
         let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -45,16 +46,17 @@ struct TransportMain {
         }
     }
 
-    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?, pairing: TransportPairingControlConfiguration?) async throws {
+    private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?, pairing: TransportPairingControlConfiguration?, optionalWakePath: String?) async throws {
         try Task.checkCancellation()
         let recovery: TransportWakeRunner?
-        if let wake {
-            do { recovery = try TransportWakeRunner(configuration: wake, report: reportWake) }
-            catch {
-                log("Wake delivery is unavailable. Direct approvals remain available.")
-                recovery = nil
-            }
-        } else { recovery = nil }
+        do {
+            if let wake { recovery = try TransportWakeRunner(configuration: wake, report: reportWake) }
+            else if let optionalWakePath { recovery = try TransportWakeRunner(pairingConfigurationPath: optionalWakePath, report: reportWake) }
+            else { recovery = nil }
+        } catch {
+            log("Wake delivery is unavailable. Direct approvals remain available.")
+            recovery = nil
+        }
         let relay = try relayPort.map { port in
             try ApprovalRelayCoordinator(listenPort: port, maximumConnections: configuration.maximumConnections,
                 timeoutMilliseconds: configuration.timeoutMilliseconds, report: reportRelay)

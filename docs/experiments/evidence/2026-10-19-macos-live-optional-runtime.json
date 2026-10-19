@@ -1,0 +1,74 @@
+{
+  "experiment": "macos-live-optional-runtime",
+  "evidenceFormat": 1,
+  "sourceCommit": "f87faceb9522ad04d05eb51bf0a2d2b9e70771f5",
+  "recordedAtUTC": "2026-10-19T01:48:29.793609+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/AdministrativeSetupPublication.swift": "6af984e9079cf7b3b7c27c0100fe111370520427dfba81d016e1831f05a98f7e",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeCommit.swift": "2e0f6ae978b9889b2f0f477ff6f1b28d45878ab9b9a97354d28d2550b4e0501b",
+    "macos/core/Sources/RemozioCore/GatewayRuntimePublication.swift": "5297f93193c88dee4418440a9eb6cafd0a02dd0a847bce835d2eeebc60ead632",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeLoader.swift": "61d5fc567f7f9bfe745ec01d2f4ee5c54939f46f59295e4b0ea97b3d15b28602",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimePublicationTests.swift": "98d009c7cf27bb3ab579620923445e33a1930a8cc865548851fbfa9b2996e262",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushCapability.swift": "fd9129e43f0903ae2086fba9015f9169a8bb214f4c1c94e50afa0b0b6d7b889f",
+    "macos/core/Sources/RemozioCore/AuthorityWakePublisher.swift": "001746ea88c7f02f11629efa11867100acba32b977ad2406c537e7149a6f156c",
+    "macos/core/Sources/RemozioCore/AuthorityWakeService.swift": "18ba5aa0c4458381f6805732aae2b720e86eb6257bdc5826105a4676fc2ced7c",
+    "macos/core/Sources/RemozioCore/AuthorityGatewayExtensionMonitor.swift": "62c44b811511df0f8cf1e71dd35855be162a047b6828dea98a94a02eb7ebe4d7",
+    "macos/core/Sources/RemozioCore/InstalledAuthorityCommandRegistration.swift": "0ef70983ebee89bef574479ffa4c85a46d843b49027c6586a2d026bd4af64b84",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushCapabilityTests.swift": "3c5ca7d356614a46ff5e79355e13a4fe4c2a62afaeaf9c5b0ec0ba6b0a4e4bb3",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushPublisherTests.swift": "d6767352b6aff94fe81d76162c73c96e4c3f278d446af6ac03558772376ba327",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushRegistrationTests.swift": "652c1a4eaf9695cdceb2198dd7336eb8fe9092c1d12656fbca32aad17300467a",
+    "macos/core/Tests/RemozioCoreTests/AuthorityGatewayExtensionMonitorTests.swift": "6bb74cd2cde648b9e17a3dd387065655c17f5497cb1a66cde21f75b5e3eb920b",
+    "macos/core/Sources/RemozioCore/TransportWakeRunner.swift": "9abdd17cc6ae51eddc369142cbd858a9198fddcb73d630b5af04107e10bf0af6",
+    "macos/core/Sources/RemozioCore/TransportOptionalWakeComposition.swift": "896e8372c8eeaa6d47809461954e69b48e9a10f77b07fe9382fdfbb864eb203c",
+    "macos/core/Tests/RemozioCoreTests/TransportOptionalWakeCompositionTests.swift": "65f315109e04487054e7b122a026cf4d541f22263ed73f9e2d982b46a437cd87",
+    "macos/app/Transport/TransportMain.swift": "cbf6a88e95f6dea162cf3ba1b16205fd1abd93ec5ad35a5e3d68bed22c7db4b1",
+    "docs/experiments/macos-live-optional-runtime.md": "b4456e1eca9954afa6cbe805515d8bf0150f04544bcf49d1acc21e3924986599"
+  },
+  "validation": {
+    "nativeCoreTests": 2739,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "focusedTestsPassed": true,
+    "focusedLogSHA256": "3da8450faa6a1567edd3a205cd23f77551c587d35cce31524f169851a5d10b50",
+    "nativeLogSHA256": "80ee214b9836b3ebc1971b5f6f3db4544a22a5ea341f1b5791023549946ebd58",
+    "ATCResultSHA256": "6bcb2c4ebb6e3b73f3aff54d6d29f2304867e65482ba1094ca29b78ce1999aed",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Publish protected optional records with a final commit and load them on existing Root and Transport owners.",
+    "Preserve foreground requests, pairing, identities and deadlines while optional work starts and suspends independently."
+  ],
+  "limits": [
+    "Optional provider installation does not establish current delivery or phone reachability.",
+    "Authorized setup publication, normal Gateway activation and app health controls follow separately.",
+    "No installed service, secret, physical device or frozen recovery artifact was used."
+  ]
+}

@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -12,6 +13,7 @@ public actor AuthorityWakeService {
     private let commandReceiver: AuthorityCommandReceiveWorker?
     private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
+    private let phonePushCapability: AuthorityPhonePushCapability?
     private let hints: AuthorityWakeHintSource
     private let requestsRetired: @Sendable () -> Bool
     private let startRequests: @Sendable () throws -> Void
@@ -37,9 +39,11 @@ public actor AuthorityWakeService {
          requestsRetired: @escaping @Sendable () -> Bool = { false }, presence: AuthorityPresenceRuntime? = nil,
          commandReceiver: AuthorityCommandReceiveWorker? = nil,
          commandExecutionWorker: AuthorityCommandExecutionWorker? = nil,
-         stopRequestProducers: @escaping @Sendable () async -> Void = {}) throws {
+         stopRequestProducers: @escaping @Sendable () async -> Void = {},
+         phonePushCapability: AuthorityPhonePushCapability? = nil) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
+        self.phonePushCapability = phonePushCapability
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
         self.stopRequestProducers = stopRequestProducers
@@ -47,6 +51,7 @@ public actor AuthorityWakeService {
         self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     }
     deinit {
+        phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
         let worker = task, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
@@ -128,18 +133,15 @@ public actor AuthorityWakeService {
             let ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)?
             if let presence { ownerRouting = { owner, moment in try presence.routing(owner: owner, now: moment) } }
             else { ownerRouting = nil }
-            let phonePush = try configuration.phonePush.map {
-                try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
-            }
             let phonePushWall: @Sendable () throws -> UInt64 = {
                 let value = Date().timeIntervalSince1970 * 1000
                 guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
                 return UInt64(value)
             }
-            let phonePublication: AuthorityPhonePushPublication?
-            if let phonePush, let options = configuration.phonePush {
-                phonePublication = try AuthorityPhonePushPublication(provider: phonePush, gatewayPublicKey: options.gatewayReceiptPublicKey, wallTime: phonePushWall)
-            } else { phonePublication = nil }
+            let phoneCapability = AuthorityPhonePushCapability(journal: journal, registration: configuration.registration,
+                clock: { try clock.now() }, wall: phonePushWall, makeProvider: {
+                    try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)
+                })
             let hints = try AuthorityWakeHintSource(registration: configuration.registration)
             let retired = AuthorityRequestRetirementSignal()
             let makePublisher: @Sendable () throws -> AuthorityWakePublisher = {
@@ -147,20 +149,20 @@ public actor AuthorityWakeService {
                     timeoutMilliseconds: configuration.timeoutMilliseconds)
                 return try AuthorityWakePublisher(journal: journal, channel: channel, registration: configuration.registration,
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
-                    ownerRouting: ownerRouting, phonePush: phonePublication)
+                    ownerRouting: ownerRouting, phonePush: phoneCapability.publication, phonePushSource: { phoneCapability.publication })
             }
             let executionWorker = try commandExecutionFactory?(journal, clock)
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
-                phonePushRegistration: phonePush?.provider(clock: { try clock.now() }, wall: phonePushWall),
-                phonePushRecovery: phonePush?.recoveryProvider(clock: { try clock.now() }, wall: phonePushWall), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                phonePushRegistration: phoneCapability.registrationProvider(),
+                phonePushRecovery: phoneCapability.recoveryProvider(), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
                 onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
                     _ = executionWorker?.enqueue(notice)
                     onCommandAuthorized(notice)
                 })
-            if let phonePush {
-                try journal.withRequests { owner in try owner.preparePhonePushRegistration(phonePush, now: clock.now()) }
+            if let options = configuration.phonePush {
+                try phoneCapability.installInitialConfiguration(options, configurationDigest: Data(SHA256.hash(data: options.canonicalBytes)))
             }
             let presenceListener: AuthorityPresenceXPCListener?
             if let presence, let appEndpoint {
@@ -173,9 +175,18 @@ public actor AuthorityWakeService {
                 startRequests: { try service.start(); try presenceListener?.start() },
                 closeRequests: { presenceListener?.close(); try service.close() },
                 requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
-                stopRequestProducers: { await journal.stopCommandExchanges() })
+                stopRequestProducers: { await journal.stopCommandExchanges() }, phonePushCapability: phoneCapability)
         } catch { presence?.close(); try? journal.close(); throw error }
     }
+    /// The native loader supplies current protected inputs. This result confirms provider installation, not delivery readiness.
+    @discardableResult
+    func installPhonePush(_ options: AuthorityPhonePushStartupConfiguration, commitDigest: Data,
+                          verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
+        guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        return try phonePushCapability.install(options, commitDigest: commitDigest, verifyCurrent: verifyCurrent)
+    }
+    func suspendPhonePush() { phonePushCapability?.suspend() }
+
     /// Start direct request listeners before attempting the optional gateway connection.
     public func start() async throws {
         guard !started, !closed else { throw AuthorityWakePublisherError.closed }
@@ -216,7 +227,7 @@ public actor AuthorityWakeService {
     }
     /// Failed request cleanup remains owned and can be retried. Concurrent callers share one cleanup attempt.
     public func close() async throws {
-        closed = true; wakeStatus = .closed
+        closed = true; wakeStatus = .closed; phonePushCapability?.close()
         guard !cleanupComplete else { return }
         if let closing { try await closing.value; return }
         let previous = task; task = nil; previous?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop()

@@ -105,6 +105,18 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try placement.validate()
         try startupActivity?.validate()
     }
+    /// The startup writer is closed after check-in. Runtime checks retain the original protected inputs and signed identity.
+    func validateRuntime() throws {
+        try lock.withLock {
+            guard !closed, taken, getuid() == 0, geteuid() == 0 else { throw InstalledAuthorityCommandError.unavailable }
+            guard try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == configuration.canonicalBytes else {
+                throw InstalledAuthorityCommandError.changedConfiguration
+            }
+            try DynamicCodeValidation.validateSelf(requirement: requirement)
+            guard try DynamicCodeValidation.selfPath() == selfPath else { throw InstalledAuthorityCommandError.wrongExecutable }
+            try placement.validate()
+        }
+    }
     func takeReceiveRight() throws -> mach_port_t {
         try lock.withLock {
             guard !taken else { throw InstalledAuthorityCommandError.unavailable }
@@ -142,8 +154,33 @@ extension AuthorityRuntimeRunner {
                         takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
                         releaseActivity: registration.releaseActivity,
                         reconcileExpired: Self.reconcileCoordinatorExpiration)
-                    return AuthorityRuntimeInstance(start: { try await service.start() }, close: {
-                        try await service.close(); try registration.close()
+                    let monitor: AuthorityGatewayExtensionMonitor?
+                    if registration.configuration.command.presence.wake.phonePush == nil {
+                        monitor = try AuthorityGatewayExtensionMonitor {
+                            do {
+                                try Task.checkCancellation()
+                                let activity = try registration.releaseActivity.acquireShared()
+                                defer { activity.close() }
+                                let verify: @Sendable () throws -> Void = {
+                                    try registration.validateRuntime(); try activity.validate()
+                                }
+                                guard let loaded = try GatewayRuntimeLoader.load(authority: registration.configuration, verifyCurrent: verify) else {
+                                    await service.suspendPhonePush(); return nil
+                                }
+                                try Task.checkCancellation()
+                                _ = try await service.installPhonePush(loaded.configuration.material.phonePush,
+                                    commitDigest: loaded.commit.pairDigest, verifyCurrent: verify)
+                                try verify(); try Task.checkCancellation()
+                                return loaded.commit.pairDigest
+                            } catch {
+                                await service.suspendPhonePush(); throw error
+                            }
+                        }
+                    } else { monitor = nil }
+                    return AuthorityRuntimeInstance(start: {
+                        try await service.start(); try await monitor?.start()
+                    }, close: {
+                        await monitor?.close(); try await service.close(); try registration.close()
                     }, retired: { await service.isRetired })
                 } catch { try? registration.close(); throw error }
             }, report: report)

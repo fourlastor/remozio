@@ -118,9 +118,11 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         let publisher: AuthorityWakePublisher
         let phonePushConfiguration: AuthorityPhonePushPublication
         init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false,
-             enablePhonePush: Bool = true) throws {
+             enablePhonePush: Bool = true, enableRootGateway: Bool = true,
+             phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil) throws {
             var retained: GatewayAuthorityEnvelope?
-            let root = try AuthorityPhonePushRegistrationTests.Harness(enrollmentCount: enrollmentCount, gatewaySetup: { tx, r, key, limits, epoch, writer in
+            let root = try AuthorityPhonePushRegistrationTests.Harness(configureGateway: enableRootGateway, enrollmentCount: enrollmentCount,
+                gatewayLedgerEnabled: enableRootGateway, gatewaySetup: { tx, r, key, limits, epoch, writer in
                 guard let earlier else { return }
                 let now = AuthorityMoment(epoch: epoch, milliseconds: 100)
                 if candidateBeforeEarlier {
@@ -189,7 +191,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                 leaseMilliseconds: 1000, clock: { clock.now() }, routing: {
                     var router = PresenceRouter(configuration: try PresenceConfiguration(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 100))
                     return router.evaluate(mode: .away, snapshot: PresenceSnapshot(), now: PresenceMoment(epoch: clock.epoch, milliseconds: clock.now().milliseconds))
-                }, phonePush: enablePhonePush ? configuration : nil)
+                }, phonePush: enablePhonePush ? configuration : nil, phonePushSource: phonePushSource)
         }
         func offer(phoneIndex: Int = 0) throws -> PhonePushRegistrationMetadata {
             try journal.withRequests { _ in
@@ -241,6 +243,41 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
     private func waitFor(_ condition: () async -> Bool) async throws {
         for _ in 0..<1000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(1)) }
         XCTFail("Fixture did not settle"); throw CocoaError(.featureUnsupported)
+    }
+    func testServiceEnablesSuspendsAndRestoresPushOnTheSameForegroundAndGatewayOwners() async throws {
+        let slot = Mutex<AuthorityPhonePushCapability?>(nil)
+        let f = try Fixture(enablePhonePush: false, enableRootGateway: false, phonePushSource: { slot.withLock { $0?.publication } })
+        let cap = AuthorityPhonePushCapability(journal: f.journal, registration: f.root.registration,
+            clock: { f.clock.now() }, wall: { f.clock.wall() }, makeProvider: { _ in f.root.provider })
+        slot.withLock { $0 = cap }
+        let options = try AuthorityPhonePushStartupConfiguration(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+            gatewayReceiptPublicKey: f.driver.receiptKey.publicKey.x963Representation, maximumControls: 30, candidateLifetimeMilliseconds: 1000)
+        let service = try AuthorityWakeService(makePublisher: { f.publisher }, hints: AuthorityWakeHintSource(registration: f.root.registration),
+            interval: 100, startRequests: {}, closeRequests: {}, phonePushCapability: cap)
+        let now = f.clock.now(), contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
+        let draft = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]),
+            actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
+            firstObservedAt: now, deadlineMilliseconds: 1100, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 2000)
+        let pending = try f.journal.withRequests { try $0.admitFixture(draft, now: now, receiptTimeMs: 1000) }
+        let before = try f.journal.withRequests { try $0.state(requestID: pending.requestID) }
+        try await service.start(); try await waitFor { await service.wakeStatus == .running }
+        let digest = Data(repeating: 95, count: 32)
+        let installed = try await service.installPhonePush(options, commitDigest: digest, verifyCurrent: {})
+        XCTAssertTrue(installed)
+        let metadata = try f.offer(); try await waitFor { await f.provider.challenges.count == 1 }
+        try f.prove(metadata, challenge: await f.provider.challenges[0]); try await waitFor { (try? f.recoveryState().phase) == .mappingObserved }
+        XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, 0)
+        XCTAssertEqual(try f.recoveryState().phase, .mappingObserved)
+        await service.suspendPhonePush(); try await waitFor { await f.publisher.phonePushDiagnostic == .disabled }
+        XCTAssertNil(cap.publication); XCTAssertFalse(f.driver.state.withLock { $0.closed })
+        let handler = cap.registrationProvider(), offer = try f.root.offer()
+        guard case .outcome(_, .unavailable) = try f.journal.withRequests({ try handler($0, f.root.binding, offer, { _ in }) }) else { return XCTFail() }
+        let restored = try await service.installPhonePush(options, commitDigest: digest, verifyCurrent: {})
+        XCTAssertTrue(restored); try await waitFor { await f.publisher.phonePushDiagnostic == .turnCompleted }
+        XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+        XCTAssertEqual(try f.journal.withRequests { try $0.state(requestID: pending.requestID) }, before)
+        XCTAssertTrue(try f.journal.validatePeer(f.root.binding)); let retired = await service.isRetired; XCTAssertFalse(retired)
+        try await service.close(); await f.close()
     }
     func testLiveProviderInstallationKeepsThePublisherSessionAndCompletesTheExistingCandidate() async throws {
         let f = try Fixture(enablePhonePush: false), digest = Data(repeating: 91, count: 32)

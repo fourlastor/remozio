@@ -30,6 +30,7 @@ public actor AuthorityWakePublisher {
     private let routing: @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting
     private let receiptTime: @Sendable () -> UInt64?
     private var phonePush: AuthorityPhonePushPublication?
+    private let phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)?
     private var phonePushConfigurationDigest: Data?
     public private(set) var phonePushDiagnostic: AuthorityPhonePushPublicationDiagnostic
     private var phoneCursor = 0
@@ -49,10 +50,11 @@ public actor AuthorityWakePublisher {
                 routing: @escaping @Sendable () throws -> PresenceRouting,
                 receiptTime: @escaping @Sendable () -> UInt64? = { nil },
                 ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)? = nil,
-                phonePush: AuthorityPhonePushPublication? = nil) throws {
+                phonePush: AuthorityPhonePushPublication? = nil,
+                phonePushSource: (@Sendable () -> AuthorityPhonePushPublication?)? = nil) throws {
         guard (1...60_000).contains(leaseMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         guard phonePush == nil || phonePush?.provider.policy.registration == registration else { throw AuthorityWakePublisherError.wrongAuthority }
-        self.phonePush = phonePush
+        self.phonePush = phonePush; self.phonePushSource = phonePushSource
         phonePushDiagnostic = phonePush == nil ? .disabled : .notStarted
         self.journal = journal; self.channel = channel; self.registration = registration
         self.leaseMilliseconds = leaseMilliseconds; self.clock = clock; self.routing = ownerRouting ?? { _, _ in try routing() }; self.receiptTime = receiptTime
@@ -98,6 +100,13 @@ public actor AuthorityWakePublisher {
     public func reconcile() async throws {
         guard state == .open else { throw AuthorityWakePublisherError.closed }
         guard !busy else { throw AuthorityWakePublisherError.busy }
+        if let phonePushSource {
+            let next = phonePushSource()
+            guard next == nil || next?.provider.policy.registration == registration else { throw AuthorityWakePublisherError.wrongAuthority }
+            if next == nil { phonePushDiagnostic = .disabled }
+            else if phonePush == nil { phonePushDiagnostic = .notStarted }
+            phonePush = next
+        }
         busy = true
         hintFeed.pause()
         defer { busy = false }
