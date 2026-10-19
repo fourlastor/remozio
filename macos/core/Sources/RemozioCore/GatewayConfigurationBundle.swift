@@ -71,7 +71,8 @@ struct GatewayConfigurationBundle: CustomStringConvertible, CustomDebugStringCon
         let host = foreground.host
         commandHost = try .init(machineDirectory: host.machineDirectory, installationID: host.installationID,
             releaseDigest: host.releaseDigest, codePolicy: host.codePolicy, command: command, label: host.label,
-            plistName: host.plistName, jobPlacement: host.jobPlacement)
+            plistName: host.plistName, jobPlacement: host.jobPlacement,
+            gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled)
         let r = material.runtime.gateway
         let binding = try GatewaySubmissionBinding(ownerID: r.ownerID, macID: r.macID, accountID: r.accountID,
             gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch)

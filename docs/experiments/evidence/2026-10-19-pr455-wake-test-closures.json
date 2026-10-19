@@ -1,0 +1,45 @@
+{
+  "experiment": "pr455-wake-test-closures",
+  "evidenceFormat": 1,
+  "sourceCommit": "e69d55183200282e26c9e6f40419cc9af39f6278",
+  "priorReviewedHead": "834cca35ec0f4b7c80c8a8b1133935a16cbbc3ad",
+  "sourceSHA256": {
+    "macos/core/Tests/RemozioCoreTests/AuthorityWakeSettingsTests.swift": "2574b71cfe6c9c581ea6f632acc552dede7112f740e15c948781aa81a0f40d1f"
+  },
+  "recordedAtUTC": "2026-10-19T08:33:58.937914+00:00",
+  "validation": {
+    "affectedTests": 6,
+    "affectedFailures": 0,
+    "nativeCoreTests": 2886,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "e69d55183200282e26c9e6f40419cc9af39f6278",
+      "recordedAtUTC": "2026-10-19T08:33:56.773044+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1176.41,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1633,
+      "logSHA256": "ebfd152d509d2404757f6c9372ed116a95180f19c819bf18b73b4e601c56b5fe"
+    },
+    "typedATC": {
+      "sourceCommit": "e69d55183200282e26c9e6f40419cc9af39f6278",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.69,
+      "resultSHA256": "ea68f46c32d05230ec5b76faeddc159d245ebf137f84a3afe58605359b6b6a93"
+    },
+    "assemblyAndLintPassed": true
+  },
+  "scope": [
+    "Explicit Sendable closures preserve the duplicate-quiescence test counters, concurrent schedule and drain assertions.",
+    "No production code or UX changed."
+  ],
+  "limits": [
+    "Hosted CI and a new exact-head Codex review remain required.",
+    "No installed service, production credential or physical Mac-Pixel flow was tested."
+  ]
+}

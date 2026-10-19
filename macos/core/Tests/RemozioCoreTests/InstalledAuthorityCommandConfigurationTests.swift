@@ -88,7 +88,7 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
         XCTAssertNoThrow(try decoded.validate(inventory: scopedInventory(), release: release(), bundlePath: bundle))
         let legacy = try config()
         XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(legacy.canonicalBytes).jobPlacement, .bundled)
-        XCTAssertEqual(InstalledAuthorityCommandConfiguration.supportedVersions, [1, 2])
+        XCTAssertEqual(InstalledAuthorityCommandConfiguration.supportedVersions, [1, 2, 3])
         XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: nil), release: release(), bundlePath: bundle))
         XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: 402), release: release(), bundlePath: bundle))
     }
@@ -181,5 +181,87 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
             XCTAssertEqual(name.withCString { remozio_authority_check_in_service($0, &port) }, KERN_INVALID_ARGUMENT)
             XCTAssertEqual(port, mach_port_t(MACH_PORT_NULL))
         }
+    }
+}
+
+extension InstalledAuthorityCommandConfigurationTests {
+    private func settingsRelease(omitHostFor omitted: AuthorityCodeRole? = nil, readersOnly: Bool = false) throws -> SignedReleaseEvidence {
+        let all = roles + [.setupController]
+        let components = try all.map { role -> ReleaseComponent in
+            var formats: [ReleaseFormat] = []
+            if role == .authority || role == .setupController {
+                if role != omitted || readersOnly {
+                    formats.append(try .init(name: "authority.command-host-config", readers: [1, 2, 3], writers: role == omitted ? [1, 2] : [1, 2, 3]))
+                }
+                formats.append(try .init(name: "authority.gateway-settings-control", readers: [1], writers: [1]))
+            }
+            return try .init(role: role, identifier: identifier(role), generation: 1, relativePath: relative(role),
+                codeDirectoryHash: role == .app ? nil : id(UInt8(role.rawValue), 20), build: "1", teamID: "ABCDEFGHIJ", formats: formats)
+        }
+        return .init(manifest: try .init(release: "1", build: "1", components: components),
+            codeDirectoryHashes: Dictionary(uniqueKeysWithValues: all.map { ($0, id(UInt8($0.rawValue), 20)) }))
+    }
+    private func settingsBase(_ release: SignedReleaseEvidence, includeSetup: Bool = true) throws -> InstalledAuthorityCommandConfiguration {
+        let p = try scopedConfig(), extra: [AuthorityCodeEntry] = includeSetup ? [try .init(role: .setupController,
+            teamID: "ABCDEFGHIJ", identifier: identifier(.setupController), installedGeneration: 1, minimumGeneration: 1,
+            codeDirectoryHash: id(UInt8(AuthorityCodeRole.setupController.rawValue), 20), active: true)] : []
+        return try .init(machineDirectory: p.machineDirectory, installationID: p.installationID,
+            releaseDigest: InstallationInventory.digest(release), codePolicy: .init(entries: p.codePolicy.entries + extra),
+            command: p.command, label: p.label, plistName: p.plistName, jobPlacement: .systemAccount)
+    }
+    func testSettingsServiceUsesAnExplicitThirdCodecAndFixedAccountAddress() throws {
+        let release = try settingsRelease(), base = try settingsBase(release)
+        let enabled = try base.enablingGatewaySettingsControl(release: release)
+        let decoded = try InstalledAuthorityCommandConfiguration.decode(enabled.canonicalBytes)
+        XCTAssertEqual(decoded.formatVersion, 3); XCTAssertEqual(decoded.jobPlacement, .systemAccount)
+        XCTAssertTrue(decoded.gatewaySettingsControlEnabled); XCTAssertEqual(decoded.canonicalBytes, enabled.canonicalBytes)
+        XCTAssertEqual(decoded.command.canonicalBytes, base.command.canonicalBytes)
+        XCTAssertNoThrow(try decoded.validateRelease(release, bundlePath: bundle))
+        let limits = try CBORLimits(maxBytes: 131072, maxDepth: 2, maxItems: 32)
+        guard case .map(let fields) = try DeterministicCBOR.decode(enabled.canonicalBytes, limits: limits) else { return XCTFail() }
+        XCTAssertEqual(fields[9], .text(try RuntimePreparationPaths(accountID: decoded.command.accountID).gatewaySettingsControlService))
+        for (key, replacement): (UInt64, CBORValue) in [(0, .unsigned(4)), (0, .unsigned(2)), (9, .null),
+            (9, .text("dev.remozio.other.gateway-settings-control")), (10, .null), (8, .text("other-placement"))] {
+            var changed = fields; changed[key] = replacement
+            XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
+        }
+        var missing = fields; missing.removeValue(forKey: 9)
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(DeterministicCBOR.encode(.map(missing), limits: limits)))
+    }
+    func testFreshSelectionRequiresBothSignedHostCodecsAndRetainedSetupIdentity() throws {
+        for role: AuthorityCodeRole in [.authority, .setupController] {
+            for readersOnly in [false, true] {
+                let release = try settingsRelease(omitHostFor: role, readersOnly: readersOnly)
+                XCTAssertThrowsError(try settingsBase(release).enablingGatewaySettingsControl(release: release))
+            }
+        }
+        let release = try settingsRelease()
+        XCTAssertThrowsError(try settingsBase(release, includeSetup: false).enablingGatewaySettingsControl(release: release))
+        let base = try settingsBase(release)
+        let changed = try settingsRelease(omitHostFor: .authority)
+        XCTAssertThrowsError(try base.enablingGatewaySettingsControl(release: changed))
+        XCTAssertThrowsError(try config().enablingGatewaySettingsControl(release: release))
+        XCTAssertEqual(base.formatVersion, 2); XCTAssertFalse(base.gatewaySettingsControlEnabled)
+    }
+    func testDefaultHostEncodingRetainsExactLegacyFieldsAndRejectsBundledSettings() throws {
+        let limits = try CBORLimits(maxBytes: 131072, maxDepth: 2, maxItems: 32)
+        for value in [try config(), try scopedConfig()] {
+            var fields: [UInt64: CBORValue] = [0: .unsigned(value.jobPlacement.rawValue), 1: .text(value.machineDirectory),
+                2: .bytes(value.installationID), 3: .bytes(value.releaseDigest), 4: .bytes(try value.codePolicy.bytes),
+                5: .bytes(value.command.canonicalBytes), 6: .text(value.label), 7: .text(value.plistName)]
+            if value.jobPlacement == .systemAccount { fields[8] = .text("protected-system-account-v1") }
+            XCTAssertEqual(value.canonicalBytes, try DeterministicCBOR.encode(.map(fields), limits: limits))
+            XCTAssertFalse(value.gatewaySettingsControlEnabled); XCTAssertEqual(value.formatVersion, value.jobPlacement.rawValue)
+            XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(value.canonicalBytes).canonicalBytes, value.canonicalBytes)
+        }
+        let p = try settingsBase(settingsRelease())
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration(machineDirectory: p.machineDirectory,
+            installationID: p.installationID, releaseDigest: p.releaseDigest, codePolicy: p.codePolicy, command: p.command,
+            label: p.label, plistName: p.plistName, jobPlacement: .bundled, gatewaySettingsControlEnabled: true))
+        let noSetup = try scopedConfig()
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration(machineDirectory: noSetup.machineDirectory,
+            installationID: noSetup.installationID, releaseDigest: noSetup.releaseDigest, codePolicy: noSetup.codePolicy,
+            command: noSetup.command, label: noSetup.label, plistName: noSetup.plistName,
+            jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true))
     }
 }

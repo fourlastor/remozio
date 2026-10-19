@@ -96,7 +96,8 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
                 "Contents/Library/LaunchDaemons/" + configuration.plistName).path), inventory: inventory, release: release)
         case .systemAccount:
             let manifest = try InstalledAccountJobManifest(accountID: configuration.command.accountID, role: .authority,
-                executionUID: 0, userName: "root", bundlePath: bundle.path)
+                executionUID: 0, userName: "root", bundlePath: bundle.path,
+                gatewaySettingsControlEnabled: configuration.gatewaySettingsControlEnabled)
             guard manifest.declaration == declaration, manifest.configurationPath == path else {
                 throw InstalledAuthorityCommandError.changedConfiguration
             }
@@ -131,6 +132,30 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             startupActivity?.close(); startupActivity = nil
             return port
         }
+    }
+    /// Build the optional control service only from retained codec 3 metadata and current signed scope.
+    func makeGatewaySettingsListener(service: AuthorityWakeService) throws -> GatewaySettingsControlXPCListener? {
+        guard configuration.gatewaySettingsControlEnabled else { return nil }
+        let activity = try releaseActivity.acquireShared(); defer { activity.close() }
+        try validateRuntime(); try activity.validate()
+        let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active })!
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        try configuration.validateRelease(release, bundlePath: bundle.path)
+        guard let authority = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }),
+              let setup = configuration.codePolicy.entries.first(where: { $0.role == .setupController && $0.active }),
+              let binding = service.gatewaySettingsBinding,
+              binding.accountID == configuration.command.accountID else { throw GatewayPreparationError.changedScope }
+        let verify: @Sendable () throws -> Void = { [weak self] in
+            guard let self else { throw InstalledAuthorityCommandError.unavailable }
+            try self.validateRuntime()
+        }
+        let access = try AuthorityGatewaySettingsAccess(service: service, binding: binding, verifyCurrent: verify)
+        let barrier = releaseActivity
+        let listener = try GatewaySettingsControlXPCListener(accountID: configuration.command.accountID,
+            authorityCode: authority, setupCode: setup, release: release, access: access,
+            acquireActivity: { try barrier.acquireShared() })
+        try validateRuntime(); try activity.validate()
+        return listener
     }
     func close() throws {
         try lock.withLock {
@@ -177,10 +202,13 @@ extension AuthorityRuntimeRunner {
                             }
                         }
                     } else { monitor = nil }
+                    let settings = AuthorityGatewaySettingsRuntime {
+                        try registration.makeGatewaySettingsListener(service: service)
+                    }
                     return AuthorityRuntimeInstance(start: {
-                        try await service.start(); try await monitor?.start()
+                        try await service.start(); try await settings.start(); try await monitor?.start()
                     }, close: {
-                        await monitor?.close(); try await service.close(); try registration.close()
+                        await settings.close(); await monitor?.close(); try await service.close(); try registration.close()
                     }, retired: { await service.isRetired })
                 } catch { try? registration.close(); throw error }
             }, report: report)

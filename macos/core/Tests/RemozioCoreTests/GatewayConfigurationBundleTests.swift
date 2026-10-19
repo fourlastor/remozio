@@ -36,10 +36,10 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         var fields = try map(original.encoded); fields[3] = .bytes(host.canonicalBytes); fields[4] = .bytes(transport.canonicalBytes)
         return try RuntimeActivationPlan.decode(encode(fields))
     }
-    private func fixture(customized: Bool = false, maximumControls: Int = 4096,
+    private func fixture(customized: Bool = false, maximumControls: Int = 4096, rootSettingsControl: Bool = false,
                          _ body: (RuntimeActivationPlan, GatewayPreparationMaterial, InstallationInventory) throws -> Void) throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner configuration fixture") }
-        let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild]
+        let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild] + (rootSettingsControl ? [.setupController] : [])
         let policy = try AuthorityCodePolicy(entries: roles.map { role in
             try .init(role: role, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.role-\(role.rawValue)", installedGeneration: 1,
                 minimumGeneration: 1, codeDirectoryHash: Data(repeating: UInt8(role.rawValue), count: 20), active: true)
@@ -69,6 +69,13 @@ final class GatewayConfigurationBundleTests: XCTestCase {
                 control: foreground.transport.control, relayPort: 52432)
             foreground = try plan(foreground, host: customHost, transport: customTransport)
         }
+        if rootSettingsControl {
+            let h = foreground.host
+            let controlled = try InstalledAuthorityCommandConfiguration(machineDirectory: h.machineDirectory, installationID: h.installationID,
+                releaseDigest: h.releaseDigest, codePolicy: h.codePolicy, command: h.command, label: h.label, plistName: h.plistName,
+                jobPlacement: h.jobPlacement, gatewaySettingsControlEnabled: true)
+            foreground = try plan(foreground, host: controlled, transport: foreground.transport)
+        }
         let material = try GatewayPreparationMaterial.create(runtime: runtime.reference, provider: provider(), senderID: "123",
             packageName: "dev.remozio.android", fileWakeCustodyAccepted: true, maximumControls: maximumControls)
         try body(foreground, material, foreground.enrolledInventory(inventory))
@@ -78,6 +85,16 @@ final class GatewayConfigurationBundleTests: XCTestCase {
         try .init(foreground: foreground, material: material.reference, inventory: inventory, settings: settings())
     }
 
+    func testPushProposalPreservesAnEnabledRootSettingsControlEndpoint() throws {
+        try fixture(rootSettingsControl: true) { foreground, material, inventory in
+            XCTAssertTrue(foreground.host.gatewaySettingsControlEnabled)
+            let selected = try bundle(foreground, material, inventory)
+            XCTAssertTrue(selected.commandHost.gatewaySettingsControlEnabled)
+            XCTAssertEqual(selected.commandHost.formatVersion, foreground.host.formatVersion)
+            XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(selected.commandHost.canonicalBytes).canonicalBytes,
+                selected.commandHost.canonicalBytes)
+        }
+    }
     func testAllThreeServicesUseTheSameRetainedScopeAndIndependentCredentials() throws {
         try fixture { foreground, material, inventory in
             let value = try bundle(foreground, material, inventory)

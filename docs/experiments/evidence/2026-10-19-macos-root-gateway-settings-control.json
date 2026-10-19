@@ -1,0 +1,171 @@
+{
+  "experiment": "macos-root-gateway-settings-control",
+  "evidenceFormat": 1,
+  "sourceCommit": "2d2fab68c8f1bcb55bcc9d3405297717bf1bbccc",
+  "recordedAtUTC": "2026-10-19T05:56:39.001359+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushCapability.swift": "534dca6d6cf2c54faf9849648d9b59c4326e8dfb44d5b0b4dff8db421e427455",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushSettingsChange.swift": "b48f7256ba3638eacd37626d6e5c2203ddee25a35193f471fcf480f33d36a311",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushSettingsTests.swift": "1581f0aa829f0dae549249bfcbe2acf7f113294fad79afdae139352c1a77c893",
+    "macos/core/Sources/RemozioCore/AuthorityWakeService.swift": "86172ee42fdac45508dcb34b5a324c33b03d9076d8f0d775fe4d86e31bdf7bd2",
+    "macos/core/Tests/RemozioCoreTests/AuthorityWakeSettingsTests.swift": "4c75e3b3f422eb4f56d3172de527829d226b91599014ab19699f974359dc3423",
+    "macos/core/Sources/RemozioCore/GatewaySettingsControlMessage.swift": "b6880ba9934fc0cc92131506f64f8e9a5c63e4679cca16bf2e000294d9ab20cd",
+    "macos/core/Sources/RemozioCore/AuthorityGatewaySettingsAccess.swift": "67efab27e43e2c051a3e62824746689b4c1ec19b0e2d96b7fdf0c30cdf683fa4",
+    "macos/core/Sources/RemozioCore/GatewaySettingsControlXPCEndpoint.swift": "b8aa94bca43d5feda149f794a66568e113af8a6613a5807b6d4e8c7dbe164461",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlMessageTests.swift": "2fad7e2ee650d0feae87138b153a6d8ade50aa2a0bccdaf7f7f24ba0f5df273c",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlEndpointTests.swift": "8d49945a5989378beacacc9ddeaf75e4628b405401cc65ee020fd55d4ceeabb2",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlNativeTests.swift": "cae6bb297e164d1d780aa551d15601490c1f8293eaadb50f6f20dd4dda1c7633",
+    "scripts/generate-macos-release-manifest.py": "212b7504dd1a41bf6ed88653143ae5952d3e7892035612ba6b29ed55c5a73e91",
+    "tests/test_macos_release_manifest.py": "507ce4246d7531d5da3022b886010ee625d7a0a3eaaec71d0b6a4ab35f7c7bf2",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "4557234d60fac549e0c8a27402edc2b30a299a263f0fa1aca2358093233e539e",
+    "macos/core/Sources/RemozioCore/GatewaySettingsControlChannel.swift": "7398451c5a0ed50acba7b06d6019d6ef76eebad70d36ab2aef01f3f4188068ee",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlChannelTests.swift": "91442e06402771afadf3aa2aada68c5f71a87e1d2a4a07cf579dfef802470261",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlPreflightTests.swift": "174acc5da9a41bc7bcebd35d01e1249ec61255839b0558f608f5f14ccf48a7b6",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlNativeClientTests.swift": "1ab86f419e04abb6f4882045643c021f919816c96dc5d41bb751cd7b5f146cbc",
+    "macos/core/Sources/RemozioCore/GatewaySettingsControlXPCListener.swift": "4f496e8349ceeb6cf9a353425c30ecb4cf246a5806a50dfef26715635380805e",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsControlListenerTests.swift": "45276877b24a7d659a0a6032907680c871fe92b2a47a8dafd61c9249f95d8033",
+    "macos/core/Sources/RemozioCore/RuntimeConfigurationBundle.swift": "53fb8d2ac2a6e378626e86208323c5a17ca2425a9a6278776e3989677ee31e08",
+    "macos/core/Sources/RemozioCore/InstalledAuthorityCommandConfiguration.swift": "dce888a13ebbd1116d6a83b27a3faa3d428ec1f13157df4db964b492a6ae7e04",
+    "macos/core/Sources/RemozioCore/InstalledAccountJobManifest.swift": "d7eee6dbe5458c8aaafe0a7f71a1bf7562cdf36441c6f0dfb54bd8e0868f1c27",
+    "macos/core/Sources/RemozioCore/InstalledAuthorityCommandRegistration.swift": "8e486c59deff0fa546f3ca063348b7c2512cca285f15219f74434fa7273c4204",
+    "macos/core/Sources/RemozioCore/RuntimeActivationPlan.swift": "c8ca986685b5373028dc5e422437cc94f752901bd5ff42a970357e5f10b9525f",
+    "macos/core/Tests/RemozioCoreTests/InstalledAuthorityCommandConfigurationTests.swift": "4edeb62950bada1ecf9704f942a5ccf5a994675323ab32759f0cd88a1ae01fca",
+    "macos/core/Tests/RemozioCoreTests/InstalledAccountJobManifestTests.swift": "64fef4aaf3f137484e759c4f3f62328751ed762cec3a0a103451fb4f36f0d919",
+    "macos/core/Tests/RemozioCoreTests/RuntimeActivationPlanTests.swift": "92e1dd52e86201d1eac4595792e7d7fb6d9206e640cad94b0a9be018e91708da",
+    "macos/core/Sources/RemozioCore/AuthorityGatewaySettingsRuntime.swift": "a53e2955f1a55bb1b07204a5cd814c01c1d85d2af1c3f4f8016e94f8fffcd00a",
+    "macos/core/Tests/RemozioCoreTests/AuthorityGatewaySettingsRuntimeTests.swift": "17c56a31d0a457860e31dffed9e2924857c812db8638d18bb6ce22131c1d95df",
+    "macos/core/Sources/RemozioCore/GatewayConfigurationBundle.swift": "38b345e45b264e7321a65387e3aa1dfb4dbe4e7fdacca3f4d10e7808a45ce5c5",
+    "macos/core/Tests/RemozioCoreTests/GatewayConfigurationBundleTests.swift": "d0a941a190174019b88f5860edceec653bd46567b28f768d900cf7884ff51f37",
+    "docs/experiments/macos-root-gateway-settings-control.md": "4a2ab0bee15b70ff2f8723bd0b3e2ef77792101beedc02bb03dc2cc09431dea2"
+  },
+  "validation": {
+    "nativeCoreTests": 2886,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "2d2fab68c8f1bcb55bcc9d3405297717bf1bbccc",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "d07dab3c099ebb67f1a14587f892c4f12e804fc64b0e8ff470cd760ce44282b7",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityGatewaySettingsRuntimeTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "AuthorityPhonePushSettingsTests": {
+          "tests": 9,
+          "failures": 0,
+          "skipped": 0
+        },
+        "AuthorityWakeSettingsTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayConfigurationBundleTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlChannelTests": {
+          "tests": 11,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlEndpointTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlListenerTests": {
+          "tests": 4,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlMessageTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlNativeClientTests": {
+          "tests": 2,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlNativeTests": {
+          "tests": 1,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsControlPreflightTests": {
+          "tests": 3,
+          "failures": 0,
+          "skipped": 0
+        },
+        "InstalledAccountJobManifestTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        },
+        "InstalledAuthorityCommandConfigurationTests": {
+          "tests": 13,
+          "failures": 0,
+          "skipped": 0
+        },
+        "RuntimeActivationPlanTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "SignedReleaseInspectionTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "318083286852be1b0a1c824d1e4190b11cdfc765f51f11440611fc25578c6e99",
+    "nativeLogSHA256": "d07dab3c099ebb67f1a14587f892c4f12e804fc64b0e8ff470cd760ce44282b7",
+    "ATCResultSHA256": "f52cfdece4ad3e881b6f0e426a2d127060c44ab2e48396587e213894253936cf",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Quiesce phone registration and join optional wake publication without replacing the foreground Root service.",
+    "Authenticate bounded settings control calls with exact Setup and Root code pins, a fresh challenge and the existing Root epoch.",
+    "Retain the Root endpoint flag through host codec3, exact Mach registration, listener lifecycle and Gateway configuration reconstruction."
+  ],
+  "limits": [
+    "Both consumer services, restart recovery, fresh host selection and the visible app action follow separately.",
+    "Anonymous XPC and owned journal controls do not establish production Root or Developer ID admission.",
+    "No installed services, secrets, physical devices or frozen recovery artifacts were used."
+  ]
+}

@@ -116,3 +116,25 @@ final class InstalledAccountJobManifestTests: XCTestCase {
         }
     }
 }
+
+extension InstalledAccountJobManifestTests {
+    func testSettingsEndpointIsOptInAndOnlyChangesTheAuthorityServiceSet() throws {
+        let original = try job(), paths = try RuntimePreparationPaths(accountID: account)
+        let enabled = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true)
+        XCTAssertEqual(enabled.declaration, original.declaration); XCTAssertEqual(enabled.path, original.path)
+        XCTAssertEqual(enabled.arguments, original.arguments); XCTAssertEqual(enabled.configurationPath, original.configurationPath)
+        XCTAssertEqual(enabled.machServices, original.machServices.union([paths.gatewaySettingsControlService]))
+        XCTAssertEqual(Set(try XCTUnwrap(dictionary(enabled.bytes)["MachServices"] as? [String: Bool]).keys), enabled.machServices)
+        XCTAssertNoThrow(try enabled.validate(enabled.bytes, inventory: inventory(), release: release()))
+        XCTAssertThrowsError(try enabled.validate(original.bytes, inventory: inventory(), release: release()))
+        XCTAssertThrowsError(try original.validate(enabled.bytes, inventory: inventory(), release: release()))
+        XCTAssertEqual(try job().bytes, original.bytes)
+        for role: AuthorityCodeRole in [.transport, .notificationGateway] {
+            let value = try job(role)
+            XCTAssertThrowsError(try InstalledAccountJobManifest(accountID: account, role: role,
+                executionUID: value.declaration.executionUID, userName: value.userName, bundlePath: bundle,
+                gatewaySettingsControlEnabled: true))
+        }
+    }
+}

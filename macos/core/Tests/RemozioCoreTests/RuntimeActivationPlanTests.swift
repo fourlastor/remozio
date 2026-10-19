@@ -75,3 +75,23 @@ final class RuntimeActivationPlanTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeActivationPlan.decode(DeterministicCBOR.encode(.map(changed), limits: limits)))
     }
 }
+
+extension RuntimeActivationPlanTests {
+    func testRetainedHostCodecSelectsTheSettingsJobWithoutChangingTransportOrLegacyPlans() throws {
+        let f = try fixture(), original = f.plan, before = try original.encoded, p = original.host
+        // Decoding metadata grants no installation authority. Native registration still verifies the signed release.
+        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: p.machineDirectory, installationID: p.installationID,
+            releaseDigest: p.releaseDigest, codePolicy: p.codePolicy, command: p.command, label: p.label, plistName: p.plistName,
+            jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true)
+        guard case .map(var fields) = try DeterministicCBOR.decode(before, limits: RuntimeActivationPlan.limits) else { return XCTFail() }
+        fields[3] = .bytes(host.canonicalBytes)
+        let bytes = try DeterministicCBOR.encode(.map(fields), limits: RuntimeActivationPlan.limits)
+        let restored = try RuntimeActivationPlan.decode(bytes), paths = try RuntimePreparationPaths(accountID: f.account.accountID)
+        XCTAssertEqual(try restored.encoded, bytes); XCTAssertTrue(restored.host.gatewaySettingsControlEnabled)
+        XCTAssertEqual(restored.authorityJob.machServices, original.authorityJob.machServices.union([paths.gatewaySettingsControlService]))
+        XCTAssertEqual(restored.transportJob.bytes, original.transportJob.bytes)
+        XCTAssertEqual(restored.transport.canonicalBytes, original.transport.canonicalBytes)
+        XCTAssertEqual(restored.reference, original.reference); XCTAssertEqual(try original.encoded, before)
+        XCTAssertFalse(try RuntimeActivationPlan.decode(before).host.gatewaySettingsControlEnabled)
+    }
+}

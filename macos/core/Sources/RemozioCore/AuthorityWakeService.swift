@@ -9,7 +9,8 @@ private final class AuthorityRequestRetirementSignal: Sendable { let value = Mut
 /// Owns the request service and its asynchronous publisher. Presence remains a required live runtime input.
 public actor AuthorityWakeService {
     public nonisolated let presence: AuthorityPresenceRuntime?
-    public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), closed }
+    nonisolated let gatewaySettingsBinding: GatewaySettingsControlBinding?
+    public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), quiescingForSettings, suspendedForSettings, closed }
     private let commandReceiver: AuthorityCommandReceiveWorker?
     private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
@@ -26,13 +27,17 @@ public actor AuthorityWakeService {
     private var receiverObserver: Task<Void, Never>?
     private var executionObserver: Task<Void, Never>?
     private var publisher: AuthorityWakePublisher?
+    private var settingsChange: AuthorityPhonePushSettingsChange?
+    private var acceptedSettings: AuthorityPhonePushSettingsChange?
+    private var settingsDrain: Task<Void, Never>?
+    private var settingsDrained = false
     private var closing: Task<Void, any Error>?
     private var cleanupComplete = false
     private var started = false
     private var closed = false
     private var retired = false
     public private(set) var wakeStatus = WakeStatus.idle
-    public var isRetired: Bool { retired || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
+    public var isRetired: Bool { retired || requestsRetired() }
     init(makePublisher: @escaping @Sendable () throws -> AuthorityWakePublisher, hints: AuthorityWakeHintSource,
          interval: UInt64, initialRetryMilliseconds: UInt64 = 1000, maximumRetryMilliseconds: UInt64 = 30_000,
          startRequests: @escaping @Sendable () throws -> Void, closeRequests: @escaping @Sendable () throws -> Void,
@@ -40,9 +45,12 @@ public actor AuthorityWakeService {
          commandReceiver: AuthorityCommandReceiveWorker? = nil,
          commandExecutionWorker: AuthorityCommandExecutionWorker? = nil,
          stopRequestProducers: @escaping @Sendable () async -> Void = {},
-         phonePushCapability: AuthorityPhonePushCapability? = nil) throws {
+         phonePushCapability: AuthorityPhonePushCapability? = nil,
+         gatewaySettingsBinding: GatewaySettingsControlBinding? = nil) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
+        guard gatewaySettingsBinding == nil || gatewaySettingsBinding?.accountID == hints.binding.accountID else { throw GatewayPreparationError.changedScope }
+        self.gatewaySettingsBinding = gatewaySettingsBinding
         self.phonePushCapability = phonePushCapability
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
@@ -53,7 +61,7 @@ public actor AuthorityWakeService {
     deinit {
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
-        let worker = task, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let worker = task, drain = settingsDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
@@ -64,7 +72,7 @@ public actor AuthorityWakeService {
                 if let pending {
                     do { try await pending.value } catch { try? closeRequests() }
                 } else {
-                    await publisher?.close(); await worker?.value; try? closeRequests()
+                    await publisher?.close(); await worker?.value; await drain?.value; try? closeRequests()
                 }
             }
         }
@@ -175,7 +183,8 @@ public actor AuthorityWakeService {
                 startRequests: { try service.start(); try presenceListener?.start() },
                 closeRequests: { presenceListener?.close(); try service.close() },
                 requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
-                stopRequestProducers: { await journal.stopCommandExchanges() }, phonePushCapability: phoneCapability)
+                stopRequestProducers: { await journal.stopCommandExchanges() }, phonePushCapability: phoneCapability,
+                gatewaySettingsBinding: .init(accountID: configuration.registration.accountID, rootEpoch: clock.epoch))
         } catch { presence?.close(); try? journal.close(); throw error }
     }
     /// The native loader supplies current protected inputs. This result confirms provider installation, not delivery readiness.
@@ -186,6 +195,55 @@ public actor AuthorityWakeService {
         return try phonePushCapability.install(options, commitDigest: commitDigest, verifyCurrent: verifyCurrent)
     }
     func suspendPhonePush() { phonePushCapability?.suspend() }
+
+    /// Stop and join optional wake publication without closing the foreground service or replacing its clock.
+    /// The native owner must authenticate the change and verify its durable scope on each call.
+    func quiescePhonePushSettings(_ change: AuthorityPhonePushSettingsChange,
+                                  verifyCurrent: @Sendable () throws -> Void) async throws {
+        guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard settingsChange == nil || settingsChange == change else { throw GatewayPreparationError.changedScope }
+        try phonePushCapability.quiesceSettings(change, verifyCurrent: verifyCurrent)
+        if settingsChange == nil {
+            settingsChange = change; settingsDrained = false; wakeStatus = .quiescingForSettings
+            let previous = task; task = nil; previous?.cancel()
+            let old = publisher; publisher = nil
+            if let old { hints.clear(old.hintFeed) }
+            settingsDrain = Task {
+                await old?.close()
+                await previous?.value
+            }
+        }
+        let drain = settingsDrain
+        await drain?.value
+        guard !closed, !isRetired, settingsChange == change else { throw AuthorityWakePublisherError.closed }
+        try verifyCurrent(); try Task.checkCancellation()
+        settingsDrained = true; wakeStatus = .suspendedForSettings
+    }
+    /// Restart optional publication only after the exact selected change has been admitted.
+    /// This result does not prove a gateway connection, provider delivery or phone readiness.
+    @discardableResult
+    func acceptPhonePushSettings(_ change: AuthorityPhonePushSettingsChange,
+                                 verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
+        guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        if settingsChange == nil, acceptedSettings == change {
+            _ = try phonePushCapability.acceptSettings(change, verifyCurrent: verifyCurrent); return false
+        }
+        guard settingsChange == change, settingsDrained else { throw GatewayPreparationError.changedScope }
+        try phonePushCapability.acceptSettings(change, verifyCurrent: verifyCurrent)
+        settingsChange = nil; settingsDrain = nil; settingsDrained = false; acceptedSettings = change
+        wakeStatus = .idle; startPublisherLoop()
+        return true
+    }
+
+    /// A local observation for one exact change. It does not establish gateway delivery or phone readiness.
+    func gatewaySettingsObservation(_ change: AuthorityPhonePushSettingsChange) throws -> GatewaySettingsControlObservation {
+        guard started, !closed, !isRetired else { throw AuthorityWakePublisherError.closed }
+        if settingsChange == change { return settingsDrained ? .suspended : .quiescing }
+        if settingsChange == nil, acceptedSettings == change {
+            return phonePushCapability?.installedCommitDigest == change.selectedCommitDigest ? .providerInstalled : .accepted
+        }
+        return .unknown
+    }
 
     /// Start direct request listeners before attempting the optional gateway connection.
     public func start() async throws {
@@ -218,6 +276,10 @@ public actor AuthorityWakeService {
             guard !closed else { throw AuthorityWakePublisherError.closed }
         }
         catch { try? await close(); throw error }
+        startPublisherLoop()
+    }
+    private func startPublisherLoop() {
+        guard !closed, !retired, settingsChange == nil, task == nil else { return }
         task = Task { [weak self, makePublisher, hints, requestsRetired, interval, initialRetry, maximumRetry] in
             await Self.publish(makePublisher: makePublisher, hints: hints, requestsRetired: requestsRetired,
                 interval: interval, initialRetry: initialRetry, maximumRetry: maximumRetry,
@@ -234,13 +296,14 @@ public actor AuthorityWakeService {
         let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
         let executionObserver = executionObserver; self.executionObserver = nil; executionObserver?.cancel()
         hints.close(); presence?.close()
-        let publisher = publisher, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let publisher = publisher, drain = settingsDrain, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         let work = Task {
             await commandReceiver?.close()
             await stopRequestProducers()
             await commandExecutionWorker?.close()
             await publisher?.close()
             await previous?.value
+            await drain?.value
             await observer?.value
             await executionObserver?.value
             try closeRequests()
@@ -250,7 +313,7 @@ public actor AuthorityWakeService {
         catch { closing = nil; throw error }
     }
     private func update(publisher: AuthorityWakePublisher?, status: WakeStatus) -> Bool {
-        guard !closed, !retired else { return false }
+        guard !closed, !retired, settingsChange == nil else { return false }
         self.publisher = publisher; wakeStatus = status
         return true
     }
@@ -267,7 +330,7 @@ public actor AuthorityWakeService {
         try? await close()
     }
     private func publisherDidStop() async {
-        guard !closed else { return }
+        guard !closed, settingsChange == nil else { return }
         retired = true
         task = nil // This callback runs on the terminating worker. Its publisher has already closed.
         try? await close()

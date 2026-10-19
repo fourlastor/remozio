@@ -1,0 +1,48 @@
+{
+  "experiment": "pr455-sendable-test-closures",
+  "evidenceFormat": 1,
+  "sourceCommit": "161383fa31b2a9c227881c38e83e6b760e4ba3d8",
+  "priorReviewedHead": "9489a0204722b1081af3d47c492e3c7bc00e8f77",
+  "sourceSHA256": {
+    "macos/core/Tests/RemozioCoreTests/AuthorityGatewaySettingsRuntimeTests.swift": "8cd940882192c81a5eb4258119e71a6cbdadf5ef35f1ace473b6864ef28592b8",
+    "macos/core/Tests/RemozioCoreTests/MachCommandCallerReceiverTests.swift": "6bd560131a35010d587988f4dc7624a6f486bb14a236b8e9293392f6e54034d6"
+  },
+  "recordedAtUTC": "2026-10-19T07:40:04.322287+00:00",
+  "validation": {
+    "affectedTests": 7,
+    "affectedFailures": 0,
+    "nativeCoreTests": 2886,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "161383fa31b2a9c227881c38e83e6b760e4ba3d8",
+      "recordedAtUTC": "2026-10-19T07:40:02.125707+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1164.71,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1632,
+      "logSHA256": "89dcc1cfca8c69192579a9f09058a2433c602d4357bd628df3bb1dd6f2b4cd7a"
+    },
+    "typedATC": {
+      "sourceCommit": "161383fa31b2a9c227881c38e83e6b760e4ba3d8",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.74,
+      "resultSHA256": "bedb95309f60ba1a1f502fa36264b16bef9d0fc787e13e8750f57afcc12a18d5"
+    },
+    "assemblyAndLintPassed": true
+  },
+  "scope": [
+    "Explicit Sendable closures preserve the concurrent close and cancellation test behavior.",
+    "The empty SQLite blocker uses rollback; durable-result and owner assertions remain unchanged.",
+    "No production code or UX changed."
+  ],
+  "linkedIssue": "https://github.com/rock3r/remozio/issues/456",
+  "limits": [
+    "Hosted CI and a new exact-head Codex review remain required.",
+    "No installed service, production credential or physical Mac-Pixel flow was tested."
+  ]
+}

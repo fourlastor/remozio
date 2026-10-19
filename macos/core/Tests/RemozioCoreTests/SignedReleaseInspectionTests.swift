@@ -43,6 +43,12 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let versions = Set(PreparationIntentStore.supportedSchemaVersions.map(UInt64.init))
                 XCTAssertEqual(preparation.readers, versions)
                 XCTAssertEqual(preparation.writers, versions)
+                let settings = try XCTUnwrap(component.formats.first { $0.name == "authority.gateway-settings-control" })
+                XCTAssertEqual(settings.readers, GatewaySettingsControlInterface.supportedVersions)
+                XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
+                let host = try XCTUnwrap(component.formats.first { $0.name == "authority.command-host-config" })
+                XCTAssertEqual(host.readers, InstalledAuthorityCommandConfiguration.supportedVersions)
+                XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.supportedVersions)
             }
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })

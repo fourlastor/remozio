@@ -80,7 +80,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2])
+        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3])
         self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
@@ -127,3 +127,21 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
+
+    def test_gateway_settings_control_is_declared_only_for_the_root_and_setup_roles(self):
+        expected = MANIFEST.format_declaration('authority.gateway-settings-control', [1])
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role in (2, 8):
+                self.assertEqual(declarations['authority.gateway-settings-control'], expected)
+            else:
+                self.assertNotIn('authority.gateway-settings-control', declarations)
+
+    def test_host_codec_three_is_declared_by_both_retained_settings_participants(self):
+        expected = MANIFEST.format_declaration('authority.command-host-config', [1, 2, 3])
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role in (2, 8):
+                self.assertEqual(declarations['authority.command-host-config'], expected)
+            else:
+                self.assertNotIn('authority.command-host-config', declarations)

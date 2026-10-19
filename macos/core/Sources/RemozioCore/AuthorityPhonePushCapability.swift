@@ -15,6 +15,8 @@ final class AuthorityPhonePushCapability: Sendable {
         var available = false
         var installing = false
         var closed = false
+        var pendingSettings: AuthorityPhonePushSettingsChange?
+        var acceptedSettings: AuthorityPhonePushSettingsChange?
     }
     private let state = Mutex(State())
     private let journal: AuthorityJournal
@@ -49,7 +51,7 @@ final class AuthorityPhonePushCapability: Sendable {
         try Task.checkCancellation()
         let previous = try state.withLock { state in
             guard !state.closed else { throw AuthorityWakePublisherError.closed }
-            guard !state.installing else { throw AuthorityWakePublisherError.busy }
+            guard !state.installing, state.pendingSettings == nil else { throw AuthorityWakePublisherError.busy }
             if let installed = state.installed {
                 guard installed.options.canonicalBytes == options.canonicalBytes, installed.commitDigest == commitDigest else {
                     throw GatewayPreparationError.changedScope
@@ -84,6 +86,66 @@ final class AuthorityPhonePushCapability: Sendable {
             $0.available = true
         }
         return true
+    }
+    /// Fence new phone registration work, then drain the existing serialized owner.
+    /// The native owner must verify the retained, authorized change. This does not stop the wake publisher.
+    @discardableResult
+    func quiesceSettings(_ change: AuthorityPhonePushSettingsChange, verifyCurrent: () throws -> Void) throws -> Bool {
+        try Task.checkCancellation()
+        try state.withLock { state in
+            guard !state.closed else { throw AuthorityWakePublisherError.closed }
+            guard !state.installing else { throw AuthorityWakePublisherError.busy }
+            guard let installed = state.installed, installed.commitDigest == change.previousCommitDigest,
+                  state.pendingSettings == nil || state.pendingSettings == change else { throw GatewayPreparationError.changedScope }
+            state.installing = true
+        }
+        defer { state.withLock { $0.installing = false } }
+        try verifyCurrent()
+        let first = try state.withLock { state in
+            guard !state.closed else { throw AuthorityWakePublisherError.closed }
+            let first = state.pendingSettings == nil
+            state.pendingSettings = change; state.acceptedSettings = nil; state.available = false
+            return first
+        }
+        // Earlier handlers hold this journal lock. Later handlers observe the fence before choosing a provider.
+        try journal.withRequests { [clock] owner in
+            try owner.requireLiveGatewaySetup(clockEpoch: clock().epoch)
+        }
+        try verifyCurrent(); try Task.checkCancellation()
+        try state.withLock { guard !$0.closed else { throw AuthorityWakePublisherError.closed } }
+        return first
+    }
+
+    /// Admit an exact successor while keeping optional admissions suspended.
+    /// A later ordinary monitor pass must validate the selected protected files before restoring the same provider.
+    @discardableResult
+    func acceptSettings(_ change: AuthorityPhonePushSettingsChange, verifyCurrent: () throws -> Void) throws -> Bool {
+        try Task.checkCancellation()
+        let alreadyAccepted = try state.withLock { state in
+            guard !state.closed else { throw AuthorityWakePublisherError.closed }
+            guard !state.installing else { throw AuthorityWakePublisherError.busy }
+            guard let installed = state.installed else { throw GatewayPreparationError.changedScope }
+            let already = state.pendingSettings == nil && state.acceptedSettings == change &&
+                installed.commitDigest == change.selectedCommitDigest
+            guard already || (state.pendingSettings == change && installed.commitDigest == change.previousCommitDigest) else {
+                throw GatewayPreparationError.changedScope
+            }
+            state.installing = true; return already
+        }
+        defer { state.withLock { $0.installing = false } }
+        try verifyCurrent()
+        try journal.withRequests { [clock] owner in
+            try owner.requireLiveGatewaySetup(clockEpoch: clock().epoch)
+        }
+        try verifyCurrent(); try Task.checkCancellation()
+        return try state.withLock { state in
+            guard !state.closed, let previous = state.installed else { throw AuthorityWakePublisherError.closed }
+            if alreadyAccepted { return false }
+            state.installed = Installed(options: previous.options, publication: previous.publication,
+                commitDigest: change.selectedCommitDigest)
+            state.pendingSettings = nil; state.acceptedSettings = change; state.available = false
+            return true
+        }
     }
     func registrationProvider() -> AuthorityPhonePushRegistrationProvider {
         { [self] owner, binding, frame, validate in

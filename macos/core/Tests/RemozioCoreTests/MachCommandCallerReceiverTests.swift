@@ -5296,7 +5296,7 @@ extension MachCommandCallerReceiverTests {
         XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
         XCTAssertEqual(test.authority.activeCommandCount, 1)
         XCTAssertEqual(try test.authority.withRequests { try $0.state(requestID: id).phase }, .executing)
-        XCTAssertEqual(sqlite3_exec(db, "COMMIT", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "ROLLBACK", nil, nil, nil), SQLITE_OK)
         try awaitDispatchCleanup(test.authority)
         let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
         XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 2)

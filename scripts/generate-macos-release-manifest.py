@@ -31,7 +31,7 @@ def declarations(role):
         2: [('authority.service-config', [1, 2]), ('authority.request-config', [1]),
             ('authority.wake-config', [1]), ('authority.presence-config', [1, 2]),
             ('authority.pairing-setup-config', [1]), ('authority.pairing-ipc', [1]), ('pairing.transcript', [1]),
-            ('authority.command-config', [1, 2]), ('authority.command-host-config', [1, 2]), ('authority.command-execution-config', [1]),
+            ('authority.command-config', [1, 2]), ('authority.command-host-config', [1, 2, 3]), ('authority.command-execution-config', [1]),
             ('authority.code-policy', [1, 2, 3]), ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         4: [('transport.config', [1, 2]), ('transport.wake-config', [1]), ('transport.remote-config', [1]),
             ('transport.pairing-config', [1]), ('transport.pairing-control-config', [1]), ('transport.pairing-control', [1]),
@@ -66,6 +66,10 @@ def declarations(role):
     }
     for name, readers, writers in records.get(role, []):
         values.append({0: name, 1: readers, 2: writers, 3: {}})
+    if role == 8:
+        values.append(format_declaration('authority.command-host-config', [1, 2, 3]))
+    if role in (2, 8):
+        values.append(format_declaration('authority.gateway-settings-control', [1]))
     return sorted(values, key=lambda v: v[0])
 
 

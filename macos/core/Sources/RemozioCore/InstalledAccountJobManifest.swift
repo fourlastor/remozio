@@ -15,10 +15,11 @@ struct InstalledAccountJobManifest {
     var path: String { Self.directory + "/" + declaration.plistName! }
 
     init(accountID: Data, role: AuthorityCodeRole, executionUID: UInt32, userName: String,
-         bundlePath: String) throws {
+         bundlePath: String, gatewaySettingsControlEnabled: Bool = false) throws {
         let paths = try RuntimePreparationPaths(accountID: accountID)
         let serviceRole: ServiceAccountRole = role == .notificationGateway ? .gateway : .transport
         guard role == .authority || role == .transport || role == .notificationGateway,
+              !gatewaySettingsControlEnabled || role == .authority,
               role == .authority ? (executionUID == 0 && userName == "root") :
                 (executionUID > 0 && executionUID < UInt32.max && userName == ServiceAccountClaim.recordName(accountID: accountID, role: serviceRole)),
               bundlePath.hasPrefix("/"), bundlePath.hasSuffix(".app"), bundlePath.utf8.count < 4096, Self.validXML(bundlePath),
@@ -37,7 +38,8 @@ struct InstalledAccountJobManifest {
             role == .notificationGateway ? paths.gatewayConfiguration : paths.transportConfiguration
         arguments = [executablePath, role == .authority ? "--command-configuration" :
             role == .notificationGateway ? "--configuration" : "--pairing-configuration", configurationPath]
-        machServices = role == .authority ? [paths.authorityService, paths.commandService, paths.presenceService] :
+        machServices = role == .authority ? Set([paths.authorityService, paths.commandService, paths.presenceService]
+            + (gatewaySettingsControlEnabled ? [paths.gatewaySettingsControlService] : [])) :
             role == .notificationGateway ? [paths.gatewayService, paths.gatewayWakeService] : [paths.pairingService]
     }
     // Stable XML avoids dictionary-order differences across fresh-process recovery.

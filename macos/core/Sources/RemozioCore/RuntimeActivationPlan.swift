@@ -18,13 +18,15 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
     var accountID: Data { reference.services.accountID }
 
     init(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
-         runtime: RuntimePreparationState, inventory: InstallationInventory) throws {
+         runtime: RuntimePreparationState, inventory: InstallationInventory,
+         gatewaySettingsRelease: SignedReleaseEvidence? = nil) throws {
         guard runtime.configurationPublished, let reference = runtime.reference else { throw RuntimeActivationError.incomplete }
         let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization, reference: reference, inventory: inventory)
         let label = bundle.paths.namespace + ".authority"
-        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
+        var host = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
             installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, codePolicy: account.initialAuthority.codePolicy,
             command: bundle.command, label: label, plistName: label + ".plist", jobPlacement: .systemAccount)
+        if let gatewaySettingsRelease { host = try host.enablingGatewaySettingsControl(release: gatewaySettingsRelease) }
         try self.init(reference: reference, bundlePath: inventory.bundlePath, host: host, transport: bundle.transport)
         try validate(account: account, reference: reference)
     }
@@ -60,7 +62,8 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             throw RuntimeActivationError.invalidPlan
         }
         self.reference = reference; self.bundlePath = bundlePath; self.host = host; self.transport = transport
-        authorityJob = try .init(accountID: services.accountID, role: .authority, executionUID: 0, userName: "root", bundlePath: bundlePath)
+        authorityJob = try .init(accountID: services.accountID, role: .authority, executionUID: 0, userName: "root", bundlePath: bundlePath,
+            gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled)
         transportJob = try .init(accountID: services.accountID, role: .transport, executionUID: claim.number, userName: claim.name, bundlePath: bundlePath)
     }
     func validate(account: AccountPreparationIntent, reference: RuntimeMaterialReference) throws {

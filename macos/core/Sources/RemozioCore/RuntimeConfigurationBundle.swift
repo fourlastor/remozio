@@ -22,6 +22,7 @@ struct RuntimePreparationPaths: Sendable {
     var transportIdentity: String { serviceDirectory + "/transport-identity.cbor" }
     var authorityService: String { namespace + ".authority" }
     var commandService: String { namespace + ".commands" }
+    var gatewaySettingsControlService: String { namespace + ".gateway-settings-control" }
     var presenceService: String { namespace + ".presence" }
     var pairingService: String { namespace + ".pairing" }
     var gatewayService: String { namespace + ".gateway" }
