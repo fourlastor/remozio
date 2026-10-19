@@ -1,14 +1,56 @@
-plugins { kotlin("jvm") }
+plugins { kotlin("multiplatform") }
 
-kotlin { jvmToolchain(21) }
+kotlin {
+    jvmToolchain(21)
+    jvm()
+    iosArm64()
+    iosSimulatorArm64()
 
-dependencies {
-    testImplementation(kotlin("test-junit"))
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    sourceSets {
+        commonTest {
+            kotlin.srcDir(layout.buildDirectory.dir("generated/commonTestVectors"))
+            dependencies {
+                implementation(kotlin("test"))
+                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+            }
+        }
+        jvmTest.dependencies {
+            implementation(kotlin("test-junit"))
+            implementation("junit:junit:4.13.2")
+        }
+    }
 }
 
-tasks.test {
+// Native tests cannot read files through system properties, so the vectors they need become Kotlin sources.
+// A vector change regenerates the source and invalidates every test task that compiles it.
+val commonTestVectors = mapOf(
+    "cborSubset" to "protocol/vectors/cbor-subset-v1.json",
+    "pairingInvitation" to "protocol/vectors/pairing-invitation-v1.json",
+)
+val generateCommonTestVectors by tasks.registering {
+    val sources = commonTestVectors.mapValues { rootProject.layout.projectDirectory.file(it.value) }
+    val output = layout.buildDirectory.file("generated/commonTestVectors/dev/remozio/protocol/TestVectors.kt")
+    inputs.files(sources.values)
+    outputs.file(output)
+    doLast {
+        val body = sources.entries.joinToString("\n") { (name, file) ->
+            val text = file.asFile.readText()
+            check(text.isNotBlank()) { "Empty vector file ${file.asFile}" }
+            // Chunked raw strings keep each constant small and need no escaping beyond the dollar sign.
+            val chunks = text.chunked(8_000).joinToString(",\n        ") {
+                "\"\"\"" + it.replace("$", "\${'$'}") + "\"\"\""
+            }
+            "    val $name: String = listOf(\n        $chunks,\n    ).joinToString(\"\")"
+        }
+        output.get().asFile.apply { parentFile.mkdirs() }.writeText(
+            "package dev.remozio.protocol\n\n/** Generated from protocol/vectors. Do not edit. */\ninternal object TestVectors {\n$body\n}\n")
+    }
+}
+tasks.matching { it.name.startsWith("compileTestKotlin") || it.name == "compileTestKotlinJvm" }
+    .configureEach { dependsOn(generateCommonTestVectors) }
+
+// The JVM tests keep their file-based vector wiring.
+tasks.named<Test>("jvmTest") {
     useJUnit()
     val pushRecoveryVectors = rootProject.layout.projectDirectory.file("protocol/vectors/phone-push-recovery-v2.json")
     inputs.file(pushRecoveryVectors)

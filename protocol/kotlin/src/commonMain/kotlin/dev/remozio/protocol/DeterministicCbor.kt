@@ -1,9 +1,5 @@
 package dev.remozio.protocol
 
-import java.io.ByteArrayOutputStream
-import java.nio.charset.CharacterCodingException
-import java.util.Collections
-
 sealed interface CborValue {
     data class Unsigned(val value: ULong) : CborValue
     data class Text(val value: String) : CborValue
@@ -19,13 +15,13 @@ sealed interface CborValue {
     }
 
     class ArrayValue(values: List<CborValue>) : CborValue {
-        val values: List<CborValue> = Collections.unmodifiableList(ArrayList(values))
+        val values: List<CborValue> = readOnlySnapshot(values)
         override fun equals(other: Any?): Boolean = other is ArrayValue && values == other.values
         override fun hashCode(): Int = values.hashCode()
     }
 
     class Fields(values: Map<ULong, CborValue>) : CborValue {
-        val values: Map<ULong, CborValue> = Collections.unmodifiableMap(LinkedHashMap(values))
+        val values: Map<ULong, CborValue> = readOnlySnapshot(values)
         override fun equals(other: Any?): Boolean = other is Fields && values == other.values
         override fun hashCode(): Int = values.hashCode()
     }
@@ -51,6 +47,26 @@ object DeterministicCbor {
         output.toByteArray()
     }
 
+    /** Growable output; the writer checks every length against its limits before appending. */
+    private class ByteBuffer {
+        private var bytes = ByteArray(64)
+        private var count = 0
+        fun size(): Int = count
+        fun append(value: Int) {
+            reserve(1)
+            bytes[count++] = value.toByte()
+        }
+        fun append(value: ByteArray) {
+            reserve(value.size)
+            value.copyInto(bytes, count)
+            count += value.size
+        }
+        fun toByteArray(): ByteArray = bytes.copyOf(count)
+        private fun reserve(extra: Int) {
+            if (count + extra > bytes.size) bytes = bytes.copyOf(maxOf(bytes.size * 2, count + extra))
+        }
+    }
+
     fun decode(bytes: ByteArray, limits: CborLimits): CborValue {
         ensure(bytes.size <= limits.maxBytes, CborFailure.BYTE_LIMIT)
         return Reader(bytes.copyOf(), limits).run {
@@ -65,12 +81,12 @@ object DeterministicCbor {
     }
 
     private class Writer(val limits: CborLimits) {
-        val output = ByteArrayOutputStream()
+        val output = ByteBuffer()
         var items = 0
 
         fun byte(value: Int) {
             ensure(output.size() < limits.maxBytes, CborFailure.BYTE_LIMIT)
-            output.write(value)
+            output.append(value)
         }
 
         fun argument(value: ULong, major: Int) {
@@ -97,14 +113,14 @@ object DeterministicCbor {
                 is CborValue.Bytes -> {
                     argument(value.size.toULong(), 2)
                     ensure(value.size <= limits.maxBytes - output.size(), CborFailure.BYTE_LIMIT)
-                    output.write(value.copyBytes())
+                    output.append(value.copyBytes())
                 }
                 is CborValue.Text -> {
                     // Count and validate before allocating the encoded text.
                     val count = utf8Length(value.value)
                     argument(count.toULong(), 3)
                     ensure(count <= limits.maxBytes - output.size(), CborFailure.BYTE_LIMIT)
-                    output.write(value.value.encodeToByteArray(throwOnInvalidSequence = true))
+                    output.append(value.value.encodeToByteArray(throwOnInvalidSequence = true))
                 }
                 is CborValue.ArrayValue -> {
                     ensure(value.values.size <= limits.maxItems - items, CborFailure.ITEM_LIMIT)
