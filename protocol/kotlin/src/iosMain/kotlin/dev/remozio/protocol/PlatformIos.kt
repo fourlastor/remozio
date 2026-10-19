@@ -44,16 +44,21 @@ internal actual fun sha256(input: ByteArray): ByteArray {
 internal actual fun pairingPoint(bytes: ByteArray) {
     require(bytes.size == 65 && bytes[0] == 4.toByte())
     val accepted = memScoped {
+        // A failed allocation rejects the point instead of passing null to Security or CFRelease.
         val data = bytes.usePinned { CFDataCreate(null, it.addressOf(0).reinterpret(), bytes.size.toLong()) }
         val size = alloc<IntVar>().apply { value = 256 }
         val bits = CFNumberCreate(null, kCFNumberIntType, size.ptr)
         val attributes = CFDictionaryCreateMutable(null, 3, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)
-        CFDictionaryAddValue(attributes, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom)
-        CFDictionaryAddValue(attributes, kSecAttrKeyClass, kSecAttrKeyClassPublic)
-        CFDictionaryAddValue(attributes, kSecAttrKeySizeInBits, bits)
-        val key = SecKeyCreateWithData(data, attributes, null)
+        val key = if (data != null && bits != null && attributes != null) {
+            CFDictionaryAddValue(attributes, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom)
+            CFDictionaryAddValue(attributes, kSecAttrKeyClass, kSecAttrKeyClassPublic)
+            CFDictionaryAddValue(attributes, kSecAttrKeySizeInBits, bits)
+            SecKeyCreateWithData(data, attributes, null)
+        } else {
+            null
+        }
         key?.let { CFRelease(it) }
-        CFRelease(attributes); CFRelease(bits); CFRelease(data)
+        attributes?.let { CFRelease(it) }; bits?.let { CFRelease(it) }; data?.let { CFRelease(it) }
         key != null
     }
     require(accepted)

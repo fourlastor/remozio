@@ -28,8 +28,10 @@ final class NativePhoneServices: NSObject, PhoneServices {
 
     @MainActor
     private static func presentScanner(_ deliver: @escaping (String?) -> Void) {
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        guard var top = scene?.keyWindow?.rootViewController else { return deliver(nil) }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        let window = scene?.keyWindow ?? scene?.windows.first
+        guard var top = window?.rootViewController else { return deliver(nil) }
         while let presented = top.presentedViewController { top = presented }
         top.present(QRScannerController(onFinish: deliver), animated: true)
     }
