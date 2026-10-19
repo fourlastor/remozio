@@ -10,11 +10,11 @@ final class GatewaySettingsConsumerListenerTests: XCTestCase, @unchecked Sendabl
     private final class Builder: GatewaySettingsConsumerEndpointBuilding, @unchecked Sendable {
         let binding: GatewaySettingsConsumerBinding
         let execute: @Sendable (GatewaySettingsConsumerRequest) async throws -> GatewaySettingsConsumerObservation
-        let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
+        let acquireActivity: @Sendable () throws -> (any OwnedReleaseActivity)?
         let created = Mutex(0)
         let closed = Mutex(0)
         init(binding: GatewaySettingsConsumerBinding,
-             acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
+             acquireActivity: @escaping @Sendable () throws -> (any OwnedReleaseActivity)? = { nil },
              execute: @escaping @Sendable (GatewaySettingsConsumerRequest) async throws -> GatewaySettingsConsumerObservation) {
             self.binding = binding; self.execute = execute; self.acquireActivity = acquireActivity
         }
@@ -134,6 +134,30 @@ final class GatewaySettingsConsumerListenerTests: XCTestCase, @unchecked Sendabl
             firstConnection.invalidate(); secondConnection.invalidate()
             await listener.closeAndWait(); try await consumer.close()
         }
+    }
+
+    func testDisconnectedWorkRetainsTheReadOnlyServiceScopeUntilActualSettlement() async throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let binding = try binding(), gate = Mutex<CheckedContinuation<Void, Never>?>(nil)
+        let builder = Builder(binding: binding, acquireActivity: { try service.acquireShared() }) { _ in
+            await withCheckedContinuation { continuation in gate.withLock { $0 = continuation } }
+            return .paused
+        }
+        let native = NSXPCListener.anonymous()
+        let listener = try GatewaySettingsConsumerXPCListener(listener: native, builder: builder, verifyCurrent: {})
+        try listener.start()
+        let (client, connection) = try channel(native, binding: binding), fence = fixture.fence
+        let exchange = Task { try await client.execute(fence, action: .quiesce) }
+        defer { gate.withLock { let old = $0; $0 = nil; old?.resume() }; connection.invalidate(); listener.close() }
+        try await waitUntil { gate.withLock { $0 != nil } }
+        connection.invalidate(); await client.close()
+        try await waitUntil { builder.closed.withLock { $0 == 1 } }
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        let closed = Mutex(false), joining = Task { await listener.closeAndWait(); closed.withLock { $0 = true } }
+        try await Task.sleep(for: .milliseconds(25)); XCTAssertFalse(closed.withLock { $0 })
+        gate.withLock { let old = $0; $0 = nil; old?.resume() }; await joining.value
+        do { _ = try await exchange.value; XCTFail() } catch {}
+        let update = try updater.acquireExclusive(); update.close()
     }
 
 }

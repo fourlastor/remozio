@@ -18,6 +18,7 @@ The repository contains experiments, protocol code, and partial native apps.
 - The [Linux host proposal](docs/linux-host-contract.md) and [Linux validation guide](docs/linux-validation.md) track Ubuntu experiments and the remaining hardware and integration gates.
 - The [Android app](android/README.md) shows saved Mac records and cached audit history. It does not claim a live connection.
 - The [native Mac app](macos/app/README.md) has a main window, a menu bar entry, and Settings.
+- The [iOS app](docs/ios-app.md) imports a pairing invitation and shows its claims. It does not connect yet.
 
 ## Local and pull request checks
 

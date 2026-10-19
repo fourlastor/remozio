@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMON_TASKS = [":protocol-kotlin:test", ":phone-core:test"]
+COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-core:test", ":phone-ui:jvmTest", ":dev-invitation:test"]
 ANDROID_TASKS = [":android-app:testDebugUnitTest", ":android-app:assembleDebug", ":android-app:lintDebug"]
 
 
@@ -21,7 +21,8 @@ class LocalChecksTests(unittest.TestCase):
             (directory / "bin").mkdir()
             shutil.copy2(ROOT / "scripts/check-local.sh", repo / "scripts/check-local.sh")
             stub = '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$CHECK_LOG"\n[ "${0##*/}" != "$FAIL_CHECK" ] || exit 23\n'
-            for name in ("scripts/check.sh", "scripts/check-linux-protocol.sh", "scripts/check-linux-host.sh", "gradlew"):
+            for name in ("scripts/check.sh", "scripts/check-linux-protocol.sh", "scripts/check-linux-host.sh",
+                         "scripts/build-ios-app.sh", "gradlew"):
                 path = repo / name
                 path.write_text(stub)
                 path.chmod(0o755)
@@ -46,7 +47,10 @@ class LocalChecksTests(unittest.TestCase):
         result, calls = self.run_gate("Darwin")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["./scripts/check.sh"],
-                                 ["./gradlew", *COMMON_TASKS, ":phone-core:approvalFlowTest", *ANDROID_TASKS]])
+                                 ["./gradlew", *COMMON_TASKS, ":phone-core:approvalFlowTest",
+                                  ":protocol-kotlin:iosSimulatorArm64Test", ":phone-ui:iosSimulatorArm64Test",
+                                  *ANDROID_TASKS],
+                                 ["./scripts/build-ios-app.sh"]])
 
     def test_unknown_platform_fails_before_running_checks(self):
         result, calls = self.run_gate("FreeBSD")
@@ -75,6 +79,11 @@ class LocalChecksTests(unittest.TestCase):
                 result, calls = self.run_gate(host, "gradlew")
                 self.assertEqual(result.returncode, 23)
                 self.assertEqual(calls[-1][0], "./gradlew")
+
+    def test_mac_app_build_failure_fails_the_gate(self):
+        result, calls = self.run_gate("Darwin", "build-ios-app.sh")
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(calls[-1], ["./scripts/build-ios-app.sh"])
 
 
 if __name__ == "__main__":
