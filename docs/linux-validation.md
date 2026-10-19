@@ -31,7 +31,9 @@ Mac CI checks before merge.
 ## Independent checks
 
 Use Python 3.11 or later, Swift 6.2 or later, JDK 21, and an Android SDK containing
-platform `android-37.0` and build tools `37.0.0`. The shell's `python3` must select
+platform `android-37.0` and build tools `37.0.0`. The shared-host SQLite tests also
+require development headers and library (`libsqlite3-dev` on Ubuntu), discoverable
+through `pkg-config`. The shell's `python3` must select
 the intended interpreter; this machine's `/usr/bin/python3` is 3.13, while another
 Python earlier on its default PATH is older.
 
@@ -78,11 +80,14 @@ portable Kotlin/phone tests and Android unit tests, debug assembly and lint. mac
 `:phone-core:approvalFlowTest` after `check.sh` has built its native peers.
 Unknown platforms and any failed phase fail the gate immediately.
 
-The [shared host core](../host/shared-core/README.md) contains the decision verifier
-and its authority-owned request, enrollment and clock inputs. Its existing verifier
-tests run through the Linux host check and the native Mac check. Mac consumers use
-the same implementation through compatibility type aliases. This extraction does
-not implement a Linux authority, durable decision consumption or command dispatch.
+The [shared host core](../host/shared-core/README.md) contains the decision verifier,
+its authority-owned request, enrollment and clock inputs, and the SQLite audit
+journal tables. Shared verifier and table tests run through the Linux host check
+and native Mac check; Mac tests also retain audit signing integration. Mac consumers
+use the same implementations through compatibility type aliases. The table owner
+still supplies protected storage, durability configuration and outer transactions.
+These extractions do not implement a Linux authority, durable decision consumption
+or command dispatch.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
