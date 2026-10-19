@@ -13,7 +13,15 @@ appId: dev.remozio.ios
 - assertVisible: "Studio"
 - assertVisible: "01010101010101010101010101010101"
 - assertVisible: "02020202020202020202020202020202"
-- assertVisible: "15448DD8-80A3E42E-81C4BE45-FA94CE71-0E577125-96136E08-5F07F24D-E63288DF"
+# The fingerprint shows in groups of eight.
+- assertVisible: "15448DD8"
+- assertVisible: "80A3E42E"
+- assertVisible: "81C4BE45"
+- assertVisible: "FA94CE71"
+- assertVisible: "0E577125"
+- assertVisible: "96136E08"
+- assertVisible: "5F07F24D"
+- assertVisible: "E63288DF"
 - assertVisible: "These are unverified invitation claims.*"
 # A new Add computer screen starts empty; eraseText removes only the text before the cursor.
 # Tags, not text: "Add computer" is also the title of this screen.
