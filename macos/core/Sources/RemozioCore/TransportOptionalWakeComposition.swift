@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 extension TransportWakeRunner {
@@ -17,8 +18,17 @@ extension TransportWakeRunner {
             try DynamicCodeValidation.validateSelf(requirement: requirement)
         }
         try verify()
+        let requireUnfenced: @Sendable () throws -> Void = {
+            try verify()
+            try GatewayRuntimeSettingsFenceReader.requireAbsent(macID: base.transport.macID, accountID: base.transport.accountID,
+                verifyCurrent: {
+                    guard getuid() == base.transport.serviceUID, geteuid() == base.transport.serviceUID else {
+                        throw ApprovalTransportStartupError.wrongAccount
+                    }
+                })
+        }
         try self.init(optionalConfiguration: {
-            guard let loaded = try GatewayRuntimeLoader.load(transport: base, verifyCurrent: verify) else {
+            guard let loaded = try GatewayRuntimeLoader.load(transport: base, verifyCurrent: requireUnfenced) else {
                 throw GatewayWakeSignerError.unavailable
             }
             return loaded

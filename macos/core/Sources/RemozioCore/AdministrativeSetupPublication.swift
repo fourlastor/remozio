@@ -46,7 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision
+        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
         case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
@@ -60,6 +60,7 @@ public enum AdministrativeSetupPublication {
             case .transportGatewayRuntime: "transport-gateway-runtime.cbor"
             case .gatewayRuntimeCommit: "gateway-runtime-commit.cbor"
             case .gatewaySettingsRevision: "gateway-settings-revision.cbor"
+            case .gatewaySettingsFence: "gateway-settings-fence.cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
@@ -89,7 +90,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }

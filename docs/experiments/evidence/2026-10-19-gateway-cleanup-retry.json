@@ -1,0 +1,108 @@
+{
+  "experiment": "gateway-cleanup-retry",
+  "evidenceFormat": 1,
+  "sourceCommit": "32dd504649cb6900034054f0110f075dacab4ee1",
+  "recordedAtUTC": "2026-10-19T22:28:13.002573+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerOwner.swift": "a721469864e722dc6bbc40f4b48a302b5815932cdb510fb8296e751d21d0fdd6",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerHostTests.swift": "25e42e6b9c5968fad9271a9aa12cf4ef524ae09296f86746b6636bb872d3e3d7",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift": "5bc3032450cfa677fab5ee00ed6884c15fe490ef1df5e344ce0ad1759df950fa",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsInitialRuntimeTests.swift": "506547add8bf50c302194ea430fb4e7113a72318cb5b312066e1654cfb3d5978"
+  },
+  "reviewFinding": "https://github.com/rock3r/remozio/pull/472#discussion_r4319312489",
+  "scope": [
+    "Both new host polling paths retry retained cleanup before considering another backend.",
+    "Fresh startup still checks closure, acceptance, initial permission and current configuration.",
+    "Quiescence during retry prevents a late backend restart."
+  ],
+  "validation": {
+    "acceptedNegativeControlFailures": 3,
+    "acceptedNegativeControlLogSHA256": "0a032937d0b6eb04f93fc41f8e722eab7eb8c248ab78c3887f1a3459422feea6",
+    "initialNegativeControlFailures": 6,
+    "initialNegativeControlLogSHA256": "8d39270805c8b37f8fac7cda419a4b12600861ef6d55ad4c5165d64b651225c4",
+    "focusedTests": 37,
+    "focusedFailures": 0,
+    "focusedLogSHA256": "6f45ebbaaf80d64f409e15c5fed1e26b11ee0eed499d11b2c772948e908cf318",
+    "affectedSuites": 15,
+    "affectedSuiteTests": 181,
+    "nativeCoreSummary": "Executed 3065 tests, with 1 test skipped and 0 failures (0 unexpected) in 883.864 (884.233) seconds",
+    "nativeLogSHA256": "72cc26604e31412566f14ab04adf4a4899af7927073a6c7376e346b00b02159d",
+    "fullCurrentLocalGatePassed": true,
+    "fullCurrentLocalGateAdmissionSHA256": "1e3ebff6a3dd211ad28c08a28ae2b5f1da83592e72c7f107474bd2f7a04a36e1",
+    "requiredGradleTasks": [
+      ":protocol-kotlin:jvmTest",
+      ":phone-core:test",
+      ":phone-ui:jvmTest",
+      ":dev-invitation:test",
+      ":phone-core:approvalFlowTest",
+      ":protocol-kotlin:iosSimulatorArm64Test",
+      ":phone-ui:iosSimulatorArm64Test",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "reports": {
+      "protocolJvm": {
+        "tests": 147,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneCore": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiJvm": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "developerInvitation": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "protocolIosSimulator": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiIosSimulator": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "sharedFrameworkPassed": true,
+    "unsignedIosAppBuildPassed": true,
+    "iosSimulatorLeaseManaged": true,
+    "bothTestBindingsVerified": true,
+    "testWrapperSettled": true,
+    "leaseReleased": true,
+    "trackedInputsVerified": 1728
+  },
+  "limits": [
+    "The new head still requires hosted CI and a current-head Codex review.",
+    "No installed service, production credential or physical device was used.",
+    "Native credential custody and the first installed approval flow remain unproven."
+  ]
+}

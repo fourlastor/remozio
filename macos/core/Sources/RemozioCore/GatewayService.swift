@@ -8,20 +8,24 @@ actor GatewayRootDispatcher {
     let lease: GatewayAuthorityLease
     let receipts: GatewayReceiptSigner
     let retryInterval: UInt64
+    private let verifyRuntime: @Sendable () throws -> Void
     private var scheduling = false
-    init(coordinator: GatewayDeliveryCoordinator, lease: GatewayAuthorityLease, receipts: GatewayReceiptSigner, retryInterval: UInt64) {
+    init(coordinator: GatewayDeliveryCoordinator, lease: GatewayAuthorityLease, receipts: GatewayReceiptSigner, retryInterval: UInt64,
+         verifyRuntime: @escaping @Sendable () throws -> Void = {}) {
         self.coordinator = coordinator; self.lease = lease; self.receipts = receipts; self.retryInterval = retryInterval
+        self.verifyRuntime = verifyRuntime
     }
     func synchronize(_ snapshot: GatewayHostSnapshot) async throws {
-        try Task.checkCancellation()
+        try Task.checkCancellation(); try verifyRuntime()
         try await coordinator.synchronizeHost(snapshot, lease: lease)
+        try verifyRuntime()
         if !scheduling {
             try await coordinator.startWakeScheduling(retryIntervalMillis: retryInterval)
             scheduling = true
         }
     }
     func execute(_ command: GatewayRootCommand) async throws -> Data {
-        try Task.checkCancellation()
+        try Task.checkCancellation(); try verifyRuntime()
         switch command {
         case .head(let query):
             if GatewayMappingStateWire.isQuery(query) {
@@ -69,24 +73,65 @@ public final class GatewayService: Sendable {
     private let lease: GatewayAuthorityLease
     private let listener: GatewayXPCListener
     private let wakeListener: GatewayWakeXPCListener?
+    private let requireAuthorization: @Sendable () throws -> Void
     private let retired: GatewayRetirementSignal
     private init(coordinator: GatewayDeliveryCoordinator, lease: GatewayAuthorityLease,
-                 listener: GatewayXPCListener, wakeListener: GatewayWakeXPCListener?, retired: GatewayRetirementSignal) {
+                 listener: GatewayXPCListener, wakeListener: GatewayWakeXPCListener?, retired: GatewayRetirementSignal,
+                 requireAuthorization: @escaping @Sendable () throws -> Void) {
         self.coordinator = coordinator; self.lease = lease; self.listener = listener; self.wakeListener = wakeListener; self.retired = retired
+        self.requireAuthorization = requireAuthorization
     }
-    public var isRetired: Bool { retired.value.withLock { $0 } }
+    public var isRetired: Bool {
+        if retired.value.withLock({ $0 }) { return true }
+        do { try requireAuthorization(); return false }
+        catch { lease.retire(); retired.value.withLock { $0 = true }; return true }
+    }
 
     public static func open(configuration: GatewayServiceConfiguration) async throws -> GatewayService {
         try configuration.requireNativeProcess()
-        try Task.checkCancellation()
+        let requireAuthorization: @Sendable () throws -> Void = {
+            let paths = try RuntimePreparationPaths(accountID: configuration.registration.accountID)
+            try GatewaySettingsInitialPublication.requireLegacyStartup {
+                try ProtectedServiceConfiguration.readPublic(path: paths.serviceDirectory + "/" + GatewaySettingsConsumerHostConfiguration.gatewayFileName)
+            }
+            try GatewayRuntimeSettingsFenceReader.requireAbsent(macID: configuration.registration.macID,
+                accountID: configuration.registration.accountID, verifyCurrent: {
+                    try configuration.requireProcess(realUID: getuid(), effectiveUID: geteuid())
+                })
+        }
+        return try await open(configuration: configuration, requireAuthorization: requireAuthorization)
+    }
+    /// The initial path retains the exact protected publication guard through every backend operation.
+    static func openInitial(publication: GatewaySettingsInitialPublication,
+                            verifyCurrent: @escaping @Sendable () throws -> Void) async throws -> GatewayService {
+        try await open(configuration: publication.configuration, requireAuthorization: verifyCurrent)
+    }
+    /// Only a live process-local consumer permit can enter the selected settings path.
+    static func openAccepted(selection: GatewaySettingsConsumerSelection, permit: GatewaySettingsConsumerPermit) async throws -> GatewayService {
+        guard selection.binding.role == .gateway else { throw GatewayPreparationError.changedScope }
+        let configuration = try GatewayServiceConfiguration.decode(selection.configuration)
+        return try await open(configuration: configuration, requireAuthorization: {
+            try permit.requireValid(binding: selection.binding, fence: selection.fence,
+                configuration: configuration.canonicalBytes, commit: selection.commit)
+        })
+    }
+    private static func open(configuration: GatewayServiceConfiguration,
+                             requireAuthorization: @escaping @Sendable () throws -> Void) async throws -> GatewayService {
+        try configuration.requireNativeProcess()
+        try requireAuthorization(); try Task.checkCancellation()
         let credentials = try GatewayServiceCredentials.load(configuration: configuration), clock = try AuthorityClock()
         let lease = try GatewayAuthorityLease(clock: clock, maximumLifetime: configuration.settings.authorityLeaseMillis)
         let settings = configuration.settings
         let oauth = try FCMOAuthClient(account: credentials.account, timeoutSeconds: Double(settings.providerTimeoutSeconds))
-        let tokens = try FCMTokenSource(client: oauth, maximumWaiters: settings.maximumOperations)
+        let tokens = try FCMTokenSource(maximumWaiters: settings.maximumOperations, now: { .now }, refresh: {
+            try requireAuthorization(); try lease.validate(); try Task.checkCancellation()
+            let token = try await oauth.acquireToken()
+            try requireAuthorization(); try lease.validate(); try Task.checkCancellation(); return token
+        })
         let sender = try FCMWakeSender(project: configuration.project, packageName: configuration.packageName,
             timeoutSeconds: Double(settings.providerTimeoutSeconds))
         let limits = try CBORLimits(maxBytes: 65536, maxDepth: 8, maxItems: 256)
+        try requireAuthorization()
         let database = try GatewayDatabase.open(directoryPath: configuration.directoryPath, serviceUID: configuration.serviceUID,
             identity: configuration.registration, payloadLimits: limits, signingLimits: limits,
             maximumOperations: settings.maximumStoredControls, maximumPendingPerEnrollment: settings.maximumPendingPerEnrollment,
@@ -96,10 +141,10 @@ public final class GatewayService: Sendable {
         do {
             coordinator = try GatewayDeliveryCoordinator(database: database, identity: configuration.registration,
                 tokens: tokens, sender: sender, policy: settings.delivery, clockEpoch: clock.epoch,
-                wakePolicy: settings.wake, validateAuthority: { try lease.validate() })
-        } catch { await tokens.shutdown(); throw error }
+                wakePolicy: settings.wake, validateAuthority: { try requireAuthorization(); try lease.validate() })
+        } catch { await tokens.shutdownAndWait(); throw error }
         let dispatcher = GatewayRootDispatcher(coordinator: coordinator, lease: lease, receipts: credentials.receipts,
-            retryInterval: settings.schedulerRetryMillis)
+            retryInterval: settings.schedulerRetryMillis, verifyRuntime: requireAuthorization)
         let retired = GatewayRetirementSignal()
         do {
             let listener = try GatewayXPCListener(configuration: configuration, lost: {
@@ -112,16 +157,21 @@ public final class GatewayService: Sendable {
                         _ = try await coordinator.submitWake(submission, signature: signature, challenge: challenge)
                     })
             }
-            return GatewayService(coordinator: coordinator, lease: lease, listener: listener, wakeListener: wakeListener, retired: retired)
+            try requireAuthorization()
+            return GatewayService(coordinator: coordinator, lease: lease, listener: listener, wakeListener: wakeListener, retired: retired, requireAuthorization: requireAuthorization)
         } catch { lease.retire(); try await coordinator.shutdown(); throw error }
     }
     public func start() throws {
         guard !isRetired else { throw GatewayServiceError.unavailable }
         do { try listener.start(); try wakeListener?.start() }
-        catch { lease.retire(); retired.value.withLock { $0 = true }; listener.close(); wakeListener?.close(); throw error }
+        catch { retire(); throw error }
+    }
+    /// Stops listener admission before the owner joins asynchronous provider work.
+    public func retire() {
+        lease.retire(); retired.value.withLock { $0 = true }; listener.close(); wakeListener?.close()
     }
     public func close() async throws {
-        lease.retire(); retired.value.withLock { $0 = true }; listener.close(); wakeListener?.close()
+        retire()
         try await coordinator.shutdown()
     }
 }

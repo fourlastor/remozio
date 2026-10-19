@@ -300,7 +300,7 @@ public actor GatewayDeliveryCoordinator {
             for task in scheduled { await task.value }
             for task in tasks { _ = await task.result }
             for task in wakeTasks { _ = await task.result }
-            await tokens.shutdown()
+            await tokens.shutdownAndWait()
             try database.close()
         }
         shutdownTask = task

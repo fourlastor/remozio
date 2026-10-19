@@ -86,6 +86,22 @@ final class SignedReleaseInspectionTests: XCTestCase {
             }
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
+                let contracts: [(String, Set<UInt64>, Set<UInt64>)] = [
+                    (GatewaySettingsConsumerHostConfiguration.formatName, GatewaySettingsConsumerHostConfiguration.supportedVersions,
+                     role == .setupController ? GatewaySettingsConsumerHostConfiguration.supportedVersions : []),
+                    (TransportPairingStartupConfiguration.formatName, TransportPairingStartupConfiguration.supportedVersions,
+                     role == .transport || role == .setupController ? TransportPairingStartupConfiguration.supportedVersions : []),
+                    (GatewayServiceConfiguration.formatName, GatewayServiceConfiguration.supportedVersions,
+                     role == .notificationGateway || role == .setupController ? GatewayServiceConfiguration.supportedVersions : [])
+                ]
+                for (name, readers, writers) in contracts {
+                    let declaration = try XCTUnwrap(component.formats.first { $0.name == name })
+                    XCTAssertEqual(declaration.readers, readers); XCTAssertEqual(declaration.writers, writers)
+                    XCTAssertTrue(declaration.migrations.isEmpty)
+                }
+            }
+            for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
+                let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                 var records = [(RuntimeMaterialReference.formatName, RuntimeMaterialReference.supportedVersions),
                                (ServiceReleaseActivityReference.formatName, ServiceReleaseActivityReference.supportedVersions)]
                 if role == .authority || role == .setupController {

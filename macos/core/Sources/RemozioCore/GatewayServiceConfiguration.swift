@@ -102,6 +102,8 @@ public struct GatewayServiceSettings: Sendable {
 
 /// Root-owned public metadata. Protected setup must establish registration, pins, accounts, and private files first.
 public struct GatewayServiceConfiguration: Sendable {
+    public static let formatName = "gateway.service-config"
+    public static let supportedVersions: Set<UInt64> = [1, 2]
     public let registration: GatewayRegistrationIdentity
     public let receiptPublicKey: Data
     public let directoryPath: String

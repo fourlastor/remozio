@@ -1,0 +1,101 @@
+{
+  "experiment": "gateway-oauth-shutdown",
+  "evidenceFormat": 1,
+  "sourceCommit": "ea9eca427720e07e11a39c606bdeb7ca41fc73a6",
+  "recordedAtUTC": "2026-10-19T21:24:55.539909+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayDeliveryCoordinator.swift": "a2cd7f3383d54a36277ba19cf3864ca525e09b4c80f7bb3041935b4e546acb01",
+    "macos/core/Tests/RemozioCoreTests/GatewayDeliveryCoordinatorTests.swift": "d908f89de9312720a7c77a5808f000fb2eed3a06bacc079399c72d77c6c9ece8"
+  },
+  "reviewFinding": "https://github.com/rock3r/remozio/pull/472#discussion_r4318777734",
+  "validation": {
+    "negativeControlReproducedBeforeFix": true,
+    "negativeControlLogSHA256": "16fcd20d4aa6501ba6567c5ea721683530a4702ee2bdab0707fd87cdd1aa43ba",
+    "focusedTests": 89,
+    "focusedFailures": 0,
+    "focusedLogSHA256": "3aff86a53f156632967466950f962d616379a65e8e77ed5e4b2e86c61a203254",
+    "nativeCoreSummary": "Executed 3063 tests, with 1 test skipped and 0 failures (0 unexpected) in 866.029 (866.366) seconds",
+    "nativeLogSHA256": "86d5b7ca5588a5873396822001dcfae58dd27d3b31a54a49d8fe0db4f65f516a",
+    "fullCurrentLocalGatePassed": true,
+    "fullCurrentLocalGateAdmissionSHA256": "01d9f694d7fa2fbcc439c11a6d6fcf687e716e572e6b809a8af46cdd02ac34c3",
+    "requiredGradleTasks": [
+      ":protocol-kotlin:jvmTest",
+      ":phone-core:test",
+      ":phone-ui:jvmTest",
+      ":dev-invitation:test",
+      ":phone-core:approvalFlowTest",
+      ":protocol-kotlin:iosSimulatorArm64Test",
+      ":phone-ui:iosSimulatorArm64Test",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "reports": {
+      "protocolJvm": {
+        "tests": 147,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneCore": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiJvm": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "developerInvitation": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "protocolIosSimulator": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiIosSimulator": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "sharedFrameworkPassed": true,
+    "unsignedIosAppBuildPassed": true,
+    "iosSimulatorLeaseManaged": true,
+    "bothTestBindingsVerified": true,
+    "testWrapperSettled": true,
+    "leaseReleased": true,
+    "inputsUnchanged": true
+  },
+  "scope": [
+    "Normal Gateway shutdown joins OAuth refresh tasks before closing its database.",
+    "Concurrent and canceled shutdown callers retain the shared drain."
+  ],
+  "limits": [
+    "No installed service or production credential was used.",
+    "Dedicated account admission and physical Mac-Pixel approval remain unproven.",
+    "The separate unchanged relay test failure in CI is tracked in issue444."
+  ]
+}

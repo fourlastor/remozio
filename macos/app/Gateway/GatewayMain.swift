@@ -8,8 +8,11 @@ struct GatewayMain {
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--journal-setup" {
             await journalSetup(path: CommandLine.arguments[2])
         }
+        if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--settings-host" {
+            await settingsHost(path: CommandLine.arguments[2])
+        }
         guard CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--configuration" else {
-            fail("Usage: RemozioGateway --configuration /absolute/protected/gateway.cbor | --journal-setup /absolute/protected/setup-service.cbor", code: EX_USAGE)
+            fail("Usage: RemozioGateway --configuration /absolute/protected/gateway.cbor | --journal-setup /absolute/protected/setup-service.cbor | --settings-host /absolute/protected/settings-host.cbor", code: EX_USAGE)
         }
         let configuration: GatewayServiceConfiguration
         do { configuration = try GatewayServiceConfiguration.load(path: CommandLine.arguments[2]) }
@@ -42,6 +45,30 @@ struct GatewayMain {
             if Task.isCancelled { throw CancellationError() }
             throw failure
         }
+    }
+    private static func settingsHost(path: String) async -> Never {
+        let host: GatewaySettingsGatewayHost
+        do { host = try .open(path: path) }
+        catch { fail("Gateway settings control requires protected bootstrap metadata and its dedicated account.", code: EX_CONFIG) }
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+        let task = Task {
+            try await host.start()
+            while true {
+                try Task.checkCancellation(); try await host.poll()
+                try await Task.sleep(for: .milliseconds(250))
+            }
+        }
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
+        termination.resume(); interruption.resume()
+        defer { termination.cancel(); interruption.cancel() }
+        var failed = false
+        do { try await task.value } catch is CancellationError {} catch { failed = true }
+        do { try await host.close() }
+        catch { fail("Gateway settings control could not drain. Check protected setup progress before restarting.", code: EX_TEMPFAIL) }
+        if failed { fail("Gateway settings control is unavailable. Check protected bootstrap metadata before restarting.", code: EX_TEMPFAIL) }
+        exit(EX_OK)
     }
     private static func journalSetup(path: String) async -> Never {
         let service: GatewayJournalSetupService

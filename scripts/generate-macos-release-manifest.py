@@ -81,7 +81,22 @@ def declarations(role):
         values.append({0: 'runtime.service-release-activity-reference', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     if role in (2, 8):
         values.append({0: 'runtime.preparation-material', 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
-    return sorted(values, key=lambda v: v[0])
+    host_formats = {
+        2: [('runtime.gateway-settings-consumer-host', [1], []),
+            ('transport.pairing-config', [1, 2], []), ('gateway.service-config', [1, 2], [])],
+        4: [('runtime.gateway-settings-consumer-host', [1], []),
+            ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [])],
+        6: [('runtime.gateway-settings-consumer-host', [1], []),
+            ('transport.pairing-config', [1, 2], [])],
+        8: [('runtime.gateway-settings-consumer-host', [1], [1]),
+            ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
+    }
+    by_name = {value[0]: value for value in values}
+    if len(by_name) != len(values):
+        raise ValueError('duplicate format declaration before host overrides')
+    for name, readers, writers in host_formats.get(role, []):
+        by_name[name] = {0: name, 1: readers, 2: writers, 3: {}}
+    return sorted(by_name.values(), key=lambda v: v[0])
 
 
 def encode(value):

@@ -67,7 +67,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role in (1, 4):
             self.assertEqual(by_role[role]['transport.pairing-control-config'][1], [1])
             self.assertEqual(by_role[role]['transport.pairing-control'][1], [1])
-        self.assertEqual(by_role[4]['transport.pairing-config'][1], [1])
+        self.assertEqual(by_role[4]['transport.pairing-config'][1], [1, 2])
         self.assertEqual(by_role[4]['pairing.setup-frame'][1], [1])
         self.assertNotIn('pairing.setup-frame', by_role[1])
         self.assertNotIn('pairing.setup-frame', by_role[2])
@@ -162,6 +162,20 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
+
+    def test_native_host_metadata_and_nested_configs_have_explicit_codec_sets(self):
+        by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}
+                   for role, *_ in MANIFEST.COMPONENTS}
+        host = 'runtime.gateway-settings-consumer-host'
+        pairing = 'transport.pairing-config'
+        gateway = 'gateway.service-config'
+        for role in (2, 4, 6, 8):
+            self.assertEqual(by_role[role][host], {0: host, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+            self.assertEqual(by_role[role][pairing], {0: pairing, 1: [1, 2], 2: [1, 2] if role in (4, 8) else [], 3: {}})
+            self.assertEqual(by_role[role][gateway], {0: gateway, 1: [1, 2], 2: [1, 2] if role in (6, 8) else [], 3: {}})
+        for role in (1, 5, 11, 12):
+            for name in (host, pairing, gateway):
+                self.assertNotIn(name, by_role[role])
 
     def test_service_activity_records_declare_directional_public_and_private_codecs(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}

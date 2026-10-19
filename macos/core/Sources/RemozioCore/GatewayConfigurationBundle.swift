@@ -89,8 +89,7 @@ struct GatewayConfigurationBundle: CustomStringConvertible, CustomDebugStringCon
         }
         let companion = try TransportWakeStartupConfiguration(transport: foreground.transport.transport, wake: signer,
             pollMilliseconds: wakePollMilliseconds)
-        transport = try .init(transport: foreground.transport.transport, control: foreground.transport.control,
-            wake: companion, relayPort: foreground.transport.relayPort)
+        transport = try foreground.transport.replacingWake(companion)
         gatewayJob = try .init(accountID: account, role: .notificationGateway, executionUID: gatewayClaim.number,
             userName: gatewayClaim.name, bundlePath: foreground.bundlePath)
         self.material = material; self.foreground = foreground
