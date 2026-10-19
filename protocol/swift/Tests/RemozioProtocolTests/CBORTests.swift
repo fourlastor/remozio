@@ -40,6 +40,44 @@ final class CBORTests: XCTestCase {
         }
     }
 
+    func testUnsupportedMajorTypesRejectBeforeReadingArguments() {
+        // Negative integers and tags stay unsupported even when their argument is
+        // missing or would otherwise be noncanonical. Preserve that error order.
+        for major: UInt8 in [1, 6] {
+            for additional: UInt8 in 0..<32 {
+                let head = major << 5 | additional
+                assertError(.unsupportedType) {
+                    try DeterministicCBOR.decode(Data([head]), limits: limits)
+                }
+                assertError(.unsupportedType) {
+                    try DeterministicCBOR.decode(Data([head, 0]), limits: limits)
+                }
+            }
+        }
+    }
+
+    func testSimpleValuesKeepTheirExactAcceptedHeaders() throws {
+        for head: UInt8 in 0xe0...0xff {
+            switch head {
+            case 0xf4:
+                XCTAssertEqual(try DeterministicCBOR.decode(Data([head]), limits: limits), .boolean(false))
+            case 0xf5:
+                XCTAssertEqual(try DeterministicCBOR.decode(Data([head]), limits: limits), .boolean(true))
+            case 0xf6:
+                XCTAssertEqual(try DeterministicCBOR.decode(Data([head]), limits: limits), .null)
+            default:
+                assertError(.unsupportedType) {
+                    try DeterministicCBOR.decode(Data([head]), limits: limits)
+                }
+            }
+        }
+        for head: UInt8 in [0xf4, 0xf5, 0xf6] {
+            assertError(.trailingBytes) {
+                try DeterministicCBOR.decode(Data([head, 0]), limits: limits)
+            }
+        }
+    }
+
     func testTextRetainsExactUTF8() throws {
         // Swift text equality can normalize canonically equivalent spellings; wire bytes must not.
         let nfc = try DeterministicCBOR.encode(.text("é"), limits: limits)

@@ -170,7 +170,10 @@ private struct Reader {
             default: throw CBORError.unsupportedType
             }
         }
-        guard [0, 2, 3, 4, 5].contains(major) else { throw CBORError.unsupportedType }
+        switch major {
+        case 0, 2, 3, 4, 5: break
+        default: throw CBORError.unsupportedType
+        }
         let value = try argument(head & 31)
         if major == 0 { return .unsigned(value) }
         guard let count = Int(exactly: value), count <= input.count - offset else {
