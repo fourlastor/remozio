@@ -32,10 +32,11 @@ tests, and Android unit tests, debug assembly and lint. macOS also runs the nati
 builds, tests and experiments, then the Swift/Kotlin interoperability suite using its freshly built
 Mac peers. Mac interoperability runs in CI for Linux contributions.
 
-Both hosts require Python 3.11 or later, JDK 21 and the Android SDK described in the
-[Android build guide](android/README.md). Linux additionally needs Swift 6.2 or later
+Both hosts require JDK 21 and the Android SDK described in the
+[Android build guide](android/README.md). Linux needs Python 3.11 or later and Swift 6.2 or later
 on `PATH`; see the [Linux Swift setup](docs/experiments/linux-swift-protocol.md).
-macOS needs the supported Xcode toolchain. This command is a manual local gate;
+macOS needs Python 3.13 or later (`os.waitid` is missing from
+earlier macOS builds of CPython) and the supported Xcode toolchain. This command is a manual local gate;
 no Git hook is installed.
 
 Pull requests use the repository's [babysit skill](.agents/skills/babysit-pr/SKILL.md).
