@@ -65,7 +65,7 @@ final class GatewayPreparationStoreTests: XCTestCase {
         XCTAssertEqual(try f.f.sql("SELECT COUNT(*) FROM gateway_preparation_v1"), 1)
         try f.machine.close(); let reopened = try f.f.open(); defer { try? reopened.close() }
         XCTAssertEqual(try reopened.gatewayPreparation(accountID: f.account.accountID).reference, try value.reference)
-        XCTAssertEqual(PreparationIntentStore.supportedSchemaVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        XCTAssertEqual(PreparationIntentStore.supportedSchemaVersions, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
     }
     func testMaterialCannotUpgradeStorageBeforeForegroundRegistrationCompletes() throws {
         let f = try fixture(activated: false), value = try material(f)

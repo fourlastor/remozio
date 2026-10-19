@@ -1,0 +1,121 @@
+{
+  "experiment": "macos-gateway-settings-transitions",
+  "evidenceFormat": 1,
+  "sourceCommit": "589f5d098a900a5b3f4f372a08bdebbb48a12332",
+  "recordedAtUTC": "2026-10-19T04:38:40.711183+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsSelection.swift": "b5181b6b449673ca46b90dd45914985fe6a42f191366391465f154ffec6e4607",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsRevision.swift": "d31021ba78588a069c9a40832e8c388dd61c710b04e2ba37c758c57e2f853b61",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsRevisionTests.swift": "c133282d8164b62f8e2c4197f18750a14aa2751e75769cefd0fe274b94b801dc",
+    "macos/core/Sources/RemozioCore/PreparationIntentStore.swift": "9f2a86388082d28c65cd0691fb267fbbc4d805ac494368b488cf9d0b939f9b07",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsState.swift": "daa0955519b882f4ae7aef45c66298455b42fa91e97c9aa486b296b618f40e2a",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsStoreTests.swift": "73c8006e4946154bf38d9787efe19342aec3b4586d3625ea1f55b4c1014c53f7",
+    "scripts/generate-macos-release-manifest.py": "376e75fce5972041083a1522404bd88979b6ec266bb00fecbab83c6a0757cd74",
+    "tests/test_macos_release_manifest.py": "fda487398ba72080a0223e43305fac19f7ae0d3a4935e14b5f4747a698530a3d",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeExtensions.swift": "b29e6a003651e376c6da2a1e5efc74903017a619ae8d48ca26426cedbc388dad",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeCommit.swift": "45633c3f799575882efd6da88a39db42938f5ba1984efba4c0330f21bde8cbeb",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupPublication.swift": "44d5b0b7e14a9ea9659c8a0b5a3e372f2da6297d8db4d4f8504b37febb454c96",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeLoader.swift": "5a6426b6a0a6c2c5d71f74a25ee56b5716d9e79f77c5b5c00b798372c8ba28ff",
+    "macos/core/Sources/RemozioCore/InstalledAuthorityCommandRegistration.swift": "92ca42156afbba05a99c7f3aa0c1489f36f4547710df72caa8496c838adf402e",
+    "macos/core/Sources/RemozioCore/TransportOptionalWakeComposition.swift": "7854ad0449414933d82f98bffbafc73eae678c57b1b7e1246dce94d55c7816ba",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsPublicationPlan.swift": "d81f24c981d50825fa9ac887a6f224fb77ac7d83928cbe5e5c042ab0ea6c760a",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsPublication.swift": "61cf4b68209edbd3acf6006556ca79a21b8c67fbe252785a7566c69055b8fd35",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsPublicationTests.swift": "e6335902cdca36724d199ddc924c86e0859942aed6e5f27b8545ce443eb48a92",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsFileTests.swift": "8ab767ccf4791aa1f7e439718412417e0e583674453033235bb6d045aa4e3f7e",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeExtension.swift": "1ce8cd90db232f338dbccec1e8438f38a41cbc228d114fbf498fb01b48814b0b",
+    "macos/core/Sources/RemozioCore/GatewayRuntimeActivationPlan.swift": "5aa482e5db65222da8ec4d153a2a25a55d246fcc1435180277bea71d713d9585",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "373e041f83f6a64054643b111326c7da5b745eef700c9beb0cbd02a4dc4d16e5",
+    "docs/experiments/macos-gateway-settings-transitions.md": "609ba5ec552c229d851e29d847eddf90c09f46185a03d086a41c142ab46eb553",
+    "macos/core/Tests/RemozioCoreTests/GatewayJournalSetupStoreTests.swift": "399a56fe8cf2582112b2a9fc240bafec0b88997f5499e02be28e5bf07e29d7ed",
+    "macos/core/Tests/RemozioCoreTests/GatewayPreparationStoreTests.swift": "79e60350e81db6f57091cc0c7faa0576f5fe7f32d54df27b11181452a52e2a0b"
+  },
+  "validation": {
+    "nativeCoreTests": 2823,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "589f5d098a900a5b3f4f372a08bdebbb48a12332",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "881cd62bd98bbf46a5d83660793d57ceecd6b1d5239801876037440a5037f52c",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayJournalSetupStoreTests": {
+          "tests": 11,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayPreparationStoreTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayRuntimeSettingsFileTests": {
+          "tests": 9,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayRuntimeSettingsPublicationTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayRuntimeSettingsRevisionTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayRuntimeSettingsStoreTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "SignedReleaseInspectionTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "bae1996768b63bb6014b95cd64b71d4050b19e44bb5e72d07c34b185eae07a61",
+    "nativeLogSHA256": "881cd62bd98bbf46a5d83660793d57ceecd6b1d5239801876037440a5037f52c",
+    "ATCResultSHA256": "2dd212ae70d7b52e7d0df5cd0fe64339f2a896003d27b262c16c467edb1b18df",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Retain exact settings successors with one pending transition per account.",
+    "Preserve the original activation, journal and pairing while recording ordered, resumable progress."
+  ],
+  "limits": [
+    "Saved transition markers do not establish current runtime or phone health.",
+    "Native coordination, recovery and visible app controls follow separately.",
+    "No installed service, secret, physical device or frozen recovery artifact was used."
+  ]
+}

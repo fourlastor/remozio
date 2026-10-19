@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -326,6 +326,135 @@ public final class PreparationIntentStore {
                 try bind(plan.accountID, column: 1, row: row); try bind(plan.digest, column: 2, row: row)
                 guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
             }
+        }
+    }
+    func gatewaySettingsTransition(accountID: Data) throws -> GatewayRuntimeSettingsState {
+        guard accountID.count == 16 else { throw GatewayPreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 11 else { return .empty }
+            let state = try loadGatewaySettingsTransition(accountID: accountID)
+            if let value = state.pending ?? state.active { _ = try requireGatewaySettingsScope(value) }
+            return state
+        }
+    }
+    /// Retention compares the exact current revision. This does not stop services or publish configuration.
+    func retainGatewaySettingsTransition(_ revision: GatewayRuntimeSettingsRevision) throws {
+        let bytes = try revision.encoded
+        guard revision.sequence <= UInt64(Int64.max) else { throw GatewayPreparationError.exhausted }
+        try transaction(write: true) {
+            try identity(macID)
+            let activation = try requireGatewaySettingsScope(revision)
+            let version = try scalar("PRAGMA user_version")
+            let state = try version >= 11 ? loadGatewaySettingsTransition(accountID: revision.accountID) : .empty
+            if let pending = state.pending {
+                guard try pending.encoded == bytes else { throw GatewayPreparationError.conflictingMaterial }; return
+            }
+            if let active = state.active, try active.encoded == bytes { return }
+            try revision.validateSuccessor(of: state.active, activation: activation)
+            if version == 10 {
+                try exec("CREATE TABLE gateway_settings_transition_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),activation BLOB NOT NULL CHECK(length(activation)=32),sequence INTEGER NOT NULL CHECK(sequence>=0),digest BLOB NOT NULL CHECK(length(digest)=32),active BLOB CHECK(active IS NULL OR length(active) BETWEEN 1 AND 32768),pending BLOB CHECK(pending IS NULL OR length(pending) BETWEEN 1 AND 32768),phase INTEGER CHECK(phase BETWEEN 0 AND 3),CHECK((sequence=0 AND active IS NULL) OR (sequence>0 AND active IS NOT NULL)),CHECK((pending IS NULL AND phase IS NULL) OR (pending IS NOT NULL AND phase IS NOT NULL))) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=11")
+            }
+            if state.active == nil {
+                guard try scalar("SELECT COUNT(*) FROM gateway_settings_transition_v1") < 64 else { throw GatewayPreparationError.exhausted }
+                try statement("INSERT INTO gateway_settings_transition_v1 VALUES(?,?,0,?,NULL,?,0)") { row in
+                    try bind(revision.accountID, column: 1, row: row); try bind(revision.activationDigest, column: 2, row: row)
+                    try bind(revision.previousDigest, column: 3, row: row); try bind(bytes, column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                }
+            } else {
+                try statement("UPDATE gateway_settings_transition_v1 SET pending=?,phase=0 WHERE account=? AND digest=? AND pending IS NULL") { row in
+                    try bind(bytes, column: 1, row: row); try bind(revision.accountID, column: 2, row: row)
+                    try bind(revision.previousDigest, column: 3, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+            }
+            try identity(macID)
+        }
+    }
+    /// The owner verifies each native stage before advancing it. Reading these markers grants no runtime authority.
+    func markGatewaySettingsTransition(_ revision: GatewayRuntimeSettingsRevision, phase: GatewayRuntimeSettingsPhase) throws {
+        try transaction(write: true) {
+            try identity(macID); _ = try requireGatewaySettingsScope(revision)
+            guard try scalar("PRAGMA user_version") >= 11 else { throw GatewayPreparationError.incomplete }
+            let state = try loadGatewaySettingsTransition(accountID: revision.accountID)
+            guard let pending = state.pending, let current = state.phase, try pending.encoded == revision.encoded else {
+                throw GatewayPreparationError.changedScope
+            }
+            if current.rawValue >= phase.rawValue { return }
+            guard phase.rawValue == current.rawValue + 1 else { throw PreparationStoreError.invalidTransition }
+            try statement("UPDATE gateway_settings_transition_v1 SET phase=? WHERE account=? AND phase=?") { row in
+                try bind(phase.rawValue, column: 1, row: row); try bind(revision.accountID, column: 2, row: row)
+                try bind(current.rawValue, column: 3, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        }
+    }
+    /// Completion preserves the original activation and journal. The current revision changes in one transaction.
+    func completeGatewaySettingsTransition(_ revision: GatewayRuntimeSettingsRevision) throws {
+        try transaction(write: true) {
+            try identity(macID); _ = try requireGatewaySettingsScope(revision)
+            guard try scalar("PRAGMA user_version") >= 11 else { throw GatewayPreparationError.incomplete }
+            let state = try loadGatewaySettingsTransition(accountID: revision.accountID)
+            if state.pending == nil, let active = state.active, try active.encoded == revision.encoded { return }
+            guard let pending = state.pending, state.phase == .consumersObserved, try pending.encoded == revision.encoded else {
+                throw GatewayPreparationError.incomplete
+            }
+            try statement("UPDATE gateway_settings_transition_v1 SET sequence=?,digest=?,active=pending,pending=NULL,phase=NULL WHERE account=? AND digest=? AND phase=3") { row in
+                try bind(Int64(revision.sequence), column: 1, row: row); try bind(revision.digest, column: 2, row: row)
+                try bind(revision.accountID, column: 3, row: row); try bind(revision.previousDigest, column: 4, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        }
+    }
+    private func requireGatewaySettingsScope(_ revision: GatewayRuntimeSettingsRevision) throws -> GatewayRuntimeActivationPlan {
+        guard revision.sequence <= UInt64(Int64.max) else { throw GatewayPreparationError.exhausted }
+        guard try scalar("PRAGMA user_version") >= 10 else { throw GatewayPreparationError.incomplete }
+        let state = try loadGatewayRuntimeActivation(accountID: revision.accountID)
+        guard state.filesPublished, state.jobRegistered, let activation = state.plan else { throw GatewayPreparationError.incomplete }
+        let scope = try requireGatewayRuntimeActivationScope(activation)
+        _ = try revision.proposal(activation: activation, journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
+        return activation
+    }
+    private func loadGatewaySettingsTransition(accountID: Data) throws -> GatewayRuntimeSettingsState {
+        try statement("SELECT account,activation,sequence,digest,active,pending,phase FROM gateway_settings_transition_v1 ORDER BY account LIMIT 65") { row in
+            var result = GatewayRuntimeSettingsState.empty, accounts = Set<Data>()
+            while try step(row) == SQLITE_ROW {
+                guard accounts.count < 64 else { throw PreparationStoreError.corruptRecord }
+                let account = try blob(row, column: 0, maximum: 16), anchor = try blob(row, column: 1, maximum: 32)
+                let sequence = sqlite3_column_int64(row, 2), digest = try blob(row, column: 3, maximum: 32)
+                guard account.count == 16, anchor.count == 32, digest.count == 32, accounts.insert(account).inserted,
+                      sqlite3_column_type(row, 2) == SQLITE_INTEGER, sequence >= 0 else { throw PreparationStoreError.corruptRecord }
+                func revision(_ column: Int32) throws -> GatewayRuntimeSettingsRevision? {
+                    if sqlite3_column_type(row, column) == SQLITE_NULL { return nil }
+                    let value: GatewayRuntimeSettingsRevision
+                    do { value = try .decode(blob(row, column: column, maximum: 32768)) }
+                    catch { throw PreparationStoreError.corruptRecord }
+                    guard value.accountID == account, value.activationDigest == anchor else { throw PreparationStoreError.corruptRecord }
+                    return value
+                }
+                let active = try revision(4), pending = try revision(5)
+                let phase: GatewayRuntimeSettingsPhase?
+                if sqlite3_column_type(row, 6) == SQLITE_NULL { phase = nil }
+                else {
+                    guard sqlite3_column_type(row, 6) == SQLITE_INTEGER,
+                          let value = GatewayRuntimeSettingsPhase(rawValue: sqlite3_column_int64(row, 6)) else { throw PreparationStoreError.corruptRecord }
+                    phase = value
+                }
+                let activeDigest = try active?.digest
+                guard active != nil || pending != nil, (pending == nil) == (phase == nil), sequence == 0 ? active == nil && digest == anchor :
+                    active != nil && active?.sequence == UInt64(sequence) && activeDigest == digest else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                if let pending {
+                    guard pending.sequence <= UInt64(Int64.max), pending.previousDigest == digest,
+                          sequence < Int64.max, pending.sequence == UInt64(sequence) + 1,
+                          active?.id != pending.id else { throw PreparationStoreError.corruptRecord }
+                }
+                if account == accountID { result = .init(active: active, pending: pending, phase: phase) }
+            }
+            return result
         }
     }
     private func requireGatewayRuntimeActivationScope(_ plan: GatewayRuntimeActivationPlan) throws
@@ -1029,7 +1158,7 @@ public final class PreparationIntentStore {
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 11, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 12, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -1046,6 +1175,7 @@ public final class PreparationIntentStore {
         if version >= 8 { expected.append("gateway_preparation_v1") }
         if version >= 9 { expected.append("gateway_journal_preparation_v1") }
         if version >= 10 { expected.append("gateway_runtime_activation_v1") }
+        if version >= 11 { expected.append("gateway_settings_transition_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
@@ -1105,6 +1235,10 @@ public final class PreparationIntentStore {
     private func bytes(_ id: UUID) -> Data {
         var value = id.uuid
         return withUnsafeBytes(of: &value) { Data($0) }
+    }
+    private func bind(_ number: Int64, column: Int32, row: OpaquePointer) throws {
+        let result = sqlite3_bind_int64(row, column, number)
+        guard result == SQLITE_OK else { throw PreparationStoreError.storage(result) }
     }
     private func bind(_ data: Data, column: Int32, row: OpaquePointer) throws {
         let result = data.withUnsafeBytes {

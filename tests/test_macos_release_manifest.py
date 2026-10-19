@@ -81,7 +81,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 3: {1: 2}})
+        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -91,7 +91,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7], [1, 2, 3, 4, 5, 6, 7]))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
@@ -105,3 +105,25 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(declarations['authority.installation-inventory'], expected)
             else:
                 self.assertNotIn('authority.installation-inventory', declarations)
+
+    def test_retained_gateway_records_declare_exact_readers_and_emitters(self):
+        by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}
+                   for role, *_ in MANIFEST.COMPONENTS}
+        role_record = 'runtime.gateway-role-extension'
+        commit = 'runtime.gateway-runtime-commit'
+        pair = 'runtime.gateway-runtime-pair'
+        activation = 'runtime.gateway-activation-plan'
+        settings = 'runtime.gateway-settings-revision'
+        for role, declarations in by_role.items():
+            if role in (2, 4, 6, 8):
+                self.assertEqual(declarations[role_record], {0: role_record, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[commit], {0: commit, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[settings], {0: settings, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+            else:
+                for name in (role_record, commit, settings):
+                    self.assertNotIn(name, declarations)
+            for name in (pair, activation):
+                if role in (2, 8):
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)

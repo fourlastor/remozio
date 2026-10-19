@@ -44,6 +44,24 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(preparation.readers, versions)
                 XCTAssertEqual(preparation.writers, versions)
             }
+            for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
+                let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
+                var records: [(String, Set<UInt64>)] = [
+                    (GatewayRuntimeExtension.formatName, GatewayRuntimeExtension.supportedVersions),
+                    (GatewayRuntimeCommit.formatName, GatewayRuntimeCommit.supportedVersions),
+                    (GatewayRuntimeSettingsRevision.formatName, GatewayRuntimeSettingsRevision.supportedVersions)
+                ]
+                if role == .authority || role == .setupController {
+                    records += [(GatewayRuntimeExtensions.formatName, GatewayRuntimeExtensions.supportedVersions),
+                                (GatewayRuntimeActivationPlan.formatName, GatewayRuntimeActivationPlan.supportedVersions)]
+                }
+                for (name, versions) in records {
+                    let declaration = try XCTUnwrap(component.formats.first { $0.name == name })
+                    XCTAssertEqual(declaration.readers, versions)
+                    XCTAssertEqual(declaration.writers, role == .setupController ? versions : [])
+                    XCTAssertTrue(declaration.migrations.isEmpty)
+                }
+            }
             XCTAssertEqual(try formats("authority.command-host-config").readers, InstalledAuthorityCommandConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-execution-config").readers, AuthorityCommandExecutionConfiguration.supportedVersions)

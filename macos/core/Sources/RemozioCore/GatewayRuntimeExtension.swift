@@ -4,6 +4,8 @@ import RemozioProtocol
 
 /// Root-owned optional metadata. Decoding grants no activation, native admission or current health.
 struct GatewayRuntimeExtension: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    static let formatName = "runtime.gateway-role-extension"
+    static let supportedVersions: Set<UInt64> = [1]
     enum Target: UInt64, Sendable { case authority = 1, transport = 2 }
     let target: Target
     let intentID: Data

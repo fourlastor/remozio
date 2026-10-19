@@ -40,7 +40,7 @@ def declarations(role):
         5: [('command.frontend-config', [1]), ('command.submission', [1])],
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
         8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7]), ('authority.code-policy', [1, 2, 3]),
-            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             ('authority.journal', [12, 13, 14, 15, 16])],
         11: [('command.child-frame', [1, 2])],
         12: [('command.monitor-frame', [2]), ('command.child-frame', [1, 2])],
@@ -49,8 +49,23 @@ def declarations(role):
               for name, versions in names[role]]
     if role == 2:
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
-        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], {1: 2}))
+        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], {1: 2}))
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
+    # Retained record versions follow the compiled codecs. Setup is the only emitter in this release.
+    records = {
+        2: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
+            ('runtime.gateway-runtime-pair', [1], []), ('runtime.gateway-activation-plan', [1], []),
+            ('runtime.gateway-settings-revision', [1], [])],
+        4: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
+            ('runtime.gateway-settings-revision', [1], [])],
+        6: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
+            ('runtime.gateway-settings-revision', [1], [])],
+        8: [('runtime.gateway-role-extension', [1], [1]), ('runtime.gateway-runtime-commit', [1, 2], [1, 2]),
+            ('runtime.gateway-runtime-pair', [1], [1]), ('runtime.gateway-activation-plan', [1], [1]),
+            ('runtime.gateway-settings-revision', [1], [1])],
+    }
+    for name, readers, writers in records.get(role, []):
+        values.append({0: name, 1: readers, 2: writers, 3: {}})
     return sorted(values, key=lambda v: v[0])
 
 

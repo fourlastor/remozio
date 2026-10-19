@@ -4,6 +4,8 @@ import RemozioProtocol
 
 /// Immutable setup proposal. Retention and registration markers must never substitute for observed runtime health.
 struct GatewayRuntimeActivationPlan: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    static let formatName = "runtime.gateway-activation-plan"
+    static let supportedVersions: Set<UInt64> = [1]
     let extensions: GatewayRuntimeExtensions
     let bundlePath: String
     var description: String { "GatewayRuntimeActivationPlan(redacted)" }

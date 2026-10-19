@@ -47,7 +47,7 @@ extension TransportWakeRunner {
                     let validate: @Sendable () throws -> Void = {
                         try Task.checkCancellation()
                         let current = try optionalConfiguration()
-                        guard current.commit.pairDigest == initial.commit.pairDigest,
+                        guard try current.commit.observationDigest == initial.commit.observationDigest,
                               try current.configuration.encoded == expectedBytes else { throw GatewayPreparationError.changedScope }
                         try current.commit.validate(current.configuration)
                     }

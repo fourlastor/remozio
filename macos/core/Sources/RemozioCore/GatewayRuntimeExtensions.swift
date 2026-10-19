@@ -4,6 +4,8 @@ import RemozioProtocol
 
 /// Prepare independent optional inputs. Foreground startup bytes, identities and request owners stay unchanged.
 struct GatewayRuntimeExtensions: Sendable {
+    static let formatName = "runtime.gateway-runtime-pair"
+    static let supportedVersions: Set<UInt64> = [1]
     let authority: GatewayRuntimeExtension
     let transport: GatewayRuntimeExtension
     init(journal: GatewayJournalPreparationState, foreground: RuntimeActivationPlan, inventory: InstallationInventory,
@@ -29,6 +31,16 @@ struct GatewayRuntimeExtensions: Sendable {
         try authority.validate(authority: foreground.host); try transport.validate(transport: foreground.transport)
         try self.init(authority: authority, transport: transport)
         _ = try encoded
+    }
+    init(settings revision: GatewayRuntimeSettingsRevision, activation: GatewayRuntimeActivationPlan,
+         journal: GatewayJournalPreparationState, foreground: RuntimeActivationPlan, inventory: InstallationInventory) throws {
+        let proposal = try revision.proposal(activation: activation, journal: journal, foreground: foreground, inventory: inventory)
+        let old = activation.extensions.transport
+        let transport = try GatewayRuntimeExtension(target: .transport, intentID: old.intentID, intentDigest: old.intentDigest,
+            foregroundDigest: old.foregroundDigest, baseDigest: old.baseDigest, material: old.material,
+            codePolicy: old.codePolicy, wake: proposal.transport.wake)
+        try self.init(authority: activation.extensions.authority, transport: transport)
+        try validate(journal: journal, foreground: foreground, inventory: inventory)
     }
     private init(authority: GatewayRuntimeExtension, transport: GatewayRuntimeExtension) throws {
         guard authority.target == .authority, transport.target == .transport,

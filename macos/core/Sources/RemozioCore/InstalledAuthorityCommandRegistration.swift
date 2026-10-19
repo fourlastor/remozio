@@ -169,9 +169,9 @@ extension AuthorityRuntimeRunner {
                                 }
                                 try Task.checkCancellation()
                                 _ = try await service.installPhonePush(loaded.configuration.material.phonePush,
-                                    commitDigest: loaded.commit.pairDigest, verifyCurrent: verify)
+                                    commitDigest: loaded.commit.observationDigest, verifyCurrent: verify)
                                 try verify(); try Task.checkCancellation()
-                                return loaded.commit.pairDigest
+                                return try loaded.commit.observationDigest
                             } catch {
                                 await service.suspendPhonePush(); throw error
                             }

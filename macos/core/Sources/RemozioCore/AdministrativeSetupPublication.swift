@@ -46,7 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit
+        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision
         case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
@@ -59,6 +59,7 @@ public enum AdministrativeSetupPublication {
             case .authorityGatewayRuntime: "authority-gateway-runtime.cbor"
             case .transportGatewayRuntime: "transport-gateway-runtime.cbor"
             case .gatewayRuntimeCommit: "gateway-runtime-commit.cbor"
+            case .gatewaySettingsRevision: "gateway-settings-revision.cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
@@ -88,7 +89,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }
@@ -208,6 +209,81 @@ public enum AdministrativeSetupPublication {
         }
         if file.requiresSharedDirectory { return try directory.withSharedDirectory(publish) }
         return try directory.withDirectory(publish)
+    }
+
+    /// Replace only optional settings metadata. The caller holds its scope and independently verifies native quiescence.
+    static func replaceSettings(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
+                                owner: uid_t, verify: () throws -> Void,
+                                didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        switch file {
+        case .gatewayConfiguration, .authorityGatewayRuntime, .transportGatewayRuntime, .gatewaySettingsRevision, .gatewayRuntimeCommit: break
+        default: throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
+              bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        guard let expected else {
+            guard case .gatewaySettingsRevision = file else { throw AdministrativeSetupPublicationError.invalidArtifact }
+            let result = try publish(bytes, file: file, directory: directory, owner: owner, verify: verify, didStage: didStage)
+            return result == .created ? .created : .retained
+        }
+        guard !expected.isEmpty, expected.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        try file.validate(); try verify(); try directory.validate()
+        let body: (Int32) throws -> GatewayRuntimeSettingsFileResult = { parent in
+            do {
+                try match(bytes, file: file, directory: directory, owner: owner)
+                try synchronizeRetained(parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
+                guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+                try verify(); try directory.validate(); return .retained
+            } catch AdministrativeSetupPublicationError.conflictingConfiguration { }
+            try match(expected, file: file, directory: directory, owner: owner)
+            let old = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard old >= 0 else { throw JournalLeaseError.system(errno) }
+            defer { _ = Darwin.close(old) }
+            try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
+            let staging = ".remozio-settings-" + UUID().uuidString
+            let fd = openat(parent, staging, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+            var exchanged = false
+            defer {
+                // Remove only the exact owned staging inode. Preserve an unexpected displaced file for diagnosis.
+                if exchanged {
+                    if (try? validateNamedFile(fd: old, parent: parent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)) != nil {
+                        _ = unlinkat(parent, staging, 0); _ = fsync(parent)
+                    }
+                } else {
+                    var held = stat(), named = stat()
+                    if fstat(fd, &held) == 0, fstatat(parent, staging, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                       held.st_dev == named.st_dev, held.st_ino == named.st_ino { _ = unlinkat(parent, staging, 0) }
+                }
+                _ = Darwin.close(fd)
+            }
+            var initial = stat()
+            guard fstat(fd, &initial) == 0 else { throw JournalLeaseError.system(errno) }
+            try ProtectedStorageMetadata.validate(fd, initial, directory: false, privateObject: false, owner: owner, ancestorOwner: owner)
+            guard let acl = acl_init(0) else { throw JournalLeaseError.system(errno) }
+            defer { acl_free(UnsafeMutableRawPointer(acl)) }
+            guard acl_set_fd(fd, acl) == 0, fchmod(fd, 0o600) == 0 else { throw JournalLeaseError.system(errno) }
+            var offset = 0
+            while offset < bytes.count {
+                let count = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { throw JournalLeaseError.system(count == 0 ? EIO : errno) }; offset += count
+            }
+            guard fchmod(fd, file.mode) == 0, fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+            try didStage(.staged); try verify(); try directory.validate()
+            try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner, mode: file.mode, group: nil)
+            try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
+            guard renameatx_np(parent, staging, parent, file.name, UInt32(RENAME_SWAP)) == 0 else { throw JournalLeaseError.system(errno) }
+            exchanged = true
+            try validateNamedFile(fd: old, parent: parent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)
+            try validateNamedFile(fd: fd, parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
+            try didStage(.published)
+            guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+            try match(bytes, file: file, directory: directory, owner: owner)
+            try verify(); try directory.validate(); return .replaced
+        }
+        if file.requiresSharedDirectory { return try directory.withSharedDirectory(body) }
+        return try directory.withDirectory(body)
     }
 
     // Read-only retention check. Missing established artifacts never become implicit creation here.
