@@ -424,8 +424,10 @@ class MonitorWorkerCleanupTests(unittest.TestCase):
         self.assertNotIn("private", json.dumps(result))
 
     def test_completed_owned_group_is_never_signaled(self):
+        # EOF can precede a descendant becoming waitable; join it before the worker exits.
+        code = "import os\nchild = os.fork()\nif child == 0:\n os._exit(0)\nos.waitpid(child, 0)\nos._exit(0)"
         with patch.object(EXPERIMENT.os, "killpg") as kill:
-            result = self.invoke("import os; os.fork(); os._exit(0)")
+            result = self.invoke(code)
         kill.assert_not_called()
         self.assertTrue(result["cleanup_reaped_all_fixture_children"])
 
