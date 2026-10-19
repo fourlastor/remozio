@@ -10,10 +10,13 @@ final class RuntimeJobRegistrationTests: XCTestCase {
             userName: "root", bundlePath: MachineBootstrap.bundlePath)
     }
     private func output(_ job: InstalledAccountJobManifest) -> String {
-        "system/\(job.declaration.label) = {\n\tpath = \(job.path)\n\ttype = LaunchDaemon\n\tstate = waiting\n\tprogram = \(job.executablePath)\n\targuments = {\n"
-            + job.arguments.map { "\t\t" + $0 + "\n" }.joined() + "\t}\n\tusername = \(job.userName)\n\tgroup = \(job.groupName)\n\tproperties = runatload | keepalive | inferred program\n\tendpoints = {\n"
-            + job.machServices.sorted().map { "\t\t\"" + $0 + "\" = {\n\t\t\tmanaged = 1\n\t\t\treset = 0\n\t\t\thide = 0\n\t\t}\n" }.joined()
-            + "\t}\n\tenvironment = {\n\t\tEXAMPLE => synthetic\n\t}\n}\n"
+        // Separate parts keep the expression within the type checker's time limit on slower Macs.
+        let arguments: String = job.arguments.map { "\t\t\($0)\n" }.joined()
+        let endpoints: String = job.machServices.sorted()
+            .map { "\t\t\"\($0)\" = {\n\t\t\tmanaged = 1\n\t\t\treset = 0\n\t\t\thide = 0\n\t\t}\n" }.joined()
+        return "system/\(job.declaration.label) = {\n\tpath = \(job.path)\n\ttype = LaunchDaemon\n\tstate = waiting\n\tprogram = \(job.executablePath)\n\targuments = {\n"
+            + "\(arguments)\t}\n\tusername = \(job.userName)\n\tgroup = \(job.groupName)\n\tproperties = runatload | keepalive | inferred program\n\tendpoints = {\n"
+            + "\(endpoints)\t}\n\tenvironment = {\n\t\tEXAMPLE => synthetic\n\t}\n}\n"
     }
     func testOperationalObservationMatchesOnlyTheExactLoadedProgramArgumentsAndSourcePath() throws {
         let job = try job(), original = output(job), target = "system/" + job.declaration.label
