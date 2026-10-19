@@ -168,6 +168,13 @@ Before enabling even a same-user production command, establish:
   `CLOCK_BOOTTIME`; pending work is reconciled after reboot. Wall-clock changes,
   suspend/resume and monotonic time from another boot cannot extend approval.
 
+The [shared clock adapter](../host/shared-core/README.md) samples `CLOCK_BOOTTIME`
+for Linux authority moments. Each `LinuxAuthorityClock` construction creates a
+fresh authority epoch, including restarts within the same boot; copies preserve
+that epoch. This adapter adds no boot-ID persistence or request recovery. Its
+automated tests do not establish physical suspend/resume, reboot reconciliation
+or the protected authority's time-namespace policy. Those remain activation gates.
+
 The independent grant policy applies from the first own-account command.
 Administrator membership, sudoers and possession of an enrolled phone create no
 implicit grant. Reload grants at admission and immediately before execution;
