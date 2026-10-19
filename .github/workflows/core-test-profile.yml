@@ -52,6 +52,7 @@ jobs:
         run: |
           python3 scripts/benchmark-core-tests.py \
             --repo "$GITHUB_WORKSPACE" \
+            --order baab \
             --output .build/core-test-profile/class-comparison
       - name: Retain profile and failure diagnostics
         if: always()

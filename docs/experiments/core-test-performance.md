@@ -122,3 +122,41 @@ fixed profile labels/call/throw counts; it rejects missing or extra cases,
 failures, skips or unequal verification work. No stack sampler runs in the timed
 trials. The diagnostic job budget accommodates four whole class runs; individual
 test expectations and timeouts are unchanged.
+
+## Matched native class pilot and bounded follow-up
+
+[Run 39254240196](https://github.com/fourlastor/remozio/actions/runs/39254240196)
+on `7d9a1edf64d9304c40525e45f95be600e2f521c4` completed all four native
+class trials. Each ran all nine cases with zero failures or skips and the same
+627-label call/throw signature as the original profile. All four builds proved
+actual primary-file compilation of the selected decoder. The source and object
+hashes matched the selected variants; the original candidate source was restored.
+The native selected test, all 141 protocol tests and synthetic decoder comparison
+also passed on the same arm64 macOS 26.6.2 / Xcode 26.6 / Swift 6.3.3 host.
+
+| Order | Variant | Whole-class wall seconds | Owned process CPU seconds |
+| --- | --- | ---: | ---: |
+| 1 | Baseline | 493.065 | 488.192 |
+| 2 | Switch | 446.571 | 442.139 |
+| 3 | Switch | 439.728 | 435.696 |
+| 4 | Baseline | 422.714 | 419.511 |
+
+The candidate average is 3.22% shorter, but the baseline falls 14.27% between
+positions one and four, and wall and CPU decline throughout the block. The
+adjacent comparisons disagree: candidate 9.43% shorter, then 4.02% longer.
+This does not confirm a consistent class improvement. Individual methods also
+vary; no observation is discarded. Host scheduling, thermal state, frequency and
+other run-order effects have not been separately measured, so the drift has no
+proven cause. The synthetic decoder result is not a substitute for this result.
+
+One reverse-order B-A-A-B block on a fresh runner is planned to test whether the
+apparent difference follows the source variant or its position. Before its first
+candidate trial, the driver performs an untimed baseline build so the first
+candidate must recompile from different source bytes. That priming build is
+retained separately and no test is timed in it. Both blocks keep identical
+native assertions, fixtures, profile signatures and compile-proof requirements.
+Results will be analyzed within each runner and together with their position
+trends, rather than treating eight observations as independent samples. Stop
+this class-performance experiment after that block if the effect remains
+inconsistent; do not keep rerunning until a favorable result appears. No full-CI
+speedup or upstream optimization PR is claimed from the first block.

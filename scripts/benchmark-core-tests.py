@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fork-only serial A-B-B-A native XCTest comparison; builds are outside timing."""
+"""Fork-only serial A-B-B-A or B-A-A-B native XCTest comparison; builds are outside timing."""
 from __future__ import annotations
 import argparse
 from contextlib import contextmanager
@@ -222,10 +222,28 @@ def terminate(signum, _frame):
     raise SystemExit(128 + signum)
 
 
-def main() -> None:
+def prime_baseline(baseline: bytes, candidate: bytes, select, verify, repo: Path, output: Path) -> dict:
+    """BAAB begins from candidate source; prove an untimed A build before the first B."""
+    verify(candidate)
+    select(baseline)
+    verify(baseline)
+    build = owned(BUILD, output / 'prime-baseline.log', repo, 600)
+    count = compiler_evidence((output / 'prime-baseline.log').read_text())
+    verify(baseline)
+    return {'mode': 'baseline', 'purpose': 'untimed baseline priming so first candidate requires a source change',
+            'sourceSHA256': sha(baseline), 'primaryCompileCommands': count, 'build': build}
+
+
+def argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--repo', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--order', choices=('abba', 'baab'), default='abba')
+    return parser
+
+
+def main() -> None:
+    parser = argument_parser()
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('the native comparison requires macOS')
@@ -242,7 +260,9 @@ def main() -> None:
     (output / 'baseline.swift').write_bytes(baseline)
     (output / 'candidate.swift').write_bytes(candidate)
     metadata = {'baselineGitSHA': BASELINE, 'candidateGitSHA': head, 'sourceSHA256': {'baseline': sha(baseline), 'candidate': sha(candidate)},
-                'buildCommand': BUILD, 'order': ['baseline', 'candidate', 'candidate', 'baseline'], 'cases': sorted(CASES),
+                'buildCommand': BUILD, 'orderName': args.order,
+                'order': ['baseline' if letter == 'a' else 'candidate' for letter in args.order], 'cases': sorted(CASES),
+                'priming': None,
                 'profileSignatureSHA256': PROFILE_SIGNATURE, 'profileReferenceArtifactSHA256': PROFILE_ARTIFACT,
                 'profileReferenceRun': 39246629242, 'driverSHA256': sha(Path(__file__).read_bytes()),
                 'measurement': 'fresh serial XCTest process; wait4 wall/CPU, compilation and input checks excluded; nested spans overlap'}
@@ -266,11 +286,16 @@ def main() -> None:
             raise RuntimeError('invalid XCTest loader')
         dump(output / 'metadata.json', metadata)
         with source_variants(repo / SOURCE, baseline, candidate) as select:
+            previous = candidate
+            if args.order == 'baab':
+                metadata['priming'] = prime_baseline(baseline, candidate, select, verify, repo, output)
+                previous = baseline
+                dump(output / 'metadata.json', metadata)
             for index, mode in enumerate(metadata['order']):
                 trial = output / f'{index + 1}-{mode}'
                 trial.mkdir()
                 data = baseline if mode == 'baseline' else candidate
-                verify(candidate if index == 0 else previous)
+                verify(previous)
                 select(data)
                 verify(data)
                 owned(BUILD, trial / 'build.log', repo, 600)

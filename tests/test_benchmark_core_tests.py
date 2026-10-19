@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,41 @@ def profile():
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_order_parser_defaults_and_rejects_unbalanced_or_unknown_orders(self):
+        required = ['--repo', '/unused', '--output', '/unused-output']
+        self.assertEqual(bench.argument_parser().parse_args(required).order, 'abba')
+        for order in ('abba', 'baab'):
+            self.assertEqual(bench.argument_parser().parse_args(required + ['--order', order]).order, order)
+        for order in ('abab', 'aabb', 'aaaa', 'BAAB', '', 'other'):
+            with self.subTest(order=order), patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as error:
+                bench.argument_parser().parse_args(required + ['--order', order])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_reverse_order_priming_changes_source_and_requires_compilation_before_return(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            calls = []
+            def verify(data):
+                calls.append(('verify', data))
+            def select(data):
+                calls.append(('select', data))
+            def build(command, log, repo, timeout):
+                calls.append(('build', list(command), timeout))
+                log.write_text('/Xcode/swift-frontend -frontend -c -primary-file /same/path/DeterministicCBOR.swift\n')
+                return {'returncode': 0}
+            with patch.object(bench, 'owned', side_effect=build):
+                result = bench.prime_baseline(b'A', b'B', select, verify, output, output)
+            self.assertEqual(calls, [('verify', b'B'), ('select', b'A'), ('verify', b'A'),
+                                     ('build', bench.BUILD, 600), ('verify', b'A')])
+            self.assertEqual(result['sourceSHA256'], bench.sha(b'A'))
+            self.assertEqual(result['primaryCompileCommands'], 1)
+            self.assertEqual(result['build']['returncode'], 0)
+            # Even a successful build command cannot permit trials without actual compiler evidence.
+            with patch.object(bench, 'owned', return_value={'returncode': 0}):
+                (output / 'prime-baseline.log').write_text('Build complete!')
+                with self.assertRaises(RuntimeError):
+                    bench.prime_baseline(b'A', b'B', select, verify, output, output)
+
     def test_exact_nine_cases(self):
         self.assertEqual(set(bench.test_cases(case_log())), bench.CASES)
 
