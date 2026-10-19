@@ -97,6 +97,149 @@ class BuildCacheTests(unittest.TestCase):
                     self.track(other)
                 self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
 
+    def test_documentation_changes_retain_outputs_and_full_inventory(self):
+        doc = self.root / 'docs/experiments/nested/report.md'
+        doc.parent.mkdir(parents=True)
+        for change in ('added', 'edited', 'renamed', 'removed'):
+            with self.subTest(change=change):
+                old_key = self.key()['key']
+                output = self.output()
+                self.operation('save')
+                captured = CACHE.capture_inputs(self.root)
+                if change == 'added':
+                    doc.write_text('first report')
+                    self.track(doc)
+                elif change == 'edited':
+                    doc.write_text('second report')
+                    os.utime(doc, ns=(captured[str(doc.relative_to(self.root))]['mtime_ns'] + 1_000_000,) * 2)
+                elif change == 'renamed':
+                    renamed = doc.with_name('renamed.md')
+                    doc.rename(renamed)
+                    self.track(renamed)
+                    doc = renamed
+                else:
+                    doc.unlink()
+                # Full content keys still change, with compatible-prefix reuse.
+                self.assertNotEqual(old_key, self.key()['key'])
+                os.utime(self.source, ns=(1_800_000_000_987654321,) * 2)
+                result = self.operation('restore')
+                self.assertEqual(result['result'], 'restored')
+                self.assertFalse(result['requires_clean_build'])
+                self.assertEqual(result['changed'], int(change != 'removed'))
+                self.assertEqual(result['missing'], int(change in ('renamed', 'removed')))
+                self.assertEqual(output.read_bytes(), b'cached output')
+                self.assertEqual(self.source.stat().st_mtime_ns, 1_700_000_000_123456789)
+                self.assertTrue(self.operation('save')['saved_manifest'])
+                manifest = json.loads((self.root / '.build/ci-cache/interop.json').read_text())
+                self.assertEqual(CACHE.content_inventory(manifest['inputs']),
+                                 CACHE.content_inventory(CACHE.capture_inputs(self.root)))
+
+    def test_other_markdown_and_nonordinary_docs_still_require_discovery(self):
+        cases = (
+            ('README.md', 'file', 0o644),
+            ('macos/core/Tests/CoreTests/Fixtures/report.md', 'file', 0o644),
+            ('docs-copy/report.md', 'file', 0o644),
+            ('docs/report.swift', 'file', 0o644),
+            ('docs/report.json', 'file', 0o644),
+            ('docs/report.md', 'symlink', None),
+            ('docs/report.md', 'file', 0o755),
+            ('docs/report.md', 'file', 0o4644),
+        )
+        for name, kind, mode in cases:
+            with self.subTest(name=name, kind=kind, mode=mode):
+                self.key()
+                output = self.output()
+                self.operation('save')
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if kind == 'symlink':
+                    path.symlink_to(self.source)
+                else:
+                    path.write_text('input')
+                    path.chmod(mode)
+                self.track(path)
+                result = self.operation('restore')
+                self.assertTrue(result['requires_clean_build'])
+                self.assertFalse(output.exists())
+                path.unlink()
+
+    def test_documentation_kind_and_mode_transitions_require_cold_build(self):
+        doc = self.root / 'docs/report.md'
+        doc.parent.mkdir()
+        for transition in ('executable', 'symlink'):
+            for reverse in (False, True):
+                with self.subTest(transition=transition, reverse=reverse):
+                    def create(ordinary):
+                        if doc.exists() or doc.is_symlink():
+                            doc.unlink()
+                        if not ordinary and transition == 'symlink':
+                            doc.symlink_to(self.source)
+                        else:
+                            doc.write_text('report')
+                            doc.chmod(0o644 if ordinary else 0o755)
+                    create(not reverse)
+                    self.track(doc)
+                    captured = CACHE.capture_inputs(self.root)
+                    create(reverse)
+                    old_mtime = captured['docs/report.md']['mtime_ns']
+                    os.utime(doc, ns=(old_mtime + 1_000_000,) * 2, follow_symlinks=False)
+                    self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+
+    def test_documentation_does_not_hide_source_changes(self):
+        doc = self.root / 'docs/report.md'
+        doc.parent.mkdir()
+        for source_change in ('ordinary-edit', 'timestamp-collision', 'addition'):
+            with self.subTest(source_change=source_change):
+                self.key()
+                output = self.output()
+                self.operation('save')
+                captured = CACHE.capture_inputs(self.root)
+                doc.write_text('report')
+                self.track(doc)
+                if source_change == 'addition':
+                    added = self.root / 'added.swift'
+                    added.write_text('print(4)')
+                    self.track(added)
+                else:
+                    self.source.write_text('print(2)' if source_change == 'ordinary-edit' else 'print(3)')
+                    old_mtime = captured['source with spaces.swift']['mtime_ns']
+                    timestamp = old_mtime + 1_000_000 if source_change == 'ordinary-edit' else old_mtime
+                    os.utime(self.source, ns=(timestamp,) * 2)
+                result = self.operation('restore')
+                self.assertEqual(result['changed'], 2)
+                self.assertEqual(result['requires_clean_build'], source_change != 'ordinary-edit')
+                self.assertEqual(output.exists(), source_change == 'ordinary-edit')
+                if source_change != 'addition':
+                    self.assertEqual(self.source.stat().st_mtime_ns, timestamp)
+                doc.unlink()
+
+    def test_documentation_timestamp_collision_still_invalidates_outputs(self):
+        doc = self.root / 'docs/report.md'
+        doc.parent.mkdir()
+        doc.write_text('first')
+        self.track(doc)
+        self.key()
+        output = self.output()
+        self.operation('save')
+        timestamp = doc.stat().st_mtime_ns
+        doc.write_text('other')
+        os.utime(doc, ns=(timestamp,) * 2)
+        result = self.operation('restore')
+        self.assertTrue(result['requires_clean_build'])
+        self.assertFalse(output.exists())
+        self.assertEqual(doc.read_text(), 'other')
+        self.assertEqual(doc.stat().st_mtime_ns, timestamp)
+
+    def test_documentation_mutation_during_build_prevents_cache_save(self):
+        doc = self.root / 'docs/report.md'
+        doc.parent.mkdir()
+        doc.write_text('first')
+        self.track(doc)
+        self.key()
+        doc.write_text('other')
+        self.assertFalse(self.operation('save')['saved_manifest'])
+        self.assertFalse((self.root / '.build/ci-cache/interop.json').exists())
+
     def test_symlink_does_not_modify_target_timestamp(self):
         target = self.root / 'outside-input.txt'
         target.write_text('private')

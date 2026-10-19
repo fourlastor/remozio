@@ -24,10 +24,22 @@ prefix restore can reuse outputs from another source revision.
 The cache contains a matching input manifest. After restoring outputs, unchanged
 regular files regain their exact recorded nanosecond modification times, only
 after their content hashes and modes match. Changed inputs are not backdated.
-Added/deleted/renamed inputs, file-type changes, or a changed input whose timestamp
-collides with its old timestamp discard the explicit output roots and build cold.
-Symlink targets are not timestamped. Missing, incompatible or malformed manifests
-also cause a cold build. Source directories retain their checkout timestamps.
+Added/deleted/renamed build inputs, file-type changes, or a changed input whose
+timestamp collides with its old timestamp discard the explicit output roots and
+build cold. The file-set comparison excludes only regular, non-executable `.md`
+files under top-level `docs/`, with no special permission bits. The cached native
+builds do not consume this documentation tree. Markdown elsewhere (including
+package resources), symlinks and executable documentation remain conservative.
+Both the old and new inventories are classified, so changing an ordinary document
+into one of those inputs, or back, still requires a cold build. A future build that
+consumes `docs/` must revisit this policy.
+
+Documentation remains in the exact content key, manifest, timestamp checks and
+save-stability check. Thus a documentation change can reuse a compatible-prefix
+cache but cannot masquerade as identical input. Even a changed document with its
+old timestamp still triggers the conservative collision fallback. Symlink targets
+are not timestamped. Missing, incompatible or malformed manifests also cause a
+cold build. Source directories retain their checkout timestamps.
 
 Successful jobs save a new manifest only if the tracked byte/mode inventory stayed
 unchanged during validation. A changed lockfile or generated tracked input prevents
@@ -53,9 +65,12 @@ job runs it before the full native gate. It creates a disposable package, then:
    fresh Git checkout at the same absolute path, restores the archive and exact
    unchanged-source timestamps, and checks that no source frontend command runs.
    The test and executable must execute again and return the original value.
-3. Changes source bytes without changing their size and checks that rebuilt code
+3. Adds, edits, renames and removes a tracked documentation report, comparing each
+   phase with the previous validated inventory. Every phase must preserve source
+   timestamps, avoid source frontend compilation, and execute the test and binary.
+4. Changes source bytes without changing their size and checks that rebuilt code
    and a freshly executed test return the new value.
-4. Repeats with a deliberately colliding old timestamp, requiring the conservative
+5. Repeats with a deliberately colliding old timestamp, requiring the conservative
    cold-build fallback and another changed runtime result.
 
 The JSON report and verbose logs are written under `.build/ci-cache-smoke` and
@@ -89,3 +104,20 @@ Mac baseline on PR #446 took about 45 minutes, with substantial time in both
 compilation and tests; a later run had a larger base-branch test suite. Compare the
 same revision and runner image instead of using those different suites as a cache
 speed comparison. Native Mac build and interoperability remain merge requirements.
+
+## Documentation invalidation follow-up
+
+[PR #461's Mac build](https://github.com/rock3r/remozio/actions/runs/39271173794/job/118123548286)
+restored a compatible main-branch cache successfully, then discarded its compiler
+outputs with `cold-input-change`. The tracked delta was two modified protocol
+files and the added `docs/experiments/cbor-major-dispatch.md` report; compatibility
+settings matched. The report addition alone made the old all-paths discovery
+comparison fail. The same decision occurred in the interoperability job.
+
+The documentation exception addresses that observed invalidation. It does not
+exclude documentation from integrity checks or make arbitrary source-graph changes
+incremental. This helper change itself starts a new compatibility namespace, so
+the first CI run may be cold. Passing the disposable smoke demonstrates reuse and
+correctness only for that package; a reduction in the full Mac job's duration
+still needs native CI evidence. No additional whole-job timing claim follows from
+this change, and all existing builds, tests and interoperability checks still run.
