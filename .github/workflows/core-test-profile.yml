@@ -27,23 +27,12 @@ jobs:
           /usr/bin/time -lp swift build --package-path macos/core --build-tests \
             --triple arm64-apple-macosx26.0 --jobs 4 --force-resolved-versions \
             2>&1 | tee .build/core-test-profile/build.log
-      - name: Profile the nine gateway activation tests serially
+      - name: Sample the owned complete-operation test process
         run: |
-          set -o pipefail
-          REMOZIO_TEST_PROFILE_DIR="$GITHUB_WORKSPACE/.build/core-test-profile" \
-            /usr/bin/time -lp swift test --package-path macos/core --skip-build \
-            --triple arm64-apple-macosx26.0 --jobs 4 --force-resolved-versions \
-            --no-parallel --filter GatewayRuntimeActivationOperationTests \
-            2>&1 | tee .build/core-test-profile/tests.log
-      - name: Check the focused test count
-        run: |
-          python3 - <<'PYTHON'
-          from pathlib import Path
-          import re
-          log = Path('.build/core-test-profile/tests.log').read_text()
-          if not re.search(r'Executed 9 tests, with 0 failures', log):
-              raise SystemExit('Expected all nine focused tests, with no skips or failures')
-          PYTHON
+          REMOZIO_TEST_PROFILE_DIR="$GITHUB_WORKSPACE/.build/core-test-profile/sample" \
+            python3 scripts/profile-core-test.py \
+            --bundle macos/core/.build/debug/RemozioCorePackageTests.xctest \
+            --output .build/core-test-profile/sample
       - name: Retain profile and failure diagnostics
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
