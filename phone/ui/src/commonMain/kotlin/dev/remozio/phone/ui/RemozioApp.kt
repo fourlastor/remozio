@@ -128,14 +128,17 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
     val palette = LocalPalette.current
     var text by remember { mutableStateOf("") }
     var preview by remember { mutableStateOf<InvitationPreview?>(null) }
+    // The last result stays composed while it fades out after the text changes.
+    var shown by remember { mutableStateOf<InvitationPreview?>(null) }
+    if (preview != null) shown = preview
     val focus = LocalFocusManager.current
     val scroll = rememberScrollState()
     fun show(input: String?) {
         if (input == null) return
         // Closing the keyboard keeps the result from being hidden under it.
-        focus.clearFocus()
         text = input
         preview = previewInvitation(input)
+        focus.clearFocus()
     }
     LaunchedEffect(preview) {
         if (preview == null) return@LaunchedEffect
@@ -176,9 +179,9 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
                         onValueChange = { input ->
                             val parsed = previewWhileTyping(input)
                             if (parsed != null) {
-                                focus.clearFocus()
                                 text = input
                                 preview = parsed
+                                focus.clearFocus()
                             } else {
                                 text = input
                                 preview = null
@@ -193,7 +196,7 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
             PrimaryButton("Read invitation", "read", enabled = text.isNotBlank()) { show(text) }
             // Fade only: an expanding result would still grow while the screen scrolls to its end.
             AnimatedVisibility(preview != null, enter = fadeIn(tween(250)), exit = fadeOut(tween(150))) {
-                when (val current = preview) {
+                when (val current = shown) {
                     null -> Unit
                     InvitationPreview.Invalid -> InvalidInvitation()
                     is InvitationPreview.Parsed -> ParsedInvitation(current)
@@ -318,11 +321,16 @@ private fun Tile(icon: ImageVector, label: String, tag: String, modifier: Modifi
 private fun PrimaryButton(label: String, tag: String, enabled: Boolean = true, onClick: () -> Unit) {
     val palette = LocalPalette.current
     Box(
-        Modifier.fillMaxWidth().height(50.dp).clip(CardShape).testTag(tag).alpha(if (enabled) 1f else 0.4f)
+        // A minimum height, not a fixed one, so the label can grow with large text sizes.
+        Modifier.fillMaxWidth().heightIn(min = 50.dp).clip(CardShape).testTag(tag).alpha(if (enabled) 1f else 0.4f)
             .background(palette.accent).clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        BasicText(label, style = Type.button.copy(color = palette.onAccent))
+        BasicText(
+            label,
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            style = Type.button.copy(color = palette.onAccent, textAlign = TextAlign.Center),
+        )
     }
 }
 
