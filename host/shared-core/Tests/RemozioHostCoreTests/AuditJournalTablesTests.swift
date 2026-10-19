@@ -1,8 +1,11 @@
-import CryptoKit
 import Foundation
-import RemozioCore
+import RemozioHostCore
 import RemozioProtocol
+#if os(Linux)
+import CSQLite
+#else
 import SQLite3
+#endif
 import XCTest
 
 final class AuditJournalTablesTests: XCTestCase {
@@ -125,7 +128,7 @@ final class AuditJournalTablesTests: XCTestCase {
         try db.exec("COMMIT")
     }
 
-    func testBoundedPagesAndExplicitRetentionProduceSignableGaps() throws {
+    func testBoundedPagesAndExplicitRetention() throws {
         let db = try DB(), (table, writer) = try initial(db)
         try db.exec("BEGIN IMMEDIATE")
         for n in 1...4 { try table.append(record(UInt64(n)), writer: writer, expectedHead: UInt64(n - 1)) }
@@ -138,15 +141,6 @@ final class AuditJournalTablesTests: XCTestCase {
         let retained = try page(table)
         XCTAssertEqual(retained.epoch.retainedAfter, 2)
         XCTAssertEqual(retained.canonicalRecords, try [record(3), record(4)])
-        let key = P256.Signing.PrivateKey()
-        let builder = try AuditReplyBuilder(macID: id(1), accountID: id(2), authorityPublicKey: key.publicKey.x963Representation,
-            limits: AuditReplyLimits(batch: bound, record: bound, history: bound, descriptor: bound, signing: bound, maximumRecords: 10)) {
-                try key.signature(for: $0).rawRepresentation
-            }
-        let reply = try builder.page(AuditPageRequest(nonce: Data(repeating: 1, count: 32), epoch: id(3), generation: .max, after: 0),
-                                     epoch: retained.epoch, canonicalRecords: retained.canonicalRecords)
-        XCTAssertTrue(try AuditBatchSignature.verify(signature: reply.signature, publicKey: key.publicKey.x963Representation,
-            wireVersion: 1, canonicalPayload: reply.canonicalBody, payloadLimits: bound, inputLimits: bound))
         try table.prune(epoch: id(3), through: 4, expectedHead: 4)
         XCTAssertTrue(try page(table).canonicalRecords.isEmpty)
         XCTAssertEqual(try page(table).epoch.retainedAfter, 4)

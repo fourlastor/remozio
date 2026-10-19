@@ -27,7 +27,7 @@ jobs:
           SWIFT_ARCHIVE_SHA256: 15608c4fa0364ef906014343d81639cf58169e8a40de2b2d3503c3f35a8bb66d
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libxml2 libicu74
+          sudo apt-get install --yes --no-install-recommends libxml2 libicu74 libsqlite3-dev
           curl --fail --location --retry 3 --max-time 300 \
             https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz \
             --output "$RUNNER_TEMP/remozio-swift.tar.gz"
