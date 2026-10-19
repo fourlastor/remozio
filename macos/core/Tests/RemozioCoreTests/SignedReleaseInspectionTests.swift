@@ -84,6 +84,20 @@ final class SignedReleaseInspectionTests: XCTestCase {
                     XCTAssertTrue(control.migrations.isEmpty)
                 }
             }
+            for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
+                let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
+                var records = [(RuntimeMaterialReference.formatName, RuntimeMaterialReference.supportedVersions),
+                               (ServiceReleaseActivityReference.formatName, ServiceReleaseActivityReference.supportedVersions)]
+                if role == .authority || role == .setupController {
+                    records.append((RuntimePreparationMaterial.formatName, RuntimePreparationMaterial.supportedVersions))
+                }
+                for (name, versions) in records {
+                    let declaration = try XCTUnwrap(component.formats.first { $0.name == name })
+                    XCTAssertEqual(declaration.readers, versions)
+                    XCTAssertEqual(declaration.writers, role == .setupController ? versions : [])
+                    XCTAssertTrue(declaration.migrations.isEmpty)
+                }
+            }
             XCTAssertEqual(try formats("authority.command-host-config").readers, InstalledAuthorityCommandConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-execution-config").readers, AuthorityCommandExecutionConfiguration.supportedVersions)
