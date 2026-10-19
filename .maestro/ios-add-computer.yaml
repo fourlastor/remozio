@@ -1,0 +1,24 @@
+# Add computer on the iOS simulator: a pasted invitation shows its claims; invalid text is rejected.
+# The invitation is the "ascii" row of protocol/vectors/pairing-invitation-v1.json.
+appId: dev.remozio.ios
+---
+- launchApp:
+    clearState: true
+- assertVisible: "No computers yet."
+- tapOn: "Add computer"
+- tapOn:
+    id: "invitation-text"
+- inputText: "remozio-pairing:v1:pwABAVABAQEBAQEBAQEBAQEBAQEBAlACAgICAgICAgICAgICAgICA2ZTdHVkaW8EWEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9QVYQQR88nsYjQNPfopSOAMEtRrDwIlp4nfyGzWmC0j8R2aZeAd3VRDbjtBAKT2axp90MNu6fa3mPOmCKZ4Et50ieHPRBgE"
+- tapOn: "Read invitation"
+- assertVisible: "Studio"
+- assertVisible: "01010101010101010101010101010101"
+- assertVisible: "02020202020202020202020202020202"
+- assertVisible: "15448DD8-80A3E42E-81C4BE45-FA94CE71-0E577125-96136E08-5F07F24D-E63288DF"
+- assertVisible: "These are unverified invitation claims.*"
+- tapOn:
+    id: "invitation-text"
+- eraseText: 400
+- inputText: "remozio-pairing:v2:not-an-invitation"
+- tapOn: "Read invitation"
+- assertVisible: "This is not a valid Remozio invitation."
+- assertNotVisible: "Studio"
