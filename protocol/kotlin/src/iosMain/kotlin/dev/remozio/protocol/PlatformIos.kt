@@ -3,6 +3,7 @@
 package dev.remozio.protocol
 
 import kotlinx.cinterop.ExperimentalForeignApi
+import kotlinx.cinterop.IntVar
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
@@ -26,7 +27,6 @@ import platform.Security.kSecAttrKeyClassPublic
 import platform.Security.kSecAttrKeySizeInBits
 import platform.Security.kSecAttrKeyType
 import platform.Security.kSecAttrKeyTypeECSECPrimeRandom
-import platform.posix.IntVar
 import platform.posix.uint8_tVar
 
 internal actual fun sha256(input: ByteArray): ByteArray {
