@@ -43,7 +43,7 @@ public actor DirectApprovalTransportService {
 
     deinit {
         let feed = feed, host = host
-        Task { await host.close(); await feed.close() }
+        Task { await feed.close(); await host.closeAndWait(); await feed.closeAndWait() }
     }
 
     public var state: DirectHostState { get async { await host.state } }
@@ -318,5 +318,11 @@ public actor DirectApprovalTransportService {
         closed = true
         await host.close()
         await feed.close()
+    }
+    /// External lifetime owners join all handlers and refresh work. A handler must not await its own settlement.
+    public func closeAndWait() async {
+        await close()
+        await host.closeAndWait()
+        await feed.closeAndWait()
     }
 }

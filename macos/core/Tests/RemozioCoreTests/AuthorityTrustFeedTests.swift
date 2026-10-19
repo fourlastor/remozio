@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import RemozioProtocol
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -145,7 +146,14 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let request = try PhonePushRecoveryFrame.decode(frame)
             reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .unavailable).encode()))
         }
-        func close() { lock.withLock { closedCalls += 1 } }
+        private var actorCloseGate: DispatchSemaphore?
+        let actorCloseEntered = XCTestExpectation(description: "held channel actor cleanup")
+        func holdActorClose() { lock.withLock { actorCloseGate = DispatchSemaphore(value: 0) } }
+        func releaseActorClose() { lock.withLock { actorCloseGate }?.signal() }
+        func close() {
+            let gate = lock.withLock { closedCalls += 1; return closedCalls == 2 ? actorCloseGate : nil }
+            if let gate { actorCloseEntered.fulfill(); _ = gate.wait(timeout: .now() + 5) }
+        }
 
     }
     private final class Listener: OwnedDirectListener, @unchecked Sendable {
@@ -154,6 +162,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         var isClosed: Bool { lock.withLock { closed } }
         func start() throws { }
         func close() { lock.withLock { closed = true } }
+        func closeAndWait() async { close() }
     }
     private final class Listeners: @unchecked Sendable {
         private let lock = NSLock()
@@ -657,6 +666,38 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(try XCTUnwrap(listeners.values.last).isClosed)
         let state = await host.state; XCTAssertEqual(state, .noEligiblePhones)
         await feed.close(); await host.close()
+    }
+    func testJoinedCloseWaitsForStartupManualRefreshValidationAndQueuedOperations() async throws {
+        for operation in ["startup", "refresh", "validation", "queued"] {
+            let trust = try trust(), driver = try Driver(trust), feed = feed(driver), host = host(Listeners())
+            if operation != "startup" { try await feed.start(host: host) }
+            if operation == "startup" || operation == "refresh" { driver.holdSnapshot() }
+            else { driver.holdValidation() }
+            driver.holdActorClose()
+            defer { driver.releaseActorClose() }
+            let pending = Task { @Sendable in
+                if operation == "startup" { try await feed.start(host: host) }
+                else if operation == "refresh" { try await feed.refresh() }
+                else { try await feed.validatePeer(trust.peers[0], revision: trust.revision) }
+            }
+            let sent = operation == "startup" || operation == "refresh" ? driver.snapshotSent : driver.validationSent
+            await fulfillment(of: [sent], timeout: 2)
+            var queued: Task<Void, any Error>?
+            if operation == "queued" {
+                queued = Task { @Sendable in try await feed.refresh() }
+                try await waitForQueue(feed, count: 1)
+            }
+            let finished = Mutex(false)
+            let close = Task { @Sendable in await feed.closeAndWait(); finished.withLock { $0 = true } }
+            close.cancel()
+            await fulfillment(of: [driver.actorCloseEntered], timeout: 2)
+            try await Task.sleep(for: .milliseconds(20))
+            XCTAssertFalse(finished.withLock { $0 }, "Joined close returned before the \(operation) operation could resume")
+            driver.releaseActorClose(); await close.value
+            do { try await pending.value; XCTFail("A closed feed operation succeeded") } catch { }
+            if let queued { do { try await queued.value; XCTFail("Queued work survived close") } catch { } }
+            await host.close()
+        }
     }
     func testLossDuringValidationClearsHostAndRejectsLateAllow() async throws {
         let trust = try trust(), driver = try Driver(trust), feed = feed(driver), listeners = Listeners(), host = host(listeners)

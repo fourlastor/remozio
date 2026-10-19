@@ -94,7 +94,7 @@ struct TransportMain {
             await pairingListener?.closeAndWait()
             await relay?.close()
             await recovery?.close()
-            await service.close()
+            await service.closeAndWait()
             if Task.isCancelled { throw CancellationError() }
             throw error
         }

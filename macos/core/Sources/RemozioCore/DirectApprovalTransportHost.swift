@@ -16,6 +16,7 @@ public struct DirectApprovalSession: Sendable {
 protocol OwnedDirectListener: Sendable {
     func start() throws
     func close()
+    func closeAndWait() async
 }
 extension DirectApprovalListener: OwnedDirectListener { }
 
@@ -33,6 +34,7 @@ public actor DirectApprovalTransportHost {
     private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
+    private let retiredListeners = OwnedTaskHandoffRegistry()
     private var enabled = false
     private var closed = false
     public private(set) var state: DirectHostState = .stopped
@@ -46,10 +48,11 @@ public actor DirectApprovalTransportHost {
         guard macID.count == 16, accountID.count == 16 else { throw DirectListenerError.invalidConfiguration }
         self.macID = macID; self.accountID = accountID
         self.validatePeer = validatePeer; self.handler = handler
+        let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
         factory = { _, peers, event, handler in
             try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
-                event: event, handler: handler)
+                event: event, handler: handler, sharedWorkBudget: connectionBudget)
         }
     }
 
@@ -73,6 +76,13 @@ public actor DirectApprovalTransportHost {
     }
     public func stop() { enabled = false; invalidate(); state = .stopped }
     public func close() { stop(); authority?.invalidate(); trust = nil; closed = true }
+    public func closeAndWait() async { close(); await retiredListeners.waitAll() }
+    deinit {
+        if let listener {
+            let work = retiredListeners.reserve(); listener.value.close()
+            work.install(Task { await listener.value.closeAndWait() })
+        }
+    }
 
     /// Call for each authenticated trust or policy change. A snapshot is not a phone-provided message.
     /// The IPC owner must reject old connection incarnations and out-of-order updates before calling this method.
@@ -155,6 +165,9 @@ public actor DirectApprovalTransportHost {
     }
     private func invalidate() {
         let previous = listener; listener = nil
-        previous?.value.close()
+        if let previous {
+            let work = retiredListeners.reserve(); previous.value.close()
+            work.install(Task { await previous.value.closeAndWait() })
+        }
     }
 }

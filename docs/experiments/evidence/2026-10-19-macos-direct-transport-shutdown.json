@@ -1,0 +1,247 @@
+{
+  "experiment": "macos-direct-transport-shutdown",
+  "evidenceFormat": 1,
+  "sourceCommit": "324569d1a56f0c3fd1a9a0009ea4428054d8a84a",
+  "recordedAtUTC": "2026-10-19T14:02:16.574188+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/OwnedTaskHandoff.swift": "e391fc94123f68dce134f0ad2386a851ce07ae32db3a0b2d8b3cf1ed428a29ec",
+    "macos/core/Sources/RemozioCore/DirectApprovalListener.swift": "a40d842e9ae5c04fe7a271ac59ae79bcc30103bad9864b106a8a561589b823e6",
+    "macos/core/Sources/RemozioCore/DirectApprovalTransportHost.swift": "6839eda6d2a9fe3efdb4932b7e49660bde2c0f84e2f9a88e895e32994ffbdb32",
+    "macos/core/Sources/RemozioCore/DirectApprovalTransportService.swift": "dd5e9cf8e9d77b639ef6b55bd7485269f5bfaeed544e5ff41ba3002ff5320b93",
+    "macos/core/Sources/RemozioCore/AuthorityTrustFeed.swift": "8278b8baa4621827c7ed151f3ba129f36b78b9160c5ff05d74090e3b7e56ed95",
+    "macos/core/Tests/RemozioCoreTests/AuthorityTrustFeedTests.swift": "6c303adb0077cc6f3574562ffda022c919b60e78d930acb36cbb1ca2ddc6ec4b",
+    "macos/core/Tests/RemozioCoreTests/DirectApprovalRequestDeliveryTests.swift": "7d01c99d756a79ec470923ab721a4f0e68fc59a05d637ddb4b57487c76b47eef",
+    "macos/core/Tests/RemozioCoreTests/DirectApprovalTransportHostTests.swift": "2ac4d6ddc4f6f60e0b6df9a5e2bb73e4a8328d9bcd7aff76db5c7e0b2cc4ffe9",
+    "macos/core/Tests/RemozioCoreTests/DirectTransportDrainTests.swift": "4ac6f99f91987b92836f4cb045c6490e98153bd557bfe7b74951a20b5670df8e",
+    "macos/app/Transport/TransportMain.swift": "d1107cf4590ea0e70522e798ca4ce8c59d0f4453f2ea01a4d6482994ee90815b",
+    "docs/experiments/macos-direct-transport-shutdown.md": "dfc75bca6addedd043affaae93bd3de92365abe31d424d404cd935fcd4b4331c"
+  },
+  "validation": {
+    "nativeCoreTests": 2954,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "324569d1a56f0c3fd1a9a0009ea4428054d8a84a",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "c47806fe98afbce82d2d3e4d14f87c23468e932f4a3b3414b6c5daf05f704b59",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityTrustFeedTests": {
+          "tests": 33,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalRequestDeliveryTests": {
+          "tests": 43,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalTransportHostTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectTransportDrainTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "d466c2cf52be1f414c8b92cb7db4c5ec6653d0008a8e0e6494bc7b02249ba16f",
+    "nativeLogSHA256": "c47806fe98afbce82d2d3e4d14f87c23468e932f4a3b3414b6c5daf05f704b59",
+    "ATCResultSHA256": "3bb533bb5bb32d5b16fbafbaeb4d6007364e37502491261bf42817f75ea1ca52",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Join current and retired direct handlers, trust refresh work and timers before the outer service lifetime ends.",
+    "Retain task reservations before installation and release each shared connection budget exactly once.",
+    "Use joined direct shutdown in the existing external Transport entry."
+  ],
+  "limits": [
+    "Owned runtime and native loopback checks do not establish installed dedicated UID or physical phone behavior.",
+    "Native settings host integration follows separately.",
+    "No installed services, secrets, physical devices or frozen recovery artifacts were used."
+  ],
+  "CICompilerCompatibilityValidation": {
+    "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+    "diagnosis": {
+      "run": 39265381333,
+      "job": 118103479017,
+      "previousHead": "15402d10aad4caabd6619af554e80a7568b0b3be",
+      "path": "macos/core/Tests/RemozioCoreTests/DirectTransportDrainTests.swift",
+      "line": 72,
+      "error": "sending value of non-Sendable type () async -> () risks causing data races",
+      "change": "Add explicit @Sendable to both concurrent registry wait tasks. Preserve every assertion and execution path.",
+      "beforeSHA256": "4ac6f99f91987b92836f4cb045c6490e98153bd557bfe7b74951a20b5670df8e",
+      "afterSHA256": "790bbea601bafaabd53ebea8b5f30a5f7443c972e373c68c58543505f0a96ffa",
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "recordedAtUTC": "2026-10-19T14:43:01.597726+00:00",
+      "CICompilerProofPending": true
+    },
+    "nativeCoreTests": 2954,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "recordedAtUTC": "2026-10-19T15:04:49.859753+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1202.77,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1666,
+      "logSHA256": "547ce11664027ea2ee976ec8c410e7f919ef0381c3c14653ad29687440ff794f"
+    },
+    "portableGate": {
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.86,
+      "resultSHA256": "088b7baa775acb5f60bfdb3f4cd64611946955d51f7ce5667595e99d2c4ab179"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "fdd71451080de79aad4a764556b2c882be710ddd",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "547ce11664027ea2ee976ec8c410e7f919ef0381c3c14653ad29687440ff794f",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityTrustFeedTests": {
+          "tests": 33,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalRequestDeliveryTests": {
+          "tests": 43,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalTransportHostTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectTransportDrainTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "scope": "Two concurrent registry wait closures declare @Sendable. No assertion or task body changed.",
+    "CICompilerProofPending": true
+  },
+  "feedOperationDrainValidation": {
+    "sourceCommit": "65d22ad8734a3ff5af7b60151c281d1c641dfb34",
+    "diagnosis": {
+      "finding": 4315453029,
+      "findingURL": "https://github.com/rock3r/remozio/pull/460#discussion_r4315453029",
+      "classification": "in-scope lifecycle defect",
+      "previousHead": "aed2d74a8ad9dc81c627c88a5ccf1d8bfe9aa68f",
+      "sourceCommit": "65d22ad8734a3ff5af7b60151c281d1c641dfb34",
+      "sourceSHA256": {
+        "macos/core/Sources/RemozioCore/AuthorityTrustFeed.swift": "3b37489db4190671bc99086e405871293abd3fc8d093248db569f274e34c8532",
+        "macos/core/Tests/RemozioCoreTests/AuthorityTrustFeedTests.swift": "54c1681ab681a22497fba8af9b57141d1dca8b72f6ee5de096991fdbca84e516"
+      },
+      "sourceDiffSHA256": "14c5871e6737aadce4fdf2e7224733c244e664b7d2ce303bccffc4e4e310909d",
+      "redProof": {
+        "exitCode": 1,
+        "elapsedSeconds": 35.45,
+        "falseReturnAssertions": 3,
+        "recordedAtUTC": "2026-10-19T15:10:56.015463+00:00"
+      },
+      "greenProof": {
+        "exitCode": 0,
+        "elapsedSeconds": 22.06,
+        "sourceSHA256": {
+          "macos/core/Sources/RemozioCore/AuthorityTrustFeed.swift": "3b37489db4190671bc99086e405871293abd3fc8d093248db569f274e34c8532",
+          "macos/core/Tests/RemozioCoreTests/AuthorityTrustFeedTests.swift": "54c1681ab681a22497fba8af9b57141d1dca8b72f6ee5de096991fdbca84e516"
+        },
+        "inputsUnchanged": true,
+        "recordedAtUTC": "2026-10-19T15:14:44.901032+00:00"
+      },
+      "recordedAtUTC": "2026-10-19T15:15:42.986064+00:00"
+    },
+    "nativeCoreTests": 2955,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "65d22ad8734a3ff5af7b60151c281d1c641dfb34",
+      "recordedAtUTC": "2026-10-19T15:38:57.146485+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1247.12,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1666,
+      "logSHA256": "7975c27e6491934e1389973ac00a769ad9c27c3aa478911a83f22139aef04526"
+    },
+    "portableGate": {
+      "sourceCommit": "65d22ad8734a3ff5af7b60151c281d1c641dfb34",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 35.53,
+      "resultSHA256": "ff43d5c0535fb0194756f6c8a1c204c78b6033c64d27839cfda73f5d0805d7e8"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "65d22ad8734a3ff5af7b60151c281d1c641dfb34",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "7975c27e6491934e1389973ac00a769ad9c27c3aa478911a83f22139aef04526",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "AuthorityTrustFeedTests": {
+          "tests": 34,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalRequestDeliveryTests": {
+          "tests": 43,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectApprovalTransportHostTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "DirectTransportDrainTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "scope": "Join admitted startup and ordered feed operations through their terminal defers, including queued calls and cancelled closers.",
+    "installedOrPhysicalProof": false
+  }
+}

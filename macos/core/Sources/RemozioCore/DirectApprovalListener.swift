@@ -97,14 +97,25 @@ public final class DirectApprovalListener: @unchecked Sendable {
     public enum Binding: Sendable { case localNetwork, loopback }
     private final class Slot: @unchecked Sendable {
         let channel: NetworkByteChannel
-        var task: Task<Void, Never>?
-        init(_ channel: NetworkByteChannel) { self.channel = channel }
+        let work: OwnedTaskHandoff
+        let budget: AuthorityXPCWorkBudget
+        private let lock = NSLock()
+        private var budgetReleased = false
+        init(_ channel: NetworkByteChannel, budget: AuthorityXPCWorkBudget) {
+            self.channel = channel; self.budget = budget
+            work = .init(onCancel: { channel.abort() })
+        }
+        func releaseBudget() {
+            let release = lock.withLock { if budgetReleased { return false }; budgetReleased = true; return true }
+            if release { budget.release() }
+        }
     }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "dev.remozio.direct-listener")
     private let lock = NSLock()
     private let peers: DirectPeerSnapshot
     private let maximumConnections: Int
+    private let connectionBudget: AuthorityXPCWorkBudget
     private let timeoutMilliseconds: UInt64
     private let handler: @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void
     private let event: @Sendable (DirectListenerEvent) -> Void
@@ -114,10 +125,20 @@ public final class DirectApprovalListener: @unchecked Sendable {
     private var ready = false
 
     /// Loopback mode never advertises. Local-network mode publishes the Android discovery hint on an ephemeral port.
-    public init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
+    public convenience init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
                 maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000,
                 event: @escaping @Sendable (DirectListenerEvent) -> Void,
                 handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void) throws {
+        try self.init(identity: identity, peers: peers, binding: binding, maximumConnections: maximumConnections,
+            timeoutMilliseconds: timeoutMilliseconds, event: event, handler: handler,
+            sharedWorkBudget: AuthorityXPCWorkBudget(maximum: maximumConnections))
+    }
+    init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
+         maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000,
+         event: @escaping @Sendable (DirectListenerEvent) -> Void,
+         handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void,
+         sharedWorkBudget: AuthorityXPCWorkBudget) throws {
+        connectionBudget = sharedWorkBudget
         guard (1...64).contains(maximumConnections), (1...60_000).contains(timeoutMilliseconds) else {
             throw DirectListenerError.invalidConfiguration
         }
@@ -166,6 +187,14 @@ public final class DirectApprovalListener: @unchecked Sendable {
         }
     }
     public func close() { finish(.stopped) }
+    var retainedConnectionCount: Int { lock.withLock { slots.count } }
+    public func closeAndWait() async {
+        close()
+        let owned = lock.withLock { Array(slots) }
+        for (id, slot) in owned {
+            await slot.work.wait(); slot.releaseBudget(); release(id)
+        }
+    }
     deinit { close() }
 
     private func changed(_ state: NWListener.State) {
@@ -186,14 +215,14 @@ public final class DirectApprovalListener: @unchecked Sendable {
         let snapshot = peers
         let id = UUID()
         let owned = lock.withLock { () -> Slot? in
-            guard started, !closed, slots.count < maximumConnections else { return nil }
-            let slot = Slot(NetworkByteChannel(connection: connection) { snapshot.peer(connection: $0) != nil })
+            guard started, !closed, slots.count < maximumConnections, connectionBudget.acquire() else { return nil }
+            let slot = Slot(NetworkByteChannel(connection: connection) { snapshot.peer(connection: $0) != nil }, budget: connectionBudget)
             slots[id] = slot; return slot
         }
         guard let slot = owned else { connection.cancel(); return }
         let channel = slot.channel
         let timeout = timeoutMilliseconds, handler = handler
-        let task = Task { [weak self] in
+        let task = Task {
             do {
                 try await channel.start(timeoutMilliseconds: timeout)
                 try Task.checkCancellation()
@@ -210,24 +239,24 @@ public final class DirectApprovalListener: @unchecked Sendable {
                 await framed.closeAndWait()
             } catch { }
             await channel.close()
-            self?.release(id)
         }
-        let keep = lock.withLock { () -> Bool in
-            guard !closed, slots[id] === slot else { return false }
-            slot.task = task; return true
+        slot.work.install(task)
+        Task { [weak self, slot] in
+            await slot.work.wait(); slot.releaseBudget(); self?.release(id)
         }
-        if !keep { task.cancel(); channel.abort() }
+        let keep = lock.withLock { !closed && slots[id] === slot }
+        if !keep { slot.work.cancel() }
     }
     private func release(_ id: UUID) { _ = lock.withLock { slots.removeValue(forKey: id) } }
     private func finish(_ result: DirectListenerEvent) {
         let owned: [Slot]? = lock.withLock {
             guard !closed else { return nil }
             closed = true
-            let owned = Array(slots.values); slots.removeAll(); return owned
+            return Array(slots.values)
         }
         guard let owned else { return }
         listener.cancel()
-        for slot in owned { slot.channel.abort(); slot.task?.cancel() }
+        for slot in owned { slot.work.cancel() }
         queue.async { [event] in event(result) }
     }
 }

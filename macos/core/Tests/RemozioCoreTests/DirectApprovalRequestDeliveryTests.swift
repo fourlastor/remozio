@@ -162,6 +162,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     private final class Listener: OwnedDirectListener, @unchecked Sendable {
         func start() throws { }
         func close() { }
+        func closeAndWait() async { close() }
     }
     private final class Factory: @unchecked Sendable {
         private let lock = NSLock()

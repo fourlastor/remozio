@@ -17,6 +17,7 @@ final class DirectApprovalTransportHostTests: XCTestCase {
         init(_ generation: UUID, _ peers: [DirectApprovalPeer]) { self.generation = generation; self.peers = peers }
         func start() throws { }
         func close() { lock.withLock { closed = true } }
+        func closeAndWait() async { close() }
     }
     private final class Factory: @unchecked Sendable {
         private let lock = NSLock()
