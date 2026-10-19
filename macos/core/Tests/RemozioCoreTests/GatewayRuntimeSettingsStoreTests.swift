@@ -5,7 +5,7 @@ import XCTest
 
 final class GatewayRuntimeSettingsStoreTests: XCTestCase {
     private struct Interrupted: Error {}
-    private struct Ready {
+    struct Ready {
         let fixture: GatewayJournalSetupExchangeTests.Fixture
         let activation: GatewayRuntimeActivationPlan
         init(register: Bool = true) throws {

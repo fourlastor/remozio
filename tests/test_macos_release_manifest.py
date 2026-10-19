@@ -145,3 +145,20 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
+
+    def test_companion_controls_and_fence_declare_only_the_current_participants(self):
+        by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}
+                   for role, *_ in MANIFEST.COMPONENTS}
+        fence = 'runtime.gateway-settings-fence'
+        gateway = 'gateway.gateway-settings-control'
+        transport = 'transport.gateway-settings-control'
+        for role, declarations in by_role.items():
+            if role in (2, 4, 6, 8):
+                self.assertEqual(declarations[fence], {0: fence, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(fence, declarations)
+            for name, consumer in ((gateway, 6), (transport, 4)):
+                if role in (consumer, 8):
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)

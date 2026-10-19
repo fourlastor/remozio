@@ -1,0 +1,348 @@
+{
+  "experiment": "macos-gateway-companion-controls",
+  "evidenceFormat": 1,
+  "sourceCommit": "7e22716466f308407298a205f16541cf2ebd7813",
+  "recordedAtUTC": "2026-10-19T09:54:05.668666+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/GatewayRuntimeSettingsFence.swift": "d724702645697fb40a9386a7cdb65e54a6a2cb9e3da21f83e8036c2fb7732486",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsFenceTests.swift": "97a98fc11fc8c02914a0a0e45343ff90213883e8ab0e2299511559436c3e5f5a",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerMessage.swift": "6e43826ec5ebd542e2c7d9b51d75399f68601ace029a5d2af5834f9303cd32f3",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerMessageTests.swift": "630aa8e1b23edd620a8e1f04b106f84de227202f6c752f2b9d616982da3414ad",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerOwner.swift": "58fc86cd42e9b28741cdbdfd5dc3b396489f2bac72fcc32da6bed75e6160fd9b",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift": "1de3a5a7b049c46e761aab43062020d6650e34a3801a8e8e1278dcf2990e2769",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerAccess.swift": "5d88cb819fbbb47ee1eea393097f9d34e456510de102a50d362ed956f0c1bad9",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerXPCEndpoint.swift": "c85f7adccf6aedc6a51366532ab0b716ccc9a62e5e7b9f20a27d80d2efbd446f",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerXPCListener.swift": "b1ae8e79f9421b1bc7c3222c61a5021d76263eda6a27fd199d329ec645161f30",
+    "macos/core/Sources/RemozioCore/GatewaySettingsConsumerChannel.swift": "d348d174411ad7f7c7a4cab61be2f021757a2fb815b8a41eb99e87f1f64a2c92",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerControlFixture.swift": "330123a47d1b7b9e4a5daf4607ef9fdfcf8c1461cea7fe534e0768c6d87b02fc",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerEndpointTests.swift": "8bcb737937835cd9b166115f7bbb195455929c5404281602e6472e9a70c10c6c",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerChannelTests.swift": "8349595a96744191c2457ddc86d01f27e58fbb256ac8a5a60244505ad4aabdd2",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerListenerTests.swift": "bf5eb8004e33440a4986a476103f4b6f78612675535d7843dc8c4692b4b016b1",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerPreflightTests.swift": "04163f675b05d3be430240fbc8646f40a115bd38931fe7d4ff68b755212ea44d",
+    "scripts/generate-macos-release-manifest.py": "30c8f9600105807c6d9c1425c72a089fd23ac22950a0861b4a79ac3acba7af8a",
+    "tests/test_macos_release_manifest.py": "4d091203d25ff2b92e28937f98a155dae1a9262e2b255498f4cb436ba99c5892",
+    "macos/core/Tests/RemozioCoreTests/SignedReleaseInspectionTests.swift": "160023eb65a80520d1795fb8806b2cea167d35875c0042e0c1a3d57072c759c0",
+    "macos/core/Tests/RemozioCoreTests/GatewayRuntimeSettingsStoreTests.swift": "837a3c8f16ce4608b820f1d9b49b7636ad167398bcd7a3f9e4c13488e3a5738b",
+    "docs/experiments/macos-gateway-companion-controls.md": "ecc775dc9ff3de80a2c8701633d31f077cd6ceb0e3d902aece4d85f60f4aef8a"
+  },
+  "validation": {
+    "nativeCoreTests": 2946,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "affectedSuitesCoveredByFullNativeRun": {
+      "sourceCommit": "7e22716466f308407298a205f16541cf2ebd7813",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "b6d545ce7f372db3b639b34f8f03e3eb4603b4d8dd790a1f3640307571193cb5",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayRuntimeSettingsFenceTests": {
+          "tests": 7,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewayRuntimeSettingsStoreTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerChannelTests": {
+          "tests": 12,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerEndpointTests": {
+          "tests": 7,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerListenerTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerMessageTests": {
+          "tests": 9,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerOwnerTests": {
+          "tests": 15,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 5,
+          "failures": 0,
+          "skipped": 0
+        },
+        "SignedReleaseInspectionTests": {
+          "tests": 10,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "affectedSuiteCoverageSHA256": "523521d044146b07c01f71b62700499461e1c50e65d5f6f4378d057214242e53",
+    "nativeLogSHA256": "b6d545ce7f372db3b639b34f8f03e3eb4603b4d8dd790a1f3640307571193cb5",
+    "ATCResultSHA256": "2bc53e232100311067643a99d7e33af28f0970a3916a9c2f4815ef8084219c51",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Bind companion controls to exact Mac, account, role, process generation, selected commit and fresh challenge.",
+    "Quiesce and join owned work before issuing a revocable process-local runtime permit.",
+    "Declare exact pause-record and companion control versions in signed components."
+  ],
+  "limits": [
+    "Native runtime adapters, host metadata, fixed registration, restart recovery and the visible app action follow separately.",
+    "Owned runtime and anonymous XPC controls do not establish installed dedicated UID or Developer ID admission.",
+    "No installed services, secrets, physical devices or frozen recovery artifacts were used."
+  ],
+  "reviewFixValidation": {
+    "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4312481845",
+    "scope": "Require both signed fence readers and the Setup fence writer before companion native control.",
+    "redControl": "The previous preflight accepted ten incompatible declarations.",
+    "affectedPreflightTests": 6,
+    "nativeCoreTests": 2947,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "recordedAtUTC": "2026-10-19T10:25:51.016760+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1256.68,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "dac6bde7e10074696a8b093e6e1a1378a92301c19a13d4a60acf5b79f532d99f"
+    },
+    "portableGate": {
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 27.1,
+      "resultSHA256": "312ee506af70d4e0f12d2ac6f41f03e192059b18ac3ece53e4017e8a4156692e"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "ee1bfbaea3e0b50447d1dd27bd5ada2c949a152a",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "dac6bde7e10074696a8b093e6e1a1378a92301c19a13d4a60acf5b79f532d99f",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
+  },
+  "compilerFixtureFixValidation": {
+    "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+    "scope": "Split the test fixture expression into explicitly typed role, format and component steps without changing declarations or assertions.",
+    "ciFailureLogSHA256": "b4b944d7a4161a36028f29d14886afa333a083c0a9ff5bac4bb5cfe912a8e514",
+    "fixtureSourceSHA256": "1ffaf90c8addad0dfff1e9675f3397d17c75e2e5197fa3e6dfa06ca9c754c270",
+    "affectedPreflightTests": 6,
+    "nativeCoreTests": 2947,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "recordedAtUTC": "2026-10-19T11:31:26.377043+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1185.32,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "b7ee3e55f15186edeb6e5a0a7b03acc2d4eab177ce3c987406efdec53b1273a8"
+    },
+    "portableGate": {
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.98,
+      "resultSHA256": "3fab7144e83494c6b288b7df17d76d4c1f812b1266466203cc6b4b1b1c871024"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "b2f0c6ddef2d8ba3ce606408be07fb6ef1dbc795",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "b7ee3e55f15186edeb6e5a0a7b03acc2d4eab177ce3c987406efdec53b1273a8",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewaySettingsConsumerPreflightTests": {
+          "tests": 6,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
+  },
+  "predecessorDigestFixValidation": {
+    "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4313328906",
+    "scope": "Bind the previous Gateway digest to its exact settings commit for successor fences.",
+    "redControl": "A same-scope valid alternate Gateway configuration passed fence decoding after substituting only field 9.",
+    "affectedFenceTests": 8,
+    "redProof": {
+      "sourceCommit": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "expectedFailure": "XCTAssertThrowsError failed: did not throw an error",
+      "tests": 1,
+      "failures": 1,
+      "unexpected": 0,
+      "test": "valid same-scope alternate Gateway bytes admitted by a substituted predecessor digest",
+      "logSHA256": "4dbc5c4e6df04efd07c14a7b155a57cdb9b60cafa164f0db2aece233dcb460d8",
+      "proofParserCorrection": "Matched the actual XCTest wording; no test rerun."
+    },
+    "nativeCoreTests": 2948,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "recordedAtUTC": "2026-10-19T12:12:43.575192+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1275.52,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "43a3f7f967223c517ed30b9ee0ebc74d04231ae92cab138648de143381efcdda"
+    },
+    "portableGate": {
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 29.81,
+      "resultSHA256": "83b91064a8d75169c8c1137989cb77de8b5f02dd3dd24cfce790435d9e096fd3"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "faea84aad0aab7571c2130a996001187221aad78",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "43a3f7f967223c517ed30b9ee0ebc74d04231ae92cab138648de143381efcdda",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayRuntimeSettingsFenceTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
+  },
+  "combinedFenceAndSendableValidation": {
+    "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+    "findingURL": "https://github.com/rock3r/remozio/pull/458#discussion_r4313328906",
+    "scope": "Bind the previous Gateway digest to its exact settings commit for successor fences.",
+    "redControl": "A same-scope valid alternate Gateway configuration passed fence decoding after substituting only field 9.",
+    "affectedFenceTests": 8,
+    "CICompilerDiagnosis": {
+      "failedRun": 39245295134,
+      "head": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "diagnosis": "Swift 6.2 rejects inferred sending closures that share already-Sendable test captures. Explicit @Sendable task closures preserve the concurrency controls.",
+      "uniqueCompilerErrors": [
+        "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift:102:21: error: sending value of non-Sendable type '() async throws -> GatewaySettingsConsumerObservation' risks causing data races [#SendingRisksDataRace]",
+        "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift:222:40: error: sending value of non-Sendable type '() async throws -> ()' risks causing data races [#SendingRisksDataRace]"
+      ],
+      "path": "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerOwnerTests.swift",
+      "oldSHA256": "1de3a5a7b049c46e761aab43062020d6650e34a3801a8e8e1278dcf2990e2769",
+      "newSHA256": "a7e89a34d1b3e4d3d598dc307a23a8ad41d4398a4dbaa1b07a4f356851c58d6b",
+      "taskClosures": 7,
+      "localToolchain": "Swift 6.4",
+      "CIReproductionPending": true,
+      "fixPreparedNotApplied": false,
+      "existingFullGateMustFinishBeforeSourceMutation": true,
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539"
+    },
+    "CICompilerProofPending": true,
+    "redProof": {
+      "sourceCommit": "ccb57dcc7e076bc4e8ffb3fabd6f85f23b1bed9a",
+      "expectedFailure": "XCTAssertThrowsError failed: did not throw an error",
+      "tests": 1,
+      "failures": 1,
+      "unexpected": 0,
+      "test": "valid same-scope alternate Gateway bytes admitted by a substituted predecessor digest",
+      "logSHA256": "4dbc5c4e6df04efd07c14a7b155a57cdb9b60cafa164f0db2aece233dcb460d8",
+      "proofParserCorrection": "Matched the actual XCTest wording; no test rerun."
+    },
+    "nativeCoreTests": 2948,
+    "nativeGate": {
+      "command": "./scripts/check.sh",
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "recordedAtUTC": "2026-10-19T12:34:40.202776+00:00",
+      "exitCode": 0,
+      "elapsedSeconds": 1227.98,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "trackedInputCount": 1651,
+      "logSHA256": "9a37521f9ce0c412082121a8065cee530709854fac003a88bbe46e43530b5373"
+    },
+    "portableGate": {
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "exitCode": 0,
+      "inputsUnchanged": true,
+      "headUnchanged": true,
+      "cleanAfter": true,
+      "elapsedSeconds": 1.46,
+      "resultSHA256": "962baf270314307a7b3628d7278117887074c9977abf0795fa3e669190df2e40"
+    },
+    "focusedCoverage": {
+      "sourceCommit": "b575a2ea56a7a79553b40df40cb55a9662273539",
+      "derivedFrom": "required full native gate; no separate focused rerun",
+      "nativeLogSHA256": "9a37521f9ce0c412082121a8065cee530709854fac003a88bbe46e43530b5373",
+      "allAffectedSuitesPassed": true,
+      "suites": {
+        "GatewayRuntimeSettingsFenceTests": {
+          "tests": 8,
+          "failures": 0,
+          "skipped": 0
+        },
+        "GatewaySettingsConsumerOwnerTests": {
+          "tests": 15,
+          "failures": 0,
+          "skipped": 0
+        }
+      }
+    },
+    "installedResourcesChanged": false,
+    "physicalTestsPerformed": false
+  }
+}

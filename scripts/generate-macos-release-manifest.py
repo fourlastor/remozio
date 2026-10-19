@@ -70,6 +70,12 @@ def declarations(role):
         values.append(format_declaration('authority.command-host-config', [1, 2, 3]))
     if role in (2, 8):
         values.append(format_declaration('authority.gateway-settings-control', [1]))
+    if role in (2, 4, 6, 8):
+        values.append({0: 'runtime.gateway-settings-fence', 1: [1], 2: [1] if role == 8 else [], 3: {}})
+    if role in (6, 8):
+        values.append(format_declaration('gateway.gateway-settings-control', [1]))
+    if role in (4, 8):
+        values.append(format_declaration('transport.gateway-settings-control', [1]))
     return sorted(values, key=lambda v: v[0])
 
 
