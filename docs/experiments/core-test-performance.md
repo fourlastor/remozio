@@ -91,3 +91,34 @@ These are synthetic decoder measurements, not retained-state or full-suite
 speedups. A native test-class comparison is required before attributing any
 check-time improvement to this change. Memoizing plans or policy decisions is
 outside this first experiment.
+
+## Synthetic Mac decoder comparison
+
+[Run 39251154997](https://github.com/fourlastor/remozio/actions/runs/39251154997)
+on `0fa23463de154e2b2b3cd81aba55cad9a4818cb6` passed the native selected test,
+all 141 shared protocol tests, and all 24 benchmark observations. The checkout
+was clean; the two decoder sources differed only by the permitted dispatch
+change. Canonical inputs, final decoded values, reencoded bytes and checksums
+matched. The host was arm64 macOS 26.6.2 (25G83), Xcode 26.6 (17F113), Swift 6.3.3.
+
+| Synthetic corpus | Baseline median wall seconds | Switch median wall seconds | Reduction |
+| --- | ---: | ---: | ---: |
+| Scalar-heavy | 1.399 | 1.003 | 28.3% |
+| Nested canonical maps/arrays | 1.814 | 1.179 | 35.0% |
+
+Each row contains six observations per variant in alternating AB/BA pairs.
+Candidate times were lower in every pair and the ranges did not overlap in this
+run. This result is specific to the standalone debug decoder and these fixed
+synthetic inputs. The separately sampled native test still passed, but its timing
+is neither uninstrumented nor matched against a same-run baseline. No reduction
+in the full checks is established yet.
+
+The next measurement runs the unchanged nine-case Gateway class in a balanced
+A–B–B–A order on one Mac runner. It rebuilds the native tests after each exact
+source swap, outside the measured test interval, using the same checkout and
+scratch path. Each trial uses a fresh XCTest process and every original fixture
+and assertion. The driver retains each case result, wall/process CPU and the
+fixed profile labels/call/throw counts; it rejects missing or extra cases,
+failures, skips or unequal verification work. No stack sampler runs in the timed
+trials. The diagnostic job budget accommodates four whole class runs; individual
+test expectations and timeouts are unchanged.
