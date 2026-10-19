@@ -1,4 +1,5 @@
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -10,7 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/run-linux-caller-monitor-experiment.py"
@@ -44,6 +45,54 @@ def pure_monitor_probe():
     fork.assert_not_called()
     spawn.assert_not_called()
     return probe
+
+
+class PidfdOpenTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.probe = pure_monitor_probe()
+
+    def test_python_api_is_preferred_when_libc_wrapper_is_absent(self):
+        native = Mock(return_value=73)
+        with patch.object(self.probe, "os", SimpleNamespace(pidfd_open=native)), \
+             patch.object(self.probe, "libc", SimpleNamespace()):
+            self.assertEqual(self.probe.pidfd_open(1234), 73)
+        native.assert_called_once_with(1234, 0)
+
+    def test_python_oserror_propagates_without_trying_libc(self):
+        error = OSError(errno.EPERM, "synthetic refusal")
+        native = Mock(side_effect=error)
+        fallback = Mock(return_value=74)
+        with patch.object(self.probe, "os", SimpleNamespace(pidfd_open=native)), \
+             patch.object(self.probe, "libc", SimpleNamespace(pidfd_open=fallback)), \
+             self.assertRaises(OSError) as raised:
+            self.probe.pidfd_open(1234)
+        self.assertIs(raised.exception, error)
+        native.assert_called_once_with(1234, 0)
+        fallback.assert_not_called()
+
+    def test_missing_python_api_keeps_libc_success(self):
+        fallback = Mock(return_value=75)
+        with patch.object(self.probe, "os", SimpleNamespace()), \
+             patch.object(self.probe, "libc", SimpleNamespace(pidfd_open=fallback)):
+            self.assertEqual(self.probe.pidfd_open(1234), 75)
+        fallback.assert_called_once()
+        pid, flags = fallback.call_args.args
+        self.assertIsInstance(pid, self.probe.ctypes.c_int)
+        self.assertIsInstance(flags, self.probe.ctypes.c_uint)
+        self.assertEqual((pid.value, flags.value), (1234, 0))
+
+    def test_missing_python_api_keeps_libc_errno_failure(self):
+        fallback = Mock(return_value=-1)
+        with patch.object(self.probe, "os", SimpleNamespace()), \
+             patch.object(self.probe, "libc", SimpleNamespace(pidfd_open=fallback)), \
+             patch.object(self.probe.ctypes, "get_errno", return_value=errno.ESRCH), \
+             self.assertRaises(OSError) as raised:
+            self.probe.pidfd_open(1234)
+        self.assertEqual(raised.exception.errno, errno.ESRCH)
+        fallback.assert_called_once()
+        pid, flags = fallback.call_args.args
+        self.assertEqual((pid.value, flags.value), (1234, 0))
 
 
 class AcknowledgmentLeaseTests(unittest.TestCase):

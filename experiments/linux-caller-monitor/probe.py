@@ -40,6 +40,9 @@ def ptrace(request, pid, data=0):
 
 
 def pidfd_open(pid):
+    python_pidfd_open = getattr(os, "pidfd_open", None)
+    if python_pidfd_open is not None:
+        return python_pidfd_open(pid, 0)
     result = libc.pidfd_open(ctypes.c_int(pid), ctypes.c_uint(0))
     if result == -1:
         raise OSError(ctypes.get_errno(), "pidfd")

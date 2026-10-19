@@ -24,6 +24,11 @@ it does not attempt the experiment or publish a passing report. Successful repor
 record `prerequisites.procTaskChildrenReadable: true`. A mounted procfs alone does
 not establish this requirement.
 
+The probe prefers Python's `os.pidfd_open`, avoiding a dependency on the libc
+wrapper when Python provides the syscall API. Python builds without that API
+retain the libc fallback. Errors from the selected API are propagated, not
+retried through the other route.
+
 It builds the native fixture in a private temporary directory
 using a fixed compiler invocation, then runs each case with a deadline:
 
@@ -72,7 +77,7 @@ the cleanup claim.
 
 ## Recorded result
 
-The [retained report](linux-caller-monitor-evidence.json), measured on 2026-10-18 UTC,
+The [retained report](linux-caller-monitor-evidence.json), measured on 2026-10-19 UTC,
 passed all 12 controls on Ubuntu 25.10 x86_64 with Linux 6.17.0 and Python 3.13.7,
 without elevation and with a temporary root containing spaces and a newline. The report binds
 its results to the runner, probe, native
@@ -81,6 +86,9 @@ revisions. The host reported Yama ptrace scope 1, AppArmor enabled, and seccomp
 mode 0 for the runner. These values do not describe every process's confinement.
 The prerequisite check confirmed readable procfs task-child enumeration. This
 run does not establish support for kernels or procfs mounts without that facility.
+This live run uses Python's pidfd API. Synthetic unit tests cover an absent libc
+wrapper and the fallback for a Python build without that API; they do not
+establish a live result on an older-libc distribution.
 
 Only the healthy control accepted the simulated handoff. All ten other lifecycle,
 sender and handoff controls rejected it; the separate memory-modification control
