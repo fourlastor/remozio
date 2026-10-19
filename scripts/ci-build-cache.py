@@ -75,6 +75,17 @@ def content_inventory(inputs):
             for name, entry in inputs.items()}
 
 
+def discovery_paths(inputs):
+    # Top-level documentation Markdown is not discovered by the cached native
+    # builds. Keep it in the full inventory/key and every other validation; only
+    # adding/removing these ordinary files is exempt from graph invalidation.
+    # Classify old and new inventories separately so type/mode transitions stay
+    # conservative. Markdown in package resources is still a build input.
+    return {name for name, entry in inputs.items()
+            if not (PurePosixPath(name).parts[0] == 'docs' and name.endswith('.md')
+                    and entry['kind'] == 'file' and entry['mode'] & 0o7111 == 0)}
+
+
 def restore_inputs(root, inputs):
     """Restore only identical regular files. Timestamp collisions require a cold build."""
     if type(inputs) is not dict:
@@ -92,7 +103,7 @@ def restore_inputs(root, inputs):
     counts = {'restored': 0, 'changed': 0, 'missing': len(inputs.keys() - current.keys()),
               'requires_clean_build': False}
     # Changes to the file set can escape timestamp-based directory discovery.
-    if current.keys() != inputs.keys():
+    if discovery_paths(current) != discovery_paths(inputs):
         counts['requires_clean_build'] = True
     for name, now in current.items():
         old = inputs.get(name)

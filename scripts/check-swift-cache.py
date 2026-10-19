@@ -159,6 +159,63 @@ def experiment(output, report):
                 "warm: source recompilation occurred after the archive and fresh checkout roundtrip")
 
         source = fixture / SOURCE
+        report["documentationRestores"] = {}
+
+        def documentation_stage(name, previous_inputs, changed_count, missing_count):
+            current = helper.capture_inputs(fixture)
+            restore = helper.restore_inputs(fixture, previous_inputs)
+            report["documentationRestores"][name] = restore
+            require(restore["changed"] == changed_count and restore["missing"] == missing_count
+                    and restore["restored"] == len(FILES),
+                    f"{name}: unexpected documentation restore counts: {restore}")
+            require(not restore.get("requires_clean_build"),
+                    f"{name}: ordinary documentation unnecessarily requires a clean build")
+            require(source.stat().st_mtime_ns == cached_stat.st_mtime_ns,
+                    f"{name}: unchanged source timestamp was not preserved exactly")
+            require(helper.content_inventory(helper.capture_inputs(fixture))
+                    == helper.content_inventory(current),
+                    f"{name}: restoring timestamps changed tracked input content")
+            restored = helper.capture_inputs(fixture)
+            stage = run_stage(name, fixture, output, swift, env, 1)
+            report["stages"][name] = stage
+            require(stage["frontendCompileCommands"] == 0,
+                    f"{name}: documentation change recompiled package source")
+            proven_inputs = helper.capture_inputs(fixture)
+            require(proven_inputs == restored,
+                    f"{name}: build or test changed tracked input content or timestamps")
+            require(source.stat().st_mtime_ns == cached_stat.st_mtime_ns,
+                    f"{name}: build or test changed the unchanged source timestamp")
+            return proven_inputs
+
+        # Compare each change with the immediately preceding proven inventory.
+        # The complete inventory still tracks these ordinary documentation files.
+        documentation = Path("docs/experiments/cache-report.md")
+        document = fixture / documentation
+        document.parent.mkdir(parents=True, exist_ok=True)
+        document.write_text("# Cache report\nInitial observations.\n")
+        command([git, "add", "--", str(documentation)], cwd=fixture, env=env)
+        documentation_inputs = documentation_stage("documentation-add", restored_inputs, 1, 0)
+
+        previous_document_time = document.stat().st_mtime_ns
+        document.write_text("# Cache report\nUpdated observations.\n")
+        edit_time = max(time.time_ns(), previous_document_time + 1_000_000)
+        os.utime(document, ns=(document.stat().st_atime_ns, edit_time))
+        require(document.stat().st_mtime_ns != previous_document_time,
+                "documentation-edit: ordinary edit did not produce a distinct timestamp")
+        command([git, "add", "--", str(documentation)], cwd=fixture, env=env)
+        documentation_inputs = documentation_stage("documentation-edit", documentation_inputs, 1, 0)
+
+        renamed_documentation = documentation.with_name("renamed-cache-report.md")
+        command([git, "mv", "--", str(documentation), str(renamed_documentation)],
+                cwd=fixture, env=env)
+        documentation_inputs = documentation_stage("documentation-rename", documentation_inputs, 1, 1)
+
+        (fixture / renamed_documentation).unlink()
+        command([git, "add", "-u", "--", str(renamed_documentation)], cwd=fixture, env=env)
+        documentation_inputs = documentation_stage("documentation-remove", documentation_inputs, 0, 1)
+        require(documentation_inputs == restored_inputs,
+                "documentation-remove: tracked inputs did not return to the original proven inventory")
+
         original = source.read_bytes()
         changed = original.replace(b"{ 1 }", b"{ 2 }")
         require(original != changed and len(original) == len(changed), "mutation must change bytes but preserve size")
