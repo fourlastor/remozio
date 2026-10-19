@@ -28,6 +28,13 @@ class InvitationPreviewTest {
         for (candidate in invalid) assertEquals(InvitationPreview.Invalid, previewInvitation(candidate), candidate)
     }
 
+    @Test fun wellFormedTextWithInvalidCborIsRejected() {
+        // 0xff (bare break), 00 00 00 (trailing bytes), 0x01 (not a map), 0xa0 (empty map).
+        for (payload in listOf("_w", "AAAA", "AQ", "oA")) {
+            assertEquals(InvitationPreview.Invalid, previewInvitation("remozio-pairing:v1:$payload"), payload)
+        }
+    }
+
     @Test fun aChangedButValidInvitationShowsADifferentFingerprint() {
         // Changing the first Mac ID byte from 0x01 to 0x03 keeps the structure valid: the invitation has no checksum.
         val changed = text.replaceFirst("AVABAQEB", "AVADAQEB")
