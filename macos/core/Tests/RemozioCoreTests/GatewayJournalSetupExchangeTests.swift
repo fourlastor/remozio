@@ -17,38 +17,55 @@ final class GatewayJournalSetupExchangeTests: XCTestCase, @unchecked Sendable {
         return String(decoding: bytes, as: UTF8.self)
     }
     final class Fixture: @unchecked Sendable {
+        private let profile: GatewayRuntimeActivationTestProfile.Scope
         let runtime: RuntimeActivationFixture
         let intent: GatewayJournalSetupIntent
         let root: URL
         let parent: ProtectedSetupDirectory
         private let lock = NSRecursiveLock()
-        init() throws {
+        init(profile: GatewayRuntimeActivationTestProfile.Scope = .disabled) throws {
+            self.profile = profile
             guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner setup exchange") }
-            runtime = try .init()
-            try runtime.machine.retainRuntimeActivation(runtime.plan)
-            _ = try runtime.machine.enrollRuntimeActivation(runtime.plan)
-            try runtime.machine.markRuntimeJobsRegistered(runtime.plan)
-            let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
-                privateKeyID: "fixture-key", privateKeyPEM: GatewayJournalSetupExchangeTests.pem.get())
-            let material = try GatewayPreparationMaterial.create(runtime: runtime.material.reference, provider: provider,
-                senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
-            try runtime.machine.retainGatewayMaterial(material.reference)
+            let runtime = try profile.measure("runtimeFixture") { try RuntimeActivationFixture(profile: profile.child("runtimeFixture")) }
+            self.runtime = runtime
+            try profile.measure("runtimeRetain") { try runtime.machine.retainRuntimeActivation(runtime.plan) }
+            _ = try profile.measure("runtimeEnroll") { try runtime.machine.enrollRuntimeActivation(runtime.plan) }
+            try profile.measure("runtimeMarkRegistered") { try runtime.machine.markRuntimeJobsRegistered(runtime.plan) }
+            let provider = try profile.measure("provider") {
+                try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
+                    privateKeyID: "fixture-key", privateKeyPEM: GatewayJournalSetupExchangeTests.pem.get())
+            }
+            let material = try profile.measure("materialCreate") {
+                try GatewayPreparationMaterial.create(runtime: runtime.material.reference, provider: provider,
+                    senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+            }
+            try profile.measure("materialRetain") { try runtime.machine.retainGatewayMaterial(material.reference) }
             let settings = try GatewayServiceSettings(delivery: .init(maximumFlights: 4, minimumSendIntervalMillis: 1000),
                 probe: .init(maximumAttempts: 3, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 300),
                 wake: .init(maximumEntries: 32, maximumAttempts: 3, minimumEnrollmentIntervalMillis: 1000,
                     maximumLifetimeMillis: 300000, maximumTTLSeconds: 300))
-            let bundle = try GatewayConfigurationBundle(foreground: runtime.plan, material: material.reference,
-                inventory: XCTUnwrap(runtime.machine.inventory()), settings: settings)
-            root = URL(fileURLWithPath: "/private/tmp/remozio-setup-exchange-" + UUID().uuidString)
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-            guard chmod(root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
-            parent = try .init(anchor: root.path, relativePath: "Service", owner: getuid(), visibility: .sharedMetadata)
-            let files = try GatewayJournalFileProvisioning.prepare(parent: parent, processOwner: getuid(), serviceUID: getuid(), serviceGID: getgid(),
-                mode: .createIfAbsent, expected: nil, verifyCurrent: {}).identity
-            intent = try .init(id: AccountPreparationIntent.randomID(), material: material.reference, configuration: bundle.gateway, files: files)
-            try runtime.machine.retainGatewayJournalIntent(intent)
+            let bundle = try profile.measure("configurationBundle") {
+                try GatewayConfigurationBundle(foreground: runtime.plan, material: material.reference,
+                    inventory: XCTUnwrap(runtime.machine.inventory()), settings: settings)
+            }
+            let root = URL(fileURLWithPath: "/private/tmp/remozio-setup-exchange-" + UUID().uuidString); self.root = root
+            try profile.measure("rootDirectory") {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+                guard chmod(root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
+            }
+            let parent = try profile.measure("serviceDirectory") {
+                try ProtectedSetupDirectory(anchor: root.path, relativePath: "Service", owner: getuid(), visibility: .sharedMetadata)
+            }
+            self.parent = parent
+            let files = try profile.measure("journalFileProvisioning") {
+                try GatewayJournalFileProvisioning.prepare(parent: parent, processOwner: getuid(), serviceUID: getuid(), serviceGID: getgid(),
+                    mode: .createIfAbsent, expected: nil, verifyCurrent: {}).identity
+            }
+            let intent = try GatewayJournalSetupIntent(id: AccountPreparationIntent.randomID(), material: material.reference, configuration: bundle.gateway, files: files)
+            self.intent = intent
+            try profile.measure("journalIntentRetain") { try runtime.machine.retainGatewayJournalIntent(intent) }
         }
-        deinit { parent.close(); try? FileManager.default.removeItem(at: root) }
+        deinit { profile.measure("cleanup") { parent.close(); try? FileManager.default.removeItem(at: root) } }
         func verifyPending() throws {
             try lock.withLock {
                 let state = try runtime.machine.gatewayJournalPreparation(accountID: intent.accountID)
