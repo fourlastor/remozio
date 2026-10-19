@@ -20,6 +20,7 @@ public final class JournalDatabase {
     private var consumption: ConsumptionJournal?
     private var commandReplay: CommandSubmissionReplayJournal?
     private var gateway: GatewayAuthorityJournal?
+    private var configuredGatewayPolicy: GatewayAuthorityPolicy?
     private var enrollment: EnrollmentJournal?
     private var routing: RoutingJournal?
     private let recordLimits: CBORLimits
@@ -98,7 +99,7 @@ public final class JournalDatabase {
             commandReplay = CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
-            if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy) }
+            if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy); configuredGatewayPolicy = gatewayPolicy }
             if initialize {
                 try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption,
                     initialAuthority: initialAuthority, didInitializeAuthority: didInitializeAuthority)
@@ -113,6 +114,24 @@ public final class JournalDatabase {
     }
 
     deinit { shutdown() }
+
+    /// In-memory capability only. The trusted host must authenticate setup before installing any provider.
+    /// Existing schema12 tables and the current writer stay in place. This does not configure a registration.
+    @discardableResult
+    func enableGatewayPolicy(_ policy: GatewayAuthorityPolicy, macID: Data, accountID: Data) throws -> Bool {
+        guard let connection = db else { throw JournalDatabaseError.closed }
+        guard !unavailable else { throw JournalDatabaseError.unavailable }
+        guard active == nil else { throw JournalDatabaseError.transactionActive }
+        guard macID.count == 16, accountID.count == 16 else { throw JournalDatabaseError.wrongScope }
+        try validateLease(); try validateIdentity(macID: macID, accountID: accountID)
+        if let current = configuredGatewayPolicy {
+            guard current.sameConfiguration(as: policy) else { throw GatewayAuthorityError.invalidConfiguration }
+            return false
+        }
+        gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: policy)
+        configuredGatewayPolicy = policy
+        return true
+    }
 
     public func read<T>(_ body: (JournalTransaction) throws -> T) throws -> T { try transaction(write: false, body) }
     public func write<T>(_ body: (JournalTransaction) throws -> T) throws -> T { try transaction(write: true, body) }

@@ -1,0 +1,64 @@
+{
+  "experiment": "macos-live-phone-push-owner",
+  "evidenceFormat": 1,
+  "sourceCommit": "e3035396aa0f2567aaeb9059066335e38f5e035c",
+  "recordedAtUTC": "2026-10-18T23:32:50.807378+00:00",
+  "sourceSHA256": {
+    "macos/core/Sources/RemozioCore/JournalDatabase.swift": "967712809345f8f0399c29387c9c93df9ff3e8eda04dc48e18a5a814c9d4005e",
+    "macos/core/Sources/RemozioCore/AuthorityJournal.swift": "d28508b8702aa566ee6bd0fcb6d500c087287b93d0e7d90266bab2f73ae01a47",
+    "macos/core/Tests/RemozioCoreTests/GatewayAuthorityJournalTests.swift": "aa1bd44d216b45a9a84462136c276f17820d21cc72836116061cf185414bbea5",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushRegistrationTests.swift": "f07fe0ea966b939ef6ae8c710c9d668ca2812b4a8be16ff65d9d36d8ae6914cf",
+    "macos/core/Sources/RemozioCore/GatewayAuthorityPolicyConfiguration.swift": "2ee1119ac022f2ec0c177dab82abf8478e7ca777cba3d718d980d443f67253fa",
+    "macos/core/Tests/RemozioCoreTests/LiveGatewayPolicyInstallationTests.swift": "3059f968ee08e2ba5db0080d107f04083cf16f30d383d2e62a5bcf732c39f090",
+    "macos/core/Sources/RemozioCore/ApprovalRequestCoordinator.swift": "f3278691b02bbb99bddf7b2e5da7192af38ab60e7bc8621a3d99611fc85becd7",
+    "macos/core/Sources/RemozioCore/AuthorityPhonePushCapability.swift": "f0cab5d2cfa0fa4e33f940be09c1a8662d6faeefee4eeb21e42935b3a1b379db",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushCapabilityTests.swift": "a07be43fa3b2c36437d243ff4c767f3556be76fb90fc55a2fbaeab0936cef9c2",
+    "macos/core/Sources/RemozioCore/AuthorityWakePublisher.swift": "b9af13916a32055bd71b8dd18a5d7bedcd6ab40887e0a4570d6df146e88160a6",
+    "macos/core/Tests/RemozioCoreTests/AuthorityPhonePushPublisherTests.swift": "fdd7dff5c4748217bb2bd867117b05ba926d0b8fa57fc72d69f12dcf6bdca030"
+  },
+  "validation": {
+    "nativeCoreTests": 2715,
+    "nativeSkips": 1,
+    "nativeFailures": 0,
+    "nativeLogSHA256": "490272bd7859b4c6796cd6174835b47f2d1781ff3e2bef3429206e1138eed5fa",
+    "ATCResultSHA256": "927c495081c764c73c16d1a2e0d737eb6ae1c2fbd8a84917118d39094327bff7",
+    "testReports": {
+      "protocol": {
+        "tests": 138,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phone": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "inputsUnchangedDuringGates": true,
+    "cleanBeforeAndAfterGates": true
+  },
+  "scope": [
+    "Install an exact phone-push provider on the existing journal and publisher session.",
+    "Retain foreground requests, enrollment, clock and deadlines."
+  ],
+  "limits": [
+    "Owned files and software fixtures do not prove native Root or Developer ID admission.",
+    "Protected native loading, activation and app controls follow separately.",
+    "No installed service, secret, physical device or frozen recovery artifact was used."
+  ]
+}

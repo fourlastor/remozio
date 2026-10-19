@@ -116,7 +116,9 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         let earlierControl: GatewayAuthorityEnvelope?
         let driver: Driver
         let publisher: AuthorityWakePublisher
-        init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false) throws {
+        let phonePushConfiguration: AuthorityPhonePushPublication
+        init(enrollmentCount: Int = 1, maximumPhonesPerTurn: Int = 16, earlier: EarlierControl? = nil, candidateBeforeEarlier: Bool = false,
+             enablePhonePush: Bool = true) throws {
             var retained: GatewayAuthorityEnvelope?
             let root = try AuthorityPhonePushRegistrationTests.Harness(enrollmentCount: enrollmentCount, gatewaySetup: { tx, r, key, limits, epoch, writer in
                 guard let earlier else { return }
@@ -182,11 +184,12 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
             let key = P256.Signing.PrivateKey(), driver = Driver(coordinator: coordinator, lease: lease, key: key)
             self.driver = driver
             let configuration = try AuthorityPhonePushPublication(provider: root.provider, gatewayPublicKey: key.publicKey.x963Representation, maximumPhonesPerTurn: maximumPhonesPerTurn, wallTime: { clock.wall() })
+            phonePushConfiguration = configuration
             publisher = try AuthorityWakePublisher(journal: journal, channel: GatewayRootChannel(driver: driver), registration: root.registration,
                 leaseMilliseconds: 1000, clock: { clock.now() }, routing: {
                     var router = PresenceRouter(configuration: try PresenceConfiguration(observationLifetimeMilliseconds: 100, unavailableGraceMilliseconds: 100))
                     return router.evaluate(mode: .away, snapshot: PresenceSnapshot(), now: PresenceMoment(epoch: clock.epoch, milliseconds: clock.now().milliseconds))
-                }, phonePush: configuration)
+                }, phonePush: enablePhonePush ? configuration : nil)
         }
         func offer(phoneIndex: Int = 0) throws -> PhonePushRegistrationMetadata {
             try journal.withRequests { _ in
@@ -238,6 +241,56 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
     private func waitFor(_ condition: () async -> Bool) async throws {
         for _ in 0..<1000 { if await condition() { return }; try await Task.sleep(for: .milliseconds(1)) }
         XCTFail("Fixture did not settle"); throw CocoaError(.featureUnsupported)
+    }
+    func testLiveProviderInstallationKeepsThePublisherSessionAndCompletesTheExistingCandidate() async throws {
+        let f = try Fixture(enablePhonePush: false), digest = Data(repeating: 91, count: 32)
+        let metadata = try f.offer(), before = try f.root.store.read()
+        try await f.publisher.start(); try await f.publisher.reconcile()
+        let disabled = await f.publisher.phonePushDiagnostic; XCTAssertEqual(disabled, .disabled)
+        XCTAssertEqual(f.driver.state.withLock { $0.probes }, 0)
+        let installed = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: digest)
+        XCTAssertTrue(installed); XCTAssertEqual(try f.root.store.read(), before)
+        try await f.publisher.reconcile()
+        try await waitFor { await f.provider.challenges.count == 1 }
+        let challenge = await f.provider.challenges[0]
+        XCTAssertEqual(challenge.candidateID, metadata.candidateID)
+        try f.prove(metadata, challenge: challenge); try await f.publisher.reconcile()
+        XCTAssertGreaterThan(f.driver.state.withLock { $0.mappedReplies }, 0)
+        XCTAssertEqual(try f.recoveryState().phase, .mappingObserved)
+        XCTAssertFalse(f.driver.state.withLock { $0.closed })
+        await f.close()
+    }
+    func testMatchingPublisherInstallationRetainsProbeHistoryAndRejectsReplacement() async throws {
+        let f = try Fixture(enablePhonePush: false), digest = Data(repeating: 92, count: 32)
+        _ = try f.offer(); try await f.publisher.start()
+        _ = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: digest)
+        try await f.publisher.reconcile(); try await waitFor { await f.provider.challenges.count == 1 }
+        let checkpoint = try f.root.store.read()
+        let changed = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: digest)
+        XCTAssertFalse(changed); XCTAssertEqual(try f.root.store.read(), checkpoint)
+        try await f.publisher.reconcile(); XCTAssertEqual(f.driver.state.withLock { $0.probes }, 1)
+        do {
+            _ = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: Data(repeating: 93, count: 32)); XCTFail()
+        } catch { XCTAssertEqual(error as? GatewayPreparationError, .changedScope) }
+        await f.close()
+        do { _ = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: digest); XCTFail() }
+        catch { XCTAssertEqual(error as? AuthorityWakePublisherError, .closed) }
+    }
+    private static func didEnter(_ semaphore: DispatchSemaphore) -> Bool { semaphore.wait(timeout: .now() + 5) == .success }
+    func testProviderInstallationRefusesAnInFlightPublicationTurn() async throws {
+        let f = try Fixture(), entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        _ = try f.offer(); try await f.publisher.start()
+        f.driver.state.withLock { $0.onCandidate = {
+            entered.signal()
+            guard release.wait(timeout: .now() + 5) == .success else { throw CocoaError(.featureUnsupported) }
+        } }
+        let turn = Task { try await f.publisher.reconcile() }
+        let reached = await Task.detached { Self.didEnter(entered) }.value
+        XCTAssertTrue(reached)
+        do { _ = try await f.publisher.installPhonePush(f.phonePushConfiguration, configurationDigest: Data(repeating: 94, count: 32)); XCTFail() }
+        catch { XCTAssertEqual(error as? AuthorityWakePublisherError, .busy) }
+        release.signal(); try await turn.value
+        XCTAssertFalse(f.driver.state.withLock { $0.closed }); await f.close()
     }
     func testRegistrationWaitsForEveryEarlierNonRegistrationControl() async throws {
         for kind in EarlierControl.allCases {

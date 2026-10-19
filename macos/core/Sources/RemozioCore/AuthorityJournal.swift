@@ -205,6 +205,27 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Enable the optional ledger under the existing foreground owner. No store, key or request owner is replaced.
+    /// The trusted setup verifier must not reenter this owner. Provider publication remains a separate authenticated step.
+    @discardableResult
+    func enableGatewayPolicy(_ policy: GatewayAuthorityPolicy, macID: Data, accountID: Data,
+                             verifyCurrent: () throws -> Void) throws -> Bool {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard let requests, !requests.retired else { throw ApprovalCoordinatorError.unavailable }
+            let activity = try releaseActivity?.acquireShared(); defer { activity?.close() }
+            _ = try validatedRead { _ in true }
+            try requests.requireLiveGatewaySetup(clockEpoch: policy.clockEpoch)
+            requestOperationActive = true; defer { requestOperationActive = false }
+            try verifyCurrent()
+            let installed = try withStorageFailureCleanup { try database.enableGatewayPolicy(policy, macID: macID, accountID: accountID) }
+            _ = try validatedRead { _ in true }
+            try requests.requireLiveGatewaySetup(clockEpoch: policy.clockEpoch)
+            try verifyCurrent(); try activity?.validate()
+            return installed
+        }
+    }
+
     /// Runs synchronous request work under the journal lock. The coordinator cannot escape in the result.
     /// The callback must not await or reenter this owner.
     public func withRequests<Value: Sendable>(_ body: @Sendable (ApprovalRequestCoordinator) throws -> Value) throws -> Value {

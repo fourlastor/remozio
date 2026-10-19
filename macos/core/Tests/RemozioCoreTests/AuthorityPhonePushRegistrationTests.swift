@@ -30,7 +30,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let provider: AuthorityPhonePushRegistration
         let signs = PushSignCount()
         let limits: CBORLimits
-        init(configureGateway: Bool = true, enrollmentCount: Int = 1,
+        init(configureGateway: Bool = true, enrollmentCount: Int = 1, gatewayLedgerEnabled: Bool = true,
              gatewaySetup: (JournalTransaction, GatewayRegistrationIdentity, P256.Signing.PrivateKey, CBORLimits, UUID, AuditEpochWriter) throws -> Void = { _, _, _, _, _, _ in }) throws {
             precondition((1...8).contains(enrollmentCount))
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
@@ -50,8 +50,8 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
             let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: pushID(1), accountID: pushID(2), recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
                 maximumConsumptions: 30, busyMilliseconds: 100, initialize: true,
-                gatewayPolicy: GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: 30,
-                    candidateLifetimeMillis: 1000, clockEpoch: clock))
+                gatewayPolicy: gatewayLedgerEnabled ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: 30,
+                    candidateLifetimeMillis: 1000, clockEpoch: clock) : nil)
             self.db = db
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
             let capabilities = ContractCapabilities(contracts: [contract: []])

@@ -73,6 +73,45 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         }
     }
 
+    private func livePolicy(maximum: Int = 20, epoch: UUID? = nil) throws -> GatewayAuthorityPolicy {
+        try .init(payloadLimits: limits, signingLimits: limits, maximumControls: maximum, candidateLifetimeMillis: 1000, clockEpoch: epoch ?? clockEpoch)
+    }
+    func testLiveEnableUsesTheExistingWriterAndDoesNotConfigureRegistrationOrMigrate() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, enabled: false)
+        defer { try? db.close() }
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .disabled) }
+        XCTAssertTrue(try db.enableGatewayPolicy(livePolicy(), macID: id(2), accountID: id(3)))
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), "12")
+        XCTAssertThrowsError(try db.read { try $0.gatewayAuthorityHead(trust().registration) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .unconfigured) }
+        XCTAssertThrowsError(try f.lease()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+        try db.write { try $0.configureGatewayAuthority(trust().registration) }
+        XCTAssertEqual(try prepare(db).revision, 1)
+    }
+    func testRepeatedLivePolicyRetainsCandidateClockAndRejectsReplacement() throws {
+        let f = try Fixture(), db = try setup(f), first = try prepare(db)
+        defer { try? db.close() }
+        XCTAssertFalse(try db.enableGatewayPolicy(livePolicy(), macID: id(2), accountID: id(3)))
+        XCTAssertThrowsError(try db.enableGatewayPolicy(livePolicy(maximum: 21), macID: id(2), accountID: id(3))) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .invalidConfiguration)
+        }
+        XCTAssertThrowsError(try db.enableGatewayPolicy(livePolicy(epoch: UUID()), macID: id(2), accountID: id(3))) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .invalidConfiguration)
+        }
+        XCTAssertEqual(try consume(db, first).revision, 2)
+    }
+    func testLivePolicyRefusesWrongScopeTransactionsAndClosedConnections() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, enabled: false), policy = try livePolicy()
+        XCTAssertThrowsError(try db.enableGatewayPolicy(policy, macID: id(99), accountID: id(3)))
+        try db.read { _ in
+            XCTAssertThrowsError(try db.enableGatewayPolicy(policy, macID: id(2), accountID: id(3))) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+        }
+        XCTAssertTrue(try db.enableGatewayPolicy(policy, macID: id(2), accountID: id(3)))
+        try db.close()
+        XCTAssertThrowsError(try db.enableGatewayPolicy(policy, macID: id(2), accountID: id(3))) { XCTAssertEqual($0 as? JournalDatabaseError, .closed) }
+    }
+
     func testCandidateProofAndActivationShareDurableControlHead() throws {
         let fixture = try Fixture(), db = try setup(fixture), first = try prepare(db)
         XCTAssertEqual(first.kind, 1); XCTAssertEqual(first.revision, 1)

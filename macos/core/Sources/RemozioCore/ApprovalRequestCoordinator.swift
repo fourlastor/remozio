@@ -169,6 +169,13 @@ public final class ApprovalRequestCoordinator {
         guard checkpointed != nil else { throw ApprovalCoordinatorError.unavailable }
     }
 
+    /// Validate live setup without advancing the request clock or changing its deadlines.
+    func requireLiveGatewaySetup(clockEpoch: UUID) throws {
+        try requirePairingCheckpoint()
+        guard self.clockEpoch == clockEpoch else { throw ApprovalCoordinatorError.invalidClock }
+        _ = try read { _ in true }
+    }
+
     /// Local setup only. The host rechecks administrator consent inside the checkpointed commit.
     /// A signing failure after commit is ambiguous; recover the retained receipt instead of enrolling again.
     func commitPairing(_ attempt: PairingEnrollmentAttempt, biometricProof: Data, authorityPublicKey: Data,

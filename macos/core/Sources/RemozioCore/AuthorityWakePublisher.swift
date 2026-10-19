@@ -29,7 +29,8 @@ public actor AuthorityWakePublisher {
     private let clock: @Sendable () throws -> AuthorityMoment
     private let routing: @Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting
     private let receiptTime: @Sendable () -> UInt64?
-    private let phonePush: AuthorityPhonePushPublication?
+    private var phonePush: AuthorityPhonePushPublication?
+    private var phonePushConfigurationDigest: Data?
     public private(set) var phonePushDiagnostic: AuthorityPhonePushPublicationDiagnostic
     private var phoneCursor = 0
     private var probeOperations: [Data: Data] = [:]
@@ -56,6 +57,28 @@ public actor AuthorityWakePublisher {
         self.journal = journal; self.channel = channel; self.registration = registration
         self.leaseMilliseconds = leaseMilliseconds; self.clock = clock; self.routing = ownerRouting ?? { _, _ in try routing() }; self.receiptTime = receiptTime
         hintFeed = try AuthorityWakeHintFeed(journal: journal, registration: registration, clock: clock, routing: self.routing, receiptTime: receiptTime)
+    }
+
+    /// Add the optional provider between publication turns. Keep the current gateway session, lease and probe history.
+    @discardableResult
+    func installPhonePush(_ publication: AuthorityPhonePushPublication, configurationDigest: Data) throws -> Bool {
+        guard state != .closed else { throw AuthorityWakePublisherError.closed }
+        guard state != .opening, !busy else { throw AuthorityWakePublisherError.busy }
+        guard configurationDigest.count == 32, publication.provider.policy.registration == registration else {
+            throw AuthorityWakePublisherError.wrongAuthority
+        }
+        if let current = phonePush {
+            let left = current.provider.policy, right = publication.provider.policy
+            guard current.gatewayPublicKey == publication.gatewayPublicKey, current.maximumPhonesPerTurn == publication.maximumPhonesPerTurn,
+                  left.registration == right.registration, left.projectID == right.projectID,
+                  left.senderID == right.senderID, left.packageName == right.packageName,
+                  phonePushConfigurationDigest == nil || phonePushConfigurationDigest == configurationDigest else {
+                throw GatewayPreparationError.changedScope
+            }
+            phonePushConfigurationDigest = configurationDigest; return false
+        }
+        phonePush = publication; phonePushConfigurationDigest = configurationDigest; phonePushDiagnostic = .notStarted
+        return true
     }
 
     public func start() async throws {
