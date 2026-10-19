@@ -19,3 +19,6 @@ else
     ./scripts/check-linux-host.sh
 fi
 ./gradlew "$@" :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
+if [ "$host" = Darwin ]; then
+    ./scripts/build-ios-app.sh
+fi

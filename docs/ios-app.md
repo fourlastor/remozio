@@ -31,10 +31,10 @@ Requirements: macOS with Xcode 26.3 or later, and JDK 21 in `JAVA_HOME` (the Xco
 
 ```sh
 ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
-cd ios
-xcodebuild -project Remozio.xcodeproj -scheme Remozio -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+./scripts/build-ios-app.sh
 ```
+
+CI and `./scripts/check-local.sh` on macOS run the same two steps.
 
 For a device or TestFlight build, pass the team at build time with `DEVELOPMENT_TEAM=<team>`. The project does not
 contain a team ID.

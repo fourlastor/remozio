@@ -176,11 +176,9 @@ jobs:
       - name: Kotlin tests on the iOS simulator
         run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
-        working-directory: ios
-        run: >-
-          xcodebuild -project Remozio.xcodeproj -scheme Remozio -configuration Debug
-          -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
-          -derivedDataPath "$RUNNER_TEMP/remozio-ios" CODE_SIGNING_ALLOWED=NO build
+        env:
+          REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
+        run: ./scripts/build-ios-app.sh
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest
