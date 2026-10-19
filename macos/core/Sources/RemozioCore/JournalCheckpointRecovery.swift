@@ -1,4 +1,5 @@
 import Foundation
+import RemozioHostCore
 
 /// Storage reconciliation only. Every result still requires the host's admission and outcome-recovery gates.
 enum JournalCheckpointRecovery {
@@ -22,25 +23,26 @@ enum JournalCheckpointRecovery {
                       let epoch = try transaction.epoch(checkpoint.journalEpoch) else { return false }
                 return epoch.head == checkpoint.journalHead
             }
-            // Prefer the candidate when both describe identical bytes, as with a no-op transaction.
-            if let pending = state.pending, try matches(pending) {
+            let pendingMatches = try state.pending.map(matches) ?? false
+            // Preserve lazy reads: a matching candidate never inspects the committed epoch.
+            let committedMatches = pendingMatches ? false : try matches(state.committed)
+            switch JournalCheckpointRecoveryPolicy.select(state: state, currentAuthorityDigest: digests.authority,
+                                                           pendingMatches: pendingMatches, committedMatches: committedMatches) {
+            case .unchanged(let checkpoint):
+                return .unchanged(checkpoint)
+            case .finalizePending(let checkpoint):
                 try continuity.finalize(expected: state)
-                return .finalized(pending)
+                return .finalized(checkpoint)
+            case .discardPending(let checkpoint):
+                try continuity.discardPreparation(expected: state)
+                return .discarded(checkpoint)
+            case .historyDiscontinuity(let previous):
+                return .historyDiscontinuity(previous)
+            case .requireRepair:
+                // Storage errors propagate instead of being converted into a persistent repair condition.
+                try continuity.requireRecovery()
+                return .repairRequired
             }
-            if try matches(state.committed) {
-                if state.pending != nil {
-                    try continuity.discardPreparation(expected: state)
-                    return .discarded(state.committed)
-                }
-                return .unchanged(state.committed)
-            }
-            if state.committed.authorityDigest == digests.authority || state.pending?.authorityDigest == digests.authority {
-                // Preserve all evidence. A separate recovery step must record the gap and unresolved outcomes.
-                return .historyDiscontinuity(state)
-            }
-            // Storage errors propagate instead of being converted into a persistent repair condition.
-            try continuity.requireRecovery()
-            return .repairRequired
         }
     }
 }
