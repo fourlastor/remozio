@@ -1,10 +1,12 @@
 #if os(Linux)
 import Crypto
+import Glibc
+import Synchronization
 #else
 import CryptoKit
 #endif
 import Foundation
-import RemozioHostCore
+@testable import RemozioHostCore
 import RemozioProtocol
 import XCTest
 
@@ -147,6 +149,36 @@ final class DecisionVerifierTests: XCTestCase {
             expect(.unavailableRequest) { try verify(request, phase: phase) }
         }
     }
+
+    #if os(Linux)
+    func testReplacementLinuxAuthorityRejectsOldRequestWhileBoottimeContinuesForward() throws {
+        let nanoseconds = Mutex(100_000_000)
+        let sampler = try SleepInclusiveClock(readTime: { clockID, sample in
+            XCTAssertEqual(clockID, CLOCK_BOOTTIME)
+            sample.pointee = timespec(tv_sec: 0, tv_nsec: nanoseconds.withLock { $0 })
+            return 0
+        })
+        let original = LinuxAuthorityClock(clock: sampler), request = try request()
+        let retained = try RetainedApprovalRequest(payload: request, phase: .presented,
+            admittedAt: original.now(), deadlineMilliseconds: 200)
+        let body = try decision(request), signature = try signature(body), trust = try trust(request)
+        nanoseconds.withLock { $0 = 150_000_000 }
+        let beforeRestart = try original.now()
+        let verified = try DecisionVerifier.verify(canonicalDecision: body, signature: signature, retained: retained,
+            trust: trust, now: beforeRestart, decisionLimits: limits, requestLimits: limits, signingLimits: limits)
+        XCTAssertEqual(verified.clockEpoch, original.epoch)
+
+        nanoseconds.withLock { $0 = 175_000_000 }
+        let replacement = LinuxAuthorityClock(clock: sampler), afterRestart = try replacement.now()
+        XCTAssertGreaterThan(afterRestart.milliseconds, beforeRestart.milliseconds)
+        XCTAssertLessThan(afterRestart.milliseconds, retained.deadlineMilliseconds)
+        XCTAssertNotEqual(afterRestart.epoch, retained.admittedAt.epoch)
+        expect(.invalidClock) {
+            try DecisionVerifier.verify(canonicalDecision: body, signature: signature, retained: retained,
+                trust: trust, now: afterRestart, decisionLimits: limits, requestLimits: limits, signingLimits: limits)
+        }
+    }
+    #endif
 
     func testAmbiguousTrustedIdentitiesAndInvalidDeadlinesFail() throws {
         let request = try request(), snapshot = try trust(request)
