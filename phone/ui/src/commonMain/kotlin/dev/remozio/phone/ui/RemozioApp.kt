@@ -17,12 +17,15 @@ import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
@@ -64,12 +67,21 @@ private fun ComputersScreen(onAdd: () -> Unit) {
 private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
     var text by remember { mutableStateOf("") }
     var preview by remember { mutableStateOf<InvitationPreview?>(null) }
+    val focus = LocalFocusManager.current
+    val scroll = rememberScrollState()
     fun show(input: String?) {
         if (input == null) return
+        // Closing the keyboard keeps the result from being hidden under it.
+        focus.clearFocus()
         text = input
         preview = previewInvitation(input)
     }
-    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    LaunchedEffect(preview) {
+        if (preview == null) return@LaunchedEffect
+        withFrameNanos { }
+        scroll.animateScrollTo(scroll.maxValue)
+    }
+    Column(Modifier.verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Action("Back", "back", onBack)
         }
