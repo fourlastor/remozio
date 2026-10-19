@@ -16,8 +16,12 @@ appId: dev.remozio.ios
 - assertVisible: "15448DD8-80A3E42E-81C4BE45-FA94CE71-0E577125-96136E08-5F07F24D-E63288DF"
 - assertVisible: "These are unverified invitation claims.*"
 # A new Add computer screen starts empty; eraseText removes only the text before the cursor.
-- tapOn: "Back"
-- tapOn: "Add computer"
+# Tags, not text: "Add computer" is also the title of this screen.
+- tapOn:
+    id: "back"
+- assertVisible: "No computers yet."
+- tapOn:
+    id: "add-computer"
 - tapOn:
     id: "invitation-text"
 - inputText: "remozio-pairing:v2:not-an-invitation"

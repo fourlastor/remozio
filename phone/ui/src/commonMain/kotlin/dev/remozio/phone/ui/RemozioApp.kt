@@ -81,10 +81,11 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
         withFrameNanos { }
         scroll.animateScrollTo(scroll.maxValue)
     }
+    // Back stays outside the scrolling column, so scrolling to a result never hides it.
+    Row(Modifier.padding(bottom = 16.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+        Action("Back", "back", onBack)
+    }
     Column(Modifier.verticalScroll(scroll), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-            Action("Back", "back", onBack)
-        }
         Title("Add computer")
         Body("Scan the QR code that the computer shows, or paste its invitation text.")
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
