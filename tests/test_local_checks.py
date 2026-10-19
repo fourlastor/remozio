@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-core:test", ":dev-invitation:test"]
+COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-core:test", ":phone-ui:jvmTest", ":dev-invitation:test"]
 ANDROID_TASKS = [":android-app:testDebugUnitTest", ":android-app:assembleDebug", ":android-app:lintDebug"]
 
 
@@ -46,7 +46,9 @@ class LocalChecksTests(unittest.TestCase):
         result, calls = self.run_gate("Darwin")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["./scripts/check.sh"],
-                                 ["./gradlew", *COMMON_TASKS, ":phone-core:approvalFlowTest", *ANDROID_TASKS]])
+                                 ["./gradlew", *COMMON_TASKS, ":phone-core:approvalFlowTest",
+                                  ":protocol-kotlin:iosSimulatorArm64Test", ":phone-ui:iosSimulatorArm64Test",
+                                  *ANDROID_TASKS]])
 
     def test_unknown_platform_fails_before_running_checks(self):
         result, calls = self.run_gate("FreeBSD")

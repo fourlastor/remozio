@@ -7,7 +7,8 @@
     "Mac build",
     "Mac interoperability",
     "Kotlin protocol",
-    "Android build"
+    "Android build",
+    "iOS build"
   ],
   "retry_eligible_workflow_keywords": [],
   "codex": {
