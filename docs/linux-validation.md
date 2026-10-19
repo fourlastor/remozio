@@ -65,6 +65,13 @@ TPM; its successful controls still leave protected code and production admission
 unsupported. Enable its live test explicitly as documented there. Existing
 historical checkpoints above remain scoped to their original source revisions.
 
+The [disposable approval-to-command experiment](experiments/linux-approval-command.md)
+connects the shared verifier, fixture-only consumption, audit tables and checkpoint/recovery
+selection to a fixed ordinary-user command. It runs automatically after the shared-host
+suite in `check-linux-host.sh`, on both the local Linux gate and Linux Swift CI job.
+Synthetic software keys and requester claims, a private fixture ledger and one fixed command
+do not establish production authority, physical-phone approval or protected caller admission.
+
 ## Local gate and CI coverage
 
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
