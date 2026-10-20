@@ -132,7 +132,7 @@ These values do not represent production progress or a retained revision.
 The service imports no rights and performs no settings transition.
 The existing ordinary-user GUI service, timeouts and verified cleanup remain unchanged.
 
-The 95-case matrix is prepared coverage, not a recorded live result.
-Run it in a supported Mac GUI session and retain a new redacted report before capability 8 publication.
-The report must show all cases passed and the temporary service absent.
+[The October 20 evidence](evidence/2026-10-20-gateway-settings-xpc.json) records all 95 cases passing on macOS 27.0.1, targeting macOS 26.
+The temporary ordinary-user service was removed. The report pins the tested source and inherited production declaration.
+This does not establish runtime behavior on macOS 26.
 This measures selector bridging and identifier refusal. It does not prove Root admission, administrator consent or installed services.
