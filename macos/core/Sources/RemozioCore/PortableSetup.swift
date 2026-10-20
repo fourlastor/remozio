@@ -107,6 +107,15 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
               }) else { throw PortableSetupError.rejected }
     }
 
+    /// Reads the selected zone through a fixed provider endpoint. It exposes no general credential or HTTP interface.
+    func zoneInspectionRequest() -> URLRequest {
+        let endpoint = URL(string: "https://api.cloudflare.com/client/v4/zones/" + zoneID)!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }
