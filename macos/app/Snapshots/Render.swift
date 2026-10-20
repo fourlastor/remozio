@@ -42,6 +42,66 @@ struct RenderSetupPreview {
             window.contentView = nil
             print(name + ": rendered synthetic preview")
         }
+        let portableGateway = try GatewayRuntimeSettingsSelection(service: .init(delivery: defaults.delivery,
+            probe: .init(maximumAttempts: 2, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 30), wake: defaults.wake),
+            activation: .init(wakePollMilliseconds: 2500, wakeTimeoutMilliseconds: 5000))
+        let portableDefaults = SharedSetupDefaults(presence: defaults.presence, gateway: portableGateway)
+        let portablePreferences = try PortableAppPreferences(preferences: [PortableAppPreferences.menuBarKey: false,
+            CommandFrontendCallerSettings.modeKey: "pipes", CommandFrontendCallerSettings.controlRetryKey: "17"])
+        let portableKeyProcess = Process(), portableKeyPipe = Pipe()
+        portableKeyProcess.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
+        portableKeyProcess.arguments = ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"]
+        portableKeyProcess.standardOutput = portableKeyPipe; portableKeyProcess.standardError = FileHandle.nullDevice
+        try portableKeyProcess.run()
+        let portableKey = portableKeyPipe.fileHandleForReading.readDataToEndOfFile(); portableKeyProcess.waitUntilExit()
+        guard portableKeyProcess.terminationStatus == 0 else { fatalError("Could not generate the disposable preview key") }
+        let portableProvider = try SetupFCMConfiguration(project: "remozio-preview", clientEmail: "preview@fixture.iam.gserviceaccount.com",
+            privateKeyID: "synthetic-preview-key", privateKeyPEM: String(decoding: portableKey, as: UTF8.self))
+        let portableClient = try SetupPushClientConfiguration(projectID: "remozio-preview", senderID: "123456789012", packageName: "dev.remozio.android")
+        let portableFull = PortableSetup(defaults: portableDefaults, fcm: portableProvider,
+            pushClient: portableClient, appPreferences: portablePreferences).preview
+        let portableSettingsOnly = PortableSetup(defaults: portableDefaults).preview
+        let portableSparse = PortableSetup(defaults: defaults, appPreferences: portablePreferences).preview
+        let portableEmpty = PortableSetup(defaults: defaults, appPreferences: try PortableAppPreferences(preferences: [:])).preview
+        for (name, portableScope, bottom) in [
+            ("portable-preview-full-light", portableFull, false),
+            ("portable-preview-full-dark", portableFull, false),
+            ("portable-preview-full-bottom-light", portableFull, true),
+            ("portable-preview-full-bottom-dark", portableFull, true),
+            ("portable-preview-settings-only-light", portableSettingsOnly, false),
+            ("portable-preview-settings-only-dark", portableSettingsOnly, false),
+            ("portable-preview-sparse-light", portableSparse, false),
+            ("portable-preview-sparse-dark", portableSparse, false),
+            ("portable-preview-empty-preferences-light", portableEmpty, false),
+            ("portable-preview-empty-preferences-dark", portableEmpty, false),
+        ] {
+            let dark = name.hasSuffix("dark"), view = SetupFilePreview(snapshotPreview: portableScope)
+            app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
+            host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: 540, height: 590)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host; host.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+            if bottom {
+                func portableScroll(_ view: NSView) -> NSScrollView? {
+                    if let scroll = view as? NSScrollView { return scroll }
+                    for child in view.subviews { if let scroll = portableScroll(child) { return scroll } }
+                    return nil
+                }
+                guard let scroll = portableScroll(host), let document = scroll.documentView else {
+                    fatalError("No portable preview scroll view")
+                }
+                let edge = document.isFlipped ? max(0, document.bounds.height - scroll.contentView.bounds.height) : 0
+                scroll.contentView.scroll(to: NSPoint(x: 0, y: edge)); scroll.reflectScrolledClipView(scroll.contentView)
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            }
+            host.displayIfNeeded()
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+            try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
+            print(name + ": rendered synthetic portable scope; frame=\(host.frame); fitting=\(host.fittingSize)")
+        }
         func gatewayProgress(stage: Int) throws -> SetupGatewayActivationProgress {
             let id = Data(repeating: 1, count: 16), digest = Data(repeating: 2, count: 32)
             let setup = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-gateway-setup-progress"),

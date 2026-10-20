@@ -204,6 +204,20 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             else:
                 self.assertNotIn(material, declarations)
 
+    def test_portable_preview_declares_readers_without_export_or_import_capabilities(self):
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role == 1:
+                payload = declarations['setup.portable']
+                self.assertEqual(payload[1], [1, 2, 3, 4])
+                self.assertEqual(payload[2], [])
+                self.assertEqual(payload[3], {})
+            else:
+                self.assertNotIn('setup.portable', declarations)
+            if role in (1, 8):
+                self.assertNotIn(9, declarations['setup.local-ipc'][1])
+                self.assertNotIn(10, declarations['setup.local-ipc'][1])
+
     def test_settings_setup_capability_eight_does_not_advertise_future_portable_calls(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}

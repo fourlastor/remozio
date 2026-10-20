@@ -107,6 +107,14 @@ struct SetupScopePreview: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Included configuration").font(.headline).accessibilityAddTraits(.isHeader)
                     Label("Presence and push defaults", systemImage: "slider.horizontal.3")
+                    if preview.categories.contains(.gatewayOperationalDefaults) {
+                        Label("Push service and wake settings", systemImage: "bell.badge")
+                        Text("Includes saved push timings and limits.")
+                            .foregroundStyle(Color.primary.opacity(0.8))
+                    }
+                    if preview.categories.contains(.appPreferences) {
+                        Label("App and command caller preferences", systemImage: "gearshape")
+                    }
                     if preview.categories.contains(.fcmCredentials) {
                         Label("Firebase push credentials", systemImage: "bell")
                     }
@@ -116,7 +124,12 @@ struct SetupScopePreview: View {
                 }
                 if let project = preview.firebaseProject {
                     scope("Firebase project", value: project)
+                    if let client = preview.pushClient {
+                        scope("Firebase sender ID", value: client.senderID)
+                        scope("Android package name", value: client.packageName)
+                    }
                 }
+                if let preferences = preview.appPreferences { appPreferences(preferences) }
                 if let account = preview.cloudflareAccount {
                     VStack(alignment: .leading, spacing: 12) {
                         scope("Cloudflare account", value: account)
@@ -134,6 +147,45 @@ struct SetupScopePreview: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxHeight: 360)
+    }
+    private func appPreferences(_ preferences: PortableAppPreferences) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("App preferences").font(.headline).accessibilityAddTraits(.isHeader)
+            if let shown = preferences.menuBarVisible {
+                LabeledContent("Menu bar") { Text(shown ? LocalizedStringKey("Shown") : LocalizedStringKey("Hidden")) }
+            }
+            if preferences.menuBarVisible == nil && preferences.commandOverrides.isEmpty {
+                Text("No app preference overrides are included.").foregroundStyle(Color.primary.opacity(0.8))
+            }
+            ForEach(PortableAppPreferences.commandKeys.filter { preferences.commandOverrides[$0] != nil }, id: \.self) { key in
+                if let value = preferences.commandOverrides[key] {
+                    LabeledContent(appPreferenceTitle(key)) {
+                        if key == CommandFrontendCallerSettings.modeKey {
+                            Text(value == "pty" ? LocalizedStringKey("Terminal (PTY)") : LocalizedStringKey("Pipes"))
+                        } else if key == CommandFrontendCallerSettings.disconnectKey {
+                            Text(value == "terminate" ? LocalizedStringKey("Terminate the command") : LocalizedStringKey("Let the command continue"))
+                        } else { Text(verbatim: value) }
+                    }
+                }
+            }
+            Text("Only listed app preferences are included. Unset values are absent.")
+                .foregroundStyle(Color.primary.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
+            Text("Login registration and the current presence mode stay local.")
+                .foregroundStyle(Color.primary.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+    private func appPreferenceTitle(_ key: String) -> LocalizedStringKey {
+        switch key {
+        case CommandFrontendCallerSettings.modeKey: "Default command I/O"
+        case CommandFrontendCallerSettings.disconnectKey: "If the caller disconnects"
+        case CommandFrontendCallerSettings.timeoutKey: "Readiness wait (ms)"
+        case CommandFrontendCallerSettings.initialBackoffKey: "Initial connection backoff (ms)"
+        case CommandFrontendCallerSettings.maximumBackoffKey: "Maximum connection backoff (ms)"
+        case CommandFrontendCallerSettings.controlTimeoutKey: "Control validation timeout (ms)"
+        case CommandFrontendCallerSettings.controlRetryKey: "Control retry interval (ms)"
+        case CommandFrontendCallerSettings.foregroundRetryKey: "Foreground retry interval (ms)"
+        default: "Command caller setting"
+        }
     }
     private func scope(_ title: LocalizedStringKey, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {

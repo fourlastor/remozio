@@ -47,6 +47,8 @@ def declarations(role):
     }
     values = [format_declaration(name, versions, {1: 2} if name == 'authority.installation-inventory' else None)
               for name, versions in names[role]]
+    if role == 1:
+        values.append({0: 'setup.portable', 1: [1, 2, 3, 4], 2: [], 3: {}})
     if role == 2:
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
         values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], {1: 2}))
