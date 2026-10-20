@@ -66,7 +66,7 @@ unsupported. Enable its live test explicitly as documented there. Existing
 historical checkpoints above remain scoped to their original source revisions.
 
 The [disposable approval-to-command experiment](experiments/linux-approval-command.md)
-connects the shared verifier, fixture-only consumption, audit tables and checkpoint/recovery
+connects the shared verifier, consumption/outcome and submission-replay tables, audit tables and checkpoint/recovery
 selection to a fixed ordinary-user command. It runs automatically after the shared-host
 suite in `check-linux-host.sh`, on both the local Linux gate and Linux Swift CI job.
 Synthetic software keys and requester claims, a private fixture ledger and one fixed command
@@ -106,7 +106,13 @@ competing write connections, replay across reopen, failure rollback and terminal
 unknown outcomes; protected Linux connection ownership and durable commit/recovery
 remain unimplemented. The Mac owner continues to load current enrollment and check
 its revision in the write transaction, mark failures and coordinate checkpoints.
-The disposable command experiment continues using its separate fixture-only ledger.
+The disposable command experiment now uses these shared table implementations, with its
+own fixture-only connection/checkpoint owner. Its seventeen process controls preserve the
+original fourteen and add ID replay, nonce replay and expiry at the final shared consumption
+call. Read-only Python SQLite observations independently check the stored row counts after
+workers retire, including reservation rollback on expiry and audit failure. A reopened worker
+rejects fresh signed requests reusing historical IDs/nonces and never restores an old token.
+This integration does not add a protected Linux owner or a production continuity format.
 
 Shared command-submission replay tests exercise permanent ID/nonce reservations,
 scope and capacity limits, competing connections, rollback, reopen, malformed rows

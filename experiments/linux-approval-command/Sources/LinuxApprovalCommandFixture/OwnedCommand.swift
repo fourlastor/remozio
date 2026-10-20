@@ -14,7 +14,7 @@ final class OwnedCommand {
     private var reaped = false
     let capture: LinuxCommandCapture
 
-    init(directory: String) throws {
+    init(directory: String, submission: CapturedSubmission? = nil) throws {
         self.directory = directory
         marker = directory + "/command.marker"
         var pairs: [Int32] = []
@@ -48,7 +48,7 @@ final class OwnedCommand {
                     executable: Self.observeExecutable("/proc/self/exe"), credentials: credentials,
                     sessionID: nil, codePolicyDigest: digest(Data("synthetic fixture policy".utf8))),
                 unverifiedRationale: "Disposable component fixture; synthetic requester claims",
-                submission: .init(id: randomBytes(16), nonce: randomBytes(32), callerBinding: randomBytes(16)),
+                submission: submission ?? .init(id: randomBytes(16), nonce: randomBytes(32), callerBinding: randomBytes(16)),
                 stdioLayout: .init(input: .init(source: input, access: .readOnly, flags: []),
                     output: .init(source: output, access: .writeOnly, flags: []),
                     error: .init(source: error, access: .writeOnly, flags: []), terminal: nil, ptyMask: 0),

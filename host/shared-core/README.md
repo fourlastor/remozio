@@ -64,6 +64,11 @@ This package contains no protected database owner, caller monitor, TPM integrati
 service installation or command execution. It introduces no Linux capture schema and changes no protocol bytes or production
 authority policy.
 
+The disposable [Linux command fixture](../../docs/experiments/linux-approval-command.md)
+uses these consumption, outcome, replay and audit tables together around its fixed command.
+Its connection owner and checkpoint adapter remain fixture-only; stored evidence never
+recreates an old dispatch token. This does not implement a protected Linux authority.
+
 Run the shared host tests with Swift 6.2 or later. Linux also needs SQLite development
 headers and library (`libsqlite3-dev` on Ubuntu), discoverable through `pkg-config`.
 macOS uses the SDK's SQLite module.

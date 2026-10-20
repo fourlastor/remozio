@@ -1,7 +1,7 @@
 # Disposable Linux approval-to-command experiment
 
-This fixture connects the shared approval verifier to a fixture-only consumption ledger,
-shared audit tables and checkpoint/recovery selection, then launches one fixed ordinary-user
+This fixture connects the shared approval verifier, consumption/outcome and command-submission
+replay tables, audit tables and checkpoint/recovery selection, then launches one fixed ordinary-user
 command. It is a component integration experiment, **not a production Linux authority**.
 Its schema-4 requester claims and software signing keys are synthetic. It does not claim a
 physical phone, biometric operation, hardware key, protected caller, or installed service.
@@ -64,6 +64,11 @@ Every successful native report must contain the exact expected checks, fixed obs
 decision result and state counts. The runner rejects unknown fields, duplicate JSON keys,
 numeric values substituted for booleans, unsupported phases and unexpected refusal reasons.
 Error text from the native process never enters a published report.
+After retiring each worker, the runner also opens SQLite read-only and independently checks
+the five expected shared tables, scoped consumption/reservation/outcome/audit row counts,
+fixed-size reservation metadata and foreign keys. A native success report or expected crash
+cannot substitute for those observations. This is a fixture row check, not protected schema
+authentication or a concurrency proof.
 
 | Case | Required decision result | Marker executions |
 | --- | --- | --- |
@@ -74,17 +79,33 @@ Error text from the native process never enters a published report.
 | `decline` | `declined`, consumed without execution | 0 |
 | `expired` | `expired` | 0 |
 | `expire-before-consume` | `expiredBeforeConsume` | 0 |
+| `expire-at-shared-consume` | `expiredAtSharedConsume` after tentative reservation; reservation and consumption roll back | 0 |
 | `replay` | `replayRejected` after the first execution | 1 total |
-| `audit-failure` | `auditFailure`, with no consumption or audit rows committed | 0 |
+| `submission-id-replay` | `submissionIDReplayRejected` for a fresh signed request reusing only the submission ID | 1 total |
+| `submission-nonce-replay` | `submissionNonceReplayRejected` for a fresh signed request reusing only the nonce | 1 total |
+| `audit-failure` | `auditFailure`, with no reservation, consumption, outcome or audit rows committed | 0 |
 
-The two expiry controls inject the retained deadline as the authority moment. They test
+The expiry controls inject the retained deadline as the authority moment. The final control
+supplies a valid first sample and the exact deadline to the shared consumption call, after
+live capture validation and tentative replay reservation in the same transaction. They test
 the verifier boundary and consumption-time recheck, rather than waiting for wall-clock
 expiration or exercising suspend/resume. Ordinary operations use the Linux authority clock.
 
 After `approve`, a fresh `reopen-completed` process opens the same state and must retain its
 successful phase, one consumed request and three audit records without launching again.
 Its `outputMatched=false` and absent child exit result mean that the reopened process did
-not run a new command; the existing marker must still contain exactly one line.
+not run a new command; the existing marker must still contain exactly one line. It also uses
+the historical reservation metadata to construct two fresh captures and signed requests,
+which must be refused for their reused ID or nonce. Old request bytes, software keys and
+dispatch tokens are never restored. The collision controls require `alreadyReserved`, so a
+capacity error cannot masquerade as replay rejection.
+
+The original fourteen process controls remain, with three added controls for seventeen total.
+Consumption and outcome updates use `ConsumptionJournalTables`, and ID/nonce reservation uses
+`CommandSubmissionReplayTables`, on the same connection as `AuditJournalTables`. The fixture
+owner supplies the outer transaction, capture validation and final clock sample; it issues its
+one-use in-memory token only for the incoming verified execute decision. Stored receipts,
+outcomes and reservations never reconstruct a dispatch token.
 
 The crash modes intentionally terminate with exit 86 and no stdout. Each crash worker and
 its descendants must be retired and reaped before a separate recovery process starts:
@@ -127,9 +148,12 @@ The environment variable explicitly enables the real fixed-command integration r
 
 ## What remains unproven
 
-The consumption ledger and its SQLite wrapper belong only to this fixture. They are not a
-production Linux journal, authority protocol, concurrency/locking implementation or recovery
-adapter. The software keys do not establish hardware custody or fresh human biometric consent.
+The table implementations are shared with the Mac authority. The SQLite connection owner,
+configuration file, bounded checksum format and checkpoint-file adapter still belong only to
+this fixture. They are not a protected Linux journal, authority protocol, concurrency/locking
+implementation or production recovery adapter. The checksum now includes replay rows in its
+authority evidence and consumption, outcome and audit rows in its ledger evidence; it is not
+the Mac journal continuity format. The software keys do not establish hardware custody or fresh human biometric consent.
 The synthetic requester does not establish protected frontend policy, executable provenance,
 continuous monitoring or a safe stopped dispatch handoff. The separate
 [caller monitor experiment](linux-caller-monitor.md) remains its own evidence boundary.
@@ -138,4 +162,6 @@ There is no protected installation, privileged target account, physical phone, e
 network delivery, TPM integration, general command API, PTY, signal forwarding, cancellation
 protocol or arbitrary-output streaming path. Passing this experiment demonstrates the stated
 disposable approval-to-command mechanics with the existing shared components; the report
-continues to state `fixtureOnlyLedger=true` and `productionAuthority=false`.
+uses report version `linux-approval-command-v2`, with `fixtureOnlyOwner=true`,
+`sharedConsumptionTables=true`, `sharedReplayTables=true` and `productionAuthority=false`.
+Legacy fixture-only-ledger reports are rejected; private fixture stores are recreated, not migrated.
