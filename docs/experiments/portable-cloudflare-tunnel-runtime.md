@@ -39,6 +39,10 @@ The source does not add an app import action in this slice.
 
 ## Validation boundary
 
+The focused run passed 141 synthetic controls at source `0e370c6`, with no failures or skips.
+It checked the provider clients, retained creation state, current import scope and late or uncertain outcomes.
+This focused result does not substitute for the complete publication gate.
+
 The source is prepared for the complete required gate on its final published dependency.
 That gate must finish before publication. Keep the reports and source hashes in the local checkpoint.
 Existing tests use temporary storage and synthetic provider replies.
