@@ -61,6 +61,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let setupReplyWork = SetupOwnerAsyncWork()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private let gatewayActivationOperation: GatewaySetupActivationOperations?
+    private let gatewaySettingsOperation: GatewaySetupSettingsOperations?
     private var closing = false
     private var closed = false
 
@@ -71,7 +72,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
             expectedReleaseDigest: expectedReleaseDigest,
             resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, releaseActivity: activity,
             gatewayJournalOperation: .native(machineDirectory: machineDirectory, macID: macID),
-            gatewayActivationOperation: .native(machineDirectory: machineDirectory, macID: macID))
+            gatewayActivationOperation: .native(machineDirectory: machineDirectory, macID: macID),
+            gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID))
     }
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
@@ -86,9 +88,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
-         gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil) throws {
+         gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -103,9 +106,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          }, prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState = {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
-         gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil) throws {
+         gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -115,9 +119,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
          activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?,
-         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?) throws {
+         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?) throws {
         self.releaseActivity = releaseActivity; self.gatewayJournalOperation = gatewayJournalOperation
-        self.gatewayActivationOperation = gatewayActivationOperation
+        self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
@@ -423,6 +427,98 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard report.planDigest.count == 32, value.planDigest == report.planDigest else { throw AdministrativeSetupError.staleProgress }
             return value
         }
+    }
+    func gatewaySettingsProgress(callerUID: uid_t) throws -> SetupGatewaySettingsProgress? {
+        try withMachine { machine in
+            _ = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let activation = try gatewayActivationProgress(machine: machine, account: account)
+            guard activation.jobRegistered else { return nil }
+            let value = try gatewaySettingsProgress(machine: machine, account: account)
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine); return value
+        }
+    }
+
+    func retainGatewaySettings(callerUID: uid_t, expected: SetupGatewaySettingsProgress,
+                               selection: GatewayRuntimeSettingsSelection) throws -> SetupGatewaySettingsProgress {
+        try withMachine { machine in
+            guard expected.activation.setup.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard expected.supportsSettingsChanges else { throw GatewayPreparationError.incomplete }
+            guard try gatewaySettingsProgress(machine: machine, account: account) == expected,
+                  try expected.pending == nil else { throw AdministrativeSetupError.staleProgress }
+            let inventory = try currentInventory(machine)
+            guard let activation = try machine.gatewayRuntimeActivation(accountID: account.accountID).plan,
+                  let foreground = try machine.runtimeActivation(accountID: account.accountID).plan,
+                  foreground.consumerHosts != nil else { throw GatewayPreparationError.incomplete }
+            var id = UUID().uuid
+            let revision = try GatewayRuntimeSettingsRevision(id: withUnsafeBytes(of: &id) { Data($0) },
+                selection: selection, activation: activation, previous: expected.active,
+                journal: machine.gatewayJournalPreparation(accountID: account.accountID),
+                foreground: foreground, inventory: inventory)
+            try machine.retainGatewaySettingsTransition(revision)
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            return try gatewaySettingsProgress(machine: machine, account: account)
+        }
+    }
+
+    func resumeGatewaySettings(callerUID: uid_t, expected: SetupGatewaySettingsProgress) async throws -> SetupGatewaySettingsProgress {
+        let context = try lock.withLock {
+            guard !closed, !closing, getpid() == processID, expected.supportsSettingsChanges, let operation = gatewaySettingsOperation else {
+                throw AdministrativeSetupError.unavailable
+            }
+            let admission = try asynchronousWork.admit()
+            do { return (admission, try releaseActivity?.acquireShared(), operation) }
+            catch { admission.close(); throw error }
+        }
+        defer { context.1?.close(); context.0.close() }
+        let revision = try withMachine(admission: context.0) { machine in
+            guard expected.activation.setup.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            guard try gatewaySettingsProgress(machine: machine, account: account) == expected,
+                  let revision = try expected.pending else { throw AdministrativeSetupError.staleProgress }
+            return revision
+        }
+        try Task.checkCancellation()
+        let report = try await context.2.resume(callerUID, expected.activation, revision, { [self] inventory in
+            try lock.withLock {
+                guard !closed, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+                try context.1?.validate(); try releaseActivity?.validate()
+                guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
+                    throw AdministrativeSetupError.changedInstallation
+                }
+                try verifyHost(inventory)
+            }
+        })
+        try Task.checkCancellation(); try context.1?.validate()
+        return try withMachine(admission: context.0) { machine in
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let value = try gatewaySettingsProgress(machine: machine, account: account)
+            try value.validateCompletion(of: expected)
+            guard try report.revisionDigest == revision.digest else { throw AdministrativeSetupError.staleProgress }
+            return value
+        }
+    }
+
+    private func gatewaySettingsProgress(machine: PreparationIntentStore, account: AccountPreparationIntent) throws -> SetupGatewaySettingsProgress {
+        guard let plan = try machine.gatewayRuntimeActivation(accountID: account.accountID).plan,
+              let foreground = try machine.runtimeActivation(accountID: account.accountID).plan else {
+            throw GatewayPreparationError.incomplete
+        }
+        let initial = try GatewayRuntimeSettingsSelection(activation: plan,
+            journal: machine.gatewayJournalPreparation(accountID: account.accountID),
+            foreground: foreground, inventory: currentInventory(machine))
+        return try .init(activation: gatewayActivationProgress(machine: machine, account: account),
+            state: machine.gatewaySettingsTransition(accountID: account.accountID), initialSelection: initial,
+            supportsSettingsChanges: foreground.consumerHosts != nil)
     }
     private func gatewayActivationProgress(machine: PreparationIntentStore, account: AccountPreparationIntent) throws -> SetupGatewayActivationProgress {
         try .init(setup: gatewayProgress(machine: machine, account: account), state: machine.gatewayRuntimeActivation(accountID: account.accountID))

@@ -54,7 +54,7 @@ def registered_service(domain, service, plist, report):
 
 
 def case_matches(name, result, expected_code, reached):
-    expected_reached = name not in ("gateway-activation-progress", "gateway-activation-wrong-server", "gateway-activation-wrong-client", "journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "gateway-progress", "gateway-wrong-server", "gateway-wrong-client", "gateway-journal-wrong-server", "gateway-journal-wrong-client", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
+    expected_reached = name not in ("gateway-settings-progress", "gateway-settings-retain-wrong-server", "gateway-settings-retain-wrong-client", "gateway-settings-resume-wrong-server", "gateway-settings-resume-wrong-client", "gateway-activation-progress", "gateway-activation-wrong-server", "gateway-activation-wrong-client", "journal-hello", "journal-wrong-server", "journal-wrong-client", "journal-wrong-server-uid", "journal-wrong-client-uid", "journal-wrong-invocation", "gateway-progress", "gateway-wrong-server", "gateway-wrong-client", "gateway-journal-wrong-server", "gateway-journal-wrong-client", "recovery-wrong-server", "recovery-wrong-client", "registration-wrong-server", "registration-wrong-client", "receipt-wrong-server", "receipt-wrong-client", "wrong-client-identifier", "guarded-wrong-server", "frame-wrong-server", "frame-wrong-client", "discovery-wrong-server", "discovery-wrong-client", "exchange-wrong-server", "exchange-wrong-client", "setup-progress", "setup-wrong-server", "setup-wrong-client", "runtime-progress", "runtime-wrong-server", "runtime-wrong-client", "activation-progress", "activation-wrong-server", "activation-wrong-client")
     return (result.returncode == expected_code
             and (expected_code != 3 or result.stdout.strip().startswith("rejected:"))
             and reached == expected_reached)
@@ -185,6 +185,20 @@ def experiment(report, swift_build_options=()):
                 ("setup-nil", "setup-nil", trusted, TRUSTED, 0),
                 ("setup-wrong-server", "setup-bytes", trusted, OTHER, 3),
                 ("setup-wrong-client", "setup-bytes", other, TRUSTED, 3),
+                ("gateway-settings-progress", "gateway-settings-progress", trusted, TRUSTED, 0),
+                ("gateway-settings-retain-bytes", "gateway-settings-retain-bytes", trusted, TRUSTED, 0),
+                ("gateway-settings-retain-empty", "gateway-settings-retain-empty", trusted, TRUSTED, 0),
+                ("gateway-settings-retain-nil", "gateway-settings-retain-nil", trusted, TRUSTED, 0),
+                ("gateway-settings-retain-wrong-server", "gateway-settings-retain-bytes", trusted, OTHER, 3),
+                ("gateway-settings-retain-wrong-client", "gateway-settings-retain-bytes", other, TRUSTED, 3),
+                ("gateway-settings-resume-bytes", "gateway-settings-resume-bytes", trusted, TRUSTED, 0),
+                ("gateway-settings-resume-empty", "gateway-settings-resume-empty", trusted, TRUSTED, 0),
+                ("gateway-settings-resume-nil", "gateway-settings-resume-nil", trusted, TRUSTED, 0),
+                ("gateway-settings-resume-wrong-server", "gateway-settings-resume-bytes", trusted, OTHER, 3),
+                ("gateway-settings-resume-wrong-client", "gateway-settings-resume-bytes", other, TRUSTED, 3),
+                ("gateway-settings-retain-bad-selection", "gateway-settings-retain-bad-selection", trusted, TRUSTED, 0),
+                ("gateway-settings-retain-bad-auth", "gateway-settings-retain-bad-auth", trusted, TRUSTED, 0),
+                ("gateway-settings-resume-bad-auth", "gateway-settings-resume-bad-auth", trusted, TRUSTED, 0),
             ]
             for name, mode, binary, expected_peer, expected_code in cases:
                 nonce = uuid.uuid4().hex
