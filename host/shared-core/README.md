@@ -5,7 +5,20 @@ trust and clock value types, a sleep-inclusive clock sampler, the SQLite audit
 journal, decision-consumption and command-submission replay tables, consumption outcomes, continuity
 checkpoints, history-recovery intent encoding and storage-reconciliation selection.
 The Mac authority uses the same implementations through the existing `RemozioCore`
-public names.
+public names. `CommandElevationPolicy` also shares the existing canonical explicit
+account grants and disclosure requirement. Parsing a grant does not prove protected
+installation or authorize execution; the Mac adapter retains protected loading,
+native target resolution and capture validation.
+
+On Linux, `LinuxOwnAccountTargetResolver` resolves only the authenticated caller's
+own non-root account through NSS. `LinuxCurrentCommandElevationPolicy` requires
+explicit fresh policy-loading and retained-caller credential-reading closures.
+Every operation reloads grants; final validation compares all captured UID/GID
+roles and groups and resolves the target again. Neither closure establishes
+protected provenance or caller identity. The service's UID, a capture's claims
+and an unvalidated numeric PID cannot substitute for an authenticated caller.
+Authority serialization, monitor binding and the final stopped handoff remain
+the owner's responsibility. These helpers enable no production Linux admission.
 
 Verification checks the exact request, current enrollment, capabilities, permitted
 action, signing key and monotonic deadline. A `VerifiedDecision` is verification

@@ -163,6 +163,16 @@ sessions. A passing local Linux gate does not establish Mac runtime compatibilit
 
 ## Human testing boundary
 
+The shared explicit-grant codec retains the Mac policy format and authorization
+checks. Linux own-account helpers refuse root and other-account targets, resolve
+current NSS credentials, and require fresh policy and authenticated retained-caller
+observations. Portable tests cover the existing canonical bytes and disclosure,
+scope and revocation; Linux tests cover fresh reads, changed credentials or targets,
+missing observations, malformed/unavailable NSS results and native own-account NSS.
+The supplied loader and credential-reader seams do not establish protected loading,
+monitor ownership or caller authentication. Production integration and the stopped
+handoff remain separate gates; no Linux protected policy path is selected here.
+
 Supervised `/dev/tpmrm0` creation, fresh-process reopen, signing and mutual TLS,
 including reuse of the same keys after the operator's reboot,
 passed with the operator's temporary per-user device ACL. The
