@@ -39,11 +39,11 @@ enum RuntimePublishedArtifactValidation {
         }
         try verifyCurrent()
     }
-    private static func nativeRead(_ artifact: Artifact) throws -> Data {
+    static func nativeRead(_ artifact: Artifact) throws -> Data {
         switch artifact.access {
         case .privateRoot: return try ProtectedServiceConfiguration.read(path: artifact.path)
         case .publicRoot: return try ProtectedServiceConfiguration.readPublic(path: artifact.path)
-        case .servicePrivate(let uid): return try ProtectedServiceConfiguration.readServicePrivate(path: artifact.path, serviceUID: uid)
+        case .servicePrivate(let uid): return try ProtectedServiceConfiguration.readServicePrivateAsRoot(path: artifact.path, serviceUID: uid)
         }
     }
 }
