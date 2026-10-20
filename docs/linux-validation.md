@@ -88,15 +88,16 @@ portable Kotlin/phone tests and Android unit tests, debug assembly and lint. mac
 Unknown platforms and any failed phase fail the gate immediately.
 
 The [shared host core](../host/shared-core/README.md) contains the decision verifier,
-its authority-owned request and enrollment inputs, sleep-inclusive clock sampler,
-SQLite audit tables, checkpoint/history-intent codecs and pure recovery selection.
-Shared tests run through the Linux host check and native Mac check; Mac tests retain
-audit signing and protected-store integration. Mac consumers use compatibility
-aliases for the shared implementations. The table owner still supplies protected
-storage, durability and outer transactions. Recovery selections are data-only;
-the Mac adapter retains serialized journal reads and protected-store transitions.
-These extractions do not implement Linux protected persistence, an authority,
-durable decision consumption or command dispatch.
+its authority-owned request, enrollment and clock inputs, the sleep-inclusive clock
+sampler, SQLite audit journal tables, checkpoint and history-intent codecs, and pure
+storage-reconciliation selection. These tests run through the Linux host check and
+native Mac check; Mac tests also retain audit signing integration. Mac consumers
+use the same implementations through compatibility type aliases. The table owner
+still supplies protected storage, durability configuration and outer transactions.
+Recovery selections are data-only recommendations; the Mac adapter retains its
+serialized journal reads and protected-store transitions, with its existing store
+integration tests. These extractions do not implement Linux protected persistence,
+an authority, durable decision consumption or command dispatch.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this

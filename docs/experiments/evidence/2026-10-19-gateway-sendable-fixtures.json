@@ -1,0 +1,112 @@
+{
+  "experiment": "gateway-sendable-fixtures",
+  "evidenceFormat": 1,
+  "sourceCommit": "cb49a498547ff81f04a3a69e24cfc127535beb7d",
+  "recordedAtUTC": "2026-10-19T21:55:47.804978+00:00",
+  "sourceSHA256": {
+    "macos/core/Tests/RemozioCoreTests/FCMTokenSourceTests.swift": "96a92f4ea487c46cd30ec7fbd4f99d23573b0e6112687bfd6ebd3d9b63687b58",
+    "macos/core/Tests/RemozioCoreTests/GatewayDeliveryCoordinatorTests.swift": "4bdbfa5a6a659cf6095b0254ee3a174c54c9e672d4cf2f151aa6173896bba142",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsConsumerHostTests.swift": "aded02289881eb1ecab3ce3a11d1f1ad2db2546cbbe2cab7f0ec5be43ee0d7fe",
+    "macos/core/Tests/RemozioCoreTests/GatewaySettingsGatewayRuntimeTests.swift": "3dcc062767953c57dff64f111f2bcd46642e18e9c40a7193a4aeddb47dfc56da"
+  },
+  "hostedFailure": {
+    "job": "https://github.com/rock3r/remozio/actions/runs/39322919191/job/118301284538",
+    "logSHA256": "5af108a46cbb5bcd755e27d16f1b322a8de8ffc312d618130799f146a13aac61",
+    "xcode": "26.6",
+    "xcodeBuild": "17F113",
+    "swiftDriver": "1.148.6",
+    "fullSwiftVersion": "not reported in retained log",
+    "diagnosis": "Three new test fixtures shared raw Mutex captures between Task closures. Hosted compilation rejected the transfers."
+  },
+  "repair": {
+    "productionSourceChanged": false,
+    "checkedSendableCounterHolders": true,
+    "locksAndAssertionsPreserved": true,
+    "newUncheckedConformances": false
+  },
+  "validation": {
+    "focusedTests": 99,
+    "focusedFailures": 0,
+    "focusedLogSHA256": "8282a85f2ae4fe9067935f6d6c0a52d5bd5c8d28a83ff94c5f71ffeb27c3c6f1",
+    "nativeCoreSummary": "Executed 3063 tests, with 1 test skipped and 0 failures (0 unexpected) in 876.291 (876.636) seconds",
+    "nativeLogSHA256": "1562cc976dcc34ba7588653e6dc404312df8e17c5d5ac02bfbe1b054d817a912",
+    "fullCurrentLocalGatePassed": true,
+    "fullCurrentLocalGateAdmissionSHA256": "3f3bf3c8f2c786533c41fe90c37e893e3d29cb5661b7c9abc661a7a9a5dd0dd2",
+    "requiredGradleTasks": [
+      ":protocol-kotlin:jvmTest",
+      ":phone-core:test",
+      ":phone-ui:jvmTest",
+      ":dev-invitation:test",
+      ":phone-core:approvalFlowTest",
+      ":protocol-kotlin:iosSimulatorArm64Test",
+      ":phone-ui:iosSimulatorArm64Test",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "reports": {
+      "protocolJvm": {
+        "tests": 147,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneCore": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiJvm": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "developerInvitation": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "protocolIosSimulator": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiIosSimulator": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "assemblyAndLintPassed": true,
+    "sharedFrameworkPassed": true,
+    "unsignedIosAppBuildPassed": true,
+    "iosSimulatorLeaseManaged": true,
+    "bothTestBindingsVerified": true,
+    "testWrapperSettled": true,
+    "leaseReleased": true,
+    "inputsUnchanged": true,
+    "trackedInputsVerified": 1727
+  },
+  "limits": [
+    "The repaired head still requires hosted CI and a current-head Codex review.",
+    "No installed service, production credential or physical device was used.",
+    "The separate unchanged relay CI failure is tracked in issue444."
+  ]
+}

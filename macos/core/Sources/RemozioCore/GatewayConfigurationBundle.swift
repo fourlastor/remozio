@@ -89,10 +89,10 @@ struct GatewayConfigurationBundle: CustomStringConvertible, CustomDebugStringCon
         }
         let companion = try TransportWakeStartupConfiguration(transport: foreground.transport.transport, wake: signer,
             pollMilliseconds: wakePollMilliseconds)
-        transport = try .init(transport: foreground.transport.transport, control: foreground.transport.control,
-            wake: companion, relayPort: foreground.transport.relayPort)
-        gatewayJob = try .init(accountID: account, role: .notificationGateway, executionUID: gatewayClaim.number,
-            userName: gatewayClaim.name, bundlePath: foreground.bundlePath)
+        transport = try foreground.transport.replacingWake(companion)
+        if let hosts = foreground.consumerHosts { gatewayJob = try hosts.job(.gateway) }
+        else { gatewayJob = try .init(accountID: account, role: .notificationGateway, executionUID: gatewayClaim.number,
+            userName: gatewayClaim.name, bundlePath: foreground.bundlePath) }
         self.material = material; self.foreground = foreground
         _ = try enrolledInventory(inventory)
     }

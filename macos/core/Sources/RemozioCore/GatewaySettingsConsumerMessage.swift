@@ -4,8 +4,12 @@ import RemozioProtocol
 
 /// Companion control is separate from Root control1. Its binding and purposes cannot decode as Root messages.
 enum GatewaySettingsConsumerInterface {
+    // The harmless greeting, binding and response keep their common version.
     static let version: UInt64 = 1
     static let supportedVersions: Set<UInt64> = [version]
+    static let settingsRequestVersion: UInt64 = 1
+    static let recoveryRequestVersion: UInt64 = 2
+    static let supportedRequestVersions: Set<UInt64> = [settingsRequestVersion, recoveryRequestVersion]
 }
 enum GatewaySettingsConsumerRole: UInt64, CaseIterable, Sendable {
     case gateway = 1, transport = 2
@@ -47,11 +51,26 @@ struct GatewaySettingsConsumerBinding: Equatable, Sendable, CustomStringConverti
     private static let limits = try! CBORLimits(maxBytes: 256, maxDepth: 1, maxItems: 13)
 }
 
+/// Companion recovery keeps its commit unchanged. Root successor messages retain their separate contract.
+struct GatewaySettingsConsumerChange: Sendable {
+    let revisionDigest: Data
+    let previousCommitDigest: Data
+    let selectedCommitDigest: Data
+    let version: UInt64
+    init(version: UInt64, revisionDigest: Data, previousCommitDigest: Data, selectedCommitDigest: Data) throws {
+        guard revisionDigest.count == 32, previousCommitDigest.count == 32, selectedCommitDigest.count == 32,
+              (version == GatewaySettingsConsumerInterface.settingsRequestVersion && previousCommitDigest != selectedCommitDigest) ||
+              (version == GatewaySettingsConsumerInterface.recoveryRequestVersion && previousCommitDigest == selectedCommitDigest) else { throw GatewayPreparationError.invalidRecord }
+        self.version = version; self.revisionDigest = revisionDigest
+        self.previousCommitDigest = previousCommitDigest; self.selectedCommitDigest = selectedCommitDigest
+    }
+}
+
 /// The current authenticated peer and exact protected record must match before an operation can act.
 struct GatewaySettingsConsumerRequest: Sendable, CustomStringConvertible {
     let binding: GatewaySettingsConsumerBinding
     let fenceDigest: Data
-    let change: AuthorityPhonePushSettingsChange
+    let change: GatewaySettingsConsumerChange
     let action: GatewaySettingsControlAction
     let challenge: Data
     var description: String { "GatewaySettingsConsumerRequest(redacted)" }
@@ -59,10 +78,10 @@ struct GatewaySettingsConsumerRequest: Sendable, CustomStringConvertible {
          action: GatewaySettingsControlAction, challenge: Data) throws {
         guard binding.macID == fence.macID, binding.accountID == fence.accountID else { throw GatewayPreparationError.changedScope }
         try self.init(binding: binding, fenceDigest: Data(SHA256.hash(data: fence.encoded)),
-            change: .init(revisionDigest: fence.revision.digest, previousCommitDigest: fence.previous.observationDigest,
+            change: .init(version: fence.version, revisionDigest: fence.revision.digest, previousCommitDigest: fence.previous.observationDigest,
                 selectedCommitDigest: fence.selected.observationDigest), action: action, challenge: challenge)
     }
-    private init(binding: GatewaySettingsConsumerBinding, fenceDigest: Data, change: AuthorityPhonePushSettingsChange,
+    private init(binding: GatewaySettingsConsumerBinding, fenceDigest: Data, change: GatewaySettingsConsumerChange,
                  action: GatewaySettingsControlAction, challenge: Data) throws {
         guard fenceDigest.count == 32, challenge.count == 32 else { throw GatewayPreparationError.invalidRecord }
         self.binding = binding; self.fenceDigest = fenceDigest; self.change = change; self.action = action; self.challenge = challenge
@@ -72,21 +91,21 @@ struct GatewaySettingsConsumerRequest: Sendable, CustomStringConvertible {
         guard try encoded == expected.encoded else { throw GatewayPreparationError.changedScope }
     }
     var encoded: Data { get throws {
-        try DeterministicCBOR.encode(.map([0: .unsigned(GatewaySettingsConsumerInterface.version),
+        try DeterministicCBOR.encode(.map([0: .unsigned(change.version),
             1: .text("remozio-gateway-settings-consumer-request"), 2: .bytes(binding.encoded), 3: .bytes(fenceDigest),
             4: .bytes(change.revisionDigest), 5: .bytes(change.previousCommitDigest), 6: .bytes(change.selectedCommitDigest),
             7: .unsigned(action.rawValue), 8: .bytes(challenge)]), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...8),
-              fields[0] == .unsigned(GatewaySettingsConsumerInterface.version), fields[1] == .text("remozio-gateway-settings-consumer-request"),
+              case .unsigned(let version) = fields[0], GatewaySettingsConsumerInterface.supportedRequestVersions.contains(version), fields[1] == .text("remozio-gateway-settings-consumer-request"),
               case .unsigned(let raw) = fields[7], let action = GatewaySettingsControlAction(rawValue: raw) else {
             throw GatewayPreparationError.invalidRecord
         }
         func data(_ key: UInt64) throws -> Data {
             guard case .bytes(let value) = fields[key] else { throw GatewayPreparationError.invalidRecord }; return value
         }
-        let result = try Self(binding: .decode(data(2)), fenceDigest: data(3), change: .init(revisionDigest: data(4),
+        let result = try Self(binding: .decode(data(2)), fenceDigest: data(3), change: .init(version: version, revisionDigest: data(4),
             previousCommitDigest: data(5), selectedCommitDigest: data(6)), action: action, challenge: data(8))
         guard try result.encoded == bytes else { throw GatewayPreparationError.invalidRecord }; return result
     }

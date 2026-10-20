@@ -9,21 +9,29 @@ public actor TransportWakeRuntime {
     private let hints: AuthorityWakeHintChannel
     private let gateway: GatewayWakeChannel
     private let signer: GatewayWakeSigner
+    private let verifyCurrent: @Sendable () throws -> Void
     private var state = State.new
     private var polling = false
     private var loopRunning = false
     private var accepted: Set<UUID> = []
     public init(hints: AuthorityWakeHintChannel, gateway: GatewayWakeChannel, signer: GatewayWakeSigner) throws {
+        try self.init(hints: hints, gateway: gateway, signer: signer, verifyCurrent: {})
+    }
+    init(hints: AuthorityWakeHintChannel, gateway: GatewayWakeChannel, signer: GatewayWakeSigner,
+         verifyCurrent: @escaping @Sendable () throws -> Void) throws {
         guard hints.binding == signer.binding else { throw TransportWakeRuntimeError.invalidConfiguration }
-        self.hints = hints; self.gateway = gateway; self.signer = signer
+        self.hints = hints; self.gateway = gateway; self.signer = signer; self.verifyCurrent = verifyCurrent
     }
     public func start() async throws {
+        try verifyCurrent(); try Task.checkCancellation()
         guard state == .new else { throw TransportWakeRuntimeError.closed }
         state = .opening
         do {
             try await hints.start()
+            try verifyCurrent(); try Task.checkCancellation()
             guard state == .opening else { throw TransportWakeRuntimeError.closed }
             try await gateway.start()
+            try verifyCurrent(); try Task.checkCancellation()
             guard state == .opening else { throw TransportWakeRuntimeError.closed }
             state = .open
         } catch { await close(); throw error }
@@ -67,7 +75,7 @@ public actor TransportWakeRuntime {
         await hints.close(); await gateway.close()
     }
     private func requireOpen() throws {
-        try Task.checkCancellation()
+        try verifyCurrent(); try Task.checkCancellation()
         guard state == .open else { throw TransportWakeRuntimeError.closed }
     }
 }

@@ -28,6 +28,7 @@ public actor FCMTokenSource {
     private var refresh: (@Sendable () async throws -> FCMTokenLease)?
     private var cached: FCMTokenGrant?
     private var flight: Flight?
+    private var retiredRefreshes: [UUID: Task<Void, Never>] = [:]
 
     private struct Flight {
         let identifier: UUID
@@ -59,7 +60,12 @@ public actor FCMTokenSource {
                 guard pendingCallerCount < maximumWaiters else {
                     continuation.resume(throwing: FCMTokenSourceError.capacityExceeded); return
                 }
-                if flight == nil { startRefresh() }
+                if flight == nil {
+                    guard retiredRefreshes.count < maximumWaiters else {
+                        continuation.resume(throwing: FCMTokenSourceError.capacityExceeded); return
+                    }
+                    startRefresh()
+                }
                 flight!.waiters[waiter] = continuation
             }
         } onCancel: {
@@ -98,6 +104,13 @@ public actor FCMTokenSource {
         abandon(throwing: FCMTokenSourceError.stopped)
     }
 
+    /// Joins provider refresh work after terminal cancellation.
+    public func shutdownAndWait() async {
+        shutdown()
+        let pending = Array(retiredRefreshes.values)
+        for task in pending { await task.value }
+    }
+
     var pendingCallerCount: Int { flight?.waiters.count ?? 0 }
     private(set) var finishedAttemptCount: UInt64 = 0
 
@@ -115,6 +128,7 @@ public actor FCMTokenSource {
         flight = Flight(identifier: identifier, task: task, waiters: [:])
     }
     private func finish(_ identifier: UUID, result: Result<FCMTokenLease, any Error>) {
+        retiredRefreshes.removeValue(forKey: identifier)
         finishedAttemptCount &+= 1
         guard let active = flight, active.identifier == identifier else { return }
         flight = nil
@@ -130,15 +144,15 @@ public actor FCMTokenSource {
         guard let continuation = flight?.waiters.removeValue(forKey: waiter) else { return }
         continuation.resume(throwing: CancellationError())
         if flight?.waiters.isEmpty == true {
-            let task = flight?.task
+            let active = flight
             flight = nil
-            task?.cancel()
+            if let active { retiredRefreshes[active.identifier] = active.task; active.task.cancel() }
         }
     }
     private func abandon(throwing error: any Error) {
         let active = flight
         flight = nil
-        active?.task.cancel()
+        if let active { retiredRefreshes[active.identifier] = active.task; active.task.cancel() }
         for continuation in active?.waiters.values ?? [:].values { continuation.resume(throwing: error) }
     }
 }

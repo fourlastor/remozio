@@ -18,6 +18,15 @@ public enum ProtectedServiceConfiguration {
         return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: 0, privateFile: false)
     }
 
+    /// Only a missing leaf is optional. Missing or changed ancestors remain an error.
+    static func readOptionalPublic(path: String) throws -> Data? {
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try readOptional(anchor: "/", relativePath: String(path.dropFirst()), owner: 0)
+    }
+    static func readOptional(anchor: String, relativePath: String, owner: uid_t) throws -> Data? {
+        try readRecord(anchor: anchor, relativePath: relativePath, owner: owner,
+            privateFile: false, ancestorOwner: nil, allowMissingLeaf: true)
+    }
     /// Reads a service-owned private file under Root-owned ancestors. The interactive account cannot select an anchor.
     static func readServicePrivate(path: String, serviceUID: uid_t) throws -> Data {
         guard serviceUID > 0, serviceUID < UInt32.max, getuid() == serviceUID, geteuid() == serviceUID else {
@@ -30,6 +39,12 @@ public enum ProtectedServiceConfiguration {
     /// Fixture entry point. Production always walks from the filesystem root with Root-owned ancestors.
     static func read(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool = true,
                      ancestorOwner: uid_t? = nil) throws -> Data {
+        guard let bytes = try readRecord(anchor: anchor, relativePath: relativePath, owner: owner,
+            privateFile: privateFile, ancestorOwner: ancestorOwner, allowMissingLeaf: false) else { throw JournalLeaseError.system(ENOENT) }
+        return bytes
+    }
+    private static func readRecord(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool,
+                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool) throws -> Data? {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !anchor.utf8.contains(0),
               anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
@@ -49,11 +64,38 @@ public enum ProtectedServiceConfiguration {
                 nodes.append(Node(fd: fd, parent: parent, name: name, info: info, directory: directory))
             } catch { _ = Darwin.close(fd); throw error }
         }
+        func validateNodes() throws {
+            for node in nodes {
+                var held = stat(), named = stat()
+                guard fstat(node.fd, &held) == 0 else { throw JournalLeaseError.system(errno) }
+                let rc = node.parent.map { fstatat($0, node.name, &named, AT_SYMLINK_NOFOLLOW) } ?? lstat(node.name, &named)
+                guard rc == 0 else { throw JournalLeaseError.system(errno) }
+                guard held.st_dev == node.info.st_dev, held.st_ino == node.info.st_ino,
+                      named.st_dev == held.st_dev, named.st_ino == held.st_ino,
+                      (named.st_mode & S_IFMT) == (node.directory ? S_IFDIR : S_IFREG) else { throw JournalLeaseError.identityChanged }
+                try ProtectedStorageMetadata.validate(node.fd, held, directory: node.directory, privateObject: !node.directory && privateFile,
+                    owner: owner, ancestorOwner: ancestorOwner ?? owner)
+                if !node.directory {
+                    guard held.st_size == node.info.st_size,
+                          held.st_mtimespec.tv_sec == node.info.st_mtimespec.tv_sec,
+                          held.st_mtimespec.tv_nsec == node.info.st_mtimespec.tv_nsec,
+                          held.st_ctimespec.tv_sec == node.info.st_ctimespec.tv_sec,
+                          held.st_ctimespec.tv_nsec == node.info.st_ctimespec.tv_nsec else { throw JournalLeaseError.identityChanged }
+                }
+            }
+        }
         try retain(open(anchor, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC), parent: nil, name: anchor, directory: true)
         for (index, part) in parts.enumerated() {
             let parent = nodes.last!.fd, directory = index < parts.count - 1
             let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (directory ? O_DIRECTORY : 0)
-            try retain(openat(parent, part, flags), parent: parent, name: part, directory: directory)
+            let descriptor = openat(parent, part, flags)
+            if descriptor < 0, !directory, allowMissingLeaf, errno == ENOENT {
+                try validateNodes()
+                var named = stat()
+                guard fstatat(parent, part, &named, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { throw JournalLeaseError.identityChanged }
+                try validateNodes(); return nil
+            }
+            try retain(descriptor, parent: parent, name: part, directory: directory)
         }
         let file = nodes.last!
         guard file.info.st_size > 0, file.info.st_size <= maximumBytes else { throw JournalLeaseError.unsafeMetadata }
@@ -66,24 +108,7 @@ public enum ProtectedServiceConfiguration {
             guard count > 0 else { throw count == 0 ? JournalLeaseError.identityChanged : JournalLeaseError.system(errno) }
             offset += count
         }
-        for node in nodes {
-            var held = stat(), named = stat()
-            guard fstat(node.fd, &held) == 0 else { throw JournalLeaseError.system(errno) }
-            let rc = node.parent.map { fstatat($0, node.name, &named, AT_SYMLINK_NOFOLLOW) } ?? lstat(node.name, &named)
-            guard rc == 0 else { throw JournalLeaseError.system(errno) }
-            guard held.st_dev == node.info.st_dev, held.st_ino == node.info.st_ino,
-                  named.st_dev == held.st_dev, named.st_ino == held.st_ino,
-                  (named.st_mode & S_IFMT) == (node.directory ? S_IFDIR : S_IFREG) else { throw JournalLeaseError.identityChanged }
-            try ProtectedStorageMetadata.validate(node.fd, held, directory: node.directory, privateObject: !node.directory && privateFile,
-                owner: owner, ancestorOwner: ancestorOwner ?? owner)
-            if !node.directory {
-                guard held.st_size == node.info.st_size,
-                      held.st_mtimespec.tv_sec == node.info.st_mtimespec.tv_sec,
-                      held.st_mtimespec.tv_nsec == node.info.st_mtimespec.tv_nsec,
-                      held.st_ctimespec.tv_sec == node.info.st_ctimespec.tv_sec,
-                      held.st_ctimespec.tv_nsec == node.info.st_ctimespec.tv_nsec else { throw JournalLeaseError.identityChanged }
-            }
-        }
+        try validateNodes()
         return result
     }
 }

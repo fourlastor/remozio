@@ -8,8 +8,8 @@ final class GatewayRuntimeSettingsStoreTests: XCTestCase {
     struct Ready {
         let fixture: GatewayJournalSetupExchangeTests.Fixture
         let activation: GatewayRuntimeActivationPlan
-        init(register: Bool = true) throws {
-            fixture = try .init(); let f = fixture
+        init(register: Bool = true, nativeConsumerHosts: Bool = false) throws {
+            fixture = try .init(nativeConsumerHosts: nativeConsumerHosts); let f = fixture
             try f.retainCompletion(.decode(f.initialize()))
             activation = try .init(journal: f.state(), foreground: f.runtime.plan, inventory: XCTUnwrap(f.runtime.machine.inventory()))
             try f.runtime.machine.retainGatewayRuntimeActivation(activation)

@@ -109,6 +109,7 @@ public final class AdministrativeSetupService {
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
             try configuration.validate(release: release)
+            let nativeMode = try GatewaySettingsNativeSupport.mode(release: release, policy: configuration.codePolicy)
             let store = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             machine = store
             guard let inventory = try store.loadInventory(), inventory.bundlePath == bundle.path else {
@@ -140,8 +141,14 @@ public final class AdministrativeSetupService {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
-                accountCodePolicy: configuration.codePolicy, releaseActivity: activity,
-                gatewayJournalOperation: .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID))
+                accountCodePolicy: configuration.codePolicy, prepareRuntime: { machine, account, expected, accepted, verify in
+                    let enabled = try GatewaySettingsNativeSupport.serviceActivityEnabled(reference: expected.reference, mode: nativeMode)
+                    return try RuntimePublicationController.prepare(machine: machine, account: account, expected: expected,
+                        fileCustodyAccepted: accepted, serviceActivityEnabled: enabled, verifyCurrent: verify)
+                }, releaseActivity: activity,
+                gatewayJournalOperation: .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID),
+                gatewayActivationOperation: nativeMode == .native
+                    ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil)
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                 teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,

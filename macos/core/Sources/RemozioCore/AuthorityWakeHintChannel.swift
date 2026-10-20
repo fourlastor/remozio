@@ -53,13 +53,22 @@ public actor AuthorityWakeHintChannel {
     private var timer: Task<Void, Never>?
     public init(serviceName: String, transportUID: uid_t, authorityPolicy: XPCPeerPolicy,
                 binding: GatewaySubmissionBinding, timeoutMilliseconds: UInt64 = 5000) throws {
+        try self.init(serviceName: serviceName, transportUID: transportUID, authorityPolicy: authorityPolicy,
+            binding: binding, timeoutMilliseconds: timeoutMilliseconds, verifyCurrent: {})
+    }
+    init(serviceName: String, transportUID: uid_t, authorityPolicy: XPCPeerPolicy,
+         binding: GatewaySubmissionBinding, timeoutMilliseconds: UInt64 = 5000,
+         verifyCurrent: @escaping @Sendable () throws -> Void) throws {
         guard transportUID > 0, transportUID < UInt32.max, authorityPolicy.expectedUserID == 0,
               GatewayWakeEndpointConfiguration.validServiceName(serviceName), (1...60_000).contains(timeoutMilliseconds) else {
             throw AuthorityWakeHintChannelError.invalidConfiguration
         }
         driver = NativeAuthorityWakeHintDriver(serviceName: serviceName, policy: authorityPolicy)
         self.binding = binding; timeout = timeoutMilliseconds
-        verifyAccount = { guard getuid() == transportUID, geteuid() == transportUID else { throw GatewayServiceError.wrongAccount } }
+        verifyAccount = {
+            guard getuid() == transportUID, geteuid() == transportUID else { throw GatewayServiceError.wrongAccount }
+            try verifyCurrent()
+        }
     }
     init(driver: any AuthorityWakeHintDriver, binding: GatewaySubmissionBinding, timeoutMilliseconds: UInt64 = 5000,
          verifyAccount: @escaping @Sendable () throws -> Void = {}) {
@@ -74,6 +83,7 @@ public actor AuthorityWakeHintChannel {
         do {
             guard case .version(let base) = try await perform(.hello), base == 1 else { throw AuthorityWakeHintChannelError.unsupportedVersion }
             guard case .version(let version) = try await perform(.version), version == 1 else { throw AuthorityWakeHintChannelError.unsupportedVersion }
+            try verifyAccount(); try Task.checkCancellation()
             guard state == .opening else { throw AuthorityWakeHintChannelError.closed }
             state = .open
         } catch { close(); throw error }
@@ -83,6 +93,8 @@ public actor AuthorityWakeHintChannel {
         guard pending == nil else { throw AuthorityWakeHintChannelError.busy }
         do {
             guard case .hints(let bytes) = try await perform(.hints), let bytes else { throw AuthorityWakeHintChannelError.invalidMessage }
+            try verifyAccount(); try Task.checkCancellation()
+            guard state == .open else { throw AuthorityWakeHintChannelError.closed }
             do { return try AuthorityWakeHints.decode(bytes, expectedBinding: binding) }
             catch { throw AuthorityWakeHintChannelError.invalidMessage }
         } catch { close(); throw error }

@@ -4,6 +4,7 @@ import Synchronization
 import XCTest
 
 final class FCMTokenSourceTests: XCTestCase, @unchecked Sendable {
+    private final class Counter: Sendable { let value = Mutex(0) }
     private enum FixtureError: Error { case timeout, missingAttempt }
     private final class Clock: Sendable {
         let value = Mutex(ContinuousClock.now)
@@ -52,6 +53,56 @@ final class FCMTokenSourceTests: XCTestCase, @unchecked Sendable {
     private func expect(_ error: FCMTokenSourceError, _ operation: () async throws -> Void) async {
         do { try await operation(); XCTFail("Expected \(error)") }
         catch let actual { XCTAssertEqual(actual as? FCMTokenSourceError, error) }
+    }
+
+    func testJoinedShutdownRetainsCancelledAndReplacedProviderAttempts() async throws {
+        let clock = Clock(), old = Refresh(honorCancellation: false), new = Refresh(honorCancellation: false)
+        let source = try source(old, clock)
+        defer { Task { await old.close(); await new.close(); await source.shutdownAndWait() } }
+        let first = Task { try await source.token() }
+        try await until { await old.calls == 1 }
+        first.cancel()
+        _ = await first.result
+        try await until { await old.cancellations.contains(1) }
+        let second = Task { try await source.token() }
+        try await until { await old.calls == 2 }
+        try await source.replace(refresh: { try await new.next() })
+        _ = await second.result
+        let third = Task { try await source.token() }
+        try await until { await new.calls == 1 }
+        let completed = Counter()
+        let closing = Task { await source.shutdownAndWait(); completed.value.withLock { $0 += 1 } }
+        let otherClose = Task { await source.shutdownAndWait(); completed.value.withLock { $0 += 1 } }
+        closing.cancel()
+        await expect(.stopped) { _ = try await third.value }
+        try await until { await new.cancellations.contains(1) }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(completed.value.withLock { $0 }, 0)
+        try await new.complete(1, .success(lease(clock)))
+        try await old.complete(2, .success(lease(clock)))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(completed.value.withLock { $0 }, 0)
+        try await old.complete(1, .success(lease(clock)))
+        await closing.value; await otherClose.value
+        XCTAssertEqual(completed.value.withLock { $0 }, 2)
+        await expect(.stopped) { _ = try await source.token() }
+    }
+
+    func testUnsettledCancelledRefreshesRemainBoundedUntilActualCompletion() async throws {
+        let clock = Clock(), refresh = Refresh(honorCancellation: false), source = try source(refresh, clock, maximum: 1)
+        defer { Task { await refresh.close(); await source.shutdownAndWait() } }
+        let abandoned = Task { try await source.token() }
+        try await until { await refresh.calls == 1 }
+        abandoned.cancel(); _ = await abandoned.result
+        try await until { await refresh.cancellations.contains(1) }
+        await expect(.capacityExceeded) { _ = try await source.token() }
+        try await refresh.complete(1, .success(lease(clock)))
+        try await until { await source.finishedAttemptCount == 1 }
+        let next = Task { try await source.token() }
+        try await until { await refresh.calls == 2 }
+        try await refresh.complete(2, .success(lease(clock)))
+        _ = try await next.value
+        await source.shutdownAndWait()
     }
 
     func testConcurrentCallersShareRefreshAndThenReuseCache() async throws {

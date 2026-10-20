@@ -54,6 +54,7 @@ actor GatewaySettingsConsumerChannel {
     private let verifyCurrent: @Sendable () throws -> Void
     private let challenge: @Sendable () throws -> Data
     private let timeout: UInt64
+    private let requestVersion: UInt64
     private let lifetime = GatewaySettingsConsumerClientLifetime()
     private var state = State.new
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewaySettingsControlReply, any Error>)?
@@ -79,18 +80,18 @@ actor GatewaySettingsConsumerChannel {
         try verify(); try verifyCurrent()
         driver = NativeGatewaySettingsConsumerDriver(serviceName: try role.serviceName(accountID: services.accountID), policy: policy)
         self.role = role; macID = services.macID; accountID = services.accountID
-        self.expectedGeneration = expectedGeneration; timeout = timeoutMilliseconds
+        self.expectedGeneration = expectedGeneration; timeout = timeoutMilliseconds; requestVersion = 1
         verifyAccount = verify; self.verifyCurrent = verifyCurrent; challenge = Self.randomChallenge
     }
     init(driver: any GatewaySettingsControlDriver, role: GatewaySettingsConsumerRole, macID: Data, accountID: Data,
-         expectedGeneration: UUID?, timeoutMilliseconds: UInt64 = 5000,
+         expectedGeneration: UUID?, timeoutMilliseconds: UInt64 = 5000, requestVersion: UInt64 = 1,
          verifyAccount: @escaping @Sendable () throws -> Void = {}, verifyCurrent: @escaping @Sendable () throws -> Void = {},
          challenge: @escaping @Sendable () throws -> Data) throws {
-        guard macID.count == 16, accountID.count == 16, (1...60_000).contains(timeoutMilliseconds) else {
+        guard macID.count == 16, accountID.count == 16, (1...60_000).contains(timeoutMilliseconds), GatewaySettingsConsumerInterface.supportedRequestVersions.contains(requestVersion) else {
             throw GatewayPreparationError.invalidRecord
         }
         self.driver = driver; self.role = role; self.macID = macID; self.accountID = accountID
-        self.expectedGeneration = expectedGeneration; timeout = timeoutMilliseconds
+        self.expectedGeneration = expectedGeneration; timeout = timeoutMilliseconds; self.requestVersion = requestVersion
         self.verifyAccount = verifyAccount; self.verifyCurrent = verifyCurrent; self.challenge = challenge
     }
     deinit { timer?.cancel(); if lifetime.close() { driver.close() } }
@@ -98,23 +99,9 @@ actor GatewaySettingsConsumerChannel {
     func execute(_ fence: GatewayRuntimeSettingsFence, action: GatewaySettingsControlAction) async throws -> GatewaySettingsConsumerResponse {
         guard state == .new else { throw state == .closed ? GatewaySettingsControlChannelError.closed : .busy }
         do {
+            guard fence.version == requestVersion else { throw GatewaySettingsControlChannelError.changedScope }
             guard action != .accept || expectedGeneration != nil else { throw GatewaySettingsControlChannelError.changedScope }
-            try verifyAccount(); try verifyCurrent(); try Task.checkCancellation()
-            state = .opening
-            let lifetime = lifetime, driver = driver
-            driver.start { [weak self, weak driver] in
-                if lifetime.close() { driver?.close() }
-                Task { await self?.close() }
-            }
-            guard case .greeting(let version, let bytes) = try await perform(.hello), let bytes else { throw GatewaySettingsControlChannelError.invalidReply }
-            guard GatewaySettingsConsumerInterface.supportedVersions.contains(version) else { throw GatewaySettingsControlChannelError.unsupportedVersion }
-            let binding = try GatewaySettingsConsumerBinding.decode(bytes)
-            guard binding.role == role, binding.macID == macID, binding.accountID == accountID,
-                  expectedGeneration == nil || expectedGeneration == binding.generation else {
-                throw GatewaySettingsControlChannelError.changedScope
-            }
-            try verifyAccount(); try verifyCurrent(); try Task.checkCancellation()
-            state = .open
+            let binding = try await openBinding()
             let request = try GatewaySettingsConsumerRequest(binding: binding, fence: fence, action: action, challenge: challenge())
             guard case .response(let reply) = try await perform(.control(request.encoded)), let reply else { throw GatewaySettingsControlChannelError.invalidReply }
             let result = try GatewaySettingsConsumerResponse.decode(reply, expected: request)
@@ -122,6 +109,34 @@ actor GatewaySettingsConsumerChannel {
             guard state == .open, lifetime.ifOpen({}) else { throw GatewaySettingsControlChannelError.closed }
             close(); return result
         } catch { close(); throw error }
+    }
+    /// A harmless, authenticated generation observation. It cannot create or restore a consumer permit.
+    func observeBinding() async throws -> GatewaySettingsConsumerBinding {
+        guard state == .new else { throw state == .closed ? GatewaySettingsControlChannelError.closed : .busy }
+        do {
+            let binding = try await openBinding()
+            guard state == .open, lifetime.ifOpen({}) else { throw GatewaySettingsControlChannelError.closed }
+            close(); return binding
+        } catch { close(); throw error }
+    }
+    private func openBinding() async throws -> GatewaySettingsConsumerBinding {
+        try verifyAccount(); try verifyCurrent(); try Task.checkCancellation()
+        state = .opening
+        let lifetime = lifetime, driver = driver
+        driver.start { [weak self, weak driver] in
+            if lifetime.close() { driver?.close() }
+            Task { await self?.close() }
+        }
+        guard case .greeting(let version, let bytes) = try await perform(.hello), let bytes else { throw GatewaySettingsControlChannelError.invalidReply }
+        guard GatewaySettingsConsumerInterface.supportedVersions.contains(version) else { throw GatewaySettingsControlChannelError.unsupportedVersion }
+        let binding = try GatewaySettingsConsumerBinding.decode(bytes)
+        guard binding.role == role, binding.macID == macID, binding.accountID == accountID,
+              expectedGeneration == nil || expectedGeneration == binding.generation else {
+            throw GatewaySettingsControlChannelError.changedScope
+        }
+        try verifyAccount(); try verifyCurrent(); try Task.checkCancellation()
+        state = .open
+        return binding
     }
     func close() {
         guard state != .closed else { return }

@@ -7,10 +7,14 @@ public enum RuntimeActivationError: Error, Equatable {
 
 /// Frozen activation inputs. A plan neither registers jobs nor proves runtime health.
 struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConvertible {
+    static let formatName = "runtime.activation-plan"
+    static let supportedVersions: Set<UInt64> = [1, 2]
     let reference: RuntimeMaterialReference
     let bundlePath: String
     let host: InstalledAuthorityCommandConfiguration
     let transport: TransportPairingStartupConfiguration
+    let consumerHosts: GatewaySettingsNativeHostPlan?
+    var gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? { consumerHosts?.gateway }
     let authorityJob: InstalledAccountJobManifest
     let transportJob: InstalledAccountJobManifest
     var description: String { "RuntimeActivationPlan(redacted)" }
@@ -21,19 +25,41 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
          runtime: RuntimePreparationState, inventory: InstallationInventory,
          gatewaySettingsRelease: SignedReleaseEvidence? = nil) throws {
         guard runtime.configurationPublished, let reference = runtime.reference else { throw RuntimeActivationError.incomplete }
-        let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization, reference: reference, inventory: inventory)
+        let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization, reference: reference,
+            inventory: inventory)
         let label = bundle.paths.namespace + ".authority"
         var host = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
             installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, codePolicy: account.initialAuthority.codePolicy,
             command: bundle.command, label: label, plistName: label + ".plist", jobPlacement: .systemAccount)
         if let gatewaySettingsRelease { host = try host.enablingGatewaySettingsControl(release: gatewaySettingsRelease) }
-        try self.init(reference: reference, bundlePath: inventory.bundlePath, host: host, transport: bundle.transport)
+        if reference.serviceActivity != nil {
+            guard let gatewaySettingsRelease else { throw RuntimeActivationError.incomplete }
+            try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: inventory.bundlePath,
+                policy: host.codePolicy).validateRelease(gatewaySettingsRelease)
+        }
+        try self.init(reference: reference, bundlePath: inventory.bundlePath, host: host,
+            transport: bundle.transport, gatewaySettingsHost: bundle.gatewaySettingsHost)
         try validate(account: account, reference: reference)
     }
+    /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained account.
+    func configurationBundle(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+                             inventory: InstallationInventory) throws -> RuntimeConfigurationBundle {
+        try .initial(account: account, initialization: initialization, reference: reference, inventory: inventory,
+            presencePolicyOverride: host.command.presence.presence.policy, relayPortOverride: transport.relayPort)
+    }
     private init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
-                 transport: TransportPairingStartupConfiguration) throws {
-        // Activity metadata cannot select jobs until both native consumers retain their lifetime scopes.
-        guard reference.serviceActivity == nil else { throw RuntimeActivationError.unavailable }
+                 transport: TransportPairingStartupConfiguration,
+                 gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? = nil) throws {
+        let selected: GatewaySettingsNativeHostPlan?
+        if reference.serviceActivity != nil {
+            let plan = try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: bundlePath, policy: host.codePolicy)
+            guard host.gatewaySettingsControlEnabled, gatewaySettingsHost == plan.gateway,
+                  transport.settingsHost == plan.transport else { throw RuntimeActivationError.invalidPlan }
+            selected = plan
+        } else {
+            guard gatewaySettingsHost == nil, transport.settingsHost == nil else { throw RuntimeActivationError.invalidPlan }
+            selected = nil
+        }
         let services = reference.services, paths = try RuntimePreparationPaths(accountID: services.accountID)
         guard let claim = services.claims.first(where: { $0.role == .transport }),
               let gateway = services.claims.first(where: { $0.role == .gateway }),
@@ -64,9 +90,11 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             throw RuntimeActivationError.invalidPlan
         }
         self.reference = reference; self.bundlePath = bundlePath; self.host = host; self.transport = transport
+        consumerHosts = selected
         authorityJob = try .init(accountID: services.accountID, role: .authority, executionUID: 0, userName: "root", bundlePath: bundlePath,
             gatewaySettingsControlEnabled: host.gatewaySettingsControlEnabled)
-        transportJob = try .init(accountID: services.accountID, role: .transport, executionUID: claim.number, userName: claim.name, bundlePath: bundlePath)
+        if let selected { transportJob = try selected.job(.transport) }
+        else { transportJob = try .init(accountID: services.accountID, role: .transport, executionUID: claim.number, userName: claim.name, bundlePath: bundlePath) }
     }
     func validate(account: AccountPreparationIntent, reference: RuntimeMaterialReference) throws {
         try self.reference.validate(account: account, services: reference.services)
@@ -102,17 +130,28 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             services: declarations, formatVersion: inventory.formatVersion)
     }
     var encoded: Data { get throws {
-        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(reference.encoded), 2: .text(bundlePath),
-            3: .bytes(host.canonicalBytes), 4: .bytes(transport.canonicalBytes)]), limits: Self.limits)
+        var fields: [UInt64: CBORValue] = [0: .unsigned(consumerHosts == nil ? 1 : 2), 1: .bytes(try reference.encoded),
+            2: .text(bundlePath), 3: .bytes(host.canonicalBytes), 4: .bytes(transport.canonicalBytes)]
+        if let gatewaySettingsHost { fields[5] = .bytes(try gatewaySettingsHost.encoded) }
+        return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...4),
-              f[0] == .unsigned(1), case .bytes(let reference) = f[1], case .text(let path) = f[2],
+        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits),
+              case .unsigned(let version) = f[0], version == 1 || version == 2,
+              Set(f.keys) == Set(UInt64(0)...(version == 1 ? 4 : 5)),
+              case .bytes(let reference) = f[1], case .text(let path) = f[2],
               case .bytes(let host) = f[3], case .bytes(let transport) = f[4] else { throw RuntimeActivationError.invalidPlan }
-        let result = try Self(reference: .decode(reference), bundlePath: path, host: .decode(host), transport: .decode(transport))
+        let gateway: GatewaySettingsConsumerHostConfiguration?
+        if version == 1 { gateway = nil }
+        else {
+            guard case .bytes(let metadata) = f[5] else { throw RuntimeActivationError.invalidPlan }
+            gateway = try .decode(metadata)
+        }
+        let result = try Self(reference: .decode(reference), bundlePath: path, host: .decode(host),
+            transport: .decode(transport), gatewaySettingsHost: gateway)
         guard try result.encoded == bytes else { throw RuntimeActivationError.invalidPlan }; return result
     }
-    static var limits: CBORLimits { get throws { try .init(maxBytes: 262144, maxDepth: 1, maxItems: 11) } }
+    static var limits: CBORLimits { get throws { try .init(maxBytes: 262144, maxDepth: 1, maxItems: 13) } }
 }
 
 /// Historical registration progress. It is not a current launchd or process health result.

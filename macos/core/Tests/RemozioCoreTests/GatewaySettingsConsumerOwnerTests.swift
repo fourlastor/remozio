@@ -203,6 +203,27 @@ final class GatewaySettingsConsumerOwnerTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(backend.state.withLock { $0.starts }, 2)
         try await owner.close()
     }
+    func testQuiescenceDuringRetriedCleanupPreventsAcceptedBackendRestart() async throws {
+        let backend = Runtime(holdClose: true, startFailures: 1, closeFailures: 1)
+        let f = try Fixture(backend: backend), owner = try f.owner()
+        try await f.accept(owner)
+        do { _ = try await owner.startAcceptedRuntimeIfNeeded(); XCTFail() } catch { XCTAssertTrue(error is Failed) }
+        let retry = Task { try await owner.startAcceptedRuntimeIfNeeded() }
+        defer { backend.releaseClose() }
+        try await waitUntil { backend.state.withLock { $0.closeGate != nil } }
+        let permit = try f.permit(), pause = Task { try await f.act(owner, .quiesce) }
+        try await waitUntil {
+            do { try f.validate(permit, owner); return false } catch { return true }
+        }
+        XCTAssertEqual(backend.state.withLock { $0.starts }, 1)
+        XCTAssertEqual(backend.state.withLock { $0.closes }, 2)
+        backend.releaseClose()
+        let restarted = try await retry.value, paused = try await pause.value
+        XCTAssertFalse(restarted); XCTAssertEqual(paused, .paused)
+        XCTAssertEqual(f.state.withLock { $0.factories }, 1)
+        XCTAssertEqual(backend.state.withLock { $0.settled }, 1)
+        try await owner.close()
+    }
     func testChangedProtectedFenceInvalidatesAnOtherwiseAcceptedPermit() async throws {
         let f = try Fixture(), owner = try f.owner(); try await f.accept(owner); try await owner.startAcceptedRuntime()
         let permit = try f.permit(), r = f.ready

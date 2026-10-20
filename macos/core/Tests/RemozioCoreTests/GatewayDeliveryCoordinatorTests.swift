@@ -55,17 +55,23 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     }
     private actor OAuthGate {
         private(set) var started = false
+        private(set) var cancelled = false
+        private let honorCancellation: Bool
         private var continuation: CheckedContinuation<FCMTokenLease, any Error>?
+        init(honorCancellation: Bool = true) { self.honorCancellation = honorCancellation }
         func refresh() async throws -> FCMTokenLease {
             started = true
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
+                    if Task.isCancelled && honorCancellation { continuation.resume(throwing: CancellationError()) }
                     else { self.continuation = continuation }
                 }
             } onCancel: { Task { await self.cancel() } }
         }
-        func cancel() { continuation?.resume(throwing: CancellationError()); continuation = nil }
+        func cancel() {
+            cancelled = true
+            if honorCancellation { continuation?.resume(throwing: CancellationError()); continuation = nil }
+        }
         func release() throws {
             continuation?.resume(returning: FCMTokenLease(value: try FCMAccessToken("synthetic"), expiresAt: .now.advanced(by: .seconds(3600))))
             continuation = nil
@@ -479,6 +485,33 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         do { _ = try await task.value; XCTFail("Stopped flight succeeded") } catch {}
         do { _ = try await coordinator.progress(operationID: id(1)); XCTFail("Closed owner remained usable") }
         catch { XCTAssertEqual(error as? GatewayDeliveryError, .stopped) }
+    }
+
+    func testShutdownJoinsOAuthRefreshEvenWhenCancellationIsIgnored() async throws {
+        let fixture = try Fixture(), provider = Provider([]), gate = OAuthGate(honorCancellation: false)
+        let source = try FCMTokenSource(now: { .now }, refresh: { try await gate.refresh() })
+        let coordinator = try fixture.coordinator(provider, tokenSource: source)
+        defer { Task { try? await gate.release(); try? await coordinator.shutdown() } }
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        try await fixture.admit(coordinator)
+        let delivery = Task { try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)) }
+        defer { delivery.cancel() }
+        try await until { await gate.started }
+        let finished = Counter()
+        let first = Task { try await coordinator.shutdown(); finished.value.withLock { $0 += 1 } }
+        let second = Task { try await coordinator.shutdown(); finished.value.withLock { $0 += 1 } }
+        first.cancel()
+        try await until { await gate.cancelled }
+        do { _ = try await delivery.value; XCTFail("Stopped delivery succeeded") } catch {}
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(finished.value.withLock { $0 }, 0)
+        try await gate.release()
+        try await first.value; try await second.value
+        XCTAssertEqual(finished.value.withLock { $0 }, 2)
+        let attempts = await source.finishedAttemptCount, sends = await provider.times
+        XCTAssertEqual(attempts, 1); XCTAssertTrue(sends.isEmpty)
+        do { _ = try await source.token(); XCTFail("Stopped token source remained usable") }
+        catch { XCTAssertEqual(error as? FCMTokenSourceError, .stopped) }
     }
 
     func testNetworkLossRetriesButProviderRejectionDoesNotRevokeEnrollment() async throws {
