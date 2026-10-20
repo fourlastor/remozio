@@ -432,6 +432,38 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return value
         }
     }
+    func prepareImportedRelayPlan(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                  selectPort: (Set<UInt16>) throws -> UInt16 = { try SharedSetupRelayPortSelection.choose(reserved: $0) }) throws -> SharedSetupImportRelayPlan {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, let retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                guard try SetupPortableImportProgress(account: account, inventory: inventory, services: services,
+                    runtime: runtime, retained: retained) == expected else { throw AdministrativeSetupError.staleProgress }
+                guard try retained.matches(proposal), proposal.cloudflare != nil else { throw SharedSetupImportError.conflict }
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                }
+                try verify()
+                return try machine.withSharedImportRelayDirectory { directory, owner in
+                    try SharedSetupImportRelayStorage.prepare(expected: retained, records: journal.records(),
+                        runtimePublished: runtime.reference != nil || runtime.configurationPublished,
+                        directory: directory, owner: owner, select: selectPort, verifyCurrent: verify)
+                }
+            }
+        }
+    }
+
+
     func portableImportProgress(callerUID: uid_t) throws -> SetupPortableImportProgress? {
         try withMachine { machine in
             let inventory = try currentInventory(machine)
@@ -627,7 +659,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             defer { activity?.close() }
             // Activity spans both writer scopes and native registration between them.
             // No native command runs within this first machine-writer scope.
-            let context = try machines.useActivation { machine -> (AccountPreparationIntent, AuthorityInitializationIntent, RuntimeActivationPlan) in
+            let context = try machines.useActivation { machine -> (AccountPreparationIntent, AuthorityInitializationIntent, RuntimeActivationPlan, SharedSetupImportIntent?) in
                 guard expected.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
                     throw AdministrativeSetupError.wrongAccount
                 }
@@ -639,6 +671,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     throw AdministrativeSetupError.staleProgress
                 }
                 let inventory = try currentInventory(machine)
+                let imported = try SharedSetupImportActivationScope.current(machine: machine, account: account)
+                let relayPlan = try imported.flatMap { try machine.sharedImportRelayPlan(expected: $0) }
                 let selectedRelease: SignedReleaseEvidence?
                 if state.plan == nil, runtime.reference?.serviceActivity != nil {
                     guard let app = try account.initialAuthority.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else {
@@ -648,25 +682,25 @@ public final class SetupAccountOwner: @unchecked Sendable {
                         teamID: app.teamID, appIdentifier: app.identifier)
                 } else { selectedRelease = nil }
                 let plan = try state.plan ?? RuntimeActivationPlan(account: account, initialization: initial,
-                    runtime: runtime, inventory: inventory, gatewaySettingsRelease: selectedRelease)
+                    runtime: runtime, inventory: inventory, gatewaySettingsRelease: selectedRelease, importIntent: imported, relayPlan: relayPlan)
                 try machine.retainRuntimeActivation(plan); try activationOperations.didStage(.intentRetained)
                 func verify() throws {
-                    _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: false)
+                    _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: false, expectedImport: imported)
                 }
                 try verify()
                 try activationOperations.prepare(plan, account, initial, inventory, verify)
                 try activationOperations.didStage(.filesPublished); try verify()
                 _ = try machine.enrollRuntimeActivation(plan)
                 try activationOperations.didStage(.inventoryEnrolled)
-                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
-                return (account, initial, plan)
+                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true, expectedImport: imported)
+                return (account, initial, plan, imported)
             }
-            let (account, initial, plan) = context
+            let (account, initial, plan, imported) = context
             func verifyReady() throws {
                 try machines.useActivation { machine in
-                    let inventory = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                    let inventory = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true, expectedImport: imported)
                     try activationOperations.validate(plan, account, initial, inventory, {
-                        _ = try self.verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                        _ = try self.verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true, expectedImport: imported)
                     })
                 }
             }
@@ -677,7 +711,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 try verifyReady()
             }
             return try machines.useActivation { machine in
-                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true)
+                _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: true, expectedImport: imported)
                 try machine.markRuntimeJobsRegistered(plan); try activationOperations.didStage(.completed)
                 let value = try SetupActivationProgress(account: account, runtime: machine.runtimePreparation(accountID: account.accountID),
                     state: machine.runtimeActivation(accountID: account.accountID))
@@ -687,7 +721,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     private func verifyActivation(machine: PreparationIntentStore, account: AccountPreparationIntent,
                                   initialization: AuthorityInitializationIntent, plan: RuntimeActivationPlan,
-                                  callerUID: uid_t, enrolled: Bool) throws -> InstallationInventory {
+                                  callerUID: uid_t, enrolled: Bool, expectedImport: SharedSetupImportIntent?) throws -> InstallationInventory {
         try verifyEnrollment(account, callerUID: callerUID, machine: machine); try machine.validateAccountPreparation(account)
         let runtime = try machine.runtimePreparation(accountID: account.accountID)
         let services = try machine.serviceAccountPlan(accountID: account.accountID)
@@ -699,6 +733,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
         try plan.validate(account: account, reference: plan.reference)
         let inventory = try currentInventory(machine), desired = try plan.enrolledInventory(inventory)
         guard !enrolled || desired == inventory else { throw RuntimeActivationError.incomplete }
+        try SharedSetupImportActivationScope.verify(machine: machine, account: account, initialization: initialization,
+            plan: plan, inventory: inventory, expected: expectedImport)
         return inventory
     }
     private func verifyEnrollment(_ value: AccountPreparationIntent, callerUID: uid_t, machine: PreparationIntentStore) throws {

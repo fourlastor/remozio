@@ -46,10 +46,22 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             } else { formats.append(try .init(role: role, name: name, readVersions: reads, writeVersions: writes)) }
         }
         if let imports = inputs.sharedImport {
-            let versions = Set(imports.records.flatMap { [$0.portableVersion, $0.settingsVersion] })
+            let portableVersions = Set(imports.records.flatMap { [$0.portableVersion, $0.settingsVersion] })
             try include(.setupController, SharedSetupImportJournal.formatName, SharedSetupImportJournal.supportedVersions,
                 SharedSetupImportJournal.supportedVersions)
-            if !versions.isEmpty { try include(.setupController, PortableSetup.formatName, versions, versions) }
+            if !portableVersions.isEmpty { try include(.setupController, PortableSetup.formatName, portableVersions, portableVersions) }
+            if imports.records.contains(where: { $0.dnsRecord != nil }) {
+                try include(.setupController, SharedSetupDNSRecord.formatName, [1], [1])
+            }
+            if imports.records.contains(where: { $0.accessApplication != nil }) {
+                try include(.setupController, SharedSetupAccessApplicationRecord.formatName, [1], [1])
+            }
+            if imports.records.contains(where: { $0.relayProvisioning != nil }) {
+                try include(.setupController, SharedSetupRelayProvisioningRecord.formatName, [1], [1])
+            }
+            if imports.records.contains(where: { $0.relay != nil }) {
+                try include(.setupController, SharedSetupImportRelayPlan.formatName, [1], [1])
+            }
         }
         if !inputs.gateways.isEmpty {
             let settings = inputs.gateways.contains { $0.activeSettings != nil || $0.pendingSettings != nil }

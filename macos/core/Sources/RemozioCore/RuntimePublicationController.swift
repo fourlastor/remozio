@@ -13,25 +13,41 @@ enum RuntimePublicationController {
                         verifyCurrent: () throws -> Void) throws -> RuntimePreparationState {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
+        try verifyCurrent()
         return try withoutActuallyEscaping(verifyCurrent) { verify in
-        try prepare(machine: machine, account: account, expected: expected, verifyCurrent: verify,
-            verifyServices: { services in
-                let directory = try NativeServiceAccountDirectory(accountID: account.accountID, ownerUID: account.ownerUID)
-                for claim in services.claims {
-                    try directory.validateGroup(claim); try directory.validateUser(claim, ownerUID: account.ownerUID)
+            try machine.withSharedImportJournal { journal in
+                try SharedSetupImportRuntimePreparation.prepare(machine: machine, account: account, expected: expected,
+                    journal: journal, verifyCurrent: verify) { imported, joinedVerify in
+                    try withoutActuallyEscaping(joinedVerify) { current in
+                        let relayPlan = try imported.flatMap { try machine.sharedImportRelayPlan(expected: $0) }
+                        func verifyRelay() throws {
+                            try current()
+                            if let imported {
+                                guard try machine.sharedImportRelayPlan(expected: imported) == relayPlan else { throw SharedSetupImportError.conflict }
+                            }
+                        }
+                        return try prepare(machine: machine, account: account, expected: expected, importIntent: imported,
+                            relayPlan: relayPlan, verifyCurrent: verifyRelay,
+                            verifyServices: { services in
+                                let directory = try NativeServiceAccountDirectory(accountID: account.accountID, ownerUID: account.ownerUID)
+                                for claim in services.claims { try directory.validateGroup(claim); try directory.validateUser(claim, ownerUID: account.ownerUID) }
+                            }, verifyAuthority: { services in
+                                let authority = try AccountPreparationController.authorityDirectory(accountID: account.accountID)
+                                _ = try AuthorityKeyProvisioning.restoreOrCreate(directoryPath: authority + "/Key", macID: account.macID,
+                                    accountID: account.accountID, expectedPublicKey: services.authorityPublicKey)
+                            }, restoreMaterial: { services, reference, verify in
+                                try RuntimeMaterialPreparation.prepareFileIdentity(account: account, services: services, expected: reference,
+                                    fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: serviceActivityEnabled, verifyCurrent: verify)
+                            }, verifyActivity: { activity in
+                                try RuntimeMaterialPreparation.validateServiceActivity(account: account, activity: activity, verifyCurrent: current)
+                            }, publish: { bundle, material, verify in
+                                try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
+                            }, validatePublishedImport: { bundle, material, verify in
+                                try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: material, verifyCurrent: verify)
+                            })
+                    }
                 }
-            }, verifyAuthority: { services in
-                let authority = try AccountPreparationController.authorityDirectory(accountID: account.accountID)
-                _ = try AuthorityKeyProvisioning.restoreOrCreate(directoryPath: authority + "/Key", macID: account.macID,
-                    accountID: account.accountID, expectedPublicKey: services.authorityPublicKey)
-            }, restoreMaterial: { services, reference, verify in
-                try RuntimeMaterialPreparation.prepareFileIdentity(account: account, services: services, expected: reference,
-                    fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: serviceActivityEnabled, verifyCurrent: verify)
-            }, verifyActivity: { activity in
-                try RuntimeMaterialPreparation.validateServiceActivity(account: account, activity: activity, verifyCurrent: verify)
-            }, publish: { bundle, material, verify in
-                try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
-            })
+            }
         }
     }
 

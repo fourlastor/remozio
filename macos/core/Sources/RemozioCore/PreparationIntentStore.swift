@@ -164,6 +164,22 @@ public final class PreparationIntentStore {
         return try lease.withSharedImportJournal(macID: macID, installationID: inventory.installationID, body: body)
     }
 
+    func withSharedImportRelayDirectory<Value>(_ body: (ProtectedSetupDirectory, uid_t) throws -> Value) throws -> Value {
+        guard !unavailable else { throw PreparationStoreError.unavailable }
+        guard db != nil else { throw PreparationStoreError.closed }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        return try lease.withSharedImportRelayDirectory(body)
+    }
+    func sharedImportRelayPlan(expected: SharedSetupImportIntent) throws -> SharedSetupImportRelayPlan? {
+        guard let inventory = try self.inventory(), let account = try accountPreparation(ownerUID: expected.scope.ownerUID),
+              expected.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)) else {
+            throw SharedSetupImportError.wrongScope
+        }
+        return try withSharedImportRelayDirectory { directory, owner in
+            try SharedSetupImportRelayStorage.read(expected: expected, directory: directory, owner: owner)
+        }
+    }
+
     func publishSharedImport(_ intent: SharedSetupImportIntent, verifyCurrent: () throws -> Void,
                              didStage: (SharedSetupImportPublication.Stage) throws -> Void) throws -> SharedSetupImportIntent {
         guard !unavailable else { throw PreparationStoreError.unavailable }
