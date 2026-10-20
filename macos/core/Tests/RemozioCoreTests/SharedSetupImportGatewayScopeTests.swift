@@ -98,13 +98,13 @@ final class SharedSetupImportGatewayScopeTests: XCTestCase, @unchecked Sendable 
     func testPartialAndMismatchedProviderInputsAreRejected() throws {
         let f = try Fixture(), selected = f.proposal
         let mismatched = try SetupPushClientConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.remozio.android")
-        let noGateway = SharedSetupDefaults(presence: selected.defaults.presence, gateway: nil)
+        let noGateway = SharedSetupDefaults(presence: selected.defaults.presence, wake: selected.defaults.wake, delivery: selected.defaults.delivery)
         for proposal in [PortableSetup(defaults: selected.defaults, fcm: selected.fcm),
                          PortableSetup(defaults: selected.defaults, pushClient: selected.pushClient),
                          PortableSetup(defaults: selected.defaults, fcm: selected.fcm, pushClient: mismatched),
                          PortableSetup(defaults: noGateway, fcm: selected.fcm, pushClient: selected.pushClient)] {
             XCTAssertThrowsError(try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: true)) {
-                XCTAssertEqual($0 as? PortableSetupError, .rejected)
+                guard case PortableSetupError.rejected = $0 else { return XCTFail("Expected rejected portable setup") }
             }
         }
     }
