@@ -31,6 +31,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let signs = PushSignCount()
         let limits: CBORLimits
         init(configureGateway: Bool = true, enrollmentCount: Int = 1, gatewayLedgerEnabled: Bool = true, checkpointed: Bool = true,
+             macID: Data = Data(repeating: 1, count: 16), accountID: Data = Data(repeating: 2, count: 16),
              gatewaySetup: (JournalTransaction, GatewayRegistrationIdentity, P256.Signing.PrivateKey, CBORLimits, UUID, AuditEpochWriter) throws -> Void = { _, _, _, _, _, _ in }) throws {
             precondition((1...8).contains(enrollmentCount))
             guard let canonical = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw Failure.injected }
@@ -48,7 +49,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
             key = P256.Signing.PrivateKey()
             limits = try .init(maxBytes: 4096, maxDepth: 12, maxItems: 256)
             let db = try JournalDatabase(lease: ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()),
-                macID: pushID(1), accountID: pushID(2), recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                macID: macID, accountID: accountID, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
                 maximumConsumptions: 30, busyMilliseconds: 100, initialize: true,
                 gatewayPolicy: gatewayLedgerEnabled ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits, maximumControls: 30,
                     candidateLifetimeMillis: 1000, clockEpoch: clock) : nil)
@@ -57,7 +58,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
             let capabilities = ContractCapabilities(contracts: [contract: []])
             let revision = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
             let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
-                0: .unsigned(1), 1: .bytes(pushID(1)), 2: .bytes(pushID(2)), 3: .bytes(pushID(3)), 4: .unsigned(3),
+                0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID), 3: .bytes(pushID(3)), 4: .unsigned(3),
                 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
             let writer = try db.write { try $0.createEpoch(descriptor) }; self.writer = writer
             let identity = P256.Signing.PrivateKey()
@@ -80,7 +81,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
                     eventID: pushID(30 + offset), receiptTimeMs: 900, writer: writer, expectedAuditHead: UInt64(index)) }
                 enrolledValues.append(next)
             }
-            let registration = try GatewayRegistrationIdentity(ownerID: pushID(40), macID: pushID(1), accountID: pushID(2),
+            let registration = try GatewayRegistrationIdentity(ownerID: pushID(40), macID: macID, accountID: accountID,
                 gatewayID: pushID(41), lifecycleEpoch: pushID(42), rootPublicKey: key.publicKey.x963Representation)
             self.registration = registration
             if configureGateway {
@@ -92,13 +93,13 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
             }
             let bindingRevision = try db.read { try $0.approvalTrustSnapshot().revision }
             bindings = try enrolledValues.map { enrollment in
-                try AuthorityPeerBinding(scope: ChannelScope(macID: pushID(1), accountID: pushID(2), phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
+                try AuthorityPeerBinding(scope: ChannelScope(macID: macID, accountID: accountID, phoneID: enrollment.approval.phoneID, enrollmentEpoch: enrollment.epoch),
                     transportPublicKey: P256.Signing.PublicKey(x963Representation: enrollment.identityPublicKey).derRepresentation, revision: bindingRevision)
             }
             binding = bindings[0]
             let initial = try db.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: writer.epoch, generation: 1, authorityGeneration: 3) }
             let store = try ContinuityStore(lease: ProtectedContinuityLease(anchor: root.path, relativeDirectory: "continuity", owner: getuid()),
-                macID: pushID(1), accountID: pushID(2), initialize: initial)
+                macID: macID, accountID: accountID, initialize: initial)
             self.store = store
             if checkpointed {
             owner = try ApprovalRequestCoordinator(database: db, continuity: store, writer: writer, clockEpoch: clock,
