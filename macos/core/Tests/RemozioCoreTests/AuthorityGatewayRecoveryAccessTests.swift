@@ -30,8 +30,8 @@ final class AuthorityGatewayRecoveryAccessTests: XCTestCase, @unchecked Sendable
         let state = Mutex(State())
         var machine: PreparationIntentStore { ready.fixture.runtime.machine }
         var authority: InstalledAuthorityCommandConfiguration { ready.fixture.runtime.plan.host }
-        init(nativeConsumerHosts: Bool = false) throws {
-            ready = try .init(nativeConsumerHosts: nativeConsumerHosts); revision = try ready.revision(); root = try .init(install: false,
+        init() throws {
+            ready = try .init(); revision = try ready.revision(); root = try .init(install: false,
                 macID: ready.fixture.runtime.plan.host.command.macID, accountID: ready.fixture.runtime.plan.host.command.accountID)
             let machine = ready.fixture.runtime.machine, foreground = ready.fixture.runtime.plan
             let transition = try GatewayRuntimeSettingsPublicationPlan(revision: revision, previous: nil, activation: ready.activation,
