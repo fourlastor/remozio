@@ -25,7 +25,8 @@ Disconnect and cancellation release the reply and activity scopes after asynchro
 
 The native service enables these calls only for the complete signed host family.
 Owned stores and anonymous XPC tests check ordering and selectors. They do not prove installed peer admission or administrator consent.
-The visible app settings sheet, portable import/export and provider credential continuity remain separate integration work.
+The [Mac settings sheet](macos-gateway-settings-app.md) now connects this interface to explicit user actions.
+Portable import/export and provider credential continuity remain separate integration work.
 
 Progress reports whether the retained hosts support live settings changes. An older enrollment remains readable and keeps its identity.
 The app must explain an unsupported mode before requesting administrator rights. It must keep the existing service restoration action available.
