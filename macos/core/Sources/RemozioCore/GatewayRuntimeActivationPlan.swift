@@ -16,6 +16,10 @@ struct GatewayRuntimeActivationPlan: Sendable, CustomStringConvertible, CustomDe
     var gatewayJob: InstalledAccountJobManifest { get throws {
         let services = extensions.authority.material.runtime.services
         guard let claim = services.claims.first(where: { $0.role == .gateway }) else { throw GatewayPreparationError.incomplete }
+        if extensions.authority.material.runtime.serviceActivity != nil {
+            return try GatewaySettingsNativeHostPlan(reference: extensions.authority.material.runtime,
+                bundlePath: bundlePath, policy: extensions.authority.codePolicy).job(.gateway)
+        }
         return try .init(accountID: accountID, role: .notificationGateway, executionUID: claim.number,
             userName: claim.name, bundlePath: bundlePath)
     } }

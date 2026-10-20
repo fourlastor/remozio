@@ -89,6 +89,32 @@ public enum DurableReleasePreparation {
         }
         return .init(attemptID: record.id, copy: .init(bundle: bundle, counts: counts, signature: signature))
     }
+    /// Checks current runtime readers on a freshly inspected inactive copy. It does not stop services or permit activation.
+    public static func validateRuntimeCompatibility(attemptID: UUID, destination: ReleaseDestinationLease, store: PreparationIntentStore,
+        limits: ReleaseCopyLimits = try! .init(), readPolicy: () throws -> AuthorityCodePolicy) throws -> DurableInactiveCopyEvidence {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try validateRuntimeCompatibilityInLease(attemptID: attemptID, destination: destination, store: store,
+            limits: limits, readPolicy: readPolicy)
+    }
+    // Owned copies and synthetic inspection validate composition, not native signing or Root admission.
+    static func validateRuntimeCompatibilityInLease(attemptID: UUID, destination: ReleaseDestinationLease, store: PreparationIntentStore,
+        limits: ReleaseCopyLimits = try! .init(), readPolicy: () throws -> AuthorityCodePolicy,
+        inspect: (URL, String, String) throws -> SignedReleaseEvidence = {
+            try SignedReleaseInspection.inspect($0, teamID: $1, appIdentifier: $2)
+        }) throws -> DurableInactiveCopyEvidence {
+        let snapshot = try RuntimeReleaseCompatibilitySnapshot.capture(machine: store)
+        let result = try recoverInLease(attemptID: attemptID, destination: destination, store: store, limits: limits,
+            readPolicy: {
+                try snapshot.requireCurrent(machine: store)
+                return try readPolicy()
+            }, inspect: { path, team, identifier in
+                let signed = try inspect(path, team, identifier)
+                try snapshot.validate(signed, policy: readPolicy(), machine: store)
+                return signed
+            })
+        try snapshot.requireCurrent(machine: store)
+        return result
+    }
     static func digest(_ signature: SignedReleaseEvidence) throws -> Data {
         let hashes = Dictionary(uniqueKeysWithValues: signature.codeDirectoryHashes.map { ($0.key.rawValue, CBORValue.bytes($0.value)) })
         let bytes = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(signature.manifest.canonicalBytes),

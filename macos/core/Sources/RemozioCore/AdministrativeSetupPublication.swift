@@ -47,7 +47,7 @@ public enum AdministrativeSetupPublication {
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
-        case runtimeRecord, gatewayMaterial, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case runtimeRecord, gatewayMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
         case transportIdentity(ownerUID: uid_t, groupID: gid_t)
@@ -66,6 +66,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .gatewayMaterial: "gateway-material.cbor"
+            case .gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration.gatewayFileName
             case .gatewayConfiguration: "gateway-host.cbor"
             case .gatewayJournalSetup: "gateway-journal-setup.cbor"
             case .gatewayJournalService: GatewayJournalSetupServiceConfiguration.fileName
@@ -90,7 +91,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewaySettingsHost, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }

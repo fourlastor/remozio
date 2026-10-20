@@ -82,7 +82,8 @@ def declarations(role):
     if role in (2, 8):
         values.append({0: 'runtime.preparation-material', 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
     host_formats = {
-        2: [('runtime.gateway-settings-consumer-host', [1], []),
+        2: [('runtime.activation-plan', [1, 2], []),
+            ('runtime.gateway-settings-consumer-host', [1], []),
             ('runtime.gateway-settings-fence', [1, 2], [2]),
             ('gateway.gateway-settings-control', [2], [2]), ('transport.gateway-settings-control', [2], [2]),
             ('transport.pairing-config', [1, 2], []), ('gateway.service-config', [1, 2], [])],
@@ -94,7 +95,8 @@ def declarations(role):
             ('runtime.gateway-settings-fence', [1, 2], []),
             ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
-        8: [('runtime.gateway-settings-consumer-host', [1], [1]),
+        8: [('runtime.activation-plan', [1, 2], [1, 2]),
+            ('runtime.gateway-settings-consumer-host', [1], [1]),
             ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
     }

@@ -178,6 +178,15 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for name in (host, pairing, gateway):
                 self.assertNotIn(name, by_role[role])
 
+    def test_runtime_activation_codec_is_declared_by_its_actual_readers_and_writer(self):
+        name = 'runtime.activation-plan'
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role in (2, 8):
+                self.assertEqual(declarations[name], {0: name, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(name, declarations)
+
     def test_service_activity_records_declare_directional_public_and_private_codecs(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}
                    for role, *_ in MANIFEST.COMPONENTS}

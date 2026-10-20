@@ -10,13 +10,14 @@ import XCTest
 final class AccountPreparationFixture {
     let root: URL
     let mac = Data(repeating: 1, count: 16)
-    let release = Data(repeating: 8, count: 32)
+    let release: Data
     let identity = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
     // Public fixture pin only. This does not claim hardware key provisioning.
     let key = P256.Signing.PrivateKey().publicKey.x963Representation
     let policy: AuthorityCodePolicy
     let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
-    init(policy suppliedPolicy: AuthorityCodePolicy? = nil) throws {
+    init(policy suppliedPolicy: AuthorityCodePolicy? = nil, releaseDigest: Data? = nil) throws {
+        release = releaseDigest ?? Data(repeating: 8, count: 32)
         root = URL(fileURLWithPath: "/private/tmp/remozio-account-preparation-" + UUID().uuidString)
         if let suppliedPolicy { policy = suppliedPolicy }
         else {

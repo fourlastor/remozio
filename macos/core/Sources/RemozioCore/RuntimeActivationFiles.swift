@@ -20,8 +20,7 @@ enum RuntimeActivationFiles {
                                publishNew: Bool, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try verifyCurrent(); try plan.validate(account: account, reference: plan.reference)
-        let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
-            reference: plan.reference, inventory: inventory)
+        let bundle = try plan.configurationBundle(account: account, initialization: initialization, inventory: inventory)
         guard bundle.command.canonicalBytes == plan.host.command.canonicalBytes,
               bundle.transport.canonicalBytes == plan.transport.canonicalBytes,
               let transport = plan.reference.services.claims.first(where: { $0.role == .transport }) else { throw RuntimeActivationError.changedScope }
@@ -56,6 +55,7 @@ enum RuntimeActivationFiles {
         try retained(bundle.command.canonicalBytes, .commandConfiguration, privateState)
         try retained(material.transportIdentity, .transportIdentity(ownerUID: transport.number, groupID: transport.number), shared)
         try retained(bundle.transport.canonicalBytes, .transportConfiguration, shared)
+        if let host = plan.gatewaySettingsHost { try retained(host.encoded, .gatewaySettingsHost, shared) }
         try retained(bundle.presenceClient.canonicalBytes, .presenceClient(ownerUID: account.ownerUID), global)
         try retained(bundle.pairingClient.canonicalBytes, .pairingClient(ownerUID: account.ownerUID), global)
         try retained(bundle.frontendClient.canonicalBytes, .frontendClient(ownerUID: account.ownerUID), global)
