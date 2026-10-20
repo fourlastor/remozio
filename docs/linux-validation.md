@@ -89,10 +89,10 @@ Unknown platforms and any failed phase fail the gate immediately.
 
 The [shared host core](../host/shared-core/README.md) contains the decision verifier,
 its authority-owned request, enrollment and clock inputs, the sleep-inclusive clock
-sampler, SQLite audit and consumption tables, consumption outcome transitions,
+sampler, SQLite audit, consumption and command-submission replay tables, consumption outcome transitions,
 checkpoint and history-intent codecs, and pure storage-reconciliation selection. These tests run through the Linux host check and
 native Mac check; Mac tests also retain audit signing integration. Mac consumers
-use the same implementations through compatibility type aliases and a consumption
+use the same implementations through compatibility type aliases and table
 storage-error adapter. The table owner still supplies protected storage, durability
 configuration and outer transactions.
 Recovery selections are data-only recommendations; the Mac adapter retains its
@@ -107,6 +107,16 @@ unknown outcomes; protected Linux connection ownership and durable commit/recove
 remain unimplemented. The Mac owner continues to load current enrollment and check
 its revision in the write transaction, mark failures and coordinate checkpoints.
 The disposable command experiment continues using its separate fixture-only ledger.
+
+Shared command-submission replay tests exercise permanent ID/nonce reservations,
+scope and capacity limits, competing connections, rollback, reopen, malformed rows
+and SQLite failures. The original Mac replay table layout is retained, with no
+shared schema-version migration or retention path. The Mac adapter keeps policy
+prerequisites, protected installation, error mapping and failed-transaction handling;
+its existing journal, checkpoint and caller-admission tests remain unchanged.
+Supplied caller bindings and capture digests are historical metadata, not caller
+authentication or execution authority. The connection owner must roll back the
+whole admission transaction on any required failure and coordinate durable commits.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
