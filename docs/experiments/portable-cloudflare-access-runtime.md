@@ -39,8 +39,11 @@ Neither reconnection nor a repeated setup call replays an uncertain creation req
 
 ## Validation boundary
 
-The source is prepared for focused synthetic checks and its complete required publication gate.
-No passing result is claimed by this preparation.
+The focused run passed 233 synthetic controls at source `f3fd1a1`, with no failures or skips.
+It covered the preceding tunnel controls and the new Access, hostname and private-route paths.
+This focused result does not substitute for the complete publication gate.
+
+The complete required publication gate remains pending on the final published dependency.
 The fixtures use temporary storage and synthetic provider replies.
 They test current import binding, empty and overlapping inventories, typed failures, cancellation and retained creation outcomes.
 
