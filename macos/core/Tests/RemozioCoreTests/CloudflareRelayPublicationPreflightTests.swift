@@ -9,7 +9,7 @@ enum RelayPublicationReplies {
         return try [empty, empty, RelayIngressProbe.reply(RelayIngressProviderFixture.ingress(configuration: XCTUnwrap(f.base.h.f.proposal().cloudflare), plan: f.base.plan)),
             RelayIngressProbe.reply(f.base.applicationReply()), empty,
             RelayIngressProbe.reply(AccessHostnameReplies.page([AccessHostnameReplies.own(f.base)] + extraApplications)),
-            empty, empty, empty, empty]
+            RelayIngressProbe.reply(AccessHostnameReplies.page([], number: 2)), empty, empty, empty, empty]
     }
     static func ownerSteps(_ f: DNSRecordFixture, extraApplications: [[String: Any]] = []) throws -> [RelayIngressProbe.Step] {
         try [RelayIngressProbe.reply(RelayIngressProviderFixture.metadata(configuration: XCTUnwrap(f.base.h.f.proposal().cloudflare), plan: f.base.plan))] + steps(f, extraApplications: extraApplications)
@@ -27,14 +27,14 @@ final class CloudflareRelayPublicationPreflightTests: XCTestCase, @unchecked Sen
         let result = try await inspect(f, probe: probe), requests = await probe.all()
         XCTAssertNoThrow(try result.validate(expected: f.base.h.intent, plan: f.base.plan, createdTunnel: f.base.tunnel, application: f.access))
         XCTAssertEqual(result.hostnameAssessment, .noOtherMatchObserved)
-        XCTAssertEqual(requests.count, 10); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" && $0.httpBody == nil })
+        XCTAssertEqual(requests.count, 11); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" && $0.httpBody == nil })
         XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/teamnet/routes") == true }.count, 2)
         XCTAssertEqual(requests.filter { $0.url?.path.hasSuffix("/zerotrust/routes/hostname") == true }.count, 2)
         XCTAssertTrue(requests[2].url?.path.hasSuffix("/configurations") == true)
         XCTAssertTrue(requests[4].url?.path.hasSuffix("/policies") == true)
         XCTAssertTrue(requests[5].url?.path.hasSuffix("/access/apps") == true)
-        XCTAssertEqual(requests[6].url?.query?.contains("name.exact="), true)
-        XCTAssertEqual(requests[7].url?.query?.contains("shadowing_name="), true)
+        XCTAssertEqual(requests[7].url?.query?.contains("name.exact="), true)
+        XCTAssertEqual(requests[8].url?.query?.contains("shadowing_name="), true)
         XCTAssertEqual(String(reflecting: result), "CloudflareRelayPublicationPreflight(redacted)"); XCTAssertNil(try f.read())
     }
     func testExactHostnamePrecedesAnOrdinaryWildcardWithoutChangingTheApplication() async throws {
@@ -43,7 +43,7 @@ final class CloudflareRelayPublicationPreflightTests: XCTestCase, @unchecked Sen
         let result = try await inspect(f, probe: probe)
         XCTAssertEqual(result.hostnameAssessment, .exactHostnamePrecedesBroaderWildcardRoots)
         XCTAssertEqual(result.hostnameInventory.matches.last?.uri, wildcard)
-        let requests = await probe.all(); XCTAssertEqual(requests.count, 10); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 11); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
     }
     func testUnresolvedApplicationTypesRemainExplicitAndOtherMacsDoNotRequireAnEmptyAccount() async throws {
         let f = try DNSRecordFixture()
@@ -57,7 +57,7 @@ final class CloudflareRelayPublicationPreflightTests: XCTestCase, @unchecked Sen
     }
     func testPrivateRoutesBeforeOrAfterTheOtherChecksAndDNSConflictsStopTheComposition() async throws {
         let f = try DNSRecordFixture()
-        for index in [0, 1, 6, 7, 8, 9] {
+        for index in [0, 1, 7, 8, 9, 10] {
             var steps = try RelayPublicationReplies.steps(f)
             steps[index] = RelayIngressProbe.reply(try RelayPrivateRouteReplies.page(results: [["id": "existing-resource"]]))
             let probe = RelayIngressProbe(steps)
@@ -74,7 +74,7 @@ final class CloudflareRelayPublicationPreflightTests: XCTestCase, @unchecked Sen
     }
     func testDeniedRequestsAtEveryStageCannotReturnPartialEvidence() async throws {
         let f = try DNSRecordFixture()
-        for index in 0..<10 {
+        for index in 0..<11 {
             var steps = try RelayPublicationReplies.steps(f); steps[index] = RelayIngressProbe.reply(Data(), status: 403)
             let probe = RelayIngressProbe(steps)
             do { _ = try await inspect(f, probe: probe); XCTFail() } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .unauthorized) }
@@ -83,7 +83,7 @@ final class CloudflareRelayPublicationPreflightTests: XCTestCase, @unchecked Sen
     }
     func testCancellationAtEveryReceiptStopsFurtherRequests() async throws {
         let f = try DNSRecordFixture()
-        for index in 1...10 {
+        for index in 1...11 {
             let probe = try RelayIngressProbe(RelayPublicationReplies.steps(f), hook: { count, _ in if count == index { withUnsafeCurrentTask { $0?.cancel() } } })
             let task = Task { @Sendable in try await self.inspect(f, probe: probe) }
             do { _ = try await task.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
