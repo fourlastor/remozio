@@ -32,6 +32,7 @@ struct RemozioApp: App {
                 LoginItemSettingsSection(controls: login)
                 PresenceSettingsSection(controls: presence)
                 CommandCallerSettingsForm()
+                GatewaySettingsSection()
             }
             .formStyle(.grouped)
             .frame(minWidth: 440, idealWidth: 500, minHeight: 240)
@@ -323,10 +324,10 @@ private struct AccountSetupSheet: View {
                                       systemImage: controls.activation?.jobsRegistered == true ? "checkmark.circle" : "circle")
                                 Text("Start the authority and transport services for this account. Restore keeps the saved identity and registers any missing matching jobs.")
                                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                                Text("The main window checks the live authority connection separately. Pair a phone after the services connect. Push delivery is not configured.")
+                                Text("The main window checks the live authority connection separately. Pair a phone after the services connect. Configure push notifications separately in Settings.")
                                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             } else {
-                                Text("Preparation does not start services, pair a phone or enable command execution. Push delivery is not configured.")
+                                Text("Preparation does not start services, pair a phone or enable command execution. Configure push notifications separately in Settings.")
                                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                             }
                         }
