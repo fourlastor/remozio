@@ -11,6 +11,7 @@ import Foundation
 final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsumerXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let binding: GatewaySettingsConsumerBinding
+    private let requestVersion: UInt64
     private let verify: () throws -> Void
     private let verifyCurrent: @Sendable () throws -> Void
     private let acquireActivity: @Sendable () throws -> (any OwnedReleaseActivity)?
@@ -45,14 +46,34 @@ final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsume
         connection.interruptionHandler = { [weak self] in self?.close() }
         connection.invalidationHandler = { [weak self] in self?.close() }
     }
+    /// Authority recovery uses its own code pin and accepts only unchanged-commit request2.
+    convenience init(recoveryConnection connection: NSXPCConnection, authorityCode: AuthorityCodeEntry,
+                     access: GatewaySettingsConsumerAccess, budget: AuthorityXPCWorkBudget,
+                     acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity,
+                     onHandshake: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void) throws {
+        try access.requireNativeProcess()
+        guard authorityCode.role == .authority, authorityCode.active else { throw GatewayPreparationError.changedScope }
+        let policy = try XPCPeerPolicy(teamID: authorityCode.teamID, componentIdentifier: authorityCode.identifier,
+            approvedCodeDirectoryHashes: [authorityCode.codeDirectoryHash], expectedUserID: 0)
+        _ = try policy.verifyCredentials(connection)
+        let invocation = XPCInvocationGuard(connection: connection, policy: policy)
+        self.init(binding: access.binding, requestVersion: 2, verify: { _ = try invocation.verifyInvocation() },
+            verifyCurrent: access.verifyCurrent, acquireActivity: acquireActivity, budget: budget, onHandshake: onHandshake,
+            invalidate: { [weak connection] in connection?.invalidate(); onClose() }, execute: { try await access.execute($0) })
+        policy.configure(connection)
+        connection.exportedInterface = NSXPCInterface(with: GatewaySettingsConsumerXPCProtocol.self)
+        connection.exportedObject = self
+        connection.interruptionHandler = { [weak self] in self?.close() }
+        connection.invalidationHandler = { [weak self] in self?.close() }
+    }
     // Owned invocation controls cannot prove native UID or code admission.
-    init(binding: GatewaySettingsConsumerBinding, verify: @escaping () throws -> Void,
+    init(binding: GatewaySettingsConsumerBinding, requestVersion: UInt64 = 1, verify: @escaping () throws -> Void,
          verifyCurrent: @escaping @Sendable () throws -> Void,
          acquireActivity: @escaping @Sendable () throws -> (any OwnedReleaseActivity)? = { nil },
          budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void = {},
          invalidate: @escaping () -> Void,
          execute: @escaping @Sendable (GatewaySettingsConsumerRequest) async throws -> GatewaySettingsConsumerObservation) {
-        self.binding = binding; self.verify = verify; self.verifyCurrent = verifyCurrent; self.acquireActivity = acquireActivity
+        self.binding = binding; self.requestVersion = requestVersion; self.verify = verify; self.verifyCurrent = verifyCurrent; self.acquireActivity = acquireActivity
         self.budget = budget; self.onHandshake = onHandshake; self.invalidate = invalidate; self.execute = execute
     }
     func close() {
@@ -84,7 +105,7 @@ final class GatewaySettingsConsumerXPCEndpoint: NSObject, GatewaySettingsConsume
             try verify()
             let request = try GatewaySettingsConsumerRequest.decode(payload)
             try lock.withLock {
-                guard ready, !closed, !consumed, request.binding == binding, budget.acquire() else {
+                guard ready, !closed, !consumed, request.change.version == requestVersion, request.binding == binding, budget.acquire() else {
                     throw GatewayPreparationError.changedScope
                 }
                 consumed = true

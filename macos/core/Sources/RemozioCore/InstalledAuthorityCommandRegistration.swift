@@ -118,6 +118,25 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try placement.validate()
         }
     }
+    /// Read optional scope under the original machine lease, before check-in closes it.
+    func captureGatewaySettingsStartup() throws -> AuthorityGatewaySettingsStartupRecovery.Snapshot {
+        try lock.withLock {
+            guard !taken else { throw InstalledAuthorityCommandError.unavailable }
+            try validate()
+            return AuthorityGatewaySettingsStartupRecovery.capture(machine: machine, authority: configuration)
+        }
+    }
+    /// Only an initially unreadable snapshot needs another short machine lease. No lease survives an asynchronous call.
+    func reloadGatewaySettingsStartup() throws -> AuthorityGatewaySettingsStartupRecovery.Snapshot {
+        try validateRuntime()
+        let current = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.command.macID)
+        do {
+            try validateRuntime()
+            let snapshot = AuthorityGatewaySettingsStartupRecovery.capture(machine: current, authority: configuration)
+            try current.close(); try validateRuntime()
+            return snapshot
+        } catch { try? current.close(); throw error }
+    }
     func takeReceiveRight() throws -> mach_port_t {
         try lock.withLock {
             guard !taken else { throw InstalledAuthorityCommandError.unavailable }
@@ -157,6 +176,97 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try validateRuntime(); try activity.validate()
         return listener
     }
+
+    /// Reads current protected state with a short writer. The caller cannot carry the writer across an await.
+    private func withGatewayRecoveryMachine<T>(_ operation: (PreparationIntentStore, SignedReleaseEvidence) throws -> T) throws -> T {
+        let activity = try releaseActivity.acquireShared(); defer { activity.close() }
+        try validateRuntime(); try activity.validate()
+        let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active })!
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        try configuration.validateRelease(release, bundlePath: bundle.path)
+        let current = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.command.macID)
+        do {
+            try validateRuntime(); try activity.validate()
+            let result = try operation(current, release)
+            try current.close(); try validateRuntime(); try activity.validate()
+            return result
+        } catch { try? current.close(); throw error }
+    }
+    func gatewayRecoveryStatus() throws -> AuthorityGatewayRecoverySnapshot.Status {
+        try withGatewayRecoveryMachine { machine, _ in
+            try AuthorityGatewayRecoverySnapshot.status(machine: machine, authority: configuration)
+        }
+    }
+    private func verifyGatewayRecovery(_ snapshot: AuthorityGatewayRecoverySnapshot) throws {
+        try withGatewayRecoveryMachine { machine, release in
+            try snapshot.withPublicationScope(machine: machine, authority: configuration) { scope in
+                try scope.verifyNative(release, verifyCurrent: validateRuntime)
+            }
+        }
+    }
+    /// The shared release token covers the complete authenticated exchange. Every metadata read closes its own writer.
+    private func withGatewayRecoveryChannel<T: Sendable>(_ snapshot: AuthorityGatewayRecoverySnapshot,
+        role: GatewaySettingsConsumerRole, generation: UUID?,
+        operation: @Sendable (GatewaySettingsConsumerChannel) async throws -> T) async throws -> T {
+        let activity = try releaseActivity.acquireShared(); defer { activity.close() }
+        let verify: @Sendable () throws -> Void = { [self] in
+            try activity.validate(); try verifyGatewayRecovery(snapshot); try activity.validate()
+        }
+        try verify(); try Task.checkCancellation()
+        let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active })!
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        try configuration.validateRelease(release, bundlePath: bundle.path)
+        let channel = try GatewaySettingsConsumerChannel.recovery(role: role,
+            services: snapshot.plan.pair.authority.material.runtime.services, codePolicy: configuration.codePolicy,
+            release: release, expectedGeneration: generation, verifyCurrent: verify)
+        do {
+            let result = try await operation(channel)
+            await channel.close(); try verify(); try Task.checkCancellation()
+            return result
+        } catch { await channel.close(); throw error }
+    }
+    func makeGatewayRecoveryAccess(service: AuthorityWakeService) throws -> AuthorityGatewayRecoveryAccess {
+        guard configuration.gatewaySettingsControlEnabled,
+              service.gatewaySettingsBinding?.accountID == configuration.command.accountID else {
+            throw GatewayPreparationError.changedScope
+        }
+        return try .init(service: service, operations: .init(verifyCurrent: { [self] in try validateRuntime() },
+            capture: { [self] id in
+                try withGatewayRecoveryMachine { machine, release in
+                    let snapshot = try AuthorityGatewayRecoverySnapshot.load(machine: machine, authority: configuration, attemptID: id)
+                    try snapshot.withPublicationScope(machine: machine, authority: configuration) { scope in
+                        try scope.verifyNative(release, verifyCurrent: validateRuntime)
+                    }
+                    return snapshot
+                }
+            }, verify: { [self] snapshot in try verifyGatewayRecovery(snapshot) },
+            publish: { [self] snapshot, ticket in
+                try withGatewayRecoveryMachine { machine, release in
+                    try snapshot.withPublicationScope(machine: machine, authority: configuration) { scope in
+                        _ = try GatewayRuntimeSettingsRecoveryPublication.prepare(scope, release: release,
+                            verifyCurrent: validateRuntime, requireRootPaused: ticket.requireValid)
+                    }
+                }
+            }, control: { [self] snapshot, role, action, generation in
+                try await withGatewayRecoveryChannel(snapshot, role: role, generation: generation) { channel in
+                    try await channel.execute(snapshot.plan.fence, action: action)
+                }
+            }, observe: { [self] snapshot, role in
+                try await withGatewayRecoveryChannel(snapshot, role: role, generation: nil) { channel in
+                    try await channel.observeBinding()
+                }
+            }, remove: { [self] snapshot, ticket, proof in
+                try withGatewayRecoveryMachine { machine, release in
+                    try snapshot.withPublicationScope(machine: machine, authority: configuration) { scope in
+                        _ = try GatewayRuntimeSettingsRecoveryPublication.removeAccepted(scope, release: release,
+                            verifyCurrent: validateRuntime, requireFreshAcceptance: {
+                                try ticket.requireValid(); try proof.requireValid(for: snapshot.plan)
+                            })
+                    }
+                }
+            }))
+    }
+
     func close() throws {
         try lock.withLock {
             guard !closed else { return }
@@ -175,10 +285,19 @@ extension AuthorityRuntimeRunner {
             monitorMilliseconds: monitorMilliseconds, open: {
                 let registration = try InstalledAuthorityCommandRegistration.open(path: installedCommandConfigurationPath)
                 do {
+                    let optionalStartup: AuthorityGatewaySettingsStartupRecovery.Snapshot
+                    if registration.configuration.command.presence.wake.phonePush == nil {
+                        optionalStartup = try registration.captureGatewaySettingsStartup()
+                    } else { optionalStartup = .absent }
                     let service = try AuthorityWakeService.open(configuration: registration.configuration.command,
                         takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
                         releaseActivity: registration.releaseActivity,
                         reconcileExpired: Self.reconcileCoordinatorExpiration)
+                    let recovery = AuthorityGatewaySettingsStartupRecovery(snapshot: optionalStartup, service: service,
+                        reload: { try registration.reloadGatewaySettingsStartup() })
+                    let consumerRecovery = AuthorityGatewayRecoverySupervisor(operations: .init(
+                        status: { try registration.gatewayRecoveryStatus() },
+                        makeCoordinator: { try registration.makeGatewayRecoveryAccess(service: service).makeCoordinator() }))
                     let monitor: AuthorityGatewayExtensionMonitor?
                     if registration.configuration.command.presence.wake.phonePush == nil {
                         monitor = try AuthorityGatewayExtensionMonitor {
@@ -188,6 +307,12 @@ extension AuthorityRuntimeRunner {
                                 defer { activity.close() }
                                 let verify: @Sendable () throws -> Void = {
                                     try registration.validateRuntime(); try activity.validate()
+                                }
+                                guard try await recovery.prepare(verifyCurrent: verify) else {
+                                    await service.suspendPhonePush(); return nil
+                                }
+                                guard try await consumerRecovery.refresh() else {
+                                    await service.suspendPhonePush(); return nil
                                 }
                                 guard let loaded = try GatewayRuntimeLoader.load(authority: registration.configuration, verifyCurrent: verify) else {
                                     await service.suspendPhonePush(); return nil
@@ -202,13 +327,24 @@ extension AuthorityRuntimeRunner {
                             }
                         }
                     } else { monitor = nil }
-                    let settings = AuthorityGatewaySettingsRuntime {
-                        try registration.makeGatewaySettingsListener(service: service)
+                    let settings = try AuthorityGatewaySettingsListenerSupervisor {
+                        guard registration.configuration.gatewaySettingsControlEnabled else { return nil }
+                        return AuthorityGatewaySettingsRuntime {
+                            try registration.makeGatewaySettingsListener(service: service)
+                        }
                     }
                     return AuthorityRuntimeInstance(start: {
+                        let activity = try registration.releaseActivity.acquireShared()
+                        do {
+                            _ = try await recovery.prepare(verifyCurrent: {
+                                try registration.validateRuntime(); try activity.validate()
+                            })
+                            try activity.validate(); activity.close()
+                        } catch { activity.close(); throw error }
                         try await service.start(); try await settings.start(); try await monitor?.start()
                     }, close: {
-                        await settings.close(); await monitor?.close(); try await service.close(); try registration.close()
+                        await monitor?.close(); await consumerRecovery.close(); await settings.close()
+                        try await service.close(); try registration.close()
                     }, retired: { await service.isRetired })
                 } catch { try? registration.close(); throw error }
             }, report: report)

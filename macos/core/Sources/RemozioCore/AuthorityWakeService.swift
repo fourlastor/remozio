@@ -6,11 +6,22 @@ import Synchronization
 
 private final class AuthorityRequestRetirementSignal: Sendable { let value = Mutex(false) }
 
+/// A live Root pause for one exact commit. Only its service can create or revoke this ticket.
+final class AuthorityPhonePushRecoveryTicket: Sendable {
+    let commitDigest: Data
+    private let active = Mutex(true)
+    fileprivate init(commitDigest: Data) { self.commitDigest = commitDigest }
+    fileprivate func revoke() { active.withLock { $0 = false } }
+    func requireValid() throws {
+        guard active.withLock({ $0 }) else { throw GatewayPreparationError.changedScope }
+    }
+}
+
 /// Owns the request service and its asynchronous publisher. Presence remains a required live runtime input.
 public actor AuthorityWakeService {
     public nonisolated let presence: AuthorityPresenceRuntime?
     nonisolated let gatewaySettingsBinding: GatewaySettingsControlBinding?
-    public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), quiescingForSettings, suspendedForSettings, closed }
+    public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), quiescingForSettings, suspendedForSettings, quiescingForRecovery, suspendedForRecovery, closed }
     private let commandReceiver: AuthorityCommandReceiveWorker?
     private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
@@ -31,6 +42,13 @@ public actor AuthorityWakeService {
     private var acceptedSettings: AuthorityPhonePushSettingsChange?
     private var settingsDrain: Task<Void, Never>?
     private var settingsDrained = false
+    private var recoveryTicket: AuthorityPhonePushRecoveryTicket?
+    private var acceptedRecoveryTicket: AuthorityPhonePushRecoveryTicket?
+    private var recoveryDrain: Task<Void, Never>?
+    private var recoveryDrained = false
+    private var recoveryStartupHold = false
+    private var startupRestorePending = false
+    private var startupScope: (options: Data, commitDigest: Data, pendingChange: AuthorityPhonePushSettingsChange?, requiresConsumerRecovery: Bool)?
     private var closing: Task<Void, any Error>?
     private var cleanupComplete = false
     private var started = false
@@ -59,9 +77,10 @@ public actor AuthorityWakeService {
         self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     }
     deinit {
+        recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
-        let worker = task, drain = settingsDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let worker = task, drain = settingsDrain, recovery = recoveryDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
@@ -72,7 +91,7 @@ public actor AuthorityWakeService {
                 if let pending {
                     do { try await pending.value } catch { try? closeRequests() }
                 } else {
-                    await publisher?.close(); await worker?.value; await drain?.value; try? closeRequests()
+                    await publisher?.close(); await worker?.value; await drain?.value; await recovery?.value; try? closeRequests()
                 }
             }
         }
@@ -187,28 +206,124 @@ public actor AuthorityWakeService {
                 gatewaySettingsBinding: .init(accountID: configuration.registration.accountID, rootEpoch: clock.epoch))
         } catch { presence?.close(); try? journal.close(); throw error }
     }
+    /// Unreadable optional state must not be treated as absence. Foreground listeners can still start.
+    func pauseUnknownPhonePushStartup() throws {
+        guard !closed, !isRetired, !started, startupScope == nil, settingsChange == nil else { throw AuthorityWakePublisherError.busy }
+        startupRestorePending = true; phonePushCapability?.suspend()
+    }
+    /// The native owner has freshly verified absence. This cannot erase a previously retained commit floor.
+    func allowAbsentPhonePushStartup() throws {
+        guard !closed, !isRetired, startupRestorePending, startupScope == nil, settingsChange == nil else {
+            throw AuthorityWakePublisherError.busy
+        }
+        startupRestorePending = false
+        if started { startPublisherLoop() }
+    }
+    /// Apply authenticated retained scope before the first publisher starts. Optional failure keeps foreground startup available.
+    /// After failure, the native owner can retry the same restoration while foreground listeners remain active.
+    @discardableResult
+    func restorePhonePushStartup(_ options: AuthorityPhonePushStartupConfiguration, commitDigest: Data,
+                                 pendingChange: AuthorityPhonePushSettingsChange?, requiresConsumerRecovery: Bool = false,
+                                 verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
+        guard !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard !started || startupRestorePending else { throw AuthorityWakePublisherError.busy }
+        guard settingsChange == nil || settingsChange == pendingChange else { throw GatewayPreparationError.changedScope }
+        if let scope = startupScope {
+            guard scope.options == options.canonicalBytes, scope.commitDigest == commitDigest, scope.pendingChange == pendingChange,
+                  scope.requiresConsumerRecovery == requiresConsumerRecovery else {
+                throw GatewayPreparationError.changedScope
+            }
+        } else {
+            guard commitDigest.count == 32, pendingChange == nil || pendingChange?.previousCommitDigest == commitDigest,
+                  !requiresConsumerRecovery || pendingChange == nil else {
+                throw GatewayPreparationError.invalidRecord
+            }
+            startupScope = (options.canonicalBytes, commitDigest, pendingChange, requiresConsumerRecovery)
+        }
+        startupRestorePending = true
+        settingsChange = pendingChange
+        recoveryStartupHold = requiresConsumerRecovery
+        if pendingChange != nil { wakeStatus = .quiescingForSettings }
+        else if requiresConsumerRecovery { wakeStatus = .suspendedForRecovery }
+        let installed = try phonePushCapability.restoreStartup(options, commitDigest: commitDigest,
+            pendingChange: pendingChange, requiresConsumerRecovery: requiresConsumerRecovery, verifyCurrent: verifyCurrent)
+        startupRestorePending = false
+        if started { startPublisherLoop() }
+        return installed
+    }
     /// The native loader supplies current protected inputs. This result confirms provider installation, not delivery readiness.
     @discardableResult
     func installPhonePush(_ options: AuthorityPhonePushStartupConfiguration, commitDigest: Data,
                           verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
         guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard !startupRestorePending, !recoveryStartupHold, recoveryTicket == nil else { throw AuthorityWakePublisherError.busy }
         return try phonePushCapability.install(options, commitDigest: commitDigest, verifyCurrent: verifyCurrent)
     }
     func suspendPhonePush() { phonePushCapability?.suspend() }
+
+    /// Pause optional work on its exact retained floor. Every waiter joins the same owned publisher drain.
+    func quiescePhonePushRecovery(commitDigest: Data, verifyCurrent: @Sendable () throws -> Void) async throws -> AuthorityPhonePushRecoveryTicket {
+        guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard !startupRestorePending, settingsChange == nil else { throw AuthorityWakePublisherError.busy }
+        guard commitDigest.count == 32, phonePushCapability.retainedCommitDigest == commitDigest,
+              recoveryTicket == nil || recoveryTicket?.commitDigest == commitDigest else { throw GatewayPreparationError.changedScope }
+        try verifyCurrent(); try Task.checkCancellation()
+        phonePushCapability.suspend()
+        if recoveryTicket == nil {
+            acceptedRecoveryTicket?.revoke(); acceptedRecoveryTicket = nil
+            recoveryTicket = AuthorityPhonePushRecoveryTicket(commitDigest: commitDigest)
+            recoveryDrained = false; wakeStatus = .quiescingForRecovery
+            let previous = task; task = nil; previous?.cancel()
+            let old = publisher; publisher = nil
+            if let old { hints.clear(old.hintFeed) }
+            recoveryDrain = Task { await old?.close(); await previous?.value }
+        }
+        let ticket = recoveryTicket!, drain = recoveryDrain
+        try phonePushCapability.quiesceRecovery(commitDigest: commitDigest, verifyCurrent: verifyCurrent)
+        await drain?.value
+        guard !closed, !isRetired, recoveryTicket === ticket, settingsChange == nil else { throw GatewayPreparationError.changedScope }
+        try ticket.requireValid(); try verifyCurrent(); try Task.checkCancellation()
+        recoveryDrained = true; wakeStatus = .suspendedForRecovery
+        return ticket
+    }
+    /// The native owner verifies fresh consumer acceptance before releasing this exact live pause.
+    @discardableResult
+    func resumePhonePushRecovery(_ ticket: AuthorityPhonePushRecoveryTicket, verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
+        guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        try ticket.requireValid()
+        guard !startupRestorePending, settingsChange == nil, phonePushCapability.retainedCommitDigest == ticket.commitDigest else {
+            throw GatewayPreparationError.changedScope
+        }
+        if recoveryTicket == nil, acceptedRecoveryTicket === ticket {
+            try verifyCurrent(); try Task.checkCancellation(); return false
+        }
+        guard recoveryTicket === ticket, recoveryDrained else { throw GatewayPreparationError.incomplete }
+        try verifyCurrent()
+        try phonePushCapability.releaseRecovery(commitDigest: ticket.commitDigest, verifyCurrent: verifyCurrent)
+        try ticket.requireValid(); try verifyCurrent(); try Task.checkCancellation()
+        recoveryTicket = nil; recoveryDrain = nil; recoveryDrained = false; recoveryStartupHold = false
+        acceptedRecoveryTicket = ticket; wakeStatus = .idle; startPublisherLoop()
+        return true
+    }
 
     /// Stop and join optional wake publication without closing the foreground service or replacing its clock.
     /// The native owner must authenticate the change and verify its durable scope on each call.
     func quiescePhonePushSettings(_ change: AuthorityPhonePushSettingsChange,
                                   verifyCurrent: @Sendable () throws -> Void) async throws {
         guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard !startupRestorePending else { throw AuthorityWakePublisherError.busy }
         guard settingsChange == nil || settingsChange == change else { throw GatewayPreparationError.changedScope }
         try phonePushCapability.quiesceSettings(change, verifyCurrent: verifyCurrent)
         if settingsChange == nil {
+            let inherited = recoveryDrain
+            recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
+            recoveryTicket = nil; acceptedRecoveryTicket = nil; recoveryDrain = nil; recoveryDrained = false; recoveryStartupHold = false
             settingsChange = change; settingsDrained = false; wakeStatus = .quiescingForSettings
             let previous = task; task = nil; previous?.cancel()
             let old = publisher; publisher = nil
             if let old { hints.clear(old.hintFeed) }
             settingsDrain = Task {
+                await inherited?.value
                 await old?.close()
                 await previous?.value
             }
@@ -225,6 +340,7 @@ public actor AuthorityWakeService {
     func acceptPhonePushSettings(_ change: AuthorityPhonePushSettingsChange,
                                  verifyCurrent: @Sendable () throws -> Void) throws -> Bool {
         guard started, !closed, !isRetired, let phonePushCapability else { throw AuthorityWakePublisherError.closed }
+        guard !startupRestorePending else { throw AuthorityWakePublisherError.busy }
         if settingsChange == nil, acceptedSettings == change {
             _ = try phonePushCapability.acceptSettings(change, verifyCurrent: verifyCurrent); return false
         }
@@ -279,7 +395,7 @@ public actor AuthorityWakeService {
         startPublisherLoop()
     }
     private func startPublisherLoop() {
-        guard !closed, !retired, settingsChange == nil, task == nil else { return }
+        guard !closed, !retired, !startupRestorePending, !recoveryStartupHold, recoveryTicket == nil, settingsChange == nil, task == nil else { return }
         task = Task { [weak self, makePublisher, hints, requestsRetired, interval, initialRetry, maximumRetry] in
             await Self.publish(makePublisher: makePublisher, hints: hints, requestsRetired: requestsRetired,
                 interval: interval, initialRetry: initialRetry, maximumRetry: maximumRetry,
@@ -289,14 +405,14 @@ public actor AuthorityWakeService {
     }
     /// Failed request cleanup remains owned and can be retried. Concurrent callers share one cleanup attempt.
     public func close() async throws {
-        closed = true; wakeStatus = .closed; phonePushCapability?.close()
+        closed = true; wakeStatus = .closed; recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke(); phonePushCapability?.close()
         guard !cleanupComplete else { return }
         if let closing { try await closing.value; return }
         let previous = task; task = nil; previous?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop()
         let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
         let executionObserver = executionObserver; self.executionObserver = nil; executionObserver?.cancel()
         hints.close(); presence?.close()
-        let publisher = publisher, drain = settingsDrain, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let publisher = publisher, drain = settingsDrain, recovery = recoveryDrain, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         let work = Task {
             await commandReceiver?.close()
             await stopRequestProducers()
@@ -304,6 +420,7 @@ public actor AuthorityWakeService {
             await publisher?.close()
             await previous?.value
             await drain?.value
+            await recovery?.value
             await observer?.value
             await executionObserver?.value
             try closeRequests()
@@ -313,7 +430,7 @@ public actor AuthorityWakeService {
         catch { closing = nil; throw error }
     }
     private func update(publisher: AuthorityWakePublisher?, status: WakeStatus) -> Bool {
-        guard !closed, !retired, settingsChange == nil else { return false }
+        guard !closed, !retired, !recoveryStartupHold, recoveryTicket == nil, settingsChange == nil else { return false }
         self.publisher = publisher; wakeStatus = status
         return true
     }
@@ -330,7 +447,7 @@ public actor AuthorityWakeService {
         try? await close()
     }
     private func publisherDidStop() async {
-        guard !closed, settingsChange == nil else { return }
+        guard !closed, !recoveryStartupHold, recoveryTicket == nil, settingsChange == nil else { return }
         retired = true
         task = nil // This callback runs on the terminating worker. Its publisher has already closed.
         try? await close()

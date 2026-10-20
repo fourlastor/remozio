@@ -71,8 +71,10 @@ public final class GatewaySettingsTransportHost: Sendable {
             let access = try GatewaySettingsConsumerAccess(owner: owner, services: services, verifyCurrent: scope.validate)
             let listener = try GatewaySettingsConsumerXPCListener(consumerCode: configuration.consumerCode, setupCode: configuration.setupCode,
                 release: release, access: access, acquireActivity: scope.acquireActivity)
+            let recovery = try GatewaySettingsConsumerXPCListener.recovery(services: services,
+                codePolicy: configuration.codePolicy, release: release, access: access, acquireActivity: scope.acquireActivity)
             let activity = try scope.acquireActivity(); controlActivity = activity
-            let control = try GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: activity)
+            let control = try GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: activity, recoveryListener: recovery)
             let host = try TransportSettingsConsumerHost(control: control, lifetime: scope, makeForeground: {
                 try TransportSettingsForegroundRuntime(bootstrap: bootstrap, verifyCurrent: scope.validate,
                     report: reportDirect, reportRelay: reportRelay)

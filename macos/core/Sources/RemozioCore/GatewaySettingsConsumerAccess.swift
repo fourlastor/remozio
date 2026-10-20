@@ -45,7 +45,7 @@ enum GatewaySettingsConsumerReleaseValidation {
                   format.writers.contains(GatewaySettingsConsumerInterface.version),
                   let fence = component.formats.first(where: { $0.name == GatewayRuntimeSettingsFence.formatName }),
                   GatewayRuntimeSettingsFence.supportedVersions.isSubset(of: fence.readers),
-                  entry.role != .setupController || GatewayRuntimeSettingsFence.supportedVersions.isSubset(of: fence.writers) else {
+                  entry.role != .setupController || fence.writers.contains(GatewayRuntimeSettingsFence.settingsVersion) else {
                 throw GatewayPreparationError.changedScope
             }
         }

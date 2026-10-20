@@ -10,7 +10,7 @@ extension GatewaySettingsConsumerXPCListener: OwnedGatewaySettingsConsumerListen
 /// Starts control before any optional backend. Provider failure does not remove the control listener.
 actor GatewaySettingsConsumerHost {
     private let owner: GatewaySettingsConsumerOwner
-    private let listener: any OwnedGatewaySettingsConsumerListener
+    private let listeners: [any OwnedGatewaySettingsConsumerListener]
     private let activity: any OwnedReleaseActivity
     private let retryDelay: Duration
     private var retryAt = ContinuousClock.now
@@ -20,15 +20,20 @@ actor GatewaySettingsConsumerHost {
     private var closing: (id: UUID, task: Task<Void, Error>)?
 
     init(owner: GatewaySettingsConsumerOwner, listener: any OwnedGatewaySettingsConsumerListener,
-         activity: any OwnedReleaseActivity, retryMilliseconds: Int = 1000) throws {
+         activity: any OwnedReleaseActivity, retryMilliseconds: Int = 1000,
+         recoveryListener: (any OwnedGatewaySettingsConsumerListener)? = nil) throws {
         guard (100...60000).contains(retryMilliseconds) else { throw GatewayPreparationError.invalidRecord }
-        self.owner = owner; self.listener = listener; self.activity = activity; retryDelay = .milliseconds(retryMilliseconds)
+        self.owner = owner; listeners = [listener] + (recoveryListener.map { [$0] } ?? [])
+        self.activity = activity; retryDelay = .milliseconds(retryMilliseconds)
     }
     func start() throws {
         guard !started, !retiring else { throw GatewayServiceError.unavailable }
         started = true
-        do { try activity.validate(); try listener.start(); try activity.validate() }
-        catch { retiring = true; listener.close(); throw error }
+        do {
+            try activity.validate()
+            for listener in listeners { try listener.start(); try activity.validate() }
+        }
+        catch { retiring = true; listeners.forEach { $0.close() }; throw error }
     }
     /// Initial or accepted work can start. Provider failure keeps observation and quiescence available.
     func poll() async throws {
@@ -40,15 +45,15 @@ actor GatewaySettingsConsumerHost {
         try activity.validate()
     }
     func close() async throws {
-        retiring = true; listener.close()
+        retiring = true; listeners.forEach { $0.close() }
         if settled { return }
         let pending: (id: UUID, task: Task<Void, Error>)
         if let closing { pending = closing }
         else {
-            let listener = listener, owner = owner, activity = activity
+            let listeners = listeners, owner = owner, activity = activity
             pending = (UUID(), Task {
                 await owner.retire()
-                await listener.closeAndWait()
+                for listener in listeners { await listener.closeAndWait() }
                 try await owner.close()
                 activity.close()
             })
@@ -64,12 +69,12 @@ actor GatewaySettingsConsumerHost {
     }
     deinit {
         if settled { return }
-        let listener = listener, owner = owner, activity = activity, pending = closing?.task
-        listener.close()
+        let listeners = listeners, owner = owner, activity = activity, pending = closing?.task
+        listeners.forEach { $0.close() }
         Task {
             if let pending, (try? await pending.value) != nil { return }
             await owner.retire()
-            await listener.closeAndWait()
+            for listener in listeners { await listener.closeAndWait() }
             while true {
                 do { try await owner.close(); activity.close(); return }
                 catch { try? await Task.sleep(for: .milliseconds(100)) }

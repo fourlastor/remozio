@@ -117,8 +117,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, declarations in by_role.items():
             if role in (2, 4, 6, 8):
                 self.assertEqual(declarations[role_record], {0: role_record, 1: [1], 2: [1] if role == 8 else [], 3: {}})
-                self.assertEqual(declarations[commit], {0: commit, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
-                self.assertEqual(declarations[settings], {0: settings, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[commit], {0: commit, 1: [1, 2], 2: [1, 2] if role == 8 else [2] if role == 2 else [], 3: {}})
+                self.assertEqual(declarations[settings], {0: settings, 1: [1], 2: [1] if role in (2, 8) else [], 3: {}})
             else:
                 for name in (role_record, commit, settings):
                     self.assertNotIn(name, declarations)
@@ -154,12 +154,13 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         transport = 'transport.gateway-settings-control'
         for role, declarations in by_role.items():
             if role in (2, 4, 6, 8):
-                self.assertEqual(declarations[fence], {0: fence, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[fence], {0: fence, 1: [1, 2], 2: [1] if role == 8 else [2] if role == 2 else [], 3: {}})
             else:
                 self.assertNotIn(fence, declarations)
             for name, consumer in ((gateway, 6), (transport, 4)):
-                if role in (consumer, 8):
-                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
+                if role in (consumer, 8, 2):
+                    versions = [1, 2] if role == consumer else [2] if role == 2 else [1]
+                    self.assertEqual(declarations[name], {0: name, 1: versions, 2: versions, 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
 

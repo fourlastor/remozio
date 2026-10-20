@@ -220,10 +220,39 @@ public enum AdministrativeSetupPublication {
         case .gatewayConfiguration, .authorityGatewayRuntime, .transportGatewayRuntime, .gatewaySettingsRevision, .gatewayRuntimeCommit: break
         default: throw AdministrativeSetupPublicationError.invalidArtifact
         }
+        return try replaceSettingsRecord(bytes, expected: expected, file: file, directory: directory, owner: owner,
+            verify: verify, didStage: didStage)
+    }
+
+    /// Replace only a recognized fence for the same completed settings. The owner authenticates its retained scope.
+    static func replaceRecoveryFence(_ bytes: Data, expected: Data?, directory: ProtectedSetupDirectory,
+                                     owner: uid_t, verify: () throws -> Void,
+                                     didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        let selected = try GatewayRuntimeSettingsFence.decode(bytes)
+        guard selected.version == 2 else { throw AdministrativeSetupPublicationError.invalidArtifact }
+        if let expected {
+            let previous = try GatewayRuntimeSettingsFence.decode(expected)
+            guard previous.macID == selected.macID, previous.accountID == selected.accountID,
+                  previous.installationID == selected.installationID, previous.releaseDigest == selected.releaseDigest,
+                  try previous.revision.encoded == selected.revision.encoded,
+                  try previous.selected.encoded == selected.selected.encoded else {
+                throw AdministrativeSetupPublicationError.conflictingConfiguration
+            }
+        }
+        return try replaceSettingsRecord(bytes, expected: expected, file: .gatewaySettingsFence, directory: directory,
+            owner: owner, verify: verify, didStage: didStage)
+    }
+
+    private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
+                                              owner: uid_t, verify: () throws -> Void,
+                                              didStage: (Stage) throws -> Void) throws -> GatewayRuntimeSettingsFileResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         guard let expected else {
-            guard case .gatewaySettingsRevision = file else { throw AdministrativeSetupPublicationError.invalidArtifact }
+            switch file {
+            case .gatewaySettingsRevision, .gatewaySettingsFence: break
+            default: throw AdministrativeSetupPublicationError.invalidArtifact
+            }
             let result = try publish(bytes, file: file, directory: directory, owner: owner, verify: verify, didStage: didStage)
             return result == .created ? .created : .retained
         }
