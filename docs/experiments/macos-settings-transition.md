@@ -29,4 +29,5 @@ The native entry requires Root, the current signed bundle, an enrolled account a
 
 Owned files, SQLite stores and injected peers test ordering, interruption and generation changes.
 These tests do not prove installed code admission, administrator consent, dedicated account isolation or physical phone delivery.
-The Setup IPC capability, app settings action and provider credential continuity remain separate integration work.
+[Setup capability 8](macos-settings-app-interface.md) and the [Mac settings action](macos-gateway-settings-app.md) connect this engine to explicit user actions.
+Provider credential continuity and installed service validation remain unproven.
