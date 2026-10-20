@@ -432,6 +432,78 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return value
         }
     }
+    func prepareImportedGateway(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                fileWakeCustodyAccepted: Bool,
+                                prepare: (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices, GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                    try GatewaySetupAccountPreparation.prepareImported(machine: $0, account: $1, choices: $2, selection: $3, verifyCurrent: $4)
+                                }, validate: (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices, GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                    try SharedSetupImportGatewayPreparedValidation.validateNative(machine: $0, account: $1, choices: $2, selection: $3, verifyCurrent: $4)
+                                }) throws -> SetupPortableImportProgress {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            func verifyDestination() throws {
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                guard try currentInventory(machine) == inventory,
+                      try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                      try machine.runtimePreparation(accountID: account.accountID) == runtime else {
+                    throw AdministrativeSetupError.staleProgress
+                }
+            }
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, var retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                let before = try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+                guard before == expected else { throw AdministrativeSetupError.staleProgress }
+                guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                guard retained.phase == .runtimePublished || retained.phase == .gatewayPrepared else {
+                    throw SharedSetupImportError.invalidTransition
+                }
+                func verify() throws {
+                    try verifyDestination()
+                    guard try journal.current(scope: scope) == retained else { throw SharedSetupImportError.staleRevision }
+                }
+                func validatePrepared(_ choices: GatewaySetupPreparationChoices?, _ verify: () throws -> Void) throws {
+                    if let choices {
+                        guard let selection = proposal.defaults.gateway else { throw PortableSetupError.rejected }
+                        try withoutActuallyEscaping(verify) { current in
+                            try validate(machine, account, choices, selection, current)
+                        }
+                    } else {
+                        try SharedSetupImportGatewayPreparedValidation.validateAbsent(machine: machine, account: account, verifyCurrent: verify)
+                    }
+                }
+                try verify()
+                if retained.phase == .runtimePublished {
+                    try SharedSetupImportGatewayScope.withReviewedPreparation(machine: machine, account: account,
+                        journal: journal, expected: retained, proposal: proposal, fileWakeCustodyAccepted: fileWakeCustodyAccepted,
+                        verifyCurrent: verify) { choices, current in
+                        try withoutActuallyEscaping(current) { preparedCurrent in
+                            if let choices {
+                                guard let selection = proposal.defaults.gateway else { throw PortableSetupError.rejected }
+                                try prepare(machine, account, choices, selection, preparedCurrent)
+                            }
+                            try validatePrepared(choices, preparedCurrent)
+                        }
+                    }
+                    try verify(); retained = try journal.advance(retained, to: .gatewayPrepared)
+                } else {
+                    let choices = proposal.fcm == nil && proposal.pushClient == nil ? nil
+                        : try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false)
+                    try validatePrepared(choices, verify)
+                }
+                try verify()
+                return try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+            }
+        }
+    }
+
+
     func prepareImportedRelayPlan(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                   selectPort: (Set<UInt16>) throws -> UInt16 = { try SharedSetupRelayPortSelection.choose(reserved: $0) }) throws -> SharedSetupImportRelayPlan {
         try withMachine { machine in

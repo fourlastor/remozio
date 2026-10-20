@@ -44,18 +44,46 @@ public struct GatewaySetupPreparationChoices: Sendable, CustomStringConvertible,
 enum GatewaySetupAccountPreparation {
     static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent, choices: GatewaySetupPreparationChoices,
                         verifyCurrent: () throws -> Void) throws {
+        try prepare(machine: machine, account: account, choices: choices, selection: nil, verifyCurrent: verifyCurrent)
+    }
+
+    /// Imports every reviewed Gateway limit. Activation timings remain part of the later activation stage.
+    static func prepareImported(machine: PreparationIntentStore, account: AccountPreparationIntent,
+                                choices: GatewaySetupPreparationChoices, selection: GatewayRuntimeSettingsSelection,
+                                verifyCurrent: () throws -> Void) throws {
+        guard try choices.settings.setupBytes == selection.service.setupBytes else { throw GatewayPreparationError.changedScope }
+        try prepare(machine: machine, account: account, choices: choices, selection: selection, verifyCurrent: verifyCurrent)
+    }
+
+    private static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent,
+                                choices: GatewaySetupPreparationChoices, selection: GatewayRuntimeSettingsSelection?,
+                                verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try verifyCurrent(); try machine.validateAccountPreparation(account)
+        let selected = try selection ?? SharedSetupImportGatewayScope.completedDefaults(machine: machine, account: account)
         let state = try machine.gatewayPreparation(accountID: account.accountID)
         let prepared = try GatewayMaterialPreparationController.prepare(machine: machine, account: account, expected: state,
             provider: choices.provider, senderID: choices.senderID, packageName: choices.packageName,
             fileWakeCustodyAccepted: choices.fileWakeCustodyAccepted, verifyCurrent: verifyCurrent)
-        guard let material = prepared.reference, let foreground = try machine.runtimeActivation(accountID: account.accountID).plan,
-              let inventory = try machine.inventory() else { throw GatewayPreparationError.incomplete }
-        let proposal = try GatewayConfigurationBundle(foreground: foreground, material: material, inventory: inventory, settings: choices.settings)
+        guard let material = prepared.reference else { throw GatewayPreparationError.incomplete }
+        let proposal = try configuration(machine: machine, account: account, material: material, choices: choices, selection: selected)
         try verifyCurrent()
         _ = try GatewayJournalSetupPreparation.prepare(machine: machine, account: account, material: material,
             configuration: proposal.gateway, expected: machine.gatewayJournalPreparation(accountID: account.accountID), verifyCurrent: verifyCurrent)
         try verifyCurrent()
+    }
+
+    // The native preparation path uses this builder before publishing its journal intent.
+    static func configuration(machine: PreparationIntentStore, account: AccountPreparationIntent, material: GatewayMaterialReference,
+                              choices: GatewaySetupPreparationChoices, selection: GatewayRuntimeSettingsSelection? = nil) throws -> GatewayConfigurationBundle {
+        let selected = try selection ?? SharedSetupImportGatewayScope.completedDefaults(machine: machine, account: account)
+        guard let foreground = try machine.runtimeActivation(accountID: account.accountID).plan,
+              let inventory = try machine.inventory(), material.runtime.services.accountID == account.accountID else {
+            throw GatewayPreparationError.incomplete
+        }
+        return try GatewayConfigurationBundle(foreground: foreground, material: material, inventory: inventory, settings: choices.settings,
+            wakeMaximumConnections: selected?.maximumWakeConnections ?? 4,
+            wakeMaximumOperations: selected?.maximumWakeOperations ?? 8,
+            wakeChallengeLifetimeMilliseconds: selected?.wakeChallengeLifetimeMilliseconds ?? 5000)
     }
 }
