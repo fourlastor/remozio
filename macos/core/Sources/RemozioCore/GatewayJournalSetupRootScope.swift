@@ -13,11 +13,12 @@ final class GatewayJournalSetupRootScope: @unchecked Sendable {
     private let verifyHost: (InstallationInventory) throws -> Void
     private let releaseToken: ReleaseActivityToken?
     private let ownsMachine: Bool
+    private let expectedImport: SharedSetupImportIntent?
     private let processID = getpid()
     private var expected: GatewayJournalPreparationState
     private var active = true
 
-    static func openNative(machineDirectory: String, macID: Data, ownerUID: UInt32, expectedIntentDigest: Data,
+    static func openNative(machineDirectory: String, macID: Data, ownerUID: UInt32, expectedIntentDigest: Data, expectedImport: SharedSetupImportIntent? = nil,
                            verifyHost: @escaping (InstallationInventory) throws -> Void) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard ownerUID > 0, ownerUID < UInt32.max, expectedIntentDigest.count == 32 else { throw GatewayPreparationError.invalidRecord }
@@ -34,7 +35,7 @@ final class GatewayJournalSetupRootScope: @unchecked Sendable {
             guard let intent = state.intent, try intent.digest == expectedIntentDigest else { throw GatewayPreparationError.changedScope }
             let configuration = try GatewayJournalSetupServiceConfiguration(intent: intent, bundlePath: inventory.bundlePath, codePolicy: foreground.host.codePolicy)
             return try Self(machine: store, account: account, foreground: foreground, inventory: inventory,
-                configuration: configuration, expected: state, ownsMachine: true, releaseToken: token, verifyHost: { inventory in
+                configuration: configuration, expected: state, ownsMachine: true, releaseToken: token, expectedImport: expectedImport, verifyHost: { inventory in
                     guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
                     try verifyHost(inventory)
                     try LocalAccountDirectory.validateOwnership(LocalAccountDirectory.lookup(uid: ownerUID), uid: ownerUID, directoryID: account.directoryID)
@@ -44,11 +45,11 @@ final class GatewayJournalSetupRootScope: @unchecked Sendable {
     init(machine: PreparationIntentStore, account: AccountPreparationIntent, foreground: RuntimeActivationPlan,
          inventory: InstallationInventory, configuration: GatewayJournalSetupServiceConfiguration,
          expected: GatewayJournalPreparationState, ownsMachine: Bool = false, releaseToken: ReleaseActivityToken? = nil,
-         verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
+         expectedImport: SharedSetupImportIntent? = nil, verifyHost: @escaping (InstallationInventory) throws -> Void = { _ in }) throws {
         guard expected.intent == configuration.intent else { throw GatewayPreparationError.changedScope }
         self.machine = machine; self.account = account; self.foreground = foreground; self.inventory = inventory
         self.configuration = configuration; self.expected = expected; self.ownsMachine = ownsMachine
-        self.releaseToken = releaseToken; self.verifyHost = verifyHost
+        self.releaseToken = releaseToken; self.verifyHost = verifyHost; self.expectedImport = expectedImport
         try verifyCurrent()
     }
     func verifyCurrent() throws {
@@ -56,6 +57,7 @@ final class GatewayJournalSetupRootScope: @unchecked Sendable {
             guard active, getpid() == processID else { throw GatewayPreparationError.incomplete }
             try releaseToken?.validate(); try verifyHost(inventory)
             try machine.validateAccountPreparation(account)
+            try SharedSetupImportGatewayRuntimeScope.validate(machine: machine, account: account, expected: expectedImport)
             let activation = try machine.runtimeActivation(accountID: account.accountID)
             guard try machine.inventory() == inventory, activation.jobsRegistered,
                   try activation.plan?.encoded == foreground.encoded,

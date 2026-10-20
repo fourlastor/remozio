@@ -6,11 +6,11 @@ import Foundation
 enum GatewayRuntimeActivationRootOperation {
     static func resumeNative(machineDirectory: String, macID: Data, ownerUID: UInt32,
                              expected: SetupGatewayActivationProgress, settings: GatewayRuntimeActivationSettings,
-                             verifyHost: @escaping (InstallationInventory) throws -> Void) throws -> SetupGatewayActivationProgress {
+                             expectedImport: SharedSetupImportIntent? = nil, verifyHost: @escaping (InstallationInventory) throws -> Void) throws -> SetupGatewayActivationProgress {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let activity = try ReleaseActivityBarrier.open(machineDirectory: machineDirectory), token = try activity.acquireShared()
         defer { token.close() }
-        return try resume(ownerUID: ownerUID, expected: expected, settings: settings,
+        return try resume(ownerUID: ownerUID, expected: expected, settings: settings, expectedImport: expectedImport,
             openMachine: { try PreparationIntentStore.open(directoryPath: machineDirectory, macID: macID) },
             verifyHost: { inventory in
                 guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -19,7 +19,7 @@ enum GatewayRuntimeActivationRootOperation {
     }
     // Owned stores and injected native operations prove composition, not Root admission or actual launchd behavior.
     static func resume(ownerUID: UInt32, expected: SetupGatewayActivationProgress, settings: GatewayRuntimeActivationSettings,
-                       openMachine: () throws -> PreparationIntentStore,
+                       expectedImport: SharedSetupImportIntent? = nil, openMachine: () throws -> PreparationIntentStore,
                        verifyHost: (InstallationInventory) throws -> Void,
                        lookupAccount: (UInt32) throws -> LocalAccountIdentity,
                        operations: GatewayRuntimeActivationOperations) throws -> SetupGatewayActivationProgress {
@@ -56,6 +56,7 @@ enum GatewayRuntimeActivationRootOperation {
                 throw GatewayPreparationError.incomplete
             }
             try verifyHost(inventory); try machine.validateAccountPreparation(account)
+            try SharedSetupImportGatewayRuntimeScope.validate(machine: machine, account: account, expected: expectedImport, activationSettings: settings)
             try LocalAccountDirectory.validateOwnership(lookupAccount(ownerUID), uid: ownerUID, directoryID: account.directoryID)
             let state = try machine.gatewayRuntimeActivation(accountID: account.accountID)
             guard try SetupGatewayActivationProgress(setup: setup(machine, account), state: state) == expected,
@@ -76,6 +77,7 @@ enum GatewayRuntimeActivationRootOperation {
                   current.installationID == inventory.installationID, current.releaseDigest == inventory.releaseDigest,
                   current.bundlePath == inventory.bundlePath else { throw AdministrativeSetupError.changedInstallation }
             try verifyHost(current); try machine.validateAccountPreparation(account)
+            try SharedSetupImportGatewayRuntimeScope.validate(machine: machine, account: account, expected: expectedImport, activationSettings: settings)
             try LocalAccountDirectory.validateOwnership(lookupAccount(ownerUID), uid: ownerUID, directoryID: account.directoryID)
             guard try setup(machine, account) == expected.setup else { throw AdministrativeSetupError.staleProgress }
         }

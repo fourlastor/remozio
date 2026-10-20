@@ -63,6 +63,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private let gatewayActivationOperation: GatewaySetupActivationOperations?
     private let gatewaySettingsOperation: GatewaySetupSettingsOperations?
+    private let importedGatewayOperation: GatewaySetupImportedRuntimeOperations?
     private var closing = false
     private var closed = false
 
@@ -74,7 +75,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
             resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, releaseActivity: activity,
             gatewayJournalOperation: .native(machineDirectory: machineDirectory, macID: macID),
             gatewayActivationOperation: .native(machineDirectory: machineDirectory, macID: macID),
-            gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID))
+            gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID),
+            importedGatewayOperation: .native(machineDirectory: machineDirectory, macID: macID))
     }
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
@@ -90,9 +92,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
-         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -108,9 +111,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
-         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -120,9 +124,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
          activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?,
-         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?) throws {
+         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?) throws {
         self.releaseActivity = releaseActivity; self.gatewayJournalOperation = gatewayJournalOperation
         self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
+        self.importedGatewayOperation = importedGatewayOperation
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
@@ -501,6 +507,89 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     services: services, runtime: runtime, retained: retained)
             }
         }
+    }
+
+
+    func resumeImportedGateway(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                               validatePrepared: @Sendable (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices,
+                                   GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                       try SharedSetupImportGatewayPreparedValidation.validateNative(machine: $0, account: $1,
+                                           choices: $2, selection: $3, verifyCurrent: $4)
+                                   }) async throws -> SetupImportedGatewayRuntimeResult {
+        let context = try lock.withLock {
+            guard !closed, !closing, getpid() == processID, let operation = importedGatewayOperation else {
+                throw AdministrativeSetupError.unavailable
+            }
+            let admission = try asynchronousWork.admit()
+            do { return (admission, try releaseActivity?.acquireShared(), operation) }
+            catch { admission.close(); throw error }
+        }
+        defer { context.1?.close(); context.0.close() }
+        func read() throws -> (SharedSetupImportIntent, SetupGatewayActivationProgress) {
+            try withMachine(admission: context.0) { machine in
+                guard expected.runtime.ownerUID == callerUID,
+                      let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+                let runtime = try machine.runtimePreparation(accountID: account.accountID)
+                let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+                let retained = try machine.withSharedImportJournal { journal in
+                    guard let journal, let retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                    let current = try SetupPortableImportProgress(account: account, inventory: inventory,
+                        services: services, runtime: runtime, retained: retained)
+                    guard current == expected else { throw AdministrativeSetupError.staleProgress }
+                    guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                    return retained
+                }
+                guard proposal.fcm != nil, proposal.pushClient != nil, let selection = proposal.defaults.gateway else {
+                    throw GatewayPreparationError.incomplete
+                }
+                let choices = try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false)
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime else {
+                        throw AdministrativeSetupError.staleProgress
+                    }
+                    try SharedSetupImportGatewayRuntimeScope.validate(machine: machine, account: account,
+                        expected: retained, activationSettings: selection.activation)
+                }
+                try verify(); try validatePrepared(machine, account, choices, selection, verify); try verify()
+                return (retained, try gatewayActivationProgress(machine: machine, account: account))
+            }
+        }
+        let before = try read(), retained = before.0
+        guard let digest = before.1.setup.journalIntentDigest, let selection = proposal.defaults.gateway else {
+            throw GatewayPreparationError.incomplete
+        }
+        let verifyHost: @Sendable (InstallationInventory) throws -> Void = { [self] inventory in
+            try lock.withLock {
+                guard !closed, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+                try context.1?.validate(); try releaseActivity?.validate()
+                guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
+                    throw AdministrativeSetupError.changedInstallation
+                }
+                try self.verifyHost(inventory)
+            }
+        }
+        try Task.checkCancellation()
+        let initialized = try await context.2.initialize(callerUID, digest, retained, verifyHost)
+        try Task.checkCancellation(); try context.1?.validate()
+        let ready = try read()
+        guard ready.0 == retained, initialized.intentDigest == digest, ready.1.setup.journalInitialized else {
+            throw AdministrativeSetupError.staleProgress
+        }
+        if !initialized.cleanupComplete {
+            return .init(progress: expected, cleanupComplete: false, activation: nil)
+        }
+        let report = try await context.2.activate(callerUID, ready.1, selection.activation, retained, verifyHost)
+        try Task.checkCancellation(); try context.1?.validate()
+        let final = try read()
+        guard final.0 == retained else { throw AdministrativeSetupError.staleProgress }
+        try final.1.validateActivation(of: ready.1, selectedSettings: selection.activation)
+        guard final.1.planDigest == report.planDigest else { throw AdministrativeSetupError.staleProgress }
+        return .init(progress: expected, cleanupComplete: true, activation: final.1)
     }
 
 

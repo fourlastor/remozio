@@ -59,7 +59,7 @@ final class SharedSetupImportGatewayApplicationTests: XCTestCase, @unchecked Sen
             .init(defaults: .init(presence: core.runtime.plan.host.command.presence.presence.policy, gateway: selection),
                 fcm: core.provider, pushClient: try! .init(projectID: core.provider.project, senderID: "123", packageName: "dev.remozio.android"))
         }
-        func owner(proposal selected: PortableSetup? = nil) throws -> SetupAccountOwner {
+        func owner(proposal selected: PortableSetup? = nil, importedRuntime: GatewaySetupImportedRuntimeOperations? = nil) throws -> SetupAccountOwner {
             let account = core.runtime.account, f = core.runtime.f
             let initial = try SharedSetupImportIntent(scope: .init(account: account, inventory: XCTUnwrap(core.machine.inventory())), proposal: selected ?? proposal())
             try f.prepare("machine/SharedSetupImport", .sharedSetupImport)
@@ -70,7 +70,7 @@ final class SharedSetupImportGatewayApplicationTests: XCTestCase, @unchecked Sen
             try core.machine.close()
             return try .init(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
                 resume: { _, _ in throw Interrupted() }, accountCodePolicy: f.policy,
-                lookupAccount: { uid in guard uid == f.identity.uid else { throw AdministrativeSetupError.wrongAccount }; return f.identity })
+                lookupAccount: { uid in guard uid == f.identity.uid else { throw AdministrativeSetupError.wrongAccount }; return f.identity }, importedGatewayOperation: importedRuntime)
         }
     }
     private func read(_ owner: SetupAccountOwner) throws -> SetupPortableImportProgress {
