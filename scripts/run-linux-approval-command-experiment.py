@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disposable signed-approval to fixed-command controls; no production authority."""
 import argparse
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import datetime
 import hashlib
 import importlib.util
@@ -14,6 +14,7 @@ import re
 import selectors
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -33,30 +34,31 @@ MAX_OUTPUT_BYTES = 32768
 MAX_BUILD_OUTPUT_BYTES = 1048576
 MARKER = b"remozio-fixture-output\n"
 NORMAL_CASES = ("approve", "malformed-decision", "malformed-capture", "bad-signature", "decline", "expired",
-                "expire-before-consume", "replay", "audit-failure")
+                "expire-before-consume", "expire-at-shared-consume", "replay", "submission-id-replay", "submission-nonce-replay", "audit-failure")
 CRASH_RECOVERIES = (("crash-before-launch", "recover-before-launch", 0),
                     ("crash-after-output", "recover-after-output", 1))
-CHECKS = {"expectedDecisionResult", "expectedLedgerState", "expectedAuditState", "expectedExecutionCount", "expectedCheckpointState"}
-_BASE = {"fixtureOnlyLedger": True, "productionAuthority": False, "physicalPhone": False,
+CHECKS = {"expectedDecisionResult", "expectedLedgerState", "expectedAuditState", "expectedExecutionCount", "expectedCheckpointState", "expectedReplayState"}
+_BASE = {"fixtureOnlyOwner": True, "sharedConsumptionTables": True, "sharedReplayTables": True, "productionAuthority": False, "physicalPhone": False,
          "hardwareKeys": False, "syntheticRequesterClaims": True}
 
 
 def observation(executions=0, phase="none", checkpoint="unchanged", rows=0, audit=0, output=False, exit_status=None):
     return {**_BASE, "executions": executions, "phase": phase, "checkpointAction": checkpoint,
-            "consumptionRows": rows, "auditRecords": audit, "outputMatched": output, "childExitStatus": exit_status}
+            "consumptionRows": rows, "submissionReservations": rows, "auditRecords": audit, "outputMatched": output, "childExitStatus": exit_status}
 
 
 OBSERVATIONS = {case: observation() for case in NORMAL_CASES}
-for _case in ("approve", "replay"):
+for _case in ("approve", "replay", "submission-id-replay", "submission-nonce-replay"):
     OBSERVATIONS[_case] = observation(1, "succeeded", rows=1, audit=3, output=True, exit_status=0)
 OBSERVATIONS["decline"] = observation(phase="declined", rows=1, audit=1)
 OBSERVATIONS["reopen-completed"] = observation(1, "succeeded", rows=1, audit=3)
 OBSERVATIONS["recover-before-launch"] = observation(phase="unknown", checkpoint="finalizePending", rows=1, audit=2)
 OBSERVATIONS["recover-after-output"] = observation(1, "unknown", rows=1, audit=3)
-DECISION_RESULTS = {"approve": "accepted", "replay": "replayRejected", "decline": "declined",
+DECISION_RESULTS = {"approve": "accepted", "replay": "replayRejected",
+                    "submission-id-replay": "submissionIDReplayRejected", "submission-nonce-replay": "submissionNonceReplayRejected", "decline": "declined",
                     "malformed-decision": "malformedDecision", "malformed-capture": "malformedCapture",
                     "bad-signature": "invalidSignature", "expired": "expired",
-                    "expire-before-consume": "expiredBeforeConsume", "audit-failure": "auditFailure",
+                    "expire-before-consume": "expiredBeforeConsume", "expire-at-shared-consume": "expiredAtSharedConsume", "audit-failure": "auditFailure",
                     "reopen-completed": "reopened", "recover-before-launch": "recovered", "recover-after-output": "recovered"}
 for _mode, _reason in DECISION_RESULTS.items():
     OBSERVATIONS[_mode]["decisionResult"] = _reason
@@ -164,6 +166,46 @@ def marker_matches(directory, executions):
         os.close(descriptor)
 
 
+def shared_state_matches(directory, mode):
+    """Independent post-worker row checks, not protected storage or caller authentication."""
+    expected = OBSERVATIONS.get(mode)
+    if expected is None:
+        if mode == "crash-before-launch":
+            expected = observation(phase="authorized", rows=1, audit=1)
+        elif mode == "crash-after-output":
+            expected = observation(1, "executing", rows=1, audit=2)
+        else:
+            return False
+    path = directory / "fixture.sqlite"
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 1048576:
+            return False
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.1)) as db:
+            db.execute("PRAGMA trusted_schema=OFF")
+            db.execute("PRAGMA query_only=ON")
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            if tables != {"consumptions_v1", "consumption_outcomes_v1", "command_submissions_v1", "audit_epochs_v1", "audit_records_v1"}:
+                return False
+            for table, count in (("consumptions_v1", expected["consumptionRows"]),
+                                 ("command_submissions_v1", expected["submissionReservations"]),
+                                 ("audit_records_v1", expected["auditRecords"]),
+                                 ("audit_epochs_v1", 2 if mode.startswith("recover-") else 1),
+                                 ("consumption_outcomes_v1", int(expected["phase"] in {"executing", "succeeded", "unknown"}))):
+                if db.execute(f"SELECT count(*) FROM {table}").fetchone()[0] != count:
+                    return False
+                if db.execute(f"SELECT count(*) FROM {table} WHERE mac IS NOT ? OR account IS NOT ?",
+                              (bytes([1]) * 16, bytes([2]) * 16)).fetchone()[0] != 0:
+                    return False
+            if expected["consumptionRows"]:
+                reservation = db.execute("SELECT submission,nonce,caller,capture FROM command_submissions_v1").fetchone()
+                if any(type(value) is not bytes or len(value) != size for value, size in zip(reservation, (16, 32, 16, 32))):
+                    return False
+            return not list(db.execute("PRAGMA foreign_key_check"))
+    except (OSError, ValueError, sqlite3.Error):
+        return False
+
+
 def invoke(binary, mode, directory, timeout, expected_crash_count=None):
     try:
         raw, returncode, error, clean = run_owned([str(binary), mode, str(directory)], timeout)
@@ -176,8 +218,11 @@ def invoke(binary, mode, directory, timeout, expected_crash_count=None):
             return failure("UnexpectedCrashResult", clean)
         if not marker_matches(directory, expected_crash_count):
             return failure("ExecutionMarkerMismatch", clean)
+        if not shared_state_matches(directory, mode):
+            return failure("SharedTableStateMismatch", clean)
         return {"passed": True, "checks": {"expectedCrashExit": True, "noSuccessReport": True,
                                             "expectedMarkerBeforeRecovery": True},
+                "shared_tables_match_expected_state": True,
                 "cleanup_reaped_all_fixture_children": clean}
     try:
         report = validate_result(raw, mode, returncode)
@@ -185,6 +230,9 @@ def invoke(binary, mode, directory, timeout, expected_crash_count=None):
         return failure("InvalidFixtureReport", clean)
     if not marker_matches(directory, OBSERVATIONS[mode]["executions"]):
         return failure("ExecutionMarkerMismatch", clean)
+    if not shared_state_matches(directory, mode):
+        return failure("SharedTableStateMismatch", clean)
+    report["shared_tables_match_expected_state"] = True
     report["marker_matches_expected_execution_count"] = True
     report["cleanup_reaped_all_fixture_children"] = clean
     return report
@@ -284,13 +332,13 @@ def measure(work_dir=None, timeout=15, build_timeout=600):
                                        if cases[seed]["passed"] else failure("PrerequisiteFailed", True))
     if source_hashes() != before_sources:
         raise RuntimeError("source inputs changed during experiment")
-    return {"experiment": "linux-approval-command-v1", "passed": all(value["passed"] for value in cases.values()),
+    return {"experiment": "linux-approval-command-v2", "passed": all(value["passed"] for value in cases.values()),
             "sourceInputsUnchanged": True,
             "measuredAtUTC": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             **_BASE, "host": host_metadata(version), "sources": before_sources, "cases": cases,
             "limits": ["disposable ordinary-user fixture; no installed or privileged authority",
                        "fixed /usr/bin/tee command only; ephemeral synthetic signing keys and schema-4 claims",
-                       "fixture ledger and checkpoint adapter; no production Linux journal or independent process locking",
+                       "shared consumption/replay/audit tables with fixture-only connection and checkpoint owner; no protected Linux journal or independent process locking",
                        "process exit controls are not power-loss or filesystem durability certification",
                        "no physical phone, biometric approval, TPM key custody, caller monitor integration or network delivery"]}
 
