@@ -114,3 +114,25 @@ Installed Root admission, hardware signing and phone delivery remain separate ga
 
 The runner accepts optional `--scratch-path` and `--cache-path` arguments for isolated SwiftPM storage.
 A separate cache disables the shared dependency cache. It does not change pinned package versions or XPC admission.
+
+
+## Settings selectors in capability 8
+
+The extension keeps all 81 preceding cases and adds 14 synthetic cases.
+Every new client negotiates `gatewaySettingsHello` and requires capability 8 before another call.
+The progress case reads an empty Data reply without a nonce payload.
+Retain and resume each distinguish nonempty, empty and nil replies.
+Wrong client and server identifiers must stop both operations before their nonce reaches the service.
+Retain also checks empty selection and wrong authorization markers. Resume checks a wrong authorization marker.
+
+The probe inherits the production `AdministrativeSetupXPCProtocol` declaration.
+Its authorization marker is synthetic text, never an external authorization form.
+Retain echoes the nonce. Resume echoes a synthetic mode-and-nonce progress payload.
+These values do not represent production progress or a retained revision.
+The service imports no rights and performs no settings transition.
+The existing ordinary-user GUI service, timeouts and verified cleanup remain unchanged.
+
+[The October 20 evidence](evidence/2026-10-20-gateway-settings-xpc.json) records all 95 cases passing on macOS 27.0.1, targeting macOS 26.
+The temporary ordinary-user service was removed. The report pins the tested source and inherited production declaration.
+This does not establish runtime behavior on macOS 26.
+This measures selector bridging and identifier refusal. It does not prove Root admission, administrator consent or installed services.

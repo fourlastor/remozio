@@ -1,0 +1,793 @@
+{
+  "schemaVersion": 1,
+  "experiment": "macos-xpc-identifiers",
+  "recordedAt": "2026-10-20T01:54:16.394494+00:00",
+  "status": "passed",
+  "cases": [
+    {
+      "name": "gateway-activation-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-bad-settings",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-bad-auth",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-activation-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-journal-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-journal-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-journal-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-journal-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-journal-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "journal-hello",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "journal-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "journal-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "journal-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "journal-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "journal-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "journal-wrong-server-uid",
+      "exitCode": 3,
+      "result": "rejected:peer-uid",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "journal-wrong-client-uid",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "journal-wrong-invocation",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "wrong-client-identifier",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "wrong-server-requirement",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "guarded-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "guarded-matching-peers",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "matching-peers-after-rejections",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "discovery-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "discovery-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "discovery-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "recovery-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "recovery-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "recovery-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "recovery-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "recovery-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "registration-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "registration-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "registration-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "registration-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "registration-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "receipt-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "receipt-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "receipt-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "receipt-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "receipt-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "exchange-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "exchange-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "exchange-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "frame-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "frame-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "frame-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "activation-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "activation-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "activation-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "activation-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "activation-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "activation-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "runtime-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "runtime-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "runtime-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "runtime-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "runtime-no-consent",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "runtime-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "runtime-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "setup-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "setup-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "setup-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "setup-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "setup-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "setup-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-progress",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-bytes",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-empty",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-nil",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-wrong-server",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4102",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-wrong-client",
+      "exitCode": 3,
+      "result": "rejected:NSCocoaErrorDomain:4097",
+      "stderr": "",
+      "requestReachedService": false,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-bad-selection",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-retain-bad-auth",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    },
+    {
+      "name": "gateway-settings-resume-bad-auth",
+      "exitCode": 0,
+      "result": "accepted",
+      "stderr": "",
+      "requestReachedService": true,
+      "passed": true
+    }
+  ],
+  "nativeAdministratorRightsTested": false,
+  "rootServiceTested": false,
+  "limits": [
+    "Synthetic payloads and ad-hoc identifier policies only.",
+    "This probe does not validate Developer ID, Team ID, Root UID or native administrator rights."
+  ],
+  "environment": {
+    "macOS": "27.0.1",
+    "architecture": "arm64",
+    "xcode": "Xcode 27.0\nBuild version 27A266a",
+    "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx27.0.0",
+    "deploymentTarget": "arm64-apple-macosx26.0",
+    "signing": "ad-hoc identifiers only; not Developer ID or Team ID validation"
+  },
+  "temporaryService": "gui/501/dev.remozio.experiments.de84dab19d7a49c5b6ec8d5d9d1081d4",
+  "cleanup": {
+    "bootoutExitCode": 0,
+    "serviceAbsent": true
+  },
+  "sourceCommit": "32d942b9fc2bd00a66a00bcecb3c8add23653456",
+  "sourceSHA256": {
+    "experiments/macos/Sources/XPCProbe/Probe.swift": "4864011e64f890e916401d9347ca543c81c4da7c5a70df614a535c74531afd2e",
+    "scripts/run-macos-xpc-experiment.py": "f30a3df14edd07cca640e37a01507909ba25ee9b2bda39dd15ab6153dad8dd04",
+    "macos/core/Sources/RemozioCore/AdministrativeSetupXPCEndpoint.swift": "100a9248c196c11fcc85721e082383cec6c9f9057d1fd33fdc7760ad2cd54365"
+  }
+}
