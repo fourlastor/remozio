@@ -98,7 +98,7 @@ struct GatewaySettingsConsumerRequest: Sendable, CustomStringConvertible {
     } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...8),
-              case .unsigned(let version) = fields[0], version == 1 || version == 2, fields[1] == .text("remozio-gateway-settings-consumer-request"),
+              case .unsigned(let version) = fields[0], GatewaySettingsConsumerInterface.supportedRequestVersions.contains(version), fields[1] == .text("remozio-gateway-settings-consumer-request"),
               case .unsigned(let raw) = fields[7], let action = GatewaySettingsControlAction(rawValue: raw) else {
             throw GatewayPreparationError.invalidRecord
         }
