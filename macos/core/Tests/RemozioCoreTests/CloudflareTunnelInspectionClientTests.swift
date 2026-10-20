@@ -56,29 +56,42 @@ final class CloudflareTunnelInspectionClientTests: XCTestCase, @unchecked Sendab
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic-provider-token-only")
     }
     func testAnExactRemoteTunnelProducesOnlyRedactedInventoryEvidence() async throws {
-        let selected = try input(), probe = try Probe([body([tunnel(selected)])])
+        let selected = try input(), probe = try Probe([body([tunnel(selected)]), body(page: 2)])
         let result = try await inspect(selected, probe: probe)
         let observed = try XCTUnwrap(result)
         XCTAssertEqual(observed.accountID, selected.configuration.accountID)
         XCTAssertEqual(observed.tunnelID, "11111111-1111-4111-8111-111111111111"); XCTAssertEqual(observed.name, selected.plan.tunnelName)
         XCTAssertEqual(String(reflecting: observed), "CloudflareTunnelObservation(redacted)")
     }
+    func testFilteredEmptyInventoryDoesNotUseOtherMacsAccountTotal() async throws {
+        let selected = try input(), probe = try Probe([body(total: 5000)])
+        let observed = try await inspect(selected, probe: probe)
+        XCTAssertNil(observed)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 1)
+    }
+    func testFilteredExistingTunnelDoesNotUseOtherMacsAccountTotal() async throws {
+        let selected = try input(), probe = try Probe([body([tunnel(selected)], total: 5000), body(page: 2, total: 5000)])
+        let observed = try await inspect(selected, probe: probe)
+        XCTAssertEqual(observed?.tunnelID, "11111111-1111-4111-8111-111111111111")
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
+    }
     func testDeprecatedRemoteFlagMayBeAbsentWhenTheConfigurationSourceIsExplicit() async throws {
         let selected = try input(); var value = tunnel(selected); value.removeValue(forKey: "remote_config")
-        let observed = try await inspect(selected, probe: Probe([body([value])]))
+        let observed = try await inspect(selected, probe: Probe([body([value]), body(page: 2)]))
         XCTAssertNotNil(observed)
     }
     func testANamePrefixIsNotAnExactCandidate() async throws {
-        let selected = try input(), probe = try Probe([body([tunnel(selected, name: selected.plan.tunnelName + "-other")])])
+        let selected = try input(), probe = try Probe([body([tunnel(selected, name: selected.plan.tunnelName + "-other")]), body(page: 2)])
         let observed = try await inspect(selected, probe: probe); XCTAssertNil(observed)
     }
     func testEveryPageIsReadEvenWhenTheFirstPageMatches() async throws {
         let selected = try input(), probe = try Probe([
             body([tunnel(selected)], size: 1, total: 2),
-            body([tunnel(selected, id: "22222222-2222-4222-8222-222222222222", name: "unrelated")], page: 2, size: 1, total: 2)])
+            body([tunnel(selected, id: "22222222-2222-4222-8222-222222222222", name: "unrelated")], page: 2, size: 1, total: 2),
+            body(page: 3, size: 1, total: 2)])
         let observed = try await inspect(selected, probe: probe); XCTAssertNotNil(observed)
-        let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
-        XCTAssertTrue(try XCTUnwrap(requests.last?.url?.query).contains("page=2"))
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+        XCTAssertTrue(try XCTUnwrap(requests.last?.url?.query).contains("page=3"))
     }
     func testTwoMatchingNamesOnDifferentPagesAreAmbiguous() async throws {
         let selected = try input(), probe = try Probe([
@@ -112,23 +125,55 @@ final class CloudflareTunnelInspectionClientTests: XCTestCase, @unchecked Sendab
     func testPaginationMetadataMustBeCompleteConsistentAndBounded() async throws {
         let selected = try input()
         for info: [String: Any] in [["page": 2], ["per_page": 0], ["per_page": 101], ["count": 1], ["total_count": -1],
-            ["total_count": 1001], ["total_pages": 2], ["page": true], ["total_count": "0"]] {
+            ["page": true], ["total_count": "0"]] {
             try await failure(.invalidResponse, selected: selected, probe: Probe([body(info: info)]))
         }
         try await failure(.invalidResponse, selected: selected, probe: Probe([body(envelope: ["result_info": NSNull()])]))
     }
-    func testZeroTotalPagesIsAcceptedOnlyForTheEmptyResult() async throws {
+    func testFilteredInventoryDoesNotRequireOptionalAccountTotals() async throws {
         let selected = try input()
-        let empty = try await inspect(selected, probe: Probe([body(info: ["total_pages": 0])]))
-        XCTAssertNil(empty)
-        try await failure(.invalidResponse, selected: selected, probe: Probe([body([tunnel(selected)], info: ["total_pages": 0])]))
+        for info: [String: Any] in [["count": 0, "page": 1, "per_page": 100],
+                                   ["count": 0, "page": 1, "per_page": 100, "total_count": NSNull()]] {
+            let result = try await inspect(selected, probe: Probe([body(envelope: ["result_info": info])]))
+            XCTAssertNil(result)
+        }
     }
-    func testChangingTotalsOrPageSizeNeverReturnPartialEvidence() async throws {
-        let selected = try input(), first = try body([tunnel(selected)], size: 1, total: 2)
-        for second in [try body([], page: 2, size: 1, total: 1), try body([tunnel(selected)], page: 2, size: 2, total: 2),
-                       try body([], page: 2, size: 1, total: 2)] {
+    func testOptionalTotalPagesCannotSubstituteForTheTerminalFilteredPage() async throws {
+        let selected = try input(), probe = try Probe([
+            body([tunnel(selected)], total: 5000, info: ["total_pages": 0]),
+            body(page: 2, total: 5001, info: ["total_pages": 999])])
+        let result = try await inspect(selected, probe: probe); XCTAssertNotNil(result)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
+    }
+    func testChangingPageSizeOrMalformedPageMetadataCannotReturnPartialEvidence() async throws {
+        let selected = try input(), first = try body([tunnel(selected)], size: 1, total: 5000)
+        for second in [try body([tunnel(selected)], page: 2, size: 2, total: 5000),
+                       try body(page: 2, size: 1, info: ["count": 1]), try body(page: 3, size: 1)] {
             try await failure(.invalidResponse, selected: selected, probe: Probe([first, second]))
         }
+    }
+    func testAShortPageStillRequiresReadingTheRemainingFilteredPages() async throws {
+        let selected = try input(), probe = try Probe([
+            body([tunnel(selected, name: selected.plan.tunnelName + "-other")], total: 5000),
+            body([tunnel(selected, id: "22222222-2222-4222-8222-222222222222")], page: 2, total: 5001),
+            body(page: 3, total: 5002)])
+        let result = try await inspect(selected, probe: probe)
+        XCTAssertEqual(result?.tunnelID, "22222222-2222-4222-8222-222222222222")
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+    }
+    func testTenNonemptyPagesNeedAnEmptyProbeAndAnEleventhDataPageCannotReportCompleteness() async throws {
+        let selected = try input()
+        var pages = try (1...CloudflareTunnelInspectionClient.maximumPages).map { page in
+            try body([tunnel(selected, id: String(format: "%08x-1111-4111-8111-111111111111", page),
+                name: page == 1 ? selected.plan.tunnelName : "unrelated")], page: page, total: 5000)
+        }
+        let terminal = CloudflareTunnelInspectionClient.maximumPages + 1
+        let complete = try Probe(pages + [body(page: terminal, total: 5001)])
+        let result = try await inspect(selected, probe: complete); XCTAssertNotNil(result)
+        let requests = await complete.all(); XCTAssertEqual(requests.count, terminal)
+        pages.append(try body([tunnel(selected, id: "aaaaaaaa-1111-4111-8111-111111111111", name: "unrelated")],
+            page: terminal, total: 5001))
+        try await failure(.invalidResponse, selected: selected, probe: Probe(pages))
     }
     func testResponseAndAggregateByteLimitsDoNotReturnAFalseAbsence() async throws {
         let selected = try input()
@@ -203,7 +248,7 @@ final class CloudflareTunnelInspectionClientTests: XCTestCase, @unchecked Sendab
         catch { XCTAssertEqual(error as? CloudflareProvisioningError, .wrongScope) }
         do { _ = try await client.inspect(selected.configuration, expected: other, plan: selected.plan); XCTFail() } catch {}
         let requests = await probe.all(); XCTAssertEqual(requests.count, 0)
-        for page in [0, CloudflareTunnelInspectionClient.maximumPages + 1] {
+        for page in [0, CloudflareTunnelInspectionClient.maximumPages + 2] {
             XCTAssertThrowsError(try selected.configuration.tunnelInspectionRequest(expected: selected.expected, plan: selected.plan, page: page))
         }
     }

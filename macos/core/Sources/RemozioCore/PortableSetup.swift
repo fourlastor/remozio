@@ -120,7 +120,7 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
         try plan.validate(expected: expected)
         guard let selected = expected.recipe.cloudflare, selected.accountID == accountID,
               selected.zoneID == zoneID, selected.dnsSuffix == dnsSuffix,
-              (1...CloudflareTunnelInspectionClient.maximumPages).contains(page) else {
+              (1...CloudflareTunnelInspectionClient.maximumRequests).contains(page) else {
             throw CloudflareProvisioningError.wrongScope
         }
         var endpoint = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel")!
