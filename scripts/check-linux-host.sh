@@ -30,3 +30,6 @@ swift test --package-path host/shared-core \
     --scratch-path "$work_dir/build" \
     --disable-keychain --disable-netrc --force-resolved-versions \
     --jobs "$jobs"
+
+python3 scripts/run-linux-approval-command-experiment.py \
+    --work-dir "$work_root/approval-command"

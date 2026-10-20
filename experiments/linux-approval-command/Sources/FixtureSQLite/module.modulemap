@@ -1,0 +1,5 @@
+module FixtureSQLite [system] {
+    header "shim.h"
+    link "sqlite3"
+    export *
+}
