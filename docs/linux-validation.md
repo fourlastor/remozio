@@ -58,6 +58,21 @@ timeouts, cleanup and untested cases. The [TPM/TLS experiment](experiments/linux
 has separate dependency and invocation instructions; simulator results must remain
 labelled as simulator results. None of these commands installs a production daemon.
 
+The separate [native Swift/provider experiment](../experiments/linux-native-tpm-tls/README.md)
+uses an internal C/OpenSSL shim for actual provider-backed signing and one TLS
+server exchange. Its private-simulator controls retain separate authority and
+transport keys, reject software keys and wrong peers, require negotiated ALPN
+even when the extension is omitted, and enforce bounded execution. It neither
+reuses the historical hardware fixture nor extends that device evidence to the
+native path. The portable runner tests are part of repository checks; the explicit
+native build and simulator run require their documented development/runtime
+dependencies. The Ubuntu 24.04 Linux Swift CI job installs those test dependencies,
+extracts the checksum-pinned resource manager into a private prefix without
+installing its service, and requires the native build and simulator controls.
+That runner's result remains pending until the PR check passes. A production signing API,
+TLS-stack choice, protected service identity and key-authorization policy remain
+separate reviewed decisions.
+
 The separate [controlled monitor experiment](experiments/linux-caller-monitor.md)
 extends the caller work with supervised fixture launch, event invalidation and a
 simulated stopped handoff. Its native fixture runs independently of a phone or
