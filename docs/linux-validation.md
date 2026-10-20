@@ -74,6 +74,15 @@ do not establish production authority, physical-phone approval or protected call
 
 ## Local gate and CI coverage
 
+The [storage lease experiment](../experiments/linux-storage-lease/README.md) also
+runs in `check-linux-host.sh`. It retains existing private directories and files,
+checks ownership, modes, ACL absence and object identity, and holds a cooperative
+writer lock. Its 33 controls include 29 live ordinary-user filesystem controls
+and four explicitly injected error controls. Filesystem and ACL prerequisites
+must be available; unsupported semantics fail rather than skip. These are fixture
+mechanics, not a protected service identity, durable journal or production storage
+policy. Advisory locking does not exclude a malicious same-account writer.
+
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
 selects the checks executable on the current host. No Git hook is installed:
 
