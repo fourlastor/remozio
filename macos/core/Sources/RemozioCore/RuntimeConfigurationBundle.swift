@@ -51,10 +51,33 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
 
     static func initial(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
                         reference: RuntimeMaterialReference, inventory: InstallationInventory,
-                        presencePolicyOverride: PresenceConfiguration? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
-        let presence = try presencePolicyOverride ?? .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000)
+                        importIntent: SharedSetupImportIntent? = nil,
+                        presencePolicyOverride: PresenceConfiguration? = nil,
+                        relayPlan: SharedSetupImportRelayPlan? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
+        let presence: PresenceConfiguration
+        let relayPort: UInt16?
+        if let importIntent, importIntent.recipe.cloudflare != nil {
+            guard let relayPlan else { throw RuntimePreparationError.incomplete }
+            try relayPlan.validate(expected: importIntent)
+            guard relayPortOverride == nil || relayPortOverride == relayPlan.port else { throw SharedSetupImportError.conflict }
+            relayPort = relayPlan.port
+        } else {
+            guard relayPlan == nil else { throw SharedSetupImportError.conflict }
+            relayPort = relayPortOverride
+        }
+        if let importIntent {
+            guard importIntent.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)) else {
+                throw SharedSetupImportError.wrongScope
+            }
+            presence = try importIntent.recipe.settings.defaults.presence
+            if let other = presencePolicyOverride {
+                guard other.idleMilliseconds == presence.idleMilliseconds,
+                      other.observationLifetimeMilliseconds == presence.observationLifetimeMilliseconds,
+                      other.unavailableGraceMilliseconds == presence.unavailableGraceMilliseconds else { throw SharedSetupImportError.conflict }
+            }
+        } else { presence = try presencePolicyOverride ?? .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000) }
         return try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
-            presencePolicy: presence, relayPort: relayPortOverride,
+            presencePolicy: presence, relayPort: relayPort,
             environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
             submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
             captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))

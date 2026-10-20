@@ -37,16 +37,27 @@ enum RuntimePublicationController {
 
     // Logical composition fixtures do not prove native Root ownership, account isolation, signing, or service registration.
     static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent,
-                        expected: RuntimePreparationState, verifyCurrent: @escaping () throws -> Void,
+                        expected: RuntimePreparationState, importIntent: SharedSetupImportIntent? = nil, relayPlan: SharedSetupImportRelayPlan? = nil,
+                        verifyCurrent: @escaping () throws -> Void,
                         verifyServices: @escaping (ServiceAccountPlan) throws -> Void,
                         verifyAuthority: (ServiceAccountPlan) throws -> Void,
                         restoreMaterial: (ServiceAccountPlan, RuntimeMaterialReference?, () throws -> Void) throws -> RuntimePreparationMaterial,
                         verifyActivity: @escaping (ServiceReleaseActivityReference) throws -> Void = { _ in throw RuntimePreparationError.incomplete },
                         publish: (RuntimeConfigurationBundle, RuntimePreparationMaterial, () throws -> Void) throws -> Void,
+                        validatePublishedImport: (RuntimeConfigurationBundle, RuntimePreparationMaterial, () throws -> Void) throws -> Void = { _, _, _ in throw RuntimePreparationError.incomplete },
                         didStage: (Stage) throws -> Void = { _ in }) throws -> RuntimePreparationState {
         try verifyCurrent(); try machine.validateAccountPreparation(account)
         guard let inventory = try machine.inventory(), let initialization = try machine.initialization(accountID: account.accountID),
               initialization.complete else { throw RuntimePreparationError.incomplete }
+        if let importIntent {
+            guard importIntent.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)) else {
+                throw SharedSetupImportError.wrongScope
+            }
+        }
+        if let importIntent, importIntent.recipe.cloudflare != nil {
+            guard let relayPlan else { throw RuntimePreparationError.incomplete }
+            try relayPlan.validate(expected: importIntent)
+        } else { guard relayPlan == nil else { throw SharedSetupImportError.conflict } }
         let state = try machine.serviceAccountPlan(accountID: account.accountID)
         guard state.complete, let services = state.plan else { throw RuntimePreparationError.incomplete }
         try services.validate(account: account)
@@ -70,6 +81,11 @@ enum RuntimePublicationController {
         if let retainedReference, retainedReference != reference { throw RuntimePreparationError.conflictingMaterial }
         if expected.configurationPublished {
             guard retainedReference != nil else { throw RuntimePreparationError.incomplete }
+            if let importIntent {
+                let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
+                    reference: reference, inventory: inventory, importIntent: importIntent, relayPlan: relayPlan)
+                try validatePublishedImport(bundle, material, verify); try verify()
+            }
             return expected
         }
         // Recheck the actual files after material recovery and immediately before retaining their identities.
@@ -79,9 +95,10 @@ enum RuntimePublicationController {
         retainedReference = reference
         try didStage(.referenceRetained); try verify()
         let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
-            reference: reference, inventory: inventory)
+            reference: reference, inventory: inventory, importIntent: importIntent, relayPlan: relayPlan)
         try publish(bundle, material, verify)
         try didStage(.filesPublished); try verify()
+        if importIntent != nil { try validatePublishedImport(bundle, material, verify); try verify() }
         // Recheck the retained material after all outputs. An established reference never permits creation here.
         let confirmed = try restoreMaterial(services, reference, verify)
         guard try confirmed.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
