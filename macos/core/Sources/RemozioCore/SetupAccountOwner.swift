@@ -701,6 +701,67 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func applyImportedRelayIngress(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                   send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareTunnelConfigurationObservation {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, created, _, scoped in
+            let intent = binding.retained
+            let routes = CloudflarePrivateRouteClient(send: scoped)
+            _ = try await routes.inspect(configuration, expected: intent, plan: plan, created: created)
+            let observed = try await CloudflareTunnelConfigurationClient(send: scoped).apply(configuration, expected: intent, plan: plan, created: created)
+            _ = try await routes.inspect(configuration, expected: intent, plan: plan, created: created)
+            return observed
+        }
+    }
+
+    func inspectImportedRelayPrivateRoutes(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                          send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflarePrivateRouteObservation {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, created, _, scoped in
+            let intent = binding.retained
+            return try await CloudflarePrivateRouteClient(send: scoped).inspect(configuration, expected: intent, plan: plan, created: created)
+        }
+    }
+
+    private func withCreatedImportedRelay<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                            send: CloudflareProvisioningScopeClient.Send?,
+                            operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
+                                SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, @escaping CloudflareProvisioningScopeClient.Send) async throws -> Value) async throws -> Value {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            let retained = try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner),
+                      let snapshot = try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) else {
+                    throw RelayProvisioningError.requiresReconciliation
+                }
+                _ = try record.createdTunnel(expected: intent, plan: plan); try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyRetained() throws {
+                try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == retained.0,
+                          try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == retained.1 else {
+                        throw RelayProvisioningError.staleRecord
+                    }
+                    try verify()
+                }
+            }
+            let transport: CloudflareProvisioningScopeClient.Send
+            if let send { transport = send }
+            else { let native = try FCMHTTPTransport(timeoutSeconds: 30); transport = { try await native.send($0) } }
+            let scoped: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyRetained()
+                return try await transport(request)
+            }
+            do {
+                _ = try await CloudflareCreatedTunnelClient(send: scoped).inspect(configuration, expected: binding.retained, plan: plan, created: retained.0)
+                try Task.checkCancellation(); try verifyRetained()
+                let observed = try await operation(configuration, binding, plan, retained.0, retained.1, scoped)
+                try Task.checkCancellation(); try verifyRetained(); return observed
+            } catch {
+                try Task.checkCancellation(); try verifyRetained()
+                throw error
+            }
+        }
+    }
+
     private func withImportedRelayProvisioning<Value>(binding: ImportedRelayInspectionBinding, callerUID: uid_t,
                     expected: SetupPortableImportProgress, proposal: PortableSetup,
                     body: (SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {

@@ -178,6 +178,17 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
         return request
     }
 
+    func privateRouteInspectionRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                       created: SharedSetupRelayProvisioningRecord, kind: CloudflarePrivateRouteClient.Kind) throws -> URLRequest {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: created)
+        let path = kind == .ip ? "/teamnet/routes" : "/zerotrust/routes/hostname"
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + path)!
+        url.queryItems = [.init(name: "tunnel_id", value: tunnel.tunnelID), .init(name: "is_deleted", value: "false"),
+                          .init(name: "page", value: "1"), .init(name: "per_page", value: "100")]
+        request.url = url.url!; return request
+    }
+
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }
