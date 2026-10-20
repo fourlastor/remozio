@@ -212,7 +212,7 @@ def run_native(args):
         try:
             experiment.start()
             versions = {"openssl": experiment.openssl("version").stdout.decode().strip(),
-                "tpm2Tools": BASE.tpm2_version(experiment.run(tools[0], "--version").stdout)}
+                "tpm2Tools": BASE.tpm2_version(experiment.tool("getcap", "--version").stdout)}
             experiment.provision()
             (directory / "message").write_bytes(b"Remozio disposable authority signature fixture v1")
             experiment.verify()

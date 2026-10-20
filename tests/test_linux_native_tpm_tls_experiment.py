@@ -113,7 +113,7 @@ class NativeLifecycleTests(unittest.TestCase):
                 path.touch(mode=0o700)
             fake = Mock()
             fake.openssl.return_value = subprocess.CompletedProcess([], 0, stdout=b"OpenSSL fixture")
-            fake.run.return_value = subprocess.CompletedProcess([], 0, stdout=b'version="5.7"')
+            fake.tool.return_value = subprocess.CompletedProcess([], 0, stdout=b'version="5.7"')
             fake.provision.side_effect = EXPERIMENT.Refused("injected-provision-failure")
             with patch.object(EXPERIMENT, "NativeExperiment", return_value=fake) as constructor, \
                     patch.object(EXPERIMENT.platform, "system", return_value="Linux"),                     patch.object(EXPERIMENT.os, "getuid", return_value=1000), \
@@ -123,6 +123,70 @@ class NativeLifecycleTests(unittest.TestCase):
             fake.start.assert_called_once_with()
             fake.halt.assert_called_once_with()
             self.assertFalse(constructor.call_args.args[0].exists())
+
+
+class NativeToolsVersionTests(unittest.TestCase):
+    def version_stage(self, output, exit_status=0):
+        # Drive the native runner through the real inherited tool/run methods.
+        # Only process execution and simulator lifecycle are replaced; no TPM is used.
+        values = []
+        sanitizer = EXPERIMENT.BASE.tpm2_version
+
+        def capture_version(data):
+            value = sanitizer(data)
+            values.append(value)
+            return value
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for relative in ("usr/bin/tpm2", "usr/bin/swtpm", "usr/sbin/tpm2-abrmd", "probe"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(mode=0o700)
+            tool = str(root / "usr/bin/tpm2")
+
+            def command(arguments, **kwargs):
+                if arguments == ["openssl", "version"]:
+                    return subprocess.CompletedProcess(arguments, 0, stdout=b"OpenSSL fixture", stderr=b"")
+                if arguments == [tool, "getcap", "--version"]:
+                    return subprocess.CompletedProcess(arguments, exit_status, stdout=output, stderr=b"private diagnostic")
+                # Noble5.6 misses top-level --version when argv[0] is an absolute path.
+                return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"unknown tool")
+
+            with patch.object(EXPERIMENT.NativeExperiment, "start"), \
+                    patch.object(EXPERIMENT.NativeExperiment, "halt") as halt, \
+                    patch.object(EXPERIMENT.NativeExperiment, "provision",
+                        side_effect=EXPERIMENT.Refused("stop-after-version")) as provision, \
+                    patch.object(EXPERIMENT.BASE, "tpm2_version", side_effect=capture_version), \
+                    patch.object(EXPERIMENT.subprocess, "run", side_effect=command) as run, \
+                    patch.object(EXPERIMENT.platform, "system", return_value="Linux"), \
+                    patch.object(EXPERIMENT.os, "getuid", return_value=1000), \
+                    patch.object(EXPERIMENT.os, "geteuid", return_value=1000), \
+                    self.assertRaises(EXPERIMENT.Refused) as raised:
+                EXPERIMENT.run_native(SimpleNamespace(runtime_root=root, probe=root / "probe"))
+            calls = [call for call in run.call_args_list if call.args[0][0] == tool]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0].args[0], [tool, "getcap", "--version"])
+            self.assertEqual(calls[0].kwargs["timeout"], EXPERIMENT.BASE.DEADLINE)
+            self.assertTrue(calls[0].kwargs["capture_output"])
+            halt.assert_called_once_with()
+            return str(raised.exception), values, provision.call_count
+
+    def test_absolute_multicall_version_uses_subtool_and_discards_private_fields(self):
+        error, values, provisions = self.version_stage(
+            b'tool="/home/example/private runtime/tpm2_getcap" version="5.6" tctis="libtss2-tctildr"\n')
+        self.assertEqual((error, values, provisions), ("stop-after-version", ["5.6"], 1))
+
+    def test_nonzero_version_command_is_refused_even_with_valid_stdout(self):
+        error, values, provisions = self.version_stage(b'version="5.6"\n', exit_status=1)
+        self.assertEqual((error, values, provisions), ("command-failed:tpm2:getcap", [], 0))
+        self.assertNotIn("private diagnostic", error)
+
+    def test_successful_command_with_ambiguous_or_path_version_is_refused(self):
+        for output in (b'version="5.6" version="5.7"\n', b'version="/private/path"\n', b'tool="private"\n'):
+            with self.subTest(output=output):
+                error, values, provisions = self.version_stage(output)
+                self.assertEqual((error, values, provisions), ("invalid-tpm2-version", [], 0))
 
 
 if __name__ == "__main__":
