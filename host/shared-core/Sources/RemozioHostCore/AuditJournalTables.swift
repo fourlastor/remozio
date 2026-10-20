@@ -160,6 +160,11 @@ public final class AuditJournalTables {
         }
     }
 
+    // Consumption must append through the exact same connection and scope before either table can commit.
+    func matchesConsumptionContext(connection: OpaquePointer, macID: Data, accountID: Data) -> Bool {
+        db == connection && self.macID == macID && self.accountID == accountID
+    }
+
     private func transaction() throws {
         guard sqlite3_get_autocommit(db) == 0 else { throw AuditJournalError.transactionRequired }
     }

@@ -126,6 +126,26 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
         // The ordinary-user fixture cannot satisfy the production Root-owned ancestor walk.
         XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivate(path: fixture.path, serviceUID: getuid()))
     }
+    func testRootServiceReaderRejectsOrdinaryCallersWithoutWeakeningServiceAdmission() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
+        let fixture = try Fixture()
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivateAsRoot(path: fixture.path, serviceUID: getuid())) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertThrowsError(try ProtectedServiceConfiguration.readServicePrivate(path: fixture.path, serviceUID: getuid() + 1)) {
+            XCTAssertEqual($0 as? ApprovalTransportStartupError, .wrongAccount)
+        }
+    }
+    func testNativePublicationUsesRootAdmissionForServiceOwnedArtifacts() throws {
+        guard geteuid() != 0 else { throw XCTSkip("Requires normal user") }
+        let fixture = try Fixture()
+        let artifact = RuntimePublishedArtifactValidation.Artifact(path: fixture.path, bytes: Data([1, 2, 3]),
+            access: .servicePrivate(getuid() + 1))
+        XCTAssertThrowsError(try RuntimePublishedArtifactValidation.nativeRead(artifact)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+    }
+
     func testRejectsUnknownVersionFieldsDuplicatesAndInvalidBounds() throws {
         let value = try configuration(), limits = try CBORLimits(maxBytes: 65536, maxDepth: 3, maxItems: 128)
         guard case .map(let fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else { return XCTFail("Expected map") }
