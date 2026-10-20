@@ -721,6 +721,125 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func createImportedAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                         send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupAccessApplicationRecord {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, scoped in
+            let initial = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                let record = try SharedSetupAccessApplicationStorage.begin(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                let snapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner))
+                return (record, snapshot)
+            }
+            if initial.0.phase == .created { return initial.0 }
+            guard initial.0.phase == .prepared else { throw RelayProvisioningError.requiresReconciliation }
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            let client = CloudflareAccessApplicationClient(send: scoped)
+            try await client.inspectAbsent(configuration, expected: binding.retained, plan: plan, createdTunnel: tunnel)
+            try Task.checkCancellation()
+            let dispatched = try initial.0.transition(to: .dispatched)
+            let sentSnapshot = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == initial.1 else { throw RelayProvisioningError.staleRecord }
+                try Task.checkCancellation()
+                try SharedSetupAccessApplicationStorage.replace(dispatched, previous: initial.0, expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                return try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner))
+            }
+            let outcome: CloudflareAccessApplicationCreationOutcome
+            do { outcome = try await client.create(configuration, expected: binding.retained, plan: plan, createdTunnel: tunnel, dispatched: dispatched) }
+            catch { outcome = .unknown }
+            let next: SharedSetupAccessApplicationRecord
+            switch outcome {
+            case .created(let app):
+                if app.accountID == configuration.accountID, app.name == plan.accessApplicationName, app.hostname == plan.hostname,
+                   let value = try? dispatched.transition(to: .created, applicationID: app.applicationID, audience: app.audience) { next = value }
+                else { next = try dispatched.transition(to: .unknown) }
+            case .rejected(let refusal): next = try dispatched.transition(to: .rejected, refusal: refusal)
+            case .unknown: next = try dispatched.transition(to: .unknown)
+            }
+            try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == sentSnapshot else { throw RelayProvisioningError.staleRecord }
+                try SharedSetupAccessApplicationStorage.replace(next, previous: dispatched, expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            return next
+        }
+    }
+
+    func inspectImportedInitialAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                                send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareInitialAccessObservation {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
+            try await CloudflareAccessApplicationClient(send: scoped).inspectInitial(configuration, expected: binding.retained,
+                plan: plan, createdTunnel: tunnel, application: application)
+        }
+    }
+
+    func inspectImportedAccessHostnameInventory(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                               send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareAccessHostnameInventory {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
+            try await CloudflareAccessHostnameClient(send: scoped).inspect(configuration, expected: binding.retained,
+                plan: plan, createdTunnel: tunnel, application: application)
+        }
+    }
+
+    private func withCreatedImportedAccessApplication<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                        send: CloudflareProvisioningScopeClient.Send?,
+                        operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
+                            SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, SharedSetupAccessApplicationRecord, @escaping CloudflareProvisioningScopeClient.Send) async throws -> Value) async throws -> Value {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, scoped in
+            let retained = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) else { throw RelayProvisioningError.requiresReconciliation }
+                _ = try record.createdApplication(expected: intent, plan: plan, createdTunnel: tunnel)
+                let snapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner)); try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyAccess() throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == retained.0,
+                          try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == retained.1 else { throw RelayProvisioningError.staleRecord }; try verify()
+                }
+            }
+            let accessSend: CloudflareProvisioningScopeClient.Send = { request in try Task.checkCancellation(); try verifyAccess(); return try await scoped(request) }
+            do {
+                let result = try await operation(configuration, binding, plan, tunnel, tunnelSnapshot, retained.0, accessSend)
+                try verifyAccess(); return result
+            } catch { try Task.checkCancellation(); try verifyAccess(); throw error }
+        }
+    }
+
+    private static func requireAccessSnapshot(_ value: SharedSetupAccessApplicationStorage.Snapshot?) throws -> SharedSetupAccessApplicationStorage.Snapshot {
+        guard let value else { throw RelayProvisioningError.staleRecord }; return value
+    }
+
+    private func withImportedAccessDirectory<Value>(binding: ImportedRelayInspectionBinding, tunnel: SharedSetupRelayProvisioningRecord,
+                        tunnelSnapshot: SharedSetupRelayProvisioningStorage.Snapshot, callerUID: uid_t, expected: SetupPortableImportProgress,
+                        proposal: PortableSetup,
+                        body: (SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {
+        try withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+            return try withoutActuallyEscaping(verify) { current in
+                func verifyAll() throws {
+                    try current()
+                    guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == tunnel,
+                          try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == tunnelSnapshot else {
+                        throw RelayProvisioningError.staleRecord
+                    }
+                }
+                try verifyAll(); let result = try body(intent, plan, directory, owner, verifyAll); try verifyAll(); return result
+            }
+        }
+    }
+
     private func withCreatedImportedRelay<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                             send: CloudflareProvisioningScopeClient.Send?,
                             operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
