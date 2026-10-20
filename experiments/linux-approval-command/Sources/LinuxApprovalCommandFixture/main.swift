@@ -8,13 +8,31 @@ import RemozioProtocol
 #endif
 
 let ordinaryCases: Set<String> = ["approve", "malformed-decision", "malformed-capture", "bad-signature", "decline",
-    "expired", "expire-before-consume", "replay", "audit-failure", "crash-before-launch", "crash-after-output"]
+    "expired", "expire-before-consume", "expire-at-shared-consume", "replay", "submission-id-replay", "submission-nonce-replay",
+    "audit-failure", "crash-before-launch", "crash-after-output"]
 let reopenCases: Set<String> = ["reopen-completed", "recover-before-launch", "recover-after-output"]
 
 func expectedRefusal(_ operation: () throws -> Void, matching: (Error) -> Bool) throws {
     do { try operation() }
     catch { try require(matching(error), "unexpectedRefusal"); return }
     throw FixtureError.failed("expectedRefusalMissing")
+}
+
+/// New capture, request and software keys; only the historical identifier is reused.
+/// A valid new decision cannot authorize a second admission of the reserved ID or nonce.
+func refuseSubmissionReplay(store: FixtureStore, directory: String, clock: LinuxAuthorityClock,
+                            original: CapturedSubmission, sameID: Bool) throws {
+    var changedID = original.id, changedNonce = original.nonce, changedCaller = original.callerBinding
+    changedID[0] ^= 0xff; changedNonce[0] ^= 0xff; changedCaller[0] ^= 0xff
+    let submission = CapturedSubmission(id: sameID ? original.id : changedID,
+        nonce: sameID ? changedNonce : original.nonce, callerBinding: changedCaller)
+    let command = try OwnedCommand(directory: directory, submission: submission)
+    let material = try FixtureProtocol.make(capture: command.capture.canonicalBytes, clock: clock)
+    try command.validate(command.capture)
+    _ = try material.verify(now: clock.now())
+    try expectedRefusal({ _ = try store.consume(material, command: command, now: clock.now) }) {
+        ($0 as? CommandSubmissionReplayError) == .alreadyReserved
+    }
 }
 
 func runFixture() throws {
@@ -40,6 +58,11 @@ func runFixture() throws {
         let prior = try store.snapshot()
         if scenario == "reopen-completed" {
             try require(prior.phase == "succeeded" && prior.rows == 1 && prior.records == 3, "reopenState")
+            let reservation = try store.reservation()
+            for sameID in [true, false] {
+                try refuseSubmissionReplay(store: store, directory: directory, clock: clock,
+                    original: reservation.submission, sameID: sameID)
+            }
             decisionResult = "reopened"; expectedPhase = "succeeded"; expectedExecutions = 1; expectedRecords = 3
         } else {
             try require(prior.phase == (scenario == "recover-before-launch" ? "authorized" : "executing"), "recoveryState")
@@ -82,6 +105,17 @@ func runFixture() throws {
                 ($0 as? DecisionVerificationError) == .expired
             }
             decisionResult = "expiredBeforeConsume"
+        case "expire-at-shared-consume":
+            try admit()
+            var samples = 0
+            try expectedRefusal({
+                _ = try store.consume(material, command: command, now: {
+                    samples += 1
+                    return samples == 1 ? initialNow : deadline
+                })
+            }) { ($0 as? DecisionVerificationError) == .expired }
+            try require(samples == 2, "sharedConsumptionClockSample")
+            decisionResult = "expiredAtSharedConsume"
         case "audit-failure":
             try admit()
             try store.injectAuditFailure()
@@ -109,12 +143,17 @@ func runFixture() throws {
                 decisionResult = "accepted"; expectedPhase = "succeeded"; expectedRecords = 3; expectedExecutions = 1
                 if scenario == "replay" {
                     try expectedRefusal({ _ = try store.consume(material, command: command, now: clock.now) }) {
-                        if case FixtureError.failed("fixtureReplay") = $0 { return true }; return false
+                        ($0 as? ConsumptionJournalError) == .alreadyConsumed
                     }
                     try expectedRefusal({ try store.dispatched(token) }) {
                         if case FixtureError.failed("fixtureTokenReplay") = $0 { return true }; return false
                     }
                     decisionResult = "replayRejected"
+                }
+                if scenario == "submission-id-replay" || scenario == "submission-nonce-replay" {
+                    try refuseSubmissionReplay(store: store, directory: directory, clock: clock,
+                        original: command.capture.submission, sameID: scenario == "submission-id-replay")
+                    decisionResult = scenario == "submission-id-replay" ? "submissionIDReplayRejected" : "submissionNonceReplayRejected"
                 }
             }
         }
@@ -129,13 +168,14 @@ func runFixture() throws {
     let checks = ["expectedDecisionResult": !decisionResult.isEmpty,
         "expectedLedgerState": snapshot.phase == expectedPhase && snapshot.rows == expectedRows,
         "expectedAuditState": snapshot.records == expectedRecords,
+        "expectedReplayState": snapshot.reservations == expectedRows,
         "expectedExecutionCount": markerBytes == expectedMarker,
         "expectedCheckpointState": try store.checkpointMatches() && store.checkpointAction == expectedCheckpoint]
     try require(checks.values.allSatisfy { $0 }, "reportChecks")
     let report: [String: Any] = ["passed": true, "checks": checks, "observations": [
-        "fixtureOnlyLedger": true, "productionAuthority": false, "physicalPhone": false, "hardwareKeys": false,
+        "fixtureOnlyOwner": true, "sharedConsumptionTables": true, "sharedReplayTables": true, "productionAuthority": false, "physicalPhone": false, "hardwareKeys": false,
         "syntheticRequesterClaims": true, "executions": expectedExecutions, "phase": snapshot.phase,
-        "checkpointAction": store.checkpointAction, "consumptionRows": snapshot.rows, "auditRecords": snapshot.records,
+        "checkpointAction": store.checkpointAction, "consumptionRows": snapshot.rows, "submissionReservations": snapshot.reservations, "auditRecords": snapshot.records,
         "outputMatched": outputMatched, "childExitStatus": childExitStatus.map { $0 as Any } ?? NSNull(),
         "decisionResult": decisionResult,
     ]]
