@@ -25,7 +25,7 @@ It checks retained resource digests and revalidates local import state around ev
 The observations do not lock provider state or grant a reusable publication permit.
 
 Hostname assessment distinguishes no other observed match, simple broader wildcard roots and unresolved precedence.
-The simple wildcard case uses the vendor's specificity rule.
+The current assessment infers precedence for simple broader wildcard roots from the vendor's specificity rule.
 Real hostname precedence and edge propagation remain integration gates.
 Complex paths, public overrides, duplicate matches and unresolved application fields require reconciliation.
 
@@ -41,8 +41,11 @@ Scope changes that prevent recording leave the earlier dispatch unresolved.
 
 ## Validation boundary
 
-The source is prepared for focused synthetic checks and the complete required publication gate.
-No passing result is claimed by this preparation.
+The focused run passed 309 synthetic controls at source `8ba3dcc`, with no failures or skips.
+It covered the tunnel, Access, private-route and DNS sequence on the integrated dependency.
+This focused result does not substitute for the complete publication gate.
+
+The complete required publication gate remains pending on the final published dependency.
 Fixtures use temporary files and synthetic provider responses.
 They cover exact bindings, changed prerequisites, late creation, cancellation, unknown outcomes and independent record readback.
 
