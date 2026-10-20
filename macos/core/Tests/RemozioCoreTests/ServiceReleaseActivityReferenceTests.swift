@@ -160,11 +160,11 @@ final class ServiceReleaseActivityReferenceTests: XCTestCase {
         let f = try RuntimeActivationFixture(), m = try extended(f.material, activity: activity(f.services)), reference = try m.reference
         XCTAssertThrowsError(try RuntimeActivationPlan(account: f.account, initialization: XCTUnwrap(f.machine.initialization(accountID: f.account.accountID)),
             runtime: .init(reference: reference, configurationPublished: true), inventory: XCTUnwrap(f.machine.inventory()))) {
-            XCTAssertEqual($0 as? RuntimeActivationError, .unavailable)
+            XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
         }
         var map = try fields(f.plan.encoded); map[1] = .bytes(try reference.encoded)
         XCTAssertThrowsError(try RuntimeActivationPlan.decode(DeterministicCBOR.encode(.map(map), limits: loose))) {
-            XCTAssertEqual($0 as? RuntimeActivationError, .unavailable)
+            XCTAssertEqual($0 as? RuntimeActivationError, .invalidPlan)
         }
         XCTAssertEqual(try RuntimeActivationPlan.decode(f.plan.encoded).encoded, try f.plan.encoded)
     }

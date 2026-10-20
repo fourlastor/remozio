@@ -19,7 +19,7 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
         var directServiceCheck: (() throws -> Void)?
         var materialCreations = 0, publications = 0, activityChecks = 0
         init() throws {
-            let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild]
+            let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .setupController, .commandFrontend, .commandMonitor, .commandChild]
             let policy = try AuthorityCodePolicy(entries: roles.map {
                 try .init(role: $0, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.role-\($0.rawValue)", installedGeneration: 1,
                     minimumGeneration: 1, codeDirectoryHash: Data(repeating: UInt8($0.rawValue), count: 20), active: true)

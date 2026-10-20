@@ -17,4 +17,25 @@ enum GatewayRuntimeSettingsFenceReleaseValidation {
                   entry.role != .setupController || format.writers.contains(version) else { throw GatewayPreparationError.changedScope }
         }
     }
+    /// Recovery uses fence2 and companion request2. Old releases cannot publish or accept this pause record.
+    static func validateRecovery(_ release: SignedReleaseEvidence, policy: AuthorityCodePolicy) throws {
+        try validate(release, policy: policy)
+        for role in [AuthorityCodeRole.authority, .transport, .notificationGateway, .setupController] {
+            guard let component = release.manifest.components.first(where: { $0.role == role }),
+                  let fence = component.formats.first(where: { $0.name == formatName }), fence.readers.contains(2),
+                  role != .authority || fence.writers.contains(2) else { throw GatewayPreparationError.changedScope }
+            let consumers: [GatewaySettingsConsumerRole]
+            switch role {
+            case .authority: consumers = [.gateway, .transport]
+            case .transport: consumers = [.transport]
+            case .notificationGateway: consumers = [.gateway]
+            default: consumers = []
+            }
+            for consumer in consumers {
+                guard let format = component.formats.first(where: { $0.name == consumer.formatName }),
+                      format.readers.contains(2), format.writers.contains(2) else { throw GatewayPreparationError.changedScope }
+            }
+        }
+    }
+
 }

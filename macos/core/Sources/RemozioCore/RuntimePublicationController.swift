@@ -117,6 +117,7 @@ enum RuntimePublicationController {
         try publish(bundle.command.canonicalBytes, .commandConfiguration, privateState)
         try publish(material.transportIdentity, .transportIdentity(ownerUID: transport.number, groupID: transport.number), shared)
         try publish(bundle.transport.canonicalBytes, .transportConfiguration, shared)
+        if let host = try bundle.gatewaySettingsHost { try publish(host.encoded, .gatewaySettingsHost, shared) }
         let owner = material.services.ownerUID
         try publish(bundle.presenceClient.canonicalBytes, .presenceClient(ownerUID: owner), global)
         try publish(bundle.pairingClient.canonicalBytes, .pairingClient(ownerUID: owner), global)

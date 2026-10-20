@@ -156,6 +156,70 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    func retainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+        try transaction(write: false) {
+            try identity(macID)
+            let schema = try scalar("PRAGMA user_version")
+            let inventory = try schema >= 2 ? loadInventoryRecord() : nil
+            guard schema >= 6 else {
+                return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [])
+            }
+            func accounts(_ sql: String) throws -> [Data] {
+                try statement(sql) { row in
+                    var result: [Data] = []
+                    while try step(row) == SQLITE_ROW {
+                        guard result.count < 64 else { throw PreparationStoreError.corruptRecord }
+                        result.append(try blob(row, column: 0, maximum: 16))
+                    }
+                    return result
+                }
+            }
+            let ids = try accounts("SELECT account FROM runtime_preparation_v1 ORDER BY account")
+            let activated = try schema >= 7 ? accounts("SELECT account FROM runtime_activation_v1 ORDER BY account") : []
+            guard activated.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
+            var values: [RuntimeReleaseCompatibilitySnapshot.Runtime] = []
+            for id in ids {
+                let state = try loadRuntimePreparation(accountID: id)
+                guard let reference = state.reference else { throw PreparationStoreError.corruptRecord }
+                try requireRuntimeMaterialScope(reference)
+                var record: Data?, registered = false
+                if activated.contains(id) {
+                    let activation = try loadRuntimeActivation(accountID: id)
+                    guard let plan = activation.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
+                    try requireRuntimeActivationScope(plan)
+                    if activation.jobsRegistered {
+                        guard let inventory, try plan.enrolledInventory(inventory) == inventory else { throw PreparationStoreError.corruptRecord }
+                    }
+                    record = try plan.encoded; registered = activation.jobsRegistered
+                }
+                values.append(.init(reference: reference, configurationPublished: state.configurationPublished,
+                    activationRecord: record, jobsRegistered: registered))
+            }
+            let gatewayIDs = try schema >= 10 ? accounts("SELECT account FROM gateway_runtime_activation_v1 ORDER BY account") : []
+            let settingsIDs = try schema >= 11 ? accounts("SELECT account FROM gateway_settings_transition_v1 ORDER BY account") : []
+            guard gatewayIDs.allSatisfy({ activated.contains($0) }), settingsIDs.allSatisfy({ gatewayIDs.contains($0) }) else {
+                throw PreparationStoreError.corruptRecord
+            }
+            var gateways: [RuntimeReleaseCompatibilitySnapshot.Gateway] = []
+            for id in gatewayIDs {
+                let state = try loadGatewayRuntimeActivation(accountID: id)
+                guard let plan = state.plan else { throw PreparationStoreError.corruptRecord }
+                let scope = try requireGatewayRuntimeActivationScope(plan)
+                if state.jobRegistered {
+                    let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
+                    guard try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw PreparationStoreError.corruptRecord }
+                }
+                let settings = try schema >= 11 ? loadGatewaySettingsTransition(accountID: id) : .empty
+                if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision) }
+                gateways.append(.init(accountID: id, activationRecord: try plan.encoded,
+                    configurationPublished: state.filesPublished, jobRegistered: state.jobRegistered,
+                    activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
+                    settingsPhase: settings.phase?.rawValue))
+            }
+            try identity(macID)
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways)
+        }
+    }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
         return try transaction(write: false) {

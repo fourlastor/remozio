@@ -15,11 +15,12 @@ struct InstalledAccountJobManifest {
     var path: String { Self.directory + "/" + declaration.plistName! }
 
     init(accountID: Data, role: AuthorityCodeRole, executionUID: UInt32, userName: String,
-         bundlePath: String, gatewaySettingsControlEnabled: Bool = false) throws {
+         bundlePath: String, gatewaySettingsControlEnabled: Bool = false, settingsConsumerHostEnabled: Bool = false) throws {
         let paths = try RuntimePreparationPaths(accountID: accountID)
         let serviceRole: ServiceAccountRole = role == .notificationGateway ? .gateway : .transport
         guard role == .authority || role == .transport || role == .notificationGateway,
               !gatewaySettingsControlEnabled || role == .authority,
+              !settingsConsumerHostEnabled || role == .transport || role == .notificationGateway,
               role == .authority ? (executionUID == 0 && userName == "root") :
                 (executionUID > 0 && executionUID < UInt32.max && userName == ServiceAccountClaim.recordName(accountID: accountID, role: serviceRole)),
               bundlePath.hasPrefix("/"), bundlePath.hasSuffix(".app"), bundlePath.utf8.count < 4096, Self.validXML(bundlePath),
@@ -35,12 +36,17 @@ struct InstalledAccountJobManifest {
             role == .notificationGateway ? "Contents/Library/LaunchServices/RemozioGateway" : "Contents/Library/LaunchServices/RemozioTransport"
         executablePath = bundlePath + "/" + relative
         configurationPath = role == .authority ? paths.privateDirectory + "/command-host.cbor" :
-            role == .notificationGateway ? paths.gatewayConfiguration : paths.transportConfiguration
+            role == .notificationGateway ? (settingsConsumerHostEnabled
+                ? paths.serviceDirectory + "/" + GatewaySettingsConsumerHostConfiguration.gatewayFileName : paths.gatewayConfiguration) : paths.transportConfiguration
         arguments = [executablePath, role == .authority ? "--command-configuration" :
-            role == .notificationGateway ? "--configuration" : "--pairing-configuration", configurationPath]
+            settingsConsumerHostEnabled ? "--settings-host" : role == .notificationGateway ? "--configuration" : "--pairing-configuration", configurationPath]
         machServices = role == .authority ? Set([paths.authorityService, paths.commandService, paths.presenceService]
             + (gatewaySettingsControlEnabled ? [paths.gatewaySettingsControlService] : [])) :
-            role == .notificationGateway ? [paths.gatewayService, paths.gatewayWakeService] : [paths.pairingService]
+            role == .notificationGateway ? Set([paths.gatewayService, paths.gatewayWakeService]
+                + (settingsConsumerHostEnabled ? [try GatewaySettingsConsumerRole.gateway.serviceName(accountID: accountID),
+                    try GatewaySettingsConsumerRole.gateway.recoveryServiceName(accountID: accountID)] : [])) :
+                Set([paths.pairingService] + (settingsConsumerHostEnabled ? [try GatewaySettingsConsumerRole.transport.serviceName(accountID: accountID),
+                    try GatewaySettingsConsumerRole.transport.recoveryServiceName(accountID: accountID)] : []))
     }
     // Stable XML avoids dictionary-order differences across fresh-process recovery.
     var bytes: Data {

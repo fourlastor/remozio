@@ -4,7 +4,7 @@ import Foundation
 /// Publishes a pending pause record and removes only its exact completed successor.
 /// The authorized owner retains its machine/release scope; this helper never advances transition phases.
 enum GatewayRuntimeSettingsFencePublication {
-    enum Removal: Equatable { case removed, absent }
+    typealias Removal = GatewaySettingsFenceRemoval.Result
     struct Scope {
         let plan: GatewayRuntimeSettingsPublicationPlan
         let machine: PreparationIntentStore
@@ -101,44 +101,11 @@ enum GatewayRuntimeSettingsFencePublication {
                        verifyCurrent: () throws -> Void, didValidate: () throws -> Void = {},
                        didRemove: () throws -> Void = {}) throws -> Removal {
         guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
-        let file = AdministrativeSetupPublication.File.gatewaySettingsFence, bytes = try scope.fence.encoded
+        let bytes = try scope.fence.encoded
         func verify() throws { try verifyCurrent(); try scope.validateComplete(); try directory.validate() }
         try verify(); try validateSelected(scope, directory: directory, owner: owner, verify: verify)
-        return try directory.withSharedDirectory { parent in
-            let fd = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-            if fd < 0 {
-                guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
-                try verify(); try validateSelected(scope, directory: directory, owner: owner, verify: verify)
-                guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-                return .absent
-            }
-            defer { _ = Darwin.close(fd) }
-            func inspect() throws -> stat {
-                var held = stat(), named = stat()
-                guard fstat(fd, &held) == 0, fstatat(parent, file.name, &named, AT_SYMLINK_NOFOLLOW) == 0 else { throw JournalLeaseError.system(errno) }
-                guard held.st_dev == named.st_dev, held.st_ino == named.st_ino else { throw JournalLeaseError.identityChanged }
-                try ProtectedStorageMetadata.validate(fd, held, directory: false, privateObject: false, owner: owner, ancestorOwner: owner)
-                guard held.st_mode & 0o7777 == file.mode, held.st_size == bytes.count else { throw JournalLeaseError.unsafeMetadata }
-                return held
-            }
-            let original = try inspect()
-            var data = Data(count: bytes.count), offset = 0
-            while offset < data.count {
-                let count = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
-                if count < 0, errno == EINTR { continue }
-                guard count > 0 else { throw JournalLeaseError.identityChanged }; offset += count
-            }
-            guard data == bytes else { throw GatewayPreparationError.changedScope }
-            try didValidate(); try verify(); try validateSelected(scope, directory: directory, owner: owner, verify: verify)
-            let current = try inspect()
-            guard current.st_dev == original.st_dev, current.st_ino == original.st_ino,
-                  current.st_mtimespec.tv_sec == original.st_mtimespec.tv_sec, current.st_mtimespec.tv_nsec == original.st_mtimespec.tv_nsec,
-                  current.st_ctimespec.tv_sec == original.st_ctimespec.tv_sec, current.st_ctimespec.tv_nsec == original.st_ctimespec.tv_nsec else {
-                throw JournalLeaseError.identityChanged
-            }
-            guard unlinkat(parent, file.name, 0) == 0, fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
-            try didRemove(); try verify(); try validateSelected(scope, directory: directory, owner: owner, verify: verify)
-            return .removed
-        }
+        return try GatewaySettingsFenceRemoval.remove(bytes, directory: directory, owner: owner, verifyCurrent: {
+            try verify(); try validateSelected(scope, directory: directory, owner: owner, verify: verify)
+        }, didValidate: didValidate, didRemove: didRemove)
     }
 }

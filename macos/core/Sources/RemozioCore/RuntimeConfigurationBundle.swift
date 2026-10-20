@@ -39,6 +39,10 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
     let paths: RuntimePreparationPaths
     let command: AuthorityCommandStartupConfiguration
     let transport: TransportPairingStartupConfiguration
+    var gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? { get throws {
+        guard let host = transport.settingsHost else { return nil }
+        return try .init(role: .gateway, runtime: host.runtime, bundlePath: host.bundlePath, codePolicy: host.codePolicy)
+    } }
     let presenceClient: AuthorityPresenceClientConfiguration
     let pairingClient: TransportPairingControlConfiguration
     let frontendClient: CommandFrontendConfiguration
@@ -46,9 +50,11 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
     var description: String { "RuntimeConfigurationBundle(redacted)" }
 
     static func initial(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
-                        reference: RuntimeMaterialReference, inventory: InstallationInventory) throws -> Self {
-        try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
-            presencePolicy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000),
+                        reference: RuntimeMaterialReference, inventory: InstallationInventory,
+                        presencePolicyOverride: PresenceConfiguration? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
+        let presence = try presencePolicyOverride ?? .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000)
+        return try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
+            presencePolicy: presence, relayPort: relayPortOverride,
             environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
             submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
             captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
@@ -56,7 +62,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
 
     init(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
          reference: RuntimeMaterialReference, inventory: InstallationInventory,
-         presencePolicy: PresenceConfiguration, environment: [CapturedEnvironmentEntry],
+         presencePolicy: PresenceConfiguration, relayPort: UInt16? = nil, environment: [CapturedEnvironmentEntry],
          submissionLimits: CBORLimits, captureLimits: CBORLimits) throws {
         try reference.validate(account: account, services: reference.services)
         guard account.storagePrepared, initialization.complete,
@@ -109,7 +115,11 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             transportUID: transportClaim.number, serviceName: paths.pairingService, teamID: app.teamID,
             appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], transportIdentifier: transportCode.identifier,
             transportHashes: [transportCode.codeDirectoryHash])
-        transport = try .init(transport: direct, control: pairingClient)
+        let baseTransport = try TransportPairingStartupConfiguration(transport: direct, control: pairingClient, relayPort: relayPort)
+        if reference.serviceActivity != nil {
+            transport = try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: inventory.bundlePath,
+                policy: policy).selecting(baseTransport)
+        } else { transport = baseTransport }
         presenceClient = try .init(macID: account.macID, accountID: account.accountID, ownerUID: account.ownerUID,
             serviceName: paths.presenceService, teamID: authority.teamID, rootIdentifier: authority.identifier,
             rootHashes: [authority.codeDirectoryHash])

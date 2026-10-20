@@ -72,7 +72,9 @@ public final class GatewaySettingsGatewayHost: Sendable {
             let access = try GatewaySettingsConsumerAccess(owner: owner, services: services, verifyCurrent: scope.validate)
             let listener = try GatewaySettingsConsumerXPCListener(consumerCode: configuration.consumerCode,
                 setupCode: configuration.setupCode, release: release, access: access, acquireActivity: scope.acquireActivity)
-            return try .init(host: .init(owner: owner, listener: listener, activity: scope))
+            let recovery = try GatewaySettingsConsumerXPCListener.recovery(services: services,
+                codePolicy: configuration.codePolicy, release: release, access: access, acquireActivity: scope.acquireActivity)
+            return try .init(host: .init(owner: owner, listener: listener, activity: scope, recoveryListener: recovery))
         } catch { scope.close(); throw error }
     }
     public func start() async throws { try await host.start() }

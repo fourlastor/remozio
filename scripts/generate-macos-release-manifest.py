@@ -51,11 +51,11 @@ def declarations(role):
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
         values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], {1: 2}))
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
-    # Retained record versions follow the compiled codecs. Setup is the only emitter in this release.
+    # Recovery fences include the retained settings revision and selected commit.
     records = {
-        2: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
+        2: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], [2]),
             ('runtime.gateway-runtime-pair', [1], []), ('runtime.gateway-activation-plan', [1], []),
-            ('runtime.gateway-settings-revision', [1], [])],
+            ('runtime.gateway-settings-revision', [1], [1])],
         4: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
             ('runtime.gateway-settings-revision', [1], [])],
         6: [('runtime.gateway-role-extension', [1], []), ('runtime.gateway-runtime-commit', [1, 2], []),
@@ -82,13 +82,22 @@ def declarations(role):
     if role in (2, 8):
         values.append({0: 'runtime.preparation-material', 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
     host_formats = {
-        2: [('runtime.gateway-settings-consumer-host', [1], []),
+        2: [('runtime.activation-plan', [1, 2], []),
+            ('runtime.gateway-settings-consumer-host', [1], []),
+            ('runtime.gateway-settings-fence', [1, 2], [2]),
+            ('gateway.gateway-settings-control', [2], [2]), ('transport.gateway-settings-control', [2], [2]),
             ('transport.pairing-config', [1, 2], []), ('gateway.service-config', [1, 2], [])],
         4: [('runtime.gateway-settings-consumer-host', [1], []),
+            ('runtime.gateway-settings-fence', [1, 2], []),
+            ('transport.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [])],
         6: [('runtime.gateway-settings-consumer-host', [1], []),
+            ('runtime.gateway-settings-fence', [1, 2], []),
+            ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
-        8: [('runtime.gateway-settings-consumer-host', [1], [1]),
+        8: [('runtime.activation-plan', [1, 2], [1, 2]),
+            ('runtime.gateway-settings-consumer-host', [1], [1]),
+            ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
     }
     by_name = {value[0]: value for value in values}

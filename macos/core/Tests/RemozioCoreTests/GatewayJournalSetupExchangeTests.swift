@@ -22,9 +22,9 @@ final class GatewayJournalSetupExchangeTests: XCTestCase, @unchecked Sendable {
         let root: URL
         let parent: ProtectedSetupDirectory
         private let lock = NSRecursiveLock()
-        init() throws {
+        init(nativeConsumerHosts: Bool = false) throws {
             guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner setup exchange") }
-            runtime = try .init()
+            runtime = try .init(nativeConsumerHosts: nativeConsumerHosts)
             try runtime.machine.retainRuntimeActivation(runtime.plan)
             _ = try runtime.machine.enrollRuntimeActivation(runtime.plan)
             try runtime.machine.markRuntimeJobsRegistered(runtime.plan)
