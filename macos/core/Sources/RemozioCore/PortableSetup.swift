@@ -169,6 +169,15 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
         return request
     }
 
+    func tunnelIngressUpdateRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                    created: SharedSetupRelayProvisioningRecord) throws -> URLRequest {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        var request = try tunnelConfigurationRequest(expected: expected, plan: plan, tunnel: tunnel)
+        request.httpMethod = "PUT"; request.httpBody = try CloudflareTunnelConfigurationClient.plannedConfiguration(plan)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }

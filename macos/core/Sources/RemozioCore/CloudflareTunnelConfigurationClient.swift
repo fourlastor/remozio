@@ -57,6 +57,30 @@ struct CloudflareTunnelConfigurationClient: Sendable {
         return .init(accountID: result.account_id, tunnelID: result.tunnel_id, providerVersion: result.version,
             planDigest: Data(SHA256.hash(data: plan.bytes)))
     }
+    /// A write reply never proves configuration. One independent read reconciles both successful and ambiguous writes.
+    func apply(_ configuration: SetupCloudflareConfiguration, expected: SharedSetupImportIntent,
+               plan: SharedSetupImportRelayPlan, created: SharedSetupRelayProvisioningRecord) async throws -> CloudflareTunnelConfigurationObservation {
+        try Task.checkCancellation()
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        let request = try configuration.tunnelIngressUpdateRequest(expected: expected, plan: plan, created: created)
+        let reply: FCMHTTPReply?
+        do { reply = try await send(request) }
+        catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            reply = nil
+        }
+        try Task.checkCancellation()
+        if let reply {
+            switch reply.status {
+            case 200, 408, 409, 425: break
+            case 401, 403: throw CloudflareProvisioningError.unauthorized
+            case 429: throw CloudflareProvisioningError.rateLimited
+            case 400..<500: throw CloudflareProvisioningError.providerRejected
+            default: break
+            }
+        }
+        return try await inspect(configuration, expected: expected, plan: plan, tunnel: tunnel)
+    }
     /// This payload exposes only the planned approval endpoint. It contains no provider credential.
     static func plannedConfiguration(_ plan: SharedSetupImportRelayPlan) throws -> Data {
         try JSONSerialization.data(withJSONObject: ["config": ["ingress": [
