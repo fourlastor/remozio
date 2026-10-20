@@ -50,12 +50,17 @@ public struct SetupFCMConfiguration: Sendable, CustomStringConvertible, CustomDe
     fileprivate let privateKeyPEM: String
 
     public init(project: String, clientEmail: String, privateKeyID: String, privateKeyPEM: String) throws {
-        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:".utf8)
-        guard !project.isEmpty, project != ".", project != "..", project.utf8.count <= 128,
-              project.utf8.allSatisfy(allowed.contains), clientEmail.utf8.count <= 254,
-              privateKeyID.utf8.count <= 256, privateKeyPEM.utf8.count <= 16_384 else { throw PortableSetupError.rejected }
+        try Self.validateProject(project)
+        guard clientEmail.utf8.count <= 254, privateKeyID.utf8.count <= 256,
+              privateKeyPEM.utf8.count <= 16_384 else { throw PortableSetupError.rejected }
         self.project = project; self.email = clientEmail; self.keyID = privateKeyID; self.privateKeyPEM = privateKeyPEM
         do { _ = try serviceAccount() } catch { throw PortableSetupError.rejected }
+    }
+
+    static func validateProject(_ project: String) throws {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.:".utf8)
+        guard !project.isEmpty, project != ".", project != "..", project.utf8.count <= 128,
+              project.utf8.allSatisfy(allowed.contains) else { throw PortableSetupError.rejected }
     }
 
     public func serviceAccount() throws -> FCMServiceAccount {
@@ -84,6 +89,13 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
     fileprivate let apiToken: String
 
     public init(accountID: String, zoneID: String, dnsSuffix: String, apiToken: String) throws {
+        try Self.validateScope(accountID: accountID, zoneID: zoneID, dnsSuffix: dnsSuffix)
+        guard (1...4096).contains(apiToken.utf8.count), apiToken.utf8.allSatisfy({ (33...126).contains($0) }) else {
+            throw PortableSetupError.rejected
+        }
+        self.accountID = accountID; self.zoneID = zoneID; self.dnsSuffix = dnsSuffix; self.apiToken = apiToken
+    }
+    static func validateScope(accountID: String, zoneID: String, dnsSuffix: String) throws {
         func identifier(_ value: String) -> Bool {
             value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
         }
@@ -92,11 +104,9 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
               labels.allSatisfy({ label in
                   !label.isEmpty && label.utf8.count <= 63 && label.first != "-" && label.last != "-" &&
                   label.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
-              }), (1...4096).contains(apiToken.utf8.count), apiToken.utf8.allSatisfy({ (33...126).contains($0) }) else {
-            throw PortableSetupError.rejected
-        }
-        self.accountID = accountID; self.zoneID = zoneID; self.dnsSuffix = dnsSuffix; self.apiToken = apiToken
+              }) else { throw PortableSetupError.rejected }
     }
+
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }

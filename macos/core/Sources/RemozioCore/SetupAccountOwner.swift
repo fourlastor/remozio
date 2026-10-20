@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import RemozioProtocol
@@ -319,6 +320,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 throw AdministrativeSetupError.wrongAccount
             }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            try SharedSetupImportGatewayScope.requireLegacyMutationAllowed(machine: machine, account: account)
             guard try gatewayProgress(machine: machine, account: account) == expected else { throw AdministrativeSetupError.staleProgress }
             if expected.journalInitialized { return expected }
             try prepare(machine, account, { try self.verifyEnrollment(account, callerUID: callerUID, machine: machine) })
@@ -343,6 +345,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 throw AdministrativeSetupError.wrongAccount
             }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            try SharedSetupImportGatewayScope.requireLegacyMutationAllowed(machine: machine, account: account)
             guard try gatewayProgress(machine: machine, account: account) == expected,
                   let digest = expected.journalIntentDigest else { throw AdministrativeSetupError.staleProgress }
             return digest
@@ -401,6 +404,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 throw AdministrativeSetupError.wrongAccount
             }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            try SharedSetupImportGatewayScope.requireLegacyMutationAllowed(machine: machine, account: account)
             guard try gatewayActivationProgress(machine: machine, account: account) == expected else {
                 throw AdministrativeSetupError.staleProgress
             }
@@ -428,6 +432,83 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return value
         }
     }
+    func portableImportProgress(callerUID: uid_t) throws -> SetupPortableImportProgress? {
+        try withMachine { machine in
+            let inventory = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let services = try machine.serviceAccountPlan(accountID: account.accountID)
+            guard services.complete else { return nil }
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                let retained = try journal?.current(scope: scope)
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal?.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                }
+                try verify()
+                let result = try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+                try verify(); return result
+            }
+        }
+    }
+    // A future native endpoint must supply the authenticated UID and fresh administrator authorization.
+    // Retention grants no credential custody, runtime publication or service activation.
+    func retainPortableImport(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                              didStage: (SharedSetupImportPublication.Stage) throws -> Void = { _ in }) throws -> SetupPortableImportProgress {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            let inventory = try currentInventory(machine)
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            func verifyDestination() throws {
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                guard try currentInventory(machine) == inventory,
+                      try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                      try machine.runtimePreparation(accountID: account.accountID) == runtime else {
+                    throw AdministrativeSetupError.staleProgress
+                }
+            }
+            let existing: SharedSetupImportIntent? = try machine.withSharedImportJournal { journal in
+                let retained = try journal?.current(scope: scope)
+                let progress = try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+                guard progress == expected else { throw AdministrativeSetupError.staleProgress }
+                try verifyDestination()
+                guard let journal else { return nil }
+                // Atomic first publication never exposes an empty journal. Do not repair an unexplained final directory.
+                guard try !journal.records().isEmpty else { throw SharedSetupImportError.corruptRecord }
+                return try SharedSetupImportRetention.retain(machine: machine, account: account, expectedRuntime: expected.runtime,
+                    expectedImport: retained, proposal: proposal, journal: journal, verifyCurrent: verifyDestination)
+            }
+            let retained: SharedSetupImportIntent
+            if let existing { retained = existing }
+            else {
+                guard expected.operationID == nil else { throw AdministrativeSetupError.staleProgress }
+                func verifyUnconfigured() throws {
+                    try verifyDestination()
+                    try SharedSetupImportRetention.requireUnconfiguredDestination(machine: machine, account: account, runtime: runtime)
+                }
+                try verifyUnconfigured()
+                let intent = try SharedSetupImportIntent(scope: scope, proposal: proposal)
+                retained = try machine.publishSharedImport(intent, verifyCurrent: verifyUnconfigured, didStage: didStage)
+            }
+            try verifyDestination()
+            let result = try SetupPortableImportProgress(account: account, inventory: inventory,
+                services: services, runtime: runtime, retained: retained)
+            try result.validateRetention(of: expected, proposalDigest: Data(SHA256.hash(data: try proposal.canonicalBytes())))
+            return result
+        }
+    }
+
     func gatewaySettingsProgress(callerUID: uid_t) throws -> SetupGatewaySettingsProgress? {
         try withMachine { machine in
             _ = try currentInventory(machine)
@@ -448,6 +529,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 throw AdministrativeSetupError.wrongAccount
             }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            try SharedSetupImportGatewayScope.requireLegacyMutationAllowed(machine: machine, account: account)
             guard expected.supportsSettingsChanges else { throw GatewayPreparationError.incomplete }
             guard try gatewaySettingsProgress(machine: machine, account: account) == expected,
                   try expected.pending == nil else { throw AdministrativeSetupError.staleProgress }
@@ -482,6 +564,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 throw AdministrativeSetupError.wrongAccount
             }
             try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            try SharedSetupImportGatewayScope.requireLegacyMutationAllowed(machine: machine, account: account)
             guard try gatewaySettingsProgress(machine: machine, account: account) == expected,
                   let revision = try expected.pending else { throw AdministrativeSetupError.staleProgress }
             return revision

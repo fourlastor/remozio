@@ -2,12 +2,13 @@ import Darwin
 import Foundation
 
 public enum SetupDatabaseKind: Sendable {
-    case journal, continuity, installation
+    case journal, continuity, installation, sharedSetupImport
     var fileName: String {
         switch self {
         case .journal: "journal.sqlite"
         case .continuity: "continuity.sqlite"
         case .installation: "installation.sqlite"
+        case .sharedSetupImport: "setup-import.sqlite"
         }
     }
 }
