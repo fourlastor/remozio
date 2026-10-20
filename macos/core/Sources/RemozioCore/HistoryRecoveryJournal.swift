@@ -1,27 +1,23 @@
 import Foundation
+import RemozioHostCore
 import SQLite3
 
 /// Retained gap evidence shares the journal transaction and ledger digest, never the authority digest.
+/// The Mac owner retains schema migration, error mapping and failed-transaction handling.
 final class HistoryRecoveryJournal {
     private let db: OpaquePointer
-    init(connection: OpaquePointer) { db = connection }
+    private let tables: HistoryRecoveryJournalTables
+    init(connection: OpaquePointer) {
+        db = connection
+        tables = HistoryRecoveryJournalTables(connection: connection)
+    }
 
     func read(epoch: Data) throws -> HistoryRecoveryIntent? {
         guard epoch.count == 16 else { throw ContinuityStoreError.invalidCheckpoint }
         let version = try schemaVersion()
         guard (12...16).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version < 14 { return nil }
-        return try statement("SELECT evidence FROM main.history_recoveries_v1 WHERE epoch=?", values: [epoch]) { row in
-            let result = sqlite3_step(row)
-            if result == SQLITE_DONE { return nil }
-            guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
-            let count = sqlite3_column_bytes(row, 0)
-            guard sqlite3_column_type(row, 0) == SQLITE_BLOB, count > 0, count <= 1024,
-                  let pointer = sqlite3_column_blob(row, 0) else { throw JournalDatabaseError.incompatibleStore }
-            let intent = try HistoryRecoveryIntent.decode(Data(bytes: pointer, count: Int(count)))
-            guard intent.recoveryEpoch == epoch else { throw JournalDatabaseError.incompatibleStore }
-            return intent
-        }
+        return try adapt { try tables.read(epoch: epoch) }
     }
 
     func prepareSchema() throws {
@@ -29,23 +25,14 @@ final class HistoryRecoveryJournal {
         guard (13...16).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         if version == 13 {
-            try exec("""
-                CREATE TABLE main.history_recoveries_v1(
-                    epoch BLOB PRIMARY KEY CHECK(length(epoch)=16),
-                    evidence BLOB NOT NULL CHECK(length(evidence) BETWEEN 1 AND 1024)
-                ) STRICT, WITHOUT ROWID;
-                PRAGMA main.user_version=14;
-                """)
+            try adapt { try tables.createSchema() }
+            try exec("PRAGMA main.user_version=14;")
         }
     }
 
     func insert(_ intent: HistoryRecoveryIntent) throws {
         try prepareSchema()
-        try statement("INSERT INTO main.history_recoveries_v1 VALUES(?,?)",
-            values: [intent.recoveryEpoch, try intent.bytes]) { row in
-            let result = sqlite3_step(row)
-            guard result == SQLITE_DONE else { throw JournalDatabaseError.storage(result) }
-        }
+        try adapt { try tables.insert(intent) }
     }
 
     private func schemaVersion() throws -> Int64 {
@@ -56,21 +43,27 @@ final class HistoryRecoveryJournal {
             return sqlite3_column_int64(row, 0)
         }
     }
+    private func adapt<T>(_ operation: () throws -> T) throws -> T {
+        do { return try operation() }
+        catch let error as HistoryRecoveryJournalError {
+            switch error {
+            case .invalidEpoch: throw ContinuityStoreError.invalidCheckpoint
+            case .transactionRequired: throw JournalDatabaseError.expiredTransaction
+            case .writeTransactionRequired: throw JournalDatabaseError.readOnly
+            case .corruptData: throw JournalDatabaseError.incompatibleStore
+            case .storage(let code): throw JournalDatabaseError.storage(code)
+            }
+        }
+    }
     private func exec(_ sql: String) throws {
         let result = sqlite3_exec(db, sql, nil, nil, nil)
         guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
     }
-    private func statement<T>(_ sql: String, values: [Data] = [], _ body: (OpaquePointer) throws -> T) throws -> T {
+    private func statement<T>(_ sql: String, _ body: (OpaquePointer) throws -> T) throws -> T {
         var row: OpaquePointer?
         let result = sqlite3_prepare_v2(db, sql, -1, &row, nil)
         guard result == SQLITE_OK, let row else { throw JournalDatabaseError.storage(result) }
         defer { sqlite3_finalize(row) }
-        for (index, value) in values.enumerated() {
-            let result = value.withUnsafeBytes {
-                sqlite3_bind_blob(row, Int32(index + 1), $0.baseAddress, Int32($0.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self))
-            }
-            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
-        }
         return try body(row)
     }
 }
