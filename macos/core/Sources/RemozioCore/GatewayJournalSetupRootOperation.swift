@@ -23,10 +23,10 @@ struct GatewayJournalSetupRootOperations: Sendable {
 /// The administrator endpoint must authenticate its caller before opening this operation outside its existing machine-store callback.
 enum GatewayJournalSetupRootOperation {
     enum Stage { case verified, filesInspected, artifactsPublished, jobRegistered, reportReceived, completionRetained, cleaned }
-    static func resumeNative(machineDirectory: String, macID: Data, ownerUID: UInt32, expectedIntentDigest: Data,
+    static func resumeNative(machineDirectory: String, macID: Data, ownerUID: UInt32, expectedIntentDigest: Data, expectedImport: SharedSetupImportIntent? = nil,
                              verifyHost: @escaping (InstallationInventory) throws -> Void) async throws -> GatewayJournalSetupRootOutcome {
         let scope = try GatewayJournalSetupRootScope.openNative(machineDirectory: machineDirectory, macID: macID,
-            ownerUID: ownerUID, expectedIntentDigest: expectedIntentDigest, verifyHost: verifyHost)
+            ownerUID: ownerUID, expectedIntentDigest: expectedIntentDigest, expectedImport: expectedImport, verifyHost: verifyHost)
         return try await resume(scope: scope, operations: .native(scope))
     }
     // Owned fixtures use real protected state and files with injected job control. They do not prove native UID or signed peer admission.

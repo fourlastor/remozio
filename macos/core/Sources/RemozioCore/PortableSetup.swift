@@ -128,6 +128,14 @@ public struct PortableSetup: Sendable, CustomStringConvertible, CustomDebugStrin
                 pushClient: SetupPushClientConfiguration? = nil, appPreferences: PortableAppPreferences? = nil) {
         self.defaults = defaults; self.fcm = fcm; self.cloudflare = cloudflare; self.pushClient = pushClient; self.appPreferences = appPreferences
     }
+    /// Import preparation requires complete shared configuration and a new local custody choice.
+    public func gatewayPreparationChoices(fileWakeCustodyAccepted: Bool) throws -> GatewaySetupPreparationChoices {
+        guard let gateway = defaults.gateway, let fcm, let pushClient, pushClient.projectID == fcm.project else {
+            throw PortableSetupError.rejected
+        }
+        return try .init(provider: fcm, senderID: pushClient.senderID, packageName: pushClient.packageName,
+            settings: gateway.service, fileWakeCustodyAccepted: fileWakeCustodyAccepted)
+    }
     /// Adds explicit app preferences while retaining the provider and shared service scope.
     public func addingAppPreferences(_ preferences: PortableAppPreferences) -> Self {
         .init(defaults: defaults, fcm: fcm, cloudflare: cloudflare, pushClient: pushClient, appPreferences: preferences)
