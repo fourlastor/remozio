@@ -59,6 +59,28 @@ class ExperimentTests(unittest.TestCase):
             self.assertTrue(runner.case_matches(name, accepted, 0, False))
             self.assertFalse(runner.case_matches(name, accepted, 0, True))
 
+    def test_settings_payload_refusals_and_progress_dispatch(self):
+        accepted = subprocess.CompletedProcess([], 0, "accepted", "")
+        for name in ("gateway-settings-retain-bytes", "gateway-settings-retain-empty", "gateway-settings-retain-nil",
+                     "gateway-settings-resume-bytes", "gateway-settings-resume-empty", "gateway-settings-resume-nil",
+                     "gateway-settings-retain-bad-selection", "gateway-settings-retain-bad-auth", "gateway-settings-resume-bad-auth"):
+            self.assertTrue(runner.case_matches(name, accepted, 0, True), name)
+            self.assertFalse(runner.case_matches(name, accepted, 0, False), name)
+        self.assertTrue(runner.case_matches("gateway-settings-progress", accepted, 0, False))
+        self.assertFalse(runner.case_matches("gateway-settings-progress", accepted, 0, True))
+
+    def test_settings_peer_refusals_precede_payload_and_exclude_crashes(self):
+        rejected = subprocess.CompletedProcess([], 3, "rejected:peer", "")
+        for name in ("gateway-settings-retain-wrong-server", "gateway-settings-retain-wrong-client",
+                     "gateway-settings-resume-wrong-server", "gateway-settings-resume-wrong-client"):
+            self.assertTrue(runner.case_matches(name, rejected, 3, False), name)
+            self.assertFalse(runner.case_matches(name, rejected, 3, True), name)
+            for code, text in ((4, "timeout"), (-5, "rejected:crash"), (3, "wrong-reply")):
+                result = subprocess.CompletedProcess([], code, text, "")
+                self.assertFalse(runner.case_matches(name, result, 3, False), name)
+
+
+
     def test_crash_and_timeout_are_not_rejections(self):
         for code in (-5, 4):
             result = subprocess.CompletedProcess([], code, "rejected:error", "")
