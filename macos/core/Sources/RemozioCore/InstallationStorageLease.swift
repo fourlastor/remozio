@@ -49,6 +49,15 @@ final class InstallationStorageLease {
         try validate(); return result
     }
 
+    func withSharedImportRelayDirectory<Value>(_ body: (ProtectedSetupDirectory, uid_t) throws -> Value) throws -> Value {
+        try validate()
+        let directory = try ProtectedSetupDirectory(anchor: anchor, relativePath: relativeDirectory + "/SharedSetupImport",
+            owner: owner, createIfMissing: false)
+        defer { directory.close() }
+        let result = try body(directory, owner)
+        try directory.validate(); try validate(); return result
+    }
+
     func sharedImportCompatibilitySnapshot(macID: Data, installationID: Data?) throws -> SharedSetupImportCompatibilitySnapshot? {
         try validate()
         let snapshot = try SharedSetupImportCompatibilitySnapshot.capture(

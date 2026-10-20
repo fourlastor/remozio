@@ -23,10 +23,11 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
 
     init(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
          runtime: RuntimePreparationState, inventory: InstallationInventory,
-         gatewaySettingsRelease: SignedReleaseEvidence? = nil) throws {
+         gatewaySettingsRelease: SignedReleaseEvidence? = nil, importIntent: SharedSetupImportIntent? = nil,
+         relayPlan: SharedSetupImportRelayPlan? = nil) throws {
         guard runtime.configurationPublished, let reference = runtime.reference else { throw RuntimeActivationError.incomplete }
         let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization, reference: reference,
-            inventory: inventory)
+            inventory: inventory, importIntent: importIntent, relayPlan: relayPlan)
         let label = bundle.paths.namespace + ".authority"
         var host = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
             installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, codePolicy: account.initialAuthority.codePolicy,
@@ -41,7 +42,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             transport: bundle.transport, gatewaySettingsHost: bundle.gatewaySettingsHost)
         try validate(account: account, reference: reference)
     }
-    /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained account.
+    /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained import.
     func configurationBundle(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
                              inventory: InstallationInventory) throws -> RuntimeConfigurationBundle {
         try .initial(account: account, initialization: initialization, reference: reference, inventory: inventory,

@@ -46,6 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
+        case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data)
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
         case runtimeRecord, gatewayMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
@@ -61,6 +62,10 @@ public enum AdministrativeSetupPublication {
             case .gatewayRuntimeCommit: "gateway-runtime-commit.cbor"
             case .gatewaySettingsRevision: "gateway-settings-revision.cbor"
             case .gatewaySettingsFence: "gateway-settings-fence.cbor"
+            case .importRelayPlan(let account): "import-relay-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importRelayProvisioning(let account): "import-relay-state-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importAccessApplication(let account): "import-relay-access-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importDNSRecord(let account): "import-relay-dns-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
@@ -121,6 +126,8 @@ public enum AdministrativeSetupPublication {
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
+            case .importRelayPlan(let account), .importRelayProvisioning(let account), .importAccessApplication(let account), .importDNSRecord(let account):
+                guard account.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .gatewayJournalJob(let account, let intent):
                 guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .accountJob(let account, let role):
@@ -244,6 +251,39 @@ public enum AdministrativeSetupPublication {
             owner: owner, verify: verify, didStage: didStage)
     }
 
+    /// Scope and transition checks precede the existing protected compare-and-swap publisher.
+    static func replaceRelayProvisioning(_ bytes: Data, previous: Data?, expected: SharedSetupImportIntent,
+                                         plan: SharedSetupImportRelayPlan, directory: ProtectedSetupDirectory, owner: uid_t,
+                                         verify: () throws -> Void, didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        let next = try SharedSetupRelayProvisioningRecord.decode(bytes, expected: expected, plan: plan)
+        let old = try previous.map { try SharedSetupRelayProvisioningRecord.decode($0, expected: expected, plan: plan) }
+        try next.validateTransition(from: old)
+        return try replaceSettingsRecord(bytes, expected: previous, file: .importRelayProvisioning(accountID: expected.scope.accountID),
+            directory: directory, owner: owner, verify: verify, didStage: didStage)
+    }
+
+    static func replaceAccessApplication(_ bytes: Data, previous: Data?, expected: SharedSetupImportIntent,
+                                         plan: SharedSetupImportRelayPlan, createdTunnel: SharedSetupRelayProvisioningRecord,
+                                         directory: ProtectedSetupDirectory, owner: uid_t,
+                                         verify: () throws -> Void, didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        let next = try SharedSetupAccessApplicationRecord.decode(bytes, expected: expected, plan: plan, createdTunnel: createdTunnel)
+        let old = try previous.map { try SharedSetupAccessApplicationRecord.decode($0, expected: expected, plan: plan, createdTunnel: createdTunnel) }
+        try next.validateTransition(from: old)
+        return try replaceSettingsRecord(bytes, expected: previous, file: .importAccessApplication(accountID: expected.scope.accountID),
+            directory: directory, owner: owner, verify: verify, didStage: didStage)
+    }
+
+    static func replaceDNSRecord(_ bytes: Data, previous: Data?, expected: SharedSetupImportIntent,
+                                 plan: SharedSetupImportRelayPlan, createdTunnel: SharedSetupRelayProvisioningRecord,
+                                 application: SharedSetupAccessApplicationRecord, directory: ProtectedSetupDirectory, owner: uid_t,
+                                 verify: () throws -> Void, didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        let next = try SharedSetupDNSRecord.decode(bytes, expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
+        let old = try previous.map { try SharedSetupDNSRecord.decode($0, expected: expected, plan: plan, createdTunnel: createdTunnel, application: application) }
+        try next.validateTransition(from: old)
+        return try replaceSettingsRecord(bytes, expected: previous, file: .importDNSRecord(accountID: expected.scope.accountID),
+            directory: directory, owner: owner, verify: verify, didStage: didStage)
+    }
+
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
                                               didStage: (Stage) throws -> Void) throws -> GatewayRuntimeSettingsFileResult {
@@ -251,7 +291,7 @@ public enum AdministrativeSetupPublication {
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         guard let expected else {
             switch file {
-            case .gatewaySettingsRevision, .gatewaySettingsFence: break
+            case .gatewaySettingsRevision, .gatewaySettingsFence, .importRelayProvisioning, .importAccessApplication, .importDNSRecord: break
             default: throw AdministrativeSetupPublicationError.invalidArtifact
             }
             let result = try publish(bytes, file: file, directory: directory, owner: owner, verify: verify, didStage: didStage)
