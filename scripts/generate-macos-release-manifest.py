@@ -25,7 +25,7 @@ def format_declaration(name, versions, migrations=None):
 
 def declarations(role):
     names = {
-        1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7]),
+        1: [('authority.presence-client-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7, 8]),
             ('transport.pairing-control-config', [1]), ('transport.pairing-control', [1]),
             ('authority.pairing-ipc', [1]), ('pairing.invitation', [1]), ('pairing.transcript', [1])],
         2: [('authority.service-config', [1, 2]), ('authority.request-config', [1]),
@@ -39,7 +39,7 @@ def declarations(role):
             ('command.capture', [1, 2, 3]), ('approval.message', [1])],
         5: [('command.frontend-config', [1]), ('command.submission', [1])],
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
-        8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7]), ('authority.code-policy', [1, 2, 3]),
+        8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7, 8]), ('authority.code-policy', [1, 2, 3]),
             ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             ('authority.journal', [12, 13, 14, 15, 16])],
         11: [('command.child-frame', [1, 2])],
