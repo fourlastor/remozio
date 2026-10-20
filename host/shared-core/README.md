@@ -3,7 +3,7 @@
 `RemozioHostCore` contains the shared decision verifier, its retained-request,
 trust and clock value types, a sleep-inclusive clock sampler, the SQLite audit
 journal, decision-consumption and command-submission replay tables, consumption outcomes, continuity
-checkpoints, history-recovery intent encoding and storage-reconciliation selection.
+checkpoints, history-recovery intent encoding and evidence tables, and storage-reconciliation selection.
 The Mac authority uses the same implementations through the existing `RemozioCore`
 public names.
 
@@ -60,6 +60,13 @@ reads and applies reconciliation inside its existing storage serialization
 boundary. Its protected stores, commit coordination and startup gates remain
 Mac-owned.
 
+`HistoryRecoveryJournalTables` stores the existing canonical history-gap evidence
+in the owner's connection and outer transaction. Reads require an explicit snapshot;
+schema creation and inserts require a main-database write transaction. Duplicate
+epochs fail instead of replacing evidence. The Mac adapter retains schema-version
+checks, migration, error mapping and failed-transaction handling. The table API
+does not authenticate the supplied intent or restore pending work or dispatch tokens.
+
 This package contains no protected database owner, caller monitor, TPM integration,
 service installation or command execution. It introduces no Linux capture schema and changes no protocol bytes or production
 authority policy.
@@ -81,6 +88,9 @@ Replay-table tests cover both identifier collisions across reopen, scope isolati
 capacity, competing connections, outer rollback, malformed rows, storage errors and
 compatibility with the existing Mac table layout. Existing Mac tests retain replay
 migration, failed-transaction retirement and checkpoint integration coverage.
+History-evidence tests cover canonical bytes across reopen, owner rollback, duplicate
+epochs, malformed records, transaction rules and temporary-table shadowing. The
+existing Mac history migration and checkpoint integration tests remain unchanged.
 Portable recovery tests cover data validation and selection. These results do not establish hardware custody, a
 protected Linux installation or a complete host approval flow. Mac tests retain
 audit signing integration with the shared table types and the existing store

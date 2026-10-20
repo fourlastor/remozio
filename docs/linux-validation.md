@@ -90,7 +90,7 @@ Unknown platforms and any failed phase fail the gate immediately.
 The [shared host core](../host/shared-core/README.md) contains the decision verifier,
 its authority-owned request, enrollment and clock inputs, the sleep-inclusive clock
 sampler, SQLite audit, consumption and command-submission replay tables, consumption outcome transitions,
-checkpoint and history-intent codecs, and pure storage-reconciliation selection. These tests run through the Linux host check and
+checkpoint and history-intent codecs/evidence tables, and pure storage-reconciliation selection. These tests run through the Linux host check and
 native Mac check; Mac tests also retain audit signing integration. Mac consumers
 use the same implementations through compatibility type aliases and table
 storage-error adapter. The table owner still supplies protected storage, durability
@@ -107,6 +107,14 @@ unknown outcomes; protected Linux connection ownership and durable commit/recove
 remain unimplemented. The Mac owner continues to load current enrollment and check
 its revision in the write transaction, mark failures and coordinate checkpoints.
 The disposable command experiment continues using its separate fixture-only ledger.
+
+`HistoryRecoveryJournalTables` also shares the existing retained history-gap table
+and canonical intent bytes. The connection owner supplies an explicit transaction;
+writes require a main-database write transaction. The Mac adapter keeps version
+checks, migration ownership, storage-error mapping and failed-transaction handling.
+Portable tests cover reopen, duplicate epochs, schema/row rollback, malformed data
+and main-table qualification. This does not select a Linux persistent catalog,
+authenticate an intent or authorize recovery of pending actions.
 
 Shared command-submission replay tests exercise permanent ID/nonce reservations,
 scope and capacity limits, competing connections, rollback, reopen, malformed rows
