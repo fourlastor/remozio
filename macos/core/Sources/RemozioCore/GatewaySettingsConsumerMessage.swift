@@ -4,8 +4,12 @@ import RemozioProtocol
 
 /// Companion control is separate from Root control1. Its binding and purposes cannot decode as Root messages.
 enum GatewaySettingsConsumerInterface {
+    // The harmless greeting, binding and response keep their common version.
     static let version: UInt64 = 1
     static let supportedVersions: Set<UInt64> = [version]
+    static let settingsRequestVersion: UInt64 = 1
+    static let recoveryRequestVersion: UInt64 = 2
+    static let supportedRequestVersions: Set<UInt64> = [settingsRequestVersion, recoveryRequestVersion]
 }
 enum GatewaySettingsConsumerRole: UInt64, CaseIterable, Sendable {
     case gateway = 1, transport = 2
@@ -55,8 +59,8 @@ struct GatewaySettingsConsumerChange: Sendable {
     let version: UInt64
     init(version: UInt64, revisionDigest: Data, previousCommitDigest: Data, selectedCommitDigest: Data) throws {
         guard revisionDigest.count == 32, previousCommitDigest.count == 32, selectedCommitDigest.count == 32,
-              (version == 1 && previousCommitDigest != selectedCommitDigest) ||
-              (version == 2 && previousCommitDigest == selectedCommitDigest) else { throw GatewayPreparationError.invalidRecord }
+              (version == GatewaySettingsConsumerInterface.settingsRequestVersion && previousCommitDigest != selectedCommitDigest) ||
+              (version == GatewaySettingsConsumerInterface.recoveryRequestVersion && previousCommitDigest == selectedCommitDigest) else { throw GatewayPreparationError.invalidRecord }
         self.version = version; self.revisionDigest = revisionDigest
         self.previousCommitDigest = previousCommitDigest; self.selectedCommitDigest = selectedCommitDigest
     }

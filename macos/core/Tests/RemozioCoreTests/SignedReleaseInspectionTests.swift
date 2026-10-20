@@ -64,7 +64,13 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 for (name, versions) in records {
                     let declaration = try XCTUnwrap(component.formats.first { $0.name == name })
                     XCTAssertEqual(declaration.readers, versions)
-                    XCTAssertEqual(declaration.writers, role == .setupController ? versions : [])
+                    let writers: Set<UInt64>
+                    if role == .setupController { writers = versions }
+                    else if role == .authority && name == GatewayRuntimeCommit.formatName { writers = [2] }
+                    else if role == .authority && name == GatewayRuntimeSettingsRevision.formatName {
+                        writers = GatewayRuntimeSettingsRevision.supportedVersions
+                    } else { writers = [] }
+                    XCTAssertEqual(declaration.writers, writers)
                     XCTAssertTrue(declaration.migrations.isEmpty)
                 }
             }
@@ -72,15 +78,20 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                 let fence = try XCTUnwrap(component.formats.first { $0.name == GatewayRuntimeSettingsFence.formatName })
                 XCTAssertEqual(fence.readers, GatewayRuntimeSettingsFence.supportedVersions)
-                XCTAssertEqual(fence.writers, role == .setupController ? GatewayRuntimeSettingsFence.supportedVersions : [])
+                let writers: Set<UInt64> = role == .setupController ? [GatewayRuntimeSettingsFence.settingsVersion] :
+                    role == .authority ? [GatewayRuntimeSettingsFence.recoveryVersion] : []
+                XCTAssertEqual(fence.writers, writers)
                 XCTAssertTrue(fence.migrations.isEmpty)
             }
             for consumer in GatewaySettingsConsumerRole.allCases {
-                for role in [consumer.codeRole, .setupController] {
+                for role in [consumer.codeRole, .setupController, .authority] {
                     let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                     let control = try XCTUnwrap(component.formats.first { $0.name == consumer.formatName })
-                    XCTAssertEqual(control.readers, GatewaySettingsConsumerInterface.supportedVersions)
-                    XCTAssertEqual(control.writers, GatewaySettingsConsumerInterface.supportedVersions)
+                    let versions: Set<UInt64> = role == .setupController ? [GatewaySettingsConsumerInterface.settingsRequestVersion] :
+                        role == .authority ? [GatewaySettingsConsumerInterface.recoveryRequestVersion] :
+                        GatewaySettingsConsumerInterface.supportedRequestVersions
+                    XCTAssertEqual(control.readers, versions)
+                    XCTAssertEqual(control.writers, versions)
                     XCTAssertTrue(control.migrations.isEmpty)
                 }
             }

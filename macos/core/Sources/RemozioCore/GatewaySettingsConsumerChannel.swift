@@ -87,7 +87,7 @@ actor GatewaySettingsConsumerChannel {
          expectedGeneration: UUID?, timeoutMilliseconds: UInt64 = 5000, requestVersion: UInt64 = 1,
          verifyAccount: @escaping @Sendable () throws -> Void = {}, verifyCurrent: @escaping @Sendable () throws -> Void = {},
          challenge: @escaping @Sendable () throws -> Data) throws {
-        guard macID.count == 16, accountID.count == 16, (1...60_000).contains(timeoutMilliseconds), [1, 2].contains(requestVersion) else {
+        guard macID.count == 16, accountID.count == 16, (1...60_000).contains(timeoutMilliseconds), GatewaySettingsConsumerInterface.supportedRequestVersions.contains(requestVersion) else {
             throw GatewayPreparationError.invalidRecord
         }
         self.driver = driver; self.role = role; self.macID = macID; self.accountID = accountID
