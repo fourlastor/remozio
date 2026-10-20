@@ -60,7 +60,7 @@ final class SharedSetupRelayLateCreationTests: XCTestCase, @unchecked Sendable {
         let client = CloudflareTunnelCreationClient(send: { _ in await probe.record(); return .init(status: 200, retryAfter: nil, body: Data()) })
         for phase in [SharedSetupImportIntent.Phase.relayPrepared, .rootComplete] {
             do { _ = try await client.create(configuration, expected: later(h.intent, phase: phase), plan: plan, dispatched: sent); XCTFail() }
-            catch { XCTAssertEqual(error as? CloudflareProvisioningError, .wrongScope) }
+            catch { XCTAssertEqual(error as? RelayProvisioningError, .wrongScope) }
         }
         let calls = await probe.calls; XCTAssertEqual(calls, 0)
     }
