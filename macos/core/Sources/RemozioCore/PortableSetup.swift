@@ -116,6 +116,36 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
+    func tunnelInspectionRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan, page: Int) throws -> URLRequest {
+        try plan.validate(expected: expected)
+        guard let selected = expected.recipe.cloudflare, selected.accountID == accountID,
+              selected.zoneID == zoneID, selected.dnsSuffix == dnsSuffix,
+              (1...CloudflareTunnelInspectionClient.maximumPages).contains(page) else {
+            throw CloudflareProvisioningError.wrongScope
+        }
+        var endpoint = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel")!
+        endpoint.queryItems = [URLQueryItem(name: "name", value: plan.tunnelName), URLQueryItem(name: "is_deleted", value: "false"),
+            URLQueryItem(name: "page", value: String(page)), URLQueryItem(name: "per_page", value: String(CloudflareTunnelInspectionClient.pageSize))]
+        var request = URLRequest(url: endpoint.url!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+    func tunnelConfigurationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                    tunnel: CloudflareTunnelObservation) throws -> URLRequest {
+        try plan.validate(expected: expected)
+        guard let selected = expected.recipe.cloudflare, selected.accountID == accountID, selected.zoneID == zoneID,
+              selected.dnsSuffix == dnsSuffix, tunnel.accountID == accountID, tunnel.name == plan.tunnelName,
+              tunnel.tunnelID.utf8.count == 36, let uuid = UUID(uuidString: tunnel.tunnelID),
+              uuid.uuidString.lowercased() == tunnel.tunnelID else { throw CloudflareProvisioningError.wrongScope }
+        let endpoint = URL(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel/" + tunnel.tunnelID + "/configurations")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }

@@ -634,6 +634,17 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func inspectImportedRelayTunnel(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                    inspect: @escaping @Sendable (SetupCloudflareConfiguration, SharedSetupImportIntent, SharedSetupImportRelayPlan) async throws -> CloudflareImportedRelayInspection = {
+                                        try await CloudflareImportedRelayInspection.native(configuration: $0, expected: $1, plan: $2)
+                                    }) async throws -> CloudflareImportedRelayInspection {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            let result = try await inspect(configuration, binding.retained, plan)
+            try result.validate(configuration: configuration, expected: binding.retained, plan: plan); return result
+        }
+    }
+
     private struct ImportedRelayInspectionBinding: Sendable {
         let retained: SharedSetupImportIntent
         let inventory: InstallationInventory
