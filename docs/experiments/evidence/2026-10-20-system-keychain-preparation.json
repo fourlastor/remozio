@@ -1,0 +1,104 @@
+{
+  "experiment": "system-keychain-preparation",
+  "evidenceFormat": 1,
+  "sourceCommit": "38bd83704b30dea6d7a6209ff6997cf326bc807a",
+  "sourceSHA256": {
+    "scripts/check.sh": "bdf5e87eedf9d16fcf2ef3c57ae54504fc6744498cbb7d597138aa3f23dc3354",
+    "docs/experiments/README.md": "5d4f75cb34835742ec73bade95ff22b95514bb21eedf7b1dedae27e0322f118f",
+    "docs/experiments/macos-system-keychain.md": "90ea0471143b0e6ccc56201ef8ad7d0a922b86b2e4e206e2aefdaa1a7f9064de",
+    "experiments/system-keychain/Package.swift": "189c2e41af585e8da2a1574aee07aa4c002d4052d20470abcd5ca5b74fd8ab20",
+    "experiments/system-keychain/Sources/SystemKeychainProbe/Probe.swift": "c5bfb53f14ecb49131563b0ecdd385d6db27a9eca76696bb6ed648f8b14e368a",
+    "experiments/system-keychain/Sources/SystemKeychainProbe/main.swift": "349581a171d67fd9a6fef2e740706bc2abb7db32b90fba79fc7146eb907e3a59",
+    "experiments/system-keychain/Tests/SystemKeychainProbeTests/ProbeTests.swift": "d9507b4bac2243a5a8a968805121ec2bac5de0429dd3026457f737fc098badf6"
+  },
+  "recordedAtUTC": "2026-10-20T00:04:52.163593+00:00",
+  "validation": {
+    "fakeBackendTests": 13,
+    "failures": 0,
+    "fullNativeGatePassed": true,
+    "nativeCoreSummary": "Executed 3058 tests, with 1 test skipped and 0 failures (0 unexpected) in 856.146 (856.486) seconds",
+    "nativeLogSHA256": "d11f60358a8f7c09e44599b9b02779e97840995fb0f5cdb96f437acc353b2d3a",
+    "typedATCResultSHA256": "e83fe81423989875dab82f5605420d7fb01fdcde102e6ed024c95aaae20baaad",
+    "portableReports": {
+      "protocolJvm": {
+        "tests": 147,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneCore": {
+        "tests": 281,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiJvm": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "developerInvitation": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "interop": {
+        "tests": 71,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "protocolIosSimulator": {
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "phoneUiIosSimulator": {
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "android": {
+        "tests": 328,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "fullCurrentLocalGateAdmissionSHA256": "f0837b0000d758ac43869b7e834ec7b0a6aaf535e0fe657d71d543ca0f106202",
+    "requiredChecks": [
+      "Python checks",
+      "Linux Swift protocol",
+      "Mac build",
+      "Mac interoperability",
+      "Kotlin protocol",
+      "Android build",
+      "iOS build"
+    ],
+    "requiredGradleTasks": [
+      ":protocol-kotlin:jvmTest",
+      ":phone-core:test",
+      ":phone-ui:jvmTest",
+      ":dev-invitation:test",
+      ":phone-core:approvalFlowTest",
+      ":protocol-kotlin:iosSimulatorArm64Test",
+      ":phone-ui:iosSimulatorArm64Test",
+      ":android-app:testDebugUnitTest",
+      ":android-app:assembleDebug",
+      ":android-app:lintDebug"
+    ],
+    "iosSimulatorTestsPassed": true,
+    "sharedFrameworkPassed": true,
+    "unsignedIosAppBuildPassed": true,
+    "probePlanKeychainOperationRequested": false
+  },
+  "limits": [
+    "No native probe item was created, read or deleted.",
+    "Dedicated service access, code isolation, lock/logout, pre-login and update continuity remain unproven.",
+    "No production custody policy was selected;no installed or physical tests ran."
+  ]
+}
