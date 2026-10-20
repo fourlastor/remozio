@@ -41,7 +41,7 @@ The host must serialize imports to limit concurrent resource use.
 
 The payload schema below selects shared configuration explicitly. It excludes authority keys, device keys, pairings, ADB keys and grants, approval credentials, audit history, pending requests, and another Mac's tunnel run identity. A valid password or container does not make a payload safe to apply.
 
-File selection, category preview, protected import, independent identity creation, and credential provisioning remain pending. This component never mutates live state. Copies of exported credentials remain usable until those credentials are revoked; deleting an export does not revoke them.
+The app offers file selection and a read-only category preview. Protected import, independent identity creation, and credential provisioning remain pending. This component never mutates live state. Copies of exported credentials remain usable until those credentials are revoked; deleting an export does not revoke them.
 
 ## Evidence
 
@@ -131,7 +131,7 @@ Existing command caller validators reject invalid values and conflicting timings
 Unknown preference keys, versions, purposes, or types reject the record. Capture ignores local keys outside the allowlist.
 Login registration, the current presence mode, identities, pairing state, and elevation grants remain local.
 
-This component extends the data format only. It does not add setup IPC capabilities or alter signed release declarations.
+This component extends the data format and read-only preview. It adds no setup IPC capabilities. The signed app declaration advertises payload readers only.
 The read-only preview displays these categories and the explicit app preference values.
 Authenticated export, confirmed import application, provider custody, and service integration remain separate work.
 No app preference becomes active merely because a file was decoded. Older implementations reject unsupported payload versions.
