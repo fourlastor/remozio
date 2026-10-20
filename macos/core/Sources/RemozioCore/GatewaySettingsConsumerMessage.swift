@@ -4,8 +4,12 @@ import RemozioProtocol
 
 /// Companion control is separate from Root control1. Its binding and purposes cannot decode as Root messages.
 enum GatewaySettingsConsumerInterface {
+    // The harmless greeting, binding and response keep their common version.
     static let version: UInt64 = 1
     static let supportedVersions: Set<UInt64> = [version]
+    static let settingsRequestVersion: UInt64 = 1
+    static let recoveryRequestVersion: UInt64 = 2
+    static let supportedRequestVersions: Set<UInt64> = [settingsRequestVersion, recoveryRequestVersion]
 }
 enum GatewaySettingsConsumerRole: UInt64, CaseIterable, Sendable {
     case gateway = 1, transport = 2
@@ -55,8 +59,8 @@ struct GatewaySettingsConsumerChange: Sendable {
     let version: UInt64
     init(version: UInt64, revisionDigest: Data, previousCommitDigest: Data, selectedCommitDigest: Data) throws {
         guard revisionDigest.count == 32, previousCommitDigest.count == 32, selectedCommitDigest.count == 32,
-              (version == 1 && previousCommitDigest != selectedCommitDigest) ||
-              (version == 2 && previousCommitDigest == selectedCommitDigest) else { throw GatewayPreparationError.invalidRecord }
+              (version == GatewaySettingsConsumerInterface.settingsRequestVersion && previousCommitDigest != selectedCommitDigest) ||
+              (version == GatewaySettingsConsumerInterface.recoveryRequestVersion && previousCommitDigest == selectedCommitDigest) else { throw GatewayPreparationError.invalidRecord }
         self.version = version; self.revisionDigest = revisionDigest
         self.previousCommitDigest = previousCommitDigest; self.selectedCommitDigest = selectedCommitDigest
     }
@@ -94,7 +98,7 @@ struct GatewaySettingsConsumerRequest: Sendable, CustomStringConvertible {
     } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits), Set(fields.keys) == Set(UInt64(0)...8),
-              case .unsigned(let version) = fields[0], version == 1 || version == 2, fields[1] == .text("remozio-gateway-settings-consumer-request"),
+              case .unsigned(let version) = fields[0], GatewaySettingsConsumerInterface.supportedRequestVersions.contains(version), fields[1] == .text("remozio-gateway-settings-consumer-request"),
               case .unsigned(let raw) = fields[7], let action = GatewaySettingsControlAction(rawValue: raw) else {
             throw GatewayPreparationError.invalidRecord
         }

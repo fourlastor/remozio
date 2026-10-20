@@ -31,5 +31,6 @@ Old cleanup cannot pause a newer settings successor.
 
 Owned controls cover the codecs, protected publication, restart generations, partial acceptance and cancellation.
 They do not establish installed Root admission, production credentials or provider delivery.
-Fresh native host selection and the visible settings action remain separate integration work.
+Native host selection is described in [the host selection record](macos-native-host-selection.md).
+The visible settings action remains separate integration work.
 No installed service or physical device test is part of these controls.

@@ -5,6 +5,7 @@ import XCTest
 
 final class AuthorityWakeRecoveryTests: XCTestCase, @unchecked Sendable {
     private struct Denied: Error {}
+    private final class Counter: Sendable { let value = Mutex(0) }
     private typealias Fixture = AuthorityWakeSettingsTests.Fixture
     private typealias Driver = AuthorityWakeSettingsTests.Driver
     private func waitUntil(_ condition: () async -> Bool) async throws {
@@ -38,17 +39,17 @@ final class AuthorityWakeRecoveryTests: XCTestCase, @unchecked Sendable {
         let f = try Fixture(), gate = DispatchSemaphore(value: 0), service = try f.service([Driver()], creationGate: gate)
         defer { gate.signal() }
         try await service.start(); try await waitUntil { f.attempts.withLock { $0 } == 1 }
-        let finished = Mutex(0)
-        let first = Task { let ticket = try await service.quiescePhonePushRecovery(commitDigest: f.old, verifyCurrent: {}); finished.withLock { $0 += 1 }; return ticket }
+        let finished = Counter()
+        let first = Task { let ticket = try await service.quiescePhonePushRecovery(commitDigest: f.old, verifyCurrent: {}); finished.value.withLock { $0 += 1 }; return ticket }
         try await waitUntil { await service.wakeStatus == .quiescingForRecovery }
-        let second = Task { let ticket = try await service.quiescePhonePushRecovery(commitDigest: f.old, verifyCurrent: {}); finished.withLock { $0 += 1 }; return ticket }
+        let second = Task { let ticket = try await service.quiescePhonePushRecovery(commitDigest: f.old, verifyCurrent: {}); finished.value.withLock { $0 += 1 }; return ticket }
         first.cancel()
-        XCTAssertNil(f.capability.publication); XCTAssertEqual(finished.withLock { $0 }, 0)
+        XCTAssertNil(f.capability.publication); XCTAssertEqual(finished.value.withLock { $0 }, 0)
         XCTAssertEqual(f.closes.withLock { $0 }, 0)
         gate.signal()
         do { _ = try await first.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
         let ticket = try await second.value
-        try ticket.requireValid(); XCTAssertEqual(finished.withLock { $0 }, 1)
+        try ticket.requireValid(); XCTAssertEqual(finished.value.withLock { $0 }, 1)
         let status = await service.wakeStatus; XCTAssertEqual(status, .suspendedForRecovery)
         try await service.close()
     }

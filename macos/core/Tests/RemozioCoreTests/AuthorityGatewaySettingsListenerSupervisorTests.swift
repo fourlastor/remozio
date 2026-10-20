@@ -5,6 +5,7 @@ import XCTest
 
 final class AuthorityGatewaySettingsListenerSupervisorTests: XCTestCase, @unchecked Sendable {
     private struct Failed: Error {}
+    private final class Counter: Sendable { let value = Mutex(0) }
     private typealias Supervisor = AuthorityGatewaySettingsListenerSupervisor
     private final class Listener: OwnedGatewaySettingsControlListener, @unchecked Sendable {
         let starts = Mutex(0), closes = Mutex(0), settled = Mutex(0)
@@ -68,16 +69,16 @@ final class AuthorityGatewaySettingsListenerSupervisorTests: XCTestCase, @unchec
         XCTAssertEqual(attempts.withLock { $0 }, 1)
     }
     func testConcurrentCancelledClosesJoinTheActiveListenerCleanup() async throws {
-        let listener = Listener(hold: true), completed = Mutex(0)
+        let listener = Listener(hold: true), completed = Counter()
         let owner = try Supervisor { AuthorityGatewaySettingsRuntime { listener } }
         try await owner.start(); try await waitUntil { await owner.status == .listening }
-        let first = Task { await owner.close(); completed.withLock { $0 += 1 } }
+        let first = Task { await owner.close(); completed.value.withLock { $0 += 1 } }
         defer { listener.release() }
         try await waitUntil { listener.gates.withLock { !$0.isEmpty } }
-        let second = Task { await owner.close(); completed.withLock { $0 += 1 } }
-        first.cancel(); XCTAssertEqual(completed.withLock { $0 }, 0); XCTAssertEqual(listener.closes.withLock { $0 }, 1)
+        let second = Task { await owner.close(); completed.value.withLock { $0 += 1 } }
+        first.cancel(); XCTAssertEqual(completed.value.withLock { $0 }, 0); XCTAssertEqual(listener.closes.withLock { $0 }, 1)
         listener.release(); await first.value; await second.value
-        XCTAssertEqual(completed.withLock { $0 }, 2); XCTAssertEqual(listener.settled.withLock { $0 }, 1)
+        XCTAssertEqual(completed.value.withLock { $0 }, 2); XCTAssertEqual(listener.settled.withLock { $0 }, 1)
     }
     func testLegacyAbsenceCreatesNoListenerAndDoesNotRetry() async throws {
         let calls = Mutex(0)
