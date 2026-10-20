@@ -85,6 +85,8 @@ enum SharedSetupImportRelayStorage {
             AdministrativeSetupPublication.File.importDNSRecord(accountID: $0.scope.accountID).name] })
         let allNames = Set(try FileManager.default.contentsOfDirectory(atPath: directory.path))
         let retained = allNames.filter { $0.hasPrefix("import-relay-") }
+        guard retained.allSatisfy({ $0.range(of: #"^import-relay-(?:(?:state|access|dns)-)?[0-9a-f]{32}\.cbor$"#,
+            options: .regularExpression) != nil }) else { throw SharedSetupImportError.incompatibleStore }
         guard retained.allSatisfy({ names.contains($0) }) else { throw SharedSetupImportError.corruptRecord }
         guard allNames.isSubset(of: names.union(["setup-import.sqlite", "writer.lock"])) else { throw SharedSetupImportError.incompatibleStore }
         try directory.validate()
