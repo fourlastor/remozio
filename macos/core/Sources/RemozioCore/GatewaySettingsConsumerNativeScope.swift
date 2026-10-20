@@ -3,6 +3,9 @@ import Foundation
 
 extension GatewaySettingsConsumerHostConfiguration {
     static let gatewayFileName = "gateway-settings-consumer-host.cbor"
+    var consumerExecutableRelativePath: String {
+        role == .gateway ? GatewayJournalSetupServiceConfiguration.executableRelativePath : "Contents/Library/LaunchServices/RemozioTransport"
+    }
     var gatewayConfigurationPath: String { get throws {
         guard role == .gateway else { throw GatewayPreparationError.changedScope }
         return try RuntimePreparationPaths(accountID: runtime.services.accountID).serviceDirectory + "/" + Self.gatewayFileName
@@ -25,8 +28,20 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
     static func openGateway(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
         let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
         let host = try GatewaySettingsConsumerHostConfiguration.decode(bytes)
-        guard host.role == .gateway, path == (try host.gatewayConfigurationPath),
-              host.bundlePath == MachineBootstrap.bundlePath else { throw GatewayPreparationError.changedScope }
+        guard host.role == .gateway, path == (try host.gatewayConfigurationPath) else { throw GatewayPreparationError.changedScope }
+        return try open(host: host, path: path, bytes: bytes)
+    }
+    static func openTransport(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence,
+                                                     bootstrap: TransportSettingsConsumerBootstrap) {
+        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
+        let bootstrap = try TransportSettingsConsumerBootstrap.decode(bytes)
+        try bootstrap.validatePath(path)
+        let opened = try open(host: bootstrap.host, path: path, bytes: bytes)
+        return (opened.scope, opened.release, bootstrap)
+    }
+    private static func open(host: GatewaySettingsConsumerHostConfiguration, path: String, bytes: Data) throws ->
+        (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
+        guard host.bundlePath == MachineBootstrap.bundlePath else { throw GatewayPreparationError.changedScope }
         try DedicatedServiceAccount.requireCurrent(serviceUID: host.serviceUID, ownerUID: host.runtime.services.ownerUID)
         let bundle = URL(fileURLWithPath: host.bundlePath)
         let placement = try ReleaseDestinationLease.readForServiceRegistration(path: bundle.deletingLastPathComponent().path)
@@ -51,13 +66,14 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let app = host.codePolicy.entries.first { $0.role == .app && $0.active }!
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-            try host.validateRelease(release)
-            let transportHost = try GatewaySettingsConsumerHostConfiguration(role: .transport, runtime: host.runtime,
-                bundlePath: host.bundlePath, codePolicy: host.codePolicy)
-            try transportHost.validateRelease(release)
-            guard release.manifest.components.first(where: { $0.role == .notificationGateway })?.relativePath
-                    == GatewayJournalSetupServiceConfiguration.executableRelativePath,
-                  release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
+            for role in GatewaySettingsConsumerRole.allCases {
+                let participant = try GatewaySettingsConsumerHostConfiguration(role: role, runtime: host.runtime,
+                    bundlePath: host.bundlePath, codePolicy: host.codePolicy)
+                try participant.validateRelease(release)
+                guard release.manifest.components.first(where: { $0.role == role.codeRole })?.relativePath
+                    == participant.consumerExecutableRelativePath else { throw GatewayPreparationError.changedScope }
+            }
+            guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
                     == AdministrativeSetupConfiguration.executablePath else { throw GatewayPreparationError.changedScope }
             try current.validate()
             return (current, release)
@@ -79,7 +95,7 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
             guard try directory.state(claim: claim, kind: .user) == .retained,
                   try directory.state(claim: claim, kind: .group) == .retained else { throw GatewayPreparationError.changedScope }
             try DynamicCodeValidation.validateSelf(requirement: requirement)
-            guard try DynamicCodeValidation.selfPath() == host.bundlePath + "/" + GatewayJournalSetupServiceConfiguration.executableRelativePath,
+            guard try DynamicCodeValidation.selfPath() == host.bundlePath + "/" + host.consumerExecutableRelativePath,
                   try ProtectedServiceConfiguration.readPublic(path: path) == bytes else { throw GatewayPreparationError.changedScope }
             try placement.validate()
             guard try placement.preparationCopyIdentity(name: URL(fileURLWithPath: host.bundlePath).lastPathComponent) == bundleIdentity else {

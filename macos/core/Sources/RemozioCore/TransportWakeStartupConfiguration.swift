@@ -34,13 +34,21 @@ public struct TransportWakeStartupConfiguration: Sendable, CustomStringConvertib
     }
     /// Loads only the configured protected key. Failure never generates a replacement or changes custody.
     public func makeRuntime() throws -> TransportWakeRuntime {
+        try makeRuntime(verifyCurrent: {})
+    }
+    /// The consumer keeps this guard through key restoration, channel operations and challenged signing.
+    func makeRuntime(verifyCurrent: @escaping @Sendable () throws -> Void) throws -> TransportWakeRuntime {
         try transport.requireNativeProcess()
+        try verifyCurrent()
         let signer = try GatewayWakeSigner.load(configuration: wake)
+        try verifyCurrent()
         let hints = try AuthorityWakeHintChannel(serviceName: transport.authorityServiceName, transportUID: transport.serviceUID,
-            authorityPolicy: transport.authorityPolicy, binding: wake.binding, timeoutMilliseconds: wake.timeoutMilliseconds)
+            authorityPolicy: transport.authorityPolicy, binding: wake.binding, timeoutMilliseconds: wake.timeoutMilliseconds,
+            verifyCurrent: verifyCurrent)
         let gateway = try GatewayWakeChannel(serviceName: wake.serviceName, transportUID: wake.transportUID,
-            gatewayPolicy: wake.gatewayPolicy, timeoutMilliseconds: wake.timeoutMilliseconds)
-        return try TransportWakeRuntime(hints: hints, gateway: gateway, signer: signer)
+            gatewayPolicy: wake.gatewayPolicy, timeoutMilliseconds: wake.timeoutMilliseconds, verifyCurrent: verifyCurrent)
+        try verifyCurrent()
+        return try TransportWakeRuntime(hints: hints, gateway: gateway, signer: signer, verifyCurrent: verifyCurrent)
     }
     private static var limits: CBORLimits { get throws { try .init(maxBytes: ProtectedServiceConfiguration.maximumBytes, maxDepth: 1, maxItems: 9) } }
 }

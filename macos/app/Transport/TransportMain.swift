@@ -5,8 +5,11 @@ import RemozioCore
 @main
 struct TransportMain {
     static func main() async {
-        guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration", "--remote-configuration", "--pairing-configuration"].contains(CommandLine.arguments[1]) else {
-            fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH or --remote-configuration PATH or --pairing-configuration PATH", code: EX_USAGE)
+        guard CommandLine.arguments.count == 3, ["--configuration", "--wake-configuration", "--remote-configuration", "--pairing-configuration", "--settings-host"].contains(CommandLine.arguments[1]) else {
+            fail("Usage: RemozioTransport --configuration PATH or --wake-configuration PATH or --remote-configuration PATH or --pairing-configuration PATH or --settings-host PATH", code: EX_USAGE)
+        }
+        if CommandLine.arguments[1] == "--settings-host" {
+            await settingsHost(path: CommandLine.arguments[2]); return
         }
         let configuration: ApprovalTransportConfiguration
         let wake: TransportWakeStartupConfiguration?
@@ -44,6 +47,30 @@ struct TransportMain {
         } catch {
             fail("Transport is unavailable. Restart requires fresh configuration and authority authentication.", code: EX_TEMPFAIL)
         }
+    }
+
+    private static func settingsHost(path: String) async {
+        let host: GatewaySettingsTransportHost
+        do { host = try .open(path: path, reportDirect: report, reportRelay: reportRelay, reportWake: reportWake) }
+        catch { fail("Transport control requires protected configuration, the dedicated account and the signed release.", code: EX_CONFIG) }
+        let task = Task {
+            do {
+                try await host.start()
+                while true { try Task.checkCancellation(); try await host.poll(); try await Task.sleep(for: .milliseconds(250)) }
+            } catch {
+                let failure = error, cleanup = Task { try await host.close() }
+                try await cleanup.value; throw failure
+            }
+        }
+        signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
+        let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        let interruption = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        termination.setEventHandler { task.cancel() }; interruption.setEventHandler { task.cancel() }
+        termination.resume(); interruption.resume()
+        defer { termination.cancel(); interruption.cancel() }
+        do { try await task.value }
+        catch is CancellationError { exit(EX_OK) }
+        catch { fail("Transport control is unavailable. Restart requires fresh protected configuration and authority authentication.", code: EX_TEMPFAIL) }
     }
 
     private static func run(_ configuration: ApprovalTransportConfiguration, wake: TransportWakeStartupConfiguration?, relayPort: UInt16?, pairing: TransportPairingControlConfiguration?, optionalWakePath: String?) async throws {

@@ -56,11 +56,19 @@ public actor GatewayWakeChannel {
 
     public init(serviceName: String, transportUID: uid_t, gatewayPolicy: XPCPeerPolicy,
                 timeoutMilliseconds: UInt64 = 5000) throws {
+        try self.init(serviceName: serviceName, transportUID: transportUID, gatewayPolicy: gatewayPolicy,
+            timeoutMilliseconds: timeoutMilliseconds, verifyCurrent: {})
+    }
+    init(serviceName: String, transportUID: uid_t, gatewayPolicy: XPCPeerPolicy,
+         timeoutMilliseconds: UInt64 = 5000, verifyCurrent: @escaping @Sendable () throws -> Void) throws {
         guard transportUID > 0, transportUID < UInt32.max, gatewayPolicy.expectedUserID > 0,
               gatewayPolicy.expectedUserID != transportUID, GatewayWakeEndpointConfiguration.validServiceName(serviceName),
               (1...60_000).contains(timeoutMilliseconds) else { throw GatewayWakeChannelError.invalidConfiguration }
         driver = NativeGatewayWakeDriver(serviceName: serviceName, policy: gatewayPolicy); timeout = timeoutMilliseconds
-        verifyAccount = { guard getuid() == transportUID, geteuid() == transportUID else { throw GatewayServiceError.wrongAccount } }
+        verifyAccount = {
+            guard getuid() == transportUID, geteuid() == transportUID else { throw GatewayServiceError.wrongAccount }
+            try verifyCurrent()
+        }
     }
     init(driver: any GatewayWakeDriver, timeoutMilliseconds: UInt64 = 5000,
          verifyAccount: @escaping @Sendable () throws -> Void = {}) {
@@ -75,6 +83,7 @@ public actor GatewayWakeChannel {
         do {
             guard case .version(let version) = try await perform(.hello) else { throw GatewayWakeChannelError.invalidMessage }
             guard version == 1 else { throw GatewayWakeChannelError.unsupportedVersion }
+            try verifyAccount(); try Task.checkCancellation()
             guard state == .opening else { throw GatewayWakeChannelError.closed }
             state = .open
         } catch { close(); throw error }
@@ -102,18 +111,25 @@ public actor GatewayWakeChannel {
             guard case .challenge(let challenge) = try await perform(.challenge), let challenge, challenge.count == 32 else {
                 throw GatewayWakeChannelError.invalidMessage
             }
+            try requireCurrent()
             let submission = try GatewayWakeSubmission(binding: binding, credentialID: credentialID,
                 deliveryID: GatewayHostSnapshot.bytes(deliveryID), challenge: challenge)
             let signature = try sign(submission)
+            try requireCurrent()
             guard signature.count == 64 else { throw GatewayWakeChannelError.invalidMessage }
             guard case .accepted(let accepted) = try await perform(.wake(submission.encode(), signature)) else {
                 throw GatewayWakeChannelError.invalidMessage
             }
+            try requireCurrent()
             guard accepted else { throw GatewayWakeChannelError.rejected }
         } catch {
             if (error as? GatewayWakeChannelError) != .rejected { close() }
             throw error
         }
+    }
+    private func requireCurrent() throws {
+        try verifyAccount(); try Task.checkCancellation()
+        guard state == .open else { throw GatewayWakeChannelError.closed }
     }
     public func close() {
         guard state != .closed else { return }
