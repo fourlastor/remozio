@@ -17,7 +17,8 @@ REMOZIO_LINUX_STORAGE_LEASE_LIVE=1 python3 -m unittest discover -s tests -p test
 
 The runner also runs automatically in `scripts/check-linux-host.sh`, locally and
 in the Linux Swift CI job. Unsupported prerequisites fail the experiment; they
-are not skipped or treated as successful validation.
+are not skipped or treated as successful validation. Python below 3.11 refuses
+before checking procfs, building or launching any process.
 
 The runner creates only private disposable files. Existing objects are never
 accepted as test targets. Each worker has a 15-second deadline (configurable up
@@ -46,8 +47,9 @@ the private subtree to remain on the anchor's device/filesystem type. This is a
 bounded fixture policy, not a production filesystem certification. Unknown kinds
 and failed filesystem reads refuse. Unsupported ACL semantics cannot pass a live
 control. Each result names the observed fixture filesystem class. The controls create real extended/default ACLs without changing system
-policy. Error controls for unavailable/denied ACL reads and unavailable/unknown
-filesystems use linker-wrapped calls and are explicitly labelled injected evidence.
+policy. Error controls for unavailable/denied ACL reads, unavailable/unknown
+filesystems and a stored object's wrong observed UID use linker-wrapped calls
+and are explicitly labelled injected evidence.
 
 The lease owns all descriptors. No descriptor-returning API exists. Files are
 opened nonblocking before type validation; no FIFO can hang acquisition. The
@@ -59,14 +61,27 @@ parent's shared open-file description. A fork copy refuses validation and a fres
 process may acquire only after the owner's descriptors close. `O_CLOEXEC` is
 checked by executing a fresh control process and counting its descriptors.
 
-Controls cover ordinary reopen, invalid paths/owner, missing objects, symlinks at
+The 34 controls comprise 29 live ordinary-user filesystem controls and five
+explicitly injected error controls; the report's `controlCounts` records both
+categories. `owner-mismatch` exercises only the requested
+owner/caller-identity guard. The separate injected `stored-owner-mismatch` first
+acquires the healthy fixture, then changes only `fstat`'s observed UID for the
+retained data object's device/inode. It requires `RSL_METADATA`, confirms that the
+wrapper was exercised, verifies the real file's owner remains unchanged, and
+reacquires without injection. No actual foreign-owned file or privilege transition
+is tested. An opt-in native mutation test removes only the stored-UID comparison:
+the healthy control must still pass and `stored-owner-mismatch` must fail.
+
+Controls also cover ordinary reopen, invalid paths, missing objects, symlinks at
 file/directory/anchor/ancestor levels, FIFO and directory substitutions, hardlinks,
 unsafe modes and special bits, access/default ACLs, a competing process, forked
 ownership, close-on-exec, file/lock/directory/anchor replacement, post-acquisition
 mode/ACL mutation, permanent retirement, and failed-acquisition descriptor/lock
 cleanup. Each control also checks its descriptor count returns to its baseline.
 Portable Python tests verify exact reports, prerequisite refusal, fixed build and
-source inventory, cleanup, output bounds and timeout behavior. Live controls are
+source inventory, cleanup, output bounds and timeout behavior. Below-floor Python
+refusal is tested with injected version tuples, without launching subprocesses;
+it is not a live run of an older interpreter. Live controls are
 explicitly enabled; portable validation on macOS is not Linux filesystem evidence.
 
 Advisory locking does not stop a malicious same-account process from ignoring the

@@ -32,9 +32,9 @@ CASES = (
     "file-mode", "special-mode", "access-acl", "default-acl", "competing-writer", "fork-copy",
     "close-on-exec", "file-replacement", "directory-replacement", "anchor-replacement",
     "lock-replacement", "mode-change", "acl-change", "failed-acquire-cleanup",
-    "acl-unavailable", "acl-denied", "filesystem-unavailable", "unknown-filesystem",
+    "acl-unavailable", "acl-denied", "filesystem-unavailable", "unknown-filesystem", "stored-owner-mismatch",
 )
-SIMULATED = {"acl-unavailable", "acl-denied", "filesystem-unavailable", "unknown-filesystem"}
+SIMULATED = {"acl-unavailable", "acl-denied", "filesystem-unavailable", "unknown-filesystem", "stored-owner-mismatch"}
 
 
 class OutputLimitError(Exception):
@@ -65,6 +65,8 @@ def validate_result(raw, case, returncode):
         raise ValueError("unsupported fixture filesystem")
     expected = {"case": case, "passed": True, "fixtureOnly": True,
                 "protectedInstallation": False, "descriptorsClosed": True, "fixtureFilesystem": filesystem}
+    if case == "stored-owner-mismatch":
+        expected["storedOwnerComparisonExercised"] = True
     if (type(result) is not dict or set(result) != set(expected) or result != expected
             or any(type(result[key]) is not bool for key in expected if key not in {"case", "fixtureFilesystem"})
             or type(returncode) is not int or returncode != 0):
@@ -143,6 +145,8 @@ def check_prerequisites():
 
 
 def measure(timeout=15):
+    if sys.version_info < (3, 11):
+        raise RuntimeError("Python 3.11 or later required")
     if (platform.system() != "Linux" or os.getuid() == 0 or os.getuid() != os.geteuid()
             or os.getgid() != os.getegid()):
         raise RuntimeError("ordinary Linux account required")
@@ -159,7 +163,7 @@ def measure(timeout=15):
         binary = directory / "lease-controls"
         arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
                      str(SOURCE / "lease.c"), str(SOURCE / "controls.c"),
-                     "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-o", str(binary)]
+                     "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-o", str(binary)]
         _output, status, error, clean = run_owned(arguments, 30)
         if status != 0 or error or not clean or not binary.is_file() or not os.access(binary, os.X_OK):
             raise RuntimeError("native build failed")
@@ -187,6 +191,7 @@ def measure(timeout=15):
                      "kernelVersion": kernel[1] if kernel else "unknown", "runsAsRoot": False,
                      "pythonVersion": ".".join(map(str, sys.version_info[:3]))},
             "prerequisites": prerequisites, "sources": before, "sourcesUnchanged": True, "cases": results,
+            "controlCounts": {"ownedLive": len(CASES) - len(SIMULATED), "injected": len(SIMULATED)},
             "passed": all(result["passed"] for result in results.values()),
             "limits": ["ordinary-user disposable anchor; no protected installation or production service identity",
                        "advisory locks and point-in-time metadata observations, not exclusion of a malicious owner",

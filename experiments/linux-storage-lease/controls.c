@@ -20,8 +20,23 @@
 
 #define CHECK(value) do { if (!(value)) return 1; } while (0)
 static int acl_fault, filesystem_fault;
+static bool stored_owner_fault;
+static dev_t stored_owner_device;
+static ino_t stored_owner_inode;
+static unsigned stored_owner_injections;
 ssize_t __real_fgetxattr(int, const char *, void *, size_t);
 int __real_fstatfs(int, struct statfs *);
+int __real_fstat(int, struct stat *);
+int __wrap_fstat(int fd, struct stat *value) {
+    int result = __real_fstat(fd, value);
+    if (!result && stored_owner_fault && value->st_dev == stored_owner_device && value->st_ino == stored_owner_inode) {
+        /* Inject only the fixture data object's observed UID. No chown, extra account,
+         * privilege or actual foreign-owned file is involved in this control. */
+        value->st_uid = getuid() ^ 1U;
+        ++stored_owner_injections;
+    }
+    return result;
+}
 ssize_t __wrap_fgetxattr(int fd, const char *name, void *value, size_t size) {
     if (acl_fault) { errno = acl_fault; return -1; }
     return __real_fgetxattr(fd, name, value, size);
@@ -194,6 +209,21 @@ static int control(const char *case_name, const char *base, const char *self) {
         CHECK(refused(anchor, long_name, getuid(), RSL_ARGUMENT));
     } else if (!strcmp(case_name, "owner-mismatch")) {
         CHECK(refused(anchor, "store", getuid() + 1, RSL_ORDINARY_OWNER_REQUIRED));
+    } else if (!strcmp(case_name, "stored-owner-mismatch")) {
+        rsl_lease *lease = NULL;
+        CHECK(rsl_acquire(anchor, "store", getuid(), &lease) == RSL_OK);
+        rsl_destroy(lease);
+        struct stat actual;
+        CHECK(lstat(data, &actual) == 0 && S_ISREG(actual.st_mode) && actual.st_uid == getuid());
+        stored_owner_device = actual.st_dev;
+        stored_owner_inode = actual.st_ino;
+        stored_owner_injections = 0;
+        stored_owner_fault = true;
+        CHECK(refused(anchor, "store", getuid(), RSL_METADATA) && stored_owner_injections > 0);
+        stored_owner_fault = false;
+        CHECK(lstat(data, &actual) == 0 && actual.st_uid == getuid());
+        CHECK(rsl_acquire(anchor, "store", getuid(), &lease) == RSL_OK);
+        rsl_destroy(lease);
     } else if (!strcmp(case_name, "acl-unavailable") || !strcmp(case_name, "acl-denied")) {
         acl_fault = !strcmp(case_name, "acl-denied") ? EACCES : EOPNOTSUPP;
         CHECK(refused(anchor, "store", getuid(), RSL_ACL_UNAVAILABLE)); acl_fault = 0;
@@ -249,6 +279,7 @@ int main(int argc, char **argv) {
     if (!kind) return 77;
     int before = descriptor_count();
     if (before < 0 || control(argv[1], argv[2], argv[0]) || descriptor_count() != before) return 1;
-    printf("{\"case\":\"%s\",\"passed\":true,\"fixtureOnly\":true,\"protectedInstallation\":false,\"descriptorsClosed\":true,\"fixtureFilesystem\":\"%s\"}\n", argv[1], kind);
+    printf("{\"case\":\"%s\",\"passed\":true,\"fixtureOnly\":true,\"protectedInstallation\":false,\"descriptorsClosed\":true,\"fixtureFilesystem\":\"%s\"%s}\n",
+           argv[1], kind, !strcmp(argv[1], "stored-owner-mismatch") ? ",\"storedOwnerComparisonExercised\":true" : "");
     return 0;
 }

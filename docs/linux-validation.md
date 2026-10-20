@@ -77,9 +77,11 @@ do not establish production authority, physical-phone approval or protected call
 The [storage lease experiment](../experiments/linux-storage-lease/README.md) also
 runs in `check-linux-host.sh`. It retains existing private directories and files,
 checks ownership, modes, ACL absence and object identity, and holds a cooperative
-writer lock. Its 33 controls include 29 live ordinary-user filesystem controls
-and four explicitly injected error controls. Filesystem and ACL prerequisites
-must be available; unsupported semantics fail rather than skip. These are fixture
+writer lock. Its 34 controls include 29 live ordinary-user filesystem controls
+and five explicitly injected error controls, including a wrong stored-object UID
+observation. The requested-owner guard remains a separate live control; no actual
+foreign-owned file is tested. Filesystem and ACL prerequisites must be available,
+and Python must be 3.11 or later; unsupported semantics fail rather than skip. These are fixture
 mechanics, not a protected service identity, durable journal or production storage
 policy. Advisory locking does not exclude a malicious same-account writer.
 

@@ -18,8 +18,11 @@ SPEC.loader.exec_module(EXPERIMENT)
 
 
 def report(case="healthy"):
-    return {"case": case, "passed": True, "fixtureOnly": True,
-            "protectedInstallation": False, "descriptorsClosed": True, "fixtureFilesystem": "tmpfs"}
+    value = {"case": case, "passed": True, "fixtureOnly": True,
+             "protectedInstallation": False, "descriptorsClosed": True, "fixtureFilesystem": "tmpfs"}
+    if case == "stored-owner-mismatch":
+        value["storedOwnerComparisonExercised"] = True
+    return value
 
 
 @contextlib.contextmanager
@@ -39,6 +42,20 @@ class ReportTests(unittest.TestCase):
             value = EXPERIMENT.validate_result(json.dumps(report(case)), case, 0)
             self.assertEqual(value["evidence"], "injected-error-control" if case in EXPERIMENT.SIMULATED
                              else "owned-live-filesystem-control")
+
+    def test_stored_owner_evidence_requires_injection_observation(self):
+        self.assertEqual(len(EXPERIMENT.CASES), 34)
+        self.assertEqual(len(EXPERIMENT.SIMULATED), 5)
+        self.assertNotIn("owner-mismatch", EXPERIMENT.SIMULATED)
+        self.assertIn("stored-owner-mismatch", EXPERIMENT.SIMULATED)
+        for flag in (None, False, 1):
+            value = report("stored-owner-mismatch")
+            if flag is None:
+                del value["storedOwnerComparisonExercised"]
+            else:
+                value["storedOwnerComparisonExercised"] = flag
+            with self.assertRaises(ValueError):
+                EXPERIMENT.validate_result(json.dumps(value), "stored-owner-mismatch", 0)
 
     def test_rejects_missing_extra_and_false_fields(self):
         for key in report():
@@ -67,6 +84,18 @@ class ReportTests(unittest.TestCase):
 
 
 class PrerequisiteAndInventoryTests(unittest.TestCase):
+    def test_python_below_floor_refuses_before_prerequisites_or_process(self):
+        for version in ((3, 9, 0), (3, 10, 99)):
+            with ordinary_linux(), patch.object(EXPERIMENT.sys, "version_info", version), \
+                 patch.object(EXPERIMENT, "check_prerequisites") as prerequisites, \
+                 patch.object(EXPERIMENT, "run_owned") as run, \
+                 patch.object(EXPERIMENT.subprocess, "Popen", side_effect=AssertionError("unexpected subprocess")) as spawn:
+                with self.assertRaisesRegex(RuntimeError, "Python 3.11 or later required"):
+                    EXPERIMENT.measure()
+                prerequisites.assert_not_called()
+                run.assert_not_called()
+                spawn.assert_not_called()
+
     def test_prerequisite_refusal_starts_no_process(self):
         with ordinary_linux(), patch.object(EXPERIMENT.Path, "open", side_effect=PermissionError), \
              patch.object(EXPERIMENT, "run_owned") as run:
@@ -128,13 +157,21 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(value["passed"])
         self.assertIs(value["protectedInstallation"], False)
         self.assertEqual(set(value["cases"]), set(EXPERIMENT.CASES))
+        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 5})
         arguments, timeout = calls[0]
         self.assertEqual(timeout, 30)
         self.assertEqual(arguments[:6], ["/fixture/cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
-        self.assertEqual(arguments[6:10], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "controls.c"),
-                                           "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs"])
+        self.assertEqual(arguments[6:11], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "controls.c"),
+                                           "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat"])
         self.assertEqual(len(calls), len(EXPERIMENT.CASES) + 1)
         self.assertNotIn("/fixture", json.dumps(value))
+
+    def test_documented_python_floor_is_admitted(self):
+        with patch.object(EXPERIMENT.sys, "version_info", (3, 11, 0)):
+            value, calls = self.run_mock_measure()
+        self.assertTrue(value["passed"])
+        self.assertEqual(value["host"]["pythonVersion"], "3.11.0")
+        self.assertEqual(len(calls), len(EXPERIMENT.CASES) + 1)
 
     def test_failed_cleanup_or_worker_cannot_pass(self):
         value, _calls = self.run_mock_measure(failure="healthy")
@@ -176,6 +213,33 @@ class WorkerTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("REMOZIO_LINUX_STORAGE_LEASE_LIVE") == "1", "explicit live filesystem controls")
 class LiveTests(unittest.TestCase):
+    def test_stored_owner_control_detects_removed_uid_comparison(self):
+        source = (EXPERIMENT.SOURCE / "lease.c").read_text()
+        comparison = "info->st_uid != lease->owner || "
+        self.assertEqual(source.count(comparison), 1)
+        with EXPERIMENT._cleanup.subreaper(), tempfile.TemporaryDirectory(prefix="storage-owner-mutation-") as temporary:
+            directory = Path(temporary)
+            mutant = directory / "lease-without-owner-check.c"
+            mutant.write_text(source.replace(comparison, "", 1))
+            binary = directory / "mutant-controls"
+            compiler = EXPERIMENT.shutil.which("cc")
+            self.assertIsNotNone(compiler)
+            arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
+                         "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "controls.c"),
+                         "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-o", str(binary)]
+            _raw, status, error, clean = EXPERIMENT.run_owned(arguments, 30)
+            self.assertEqual((status, error, clean), (0, None, True))
+            for case in ("healthy", "stored-owner-mismatch"):
+                with tempfile.TemporaryDirectory(prefix="case-", dir=directory) as workspace:
+                    raw, status, error, clean = EXPERIMENT.run_owned([str(binary), case, workspace], 15)
+                    self.assertIsNone(error)
+                    self.assertTrue(clean)
+                    if case == "healthy":
+                        self.assertTrue(EXPERIMENT.validate_result(raw, case, status)["passed"])
+                    else:
+                        self.assertEqual(status, 1)
+                        self.assertEqual(raw, b"")
+
     def test_native_controls_under_restrictive_umask_and_unusual_paths(self):
         with tempfile.TemporaryDirectory(prefix="storage fixture \n") as parent:
             previous = os.umask(0o777)
@@ -186,6 +250,7 @@ class LiveTests(unittest.TestCase):
                 os.umask(previous)
         self.assertTrue(value["passed"], json.dumps(value["cases"], sort_keys=True))
         self.assertEqual(len(value["cases"]), len(EXPERIMENT.CASES))
+        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 5})
         self.assertTrue(value["sourcesUnchanged"])
         self.assertTrue(all(case["ownedProcessesReaped"] for case in value["cases"].values()))
 
