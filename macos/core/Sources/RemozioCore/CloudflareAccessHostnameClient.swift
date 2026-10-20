@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-/// A point-in-time inventory. It does not establish routing precedence or authorize DNS publication.
+/// A bounded account inventory read through an empty terminal page. It does not establish routing precedence or authorize DNS publication.
 struct CloudflareAccessHostnameInventory: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     struct Match: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let applicationID: String
@@ -28,6 +28,7 @@ struct CloudflareAccessHostnameInventory: Equatable, Sendable, CustomStringConve
 /// Account-scoped reads only. Destination aliases are included; provider URLs are never followed.
 struct CloudflareAccessHostnameClient: Sendable {
     static let maximumPages = 100
+    static let maximumRequests = maximumPages + 1
     typealias Send = CloudflareProvisioningScopeClient.Send
     private let send: Send
     init(send: @escaping Send) { self.send = send }
@@ -37,8 +38,8 @@ struct CloudflareAccessHostnameClient: Sendable {
         let selected = try application.createdApplication(expected: expected, plan: plan, createdTunnel: createdTunnel)
         let reader = CloudflareAccessApplicationClient(send: send)
         var ids = Set<String>(), matches: [CloudflareAccessHostnameInventory.Match] = [], unresolved: [String] = []
-        var pageSize: Int?, totalCount: Int?, totalPages: Int?
-        for number in 1...Self.maximumPages {
+        var pageSize: Int?
+        for number in 1...Self.maximumRequests {
             let request = try configuration.accessAccountInventoryRequest(expected: expected, plan: plan, createdTunnel: createdTunnel, page: number)
             let reply = try await reader.read(request)
             let envelope: Envelope
@@ -48,15 +49,18 @@ struct CloudflareAccessHostnameClient: Sendable {
             let info = envelope.result_info
             guard info.page == number, (1...100).contains(info.per_page), info.count == envelope.result.count,
                   (0...info.per_page).contains(info.count), pageSize == nil || pageSize == info.per_page,
-                  info.total_count == nil || info.total_count! >= 0,
-                  info.total_pages == nil || (0...Self.maximumPages).contains(info.total_pages!) else { throw CloudflareProvisioningError.invalidResponse }
-            if number == 1 { pageSize = info.per_page; totalCount = info.total_count; totalPages = info.total_pages }
-            guard totalCount == info.total_count, totalPages == info.total_pages,
-                  totalPages != 0 || (number == 1 && envelope.result.isEmpty) else { throw CloudflareProvisioningError.invalidResponse }
-            if let totalCount, let totalPages {
-                let expectedPages = totalCount / info.per_page + (totalCount % info.per_page == 0 ? 0 : 1)
-                guard totalPages == expectedPages || (totalCount == 0 && totalPages == 1) else { throw CloudflareProvisioningError.invalidResponse }
+                  info.total_count.map({ $0 >= 0 }) ?? true else { throw CloudflareProvisioningError.invalidResponse }
+            pageSize = info.per_page
+            if envelope.result.isEmpty {
+                guard ids.contains(selected.applicationID),
+                      matches.contains(where: { $0.applicationID == selected.applicationID && $0.uri == selected.hostname }) else {
+                    throw CloudflareProvisioningError.wrongScope
+                }
+                try Task.checkCancellation()
+                return .init(identity: selected, planDigest: Data(SHA256.hash(data: plan.bytes)), applicationCount: ids.count,
+                    matches: matches, unresolvedApplicationIDs: unresolved)
             }
+            guard number <= Self.maximumPages else { throw CloudflareProvisioningError.invalidResponse }
             for row in envelope.result {
                 guard row.id.utf8.count == 36, let id = UUID(uuidString: row.id),
                       ids.insert(id.uuidString.lowercased()).inserted else { throw CloudflareProvisioningError.invalidResponse }
@@ -70,24 +74,6 @@ struct CloudflareAccessHostnameClient: Sendable {
                             hasPublicOverrides: destination.hasPublicOverrides))
                     }
                 }
-            }
-            let terminal: Bool
-            if let totalCount {
-                guard ids.count <= totalCount else { throw CloudflareProvisioningError.invalidResponse }
-                terminal = ids.count == totalCount
-                if !terminal && info.count != info.per_page { throw CloudflareProvisioningError.invalidResponse }
-            } else if let totalPages {
-                terminal = number >= totalPages
-                if !terminal && info.count != info.per_page { throw CloudflareProvisioningError.invalidResponse }
-            } else { terminal = info.count < info.per_page }
-            if terminal {
-                guard ids.contains(selected.applicationID),
-                      matches.contains(where: { $0.applicationID == selected.applicationID && $0.uri == selected.hostname }) else {
-                    throw CloudflareProvisioningError.wrongScope
-                }
-                try Task.checkCancellation()
-                return .init(identity: selected, planDigest: Data(SHA256.hash(data: plan.bytes)), applicationCount: ids.count,
-                    matches: matches, unresolvedApplicationIDs: unresolved)
             }
         }
         throw CloudflareProvisioningError.invalidResponse
@@ -117,7 +103,7 @@ struct CloudflareAccessHostnameClient: Sendable {
         let success: Bool; let errors: [Ignored]; let result: [Application]; let result_info: Page
     }
     private struct Page: Decodable {
-        let page: Int; let count: Int; let per_page: Int; let total_count: Int?; let total_pages: Int?
+        let page: Int; let count: Int; let per_page: Int; let total_count: Int?
     }
     private struct Route {
         let uri: String; let hasPublicOverrides: Bool

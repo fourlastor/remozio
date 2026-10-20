@@ -8,7 +8,8 @@ final class SharedSetupAccessHostnameOwnerTests: XCTestCase, @unchecked Sendable
     private func steps(_ f: AccessApplicationFixture) throws -> [RelayIngressProbe.Step] {
         try [RelayIngressProbe.reply(RelayIngressProviderFixture.metadata(configuration: XCTUnwrap(f.h.f.proposal().cloudflare), plan: f.plan)),
             RelayIngressProbe.reply(AccessHostnameReplies.page([AccessHostnameReplies.own(f)], size: 1, total: 2)),
-            RelayIngressProbe.reply(AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: "unrelated.invalid")], number: 2, size: 1, total: 2))]
+            RelayIngressProbe.reply(AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: "unrelated.invalid")], number: 2, size: 1, total: 2)),
+            RelayIngressProbe.reply(AccessHostnameReplies.page([], number: 3, size: 1, total: 2))]
     }
     private func inspect(_ owner: SetupAccountOwner, f: AccessApplicationFixture, expected: SetupPortableImportProgress,
                          probe: RelayIngressProbe) async throws -> CloudflareAccessHostnameInventory {
@@ -22,7 +23,7 @@ final class SharedSetupAccessHostnameOwnerTests: XCTestCase, @unchecked Sendable
         let observed = try await inspect(owner, f: f, expected: expected, probe: probe)
         XCTAssertNoThrow(try observed.validate(expected: f.h.intent, plan: f.plan, createdTunnel: f.tunnel, application: application))
         XCTAssertEqual(observed.applicationCount, 2); XCTAssertEqual(try f.h.progress(owner), expected); XCTAssertEqual(try f.read(), application)
-        let requests = await probe.all(); XCTAssertEqual(requests.count, 3); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 4); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
     }
     func testIdenticalApplicationReplacementStopsBeforeTheNextPage() async throws {
         let f = try AccessApplicationFixture(), application = try f.retainCreated(), owner = try f.h.owner(); defer { try? owner.close() }
@@ -36,12 +37,12 @@ final class SharedSetupAccessHostnameOwnerTests: XCTestCase, @unchecked Sendable
     }
     func testInventoryChangeAtTheLastPageCannotReturnACompleteObservation() async throws {
         let f = try AccessApplicationFixture(); _ = try f.retainCreated(); let owner = try f.h.owner(); defer { try? owner.close() }
-        let probe = try RelayIngressProbe(steps(f), hook: { count, _ in if count == 3 {
+        let probe = try RelayIngressProbe(steps(f), hook: { count, _ in if count == 4 {
             try f.h.machine { machine in let inventory = try XCTUnwrap(machine.inventory()); _ = try machine.writeInventory(inventory, expectedRevision: inventory.revision) }
         } })
         do { _ = try await inspect(owner, f: f, expected: f.h.progress(owner), probe: probe); XCTFail() }
         catch { XCTAssertEqual(error as? AdministrativeSetupError, .staleProgress) }
-        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 4)
     }
     func testChangedTunnelRecordStopsBeforeTheNextPage() async throws {
         let f = try AccessApplicationFixture(); _ = try f.retainCreated(); let owner = try f.h.owner(); defer { try? owner.close() }

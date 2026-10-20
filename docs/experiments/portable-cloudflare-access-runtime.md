@@ -29,6 +29,13 @@ It also checks the application's initial empty policy response.
 The account inventory includes public destination aliases, wildcard overlap and unresolved routing fields.
 These observations do not prove provider routing precedence or authorize DNS publication.
 
+Account inventory reads continue through an empty terminal page. A short nonempty page cannot prove completion.
+The client accepts up to 100 nonempty pages and one final empty probe.
+A failed final read or a nonempty overflow page returns no inventory.
+Totals do not determine completion. Page sequence, size, duplicate identity and response limits remain checked.
+This follows the official [Access client](https://github.com/cloudflare/cloudflare-typescript/blob/main/src/resources/zero-trust/access/applications/applications.ts)
+and its [pagination implementation](https://github.com/cloudflare/cloudflare-typescript/blob/main/src/core/pagination.ts).
+
 The private-route checks use tunnel-filtered responses.
 A provider's global result total does not identify routes belonging to this tunnel.
 A route, malformed response or unavailable read cannot establish the required empty observation.
@@ -43,7 +50,7 @@ The focused run passed 233 synthetic controls at source `f3fd1a1`, with no failu
 It covered the preceding tunnel controls and the new Access, hostname and private-route paths.
 This focused result does not substitute for the complete publication gate.
 
-The complete required publication gate remains pending on the final published dependency.
+The complete required gate must pass on the final dependency before publication.
 The fixtures use temporary storage and synthetic provider replies.
 They test current import binding, empty and overlapping inventories, typed failures, cancellation and retained creation outcomes.
 

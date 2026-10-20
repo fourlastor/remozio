@@ -66,7 +66,7 @@ unsupported. Enable its live test explicitly as documented there. Existing
 historical checkpoints above remain scoped to their original source revisions.
 
 The [disposable approval-to-command experiment](experiments/linux-approval-command.md)
-connects the shared verifier, fixture-only consumption, audit tables and checkpoint/recovery
+connects the shared verifier, consumption/outcome and submission-replay tables, audit tables and checkpoint/recovery
 selection to a fixed ordinary-user command. It runs automatically after the shared-host
 suite in `check-linux-host.sh`, on both the local Linux gate and Linux Swift CI job.
 Synthetic software keys and requester claims, a private fixture ledger and one fixed command
@@ -89,10 +89,10 @@ Unknown platforms and any failed phase fail the gate immediately.
 
 The [shared host core](../host/shared-core/README.md) contains the decision verifier,
 its authority-owned request, enrollment and clock inputs, the sleep-inclusive clock
-sampler, SQLite audit and consumption tables, consumption outcome transitions,
-checkpoint and history-intent codecs, and pure storage-reconciliation selection. These tests run through the Linux host check and
+sampler, SQLite audit, consumption and command-submission replay tables, consumption outcome transitions,
+checkpoint and history-intent codecs/evidence tables, and pure storage-reconciliation selection. These tests run through the Linux host check and
 native Mac check; Mac tests also retain audit signing integration. Mac consumers
-use the same implementations through compatibility type aliases and a consumption
+use the same implementations through compatibility type aliases and table
 storage-error adapter. The table owner still supplies protected storage, durability
 configuration and outer transactions.
 Recovery selections are data-only recommendations; the Mac adapter retains its
@@ -106,7 +106,31 @@ competing write connections, replay across reopen, failure rollback and terminal
 unknown outcomes; protected Linux connection ownership and durable commit/recovery
 remain unimplemented. The Mac owner continues to load current enrollment and check
 its revision in the write transaction, mark failures and coordinate checkpoints.
-The disposable command experiment continues using its separate fixture-only ledger.
+The disposable command experiment now uses these shared table implementations, with its
+own fixture-only connection/checkpoint owner. Its seventeen process controls preserve the
+original fourteen and add ID replay, nonce replay and expiry at the final shared consumption
+call. Read-only Python SQLite observations independently check the stored row counts after
+workers retire, including reservation rollback on expiry and audit failure. A reopened worker
+rejects fresh signed requests reusing historical IDs/nonces and never restores an old token.
+This integration does not add a protected Linux owner or a production continuity format.
+
+`HistoryRecoveryJournalTables` also shares the existing retained history-gap table
+and canonical intent bytes. The connection owner supplies an explicit transaction;
+writes require a main-database write transaction. The Mac adapter keeps version
+checks, migration ownership, storage-error mapping and failed-transaction handling.
+Portable tests cover reopen, duplicate epochs, schema/row rollback, malformed data
+and main-table qualification. This does not select a Linux persistent catalog,
+authenticate an intent or authorize recovery of pending actions.
+
+Shared command-submission replay tests exercise permanent ID/nonce reservations,
+scope and capacity limits, competing connections, rollback, reopen, malformed rows
+and SQLite failures. The original Mac replay table layout is retained, with no
+shared schema-version migration or retention path. The Mac adapter keeps policy
+prerequisites, protected installation, error mapping and failed-transaction handling;
+its existing journal, checkpoint and caller-admission tests remain unchanged.
+Supplied caller bindings and capture digests are historical metadata, not caller
+authentication or execution authority. The connection owner must roll back the
+whole admission transaction on any required failure and coordinate durable commits.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
@@ -152,6 +176,16 @@ device-dependent experiments still require their specified interactive operator
 sessions. A passing local Linux gate does not establish Mac runtime compatibility.
 
 ## Human testing boundary
+
+The shared explicit-grant codec retains the Mac policy format and authorization
+checks. Linux own-account helpers refuse root and other-account targets, resolve
+current NSS credentials, and require fresh policy and authenticated retained-caller
+observations. Portable tests cover the existing canonical bytes and disclosure,
+scope and revocation; Linux tests cover fresh reads, changed credentials or targets,
+missing observations, malformed/unavailable NSS results and native own-account NSS.
+The supplied loader and credential-reader seams do not establish protected loading,
+monitor ownership or caller authentication. Production integration and the stopped
+handoff remain separate gates; no Linux protected policy path is selected here.
 
 Supervised `/dev/tpmrm0` creation, fresh-process reopen, signing and mutual TLS,
 including reuse of the same keys after the operator's reboot,

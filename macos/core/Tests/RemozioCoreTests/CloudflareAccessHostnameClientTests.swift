@@ -36,9 +36,10 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
     func testEveryPageUsesTheBoundAccountWithoutDomainOrNameFilters() async throws {
         let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([
             reply([AccessHostnameReplies.row(1, uri: "other.invalid"), AccessHostnameReplies.row(2, uri: "another.invalid")], size: 2, total: 3, pages: 2),
-            reply([AccessHostnameReplies.own(f)], number: 2, size: 2, total: 3, pages: 2)])
+            reply([AccessHostnameReplies.own(f)], number: 2, size: 2, total: 3, pages: 2),
+            reply([], number: 3, size: 2, total: 3, pages: 2)])
         let observed = try await inspect(f, probe: probe), requests = await probe.all()
-        XCTAssertEqual(observed.applicationCount, 3); XCTAssertEqual(observed.matches.count, 1); XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(observed.applicationCount, 3); XCTAssertEqual(observed.matches.count, 1); XCTAssertEqual(requests.count, 3)
         for (index, request) in requests.enumerated() {
             XCTAssertEqual(request.httpMethod, "GET"); XCTAssertNil(request.httpBody)
             let url = try XCTUnwrap(URLComponents(url: XCTUnwrap(request.url), resolvingAgainstBaseURL: false))
@@ -50,11 +51,21 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
         XCTAssertEqual(String(reflecting: observed), "CloudflareAccessHostnameInventory(redacted)")
         XCTAssertEqual(String(reflecting: observed.matches[0]), "CloudflareAccessHostnameMatch(redacted)")
     }
+    func testShortNonemptyPageCannotHideALaterHostnameOverlap() async throws {
+        let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([
+            reply([AccessHostnameReplies.own(f)]),
+            reply([AccessHostnameReplies.row(1, uri: f.plan.hostname)], number: 2),
+            reply([], number: 3)])
+        let observed = try await inspect(f, probe: probe)
+        XCTAssertEqual(observed.applicationCount, 2)
+        XCTAssertEqual(observed.matches.count, 2)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+    }
     func testAdditionalDestinationFindsOverlapDespiteDifferentPrimaryDomain() async throws {
         let f = try AccessApplicationFixture()
         let alias = AccessHostnameReplies.row(1, uri: "unrelated.invalid", extra: ["destinations": [["type": "public", "uri": f.plan.hostname,
             "overrides": [["behavior": "public", "path_pattern": "/*"]]]]])
-        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f), alias])])
+        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f), alias]), reply([], number: 2)])
         let observed = try await inspect(f, probe: probe)
         XCTAssertEqual(observed.matches.count, 2)
         XCTAssertEqual(observed.matches.last?.applicationID, "00000001-1111-4111-8111-111111111111")
@@ -64,7 +75,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
         let f = try AccessApplicationFixture()
         let row = AccessHostnameReplies.row(1, uri: f.plan.hostname, extra: ["self_hosted_domains": [f.plan.hostname],
             "destinations": [["type": "public", "uri": "unrelated.invalid"]]])
-        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f), row])])
+        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f), row]), reply([], number: 2)])
         let observed = try await inspect(f, probe: probe); XCTAssertEqual(observed.matches.count, 1)
     }
     func testWildcardsMatchOnlyTheirOwnLabelsAndDoNotSelectAWinner() async throws {
@@ -74,7 +85,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
             "*" + String(first.suffix(3)) + "." + suffix, f.plan.hostname.uppercased(), "*." + f.plan.hostname,
             "*." + labels.dropFirst(2).joined(separator: "."), "unrelated.invalid"]
         let rows = patterns.enumerated().map { AccessHostnameReplies.row($0.offset + 1, uri: $0.element) }
-        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)] + rows)])
+        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)] + rows), reply([], number: 2)])
         let result = try await inspect(f, probe: probe)
         XCTAssertEqual(result.matches.map(\.uri), [f.plan.hostname] + Array(patterns.prefix(4)))
         XCTAssertEqual(result.matches.map(\.wildcardHostname), [false, true, true, true, false])
@@ -82,7 +93,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
     func testPathSpecificApplicationsRemainVisibleForLaterPrecedenceChecks() async throws {
         let f = try AccessApplicationFixture(), paths = ["/", "/*", "/admin", "/alpha/*", "/%2f"]
         let rows = paths.enumerated().map { AccessHostnameReplies.row($0.offset + 1, uri: f.plan.hostname + $0.element) }
-        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)] + rows)])
+        let probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)] + rows), reply([], number: 2)])
         let result = try await inspect(f, probe: probe)
         XCTAssertEqual(result.matches.map(\.uri), [f.plan.hostname] + paths.map { f.plan.hostname + $0 })
     }
@@ -91,7 +102,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
             AccessHostnameReplies.row(1, uri: "other.invalid", extra: ["self_hosted_domains": ["other.invalid", f.plan.hostname]]),
             AccessHostnameReplies.row(2, uri: f.plan.hostname, type: "ssh"), AccessHostnameReplies.row(3, uri: f.plan.hostname, type: "vnc"),
             AccessHostnameReplies.row(4, uri: f.plan.hostname, extra: ["self_hosted_domains": ["other.invalid"]])]
-        let probe = try RelayIngressProbe([reply(rows)]), result = try await inspect(f, probe: probe)
+        let probe = try RelayIngressProbe([reply(rows), reply([], number: 2)]), result = try await inspect(f, probe: probe)
         XCTAssertEqual(result.matches.count, 5)
     }
     func testUnknownApplicationAndDestinationTypesRemainExplicitlyUnresolved() async throws {
@@ -100,12 +111,12 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
             AccessHostnameReplies.row(2, uri: "other.invalid", extra: ["destinations": [["type": "future-destination"]]]),
             AccessHostnameReplies.row(3, uri: "other.invalid", extra: ["destinations": [["type": "private", "hostname": f.plan.hostname]]]),
             AccessHostnameReplies.row(4, uri: "other.invalid", extra: ["destinations": [["type": "public", "uri": f.plan.hostname, "future_routing_option": true]]])]
-        let probe = try RelayIngressProbe([reply(rows)]), result = try await inspect(f, probe: probe)
+        let probe = try RelayIngressProbe([reply(rows), reply([], number: 2)]), result = try await inspect(f, probe: probe)
         XCTAssertEqual(result.unresolvedApplicationIDs, ["00000001-1111-4111-8111-111111111111", "00000002-1111-4111-8111-111111111111", "00000004-1111-4111-8111-111111111111"])
         XCTAssertEqual(result.matches.count, 2)
     }
     func testMissingRetainedApplicationNeverAdoptsAnotherAppWithTheSameHostname() async throws {
-        let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([reply([AccessHostnameReplies.row(1, uri: f.plan.hostname)])])
+        let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([reply([AccessHostnameReplies.row(1, uri: f.plan.hostname)]), reply([], number: 2)])
         do { _ = try await inspect(f, probe: probe); XCTFail() } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .wrongScope) }
     }
     func testDuplicateOrMalformedApplicationIdentityInvalidatesTheInventory() async throws {
@@ -123,39 +134,66 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
             do { _ = try await inspect(f, probe: probe); XCTFail(uri) } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
         }
     }
+    func testAdvisoryTotalsCannotTruncateOrRejectTheObservedPages() async throws {
+        let f = try AccessApplicationFixture(), probe = RelayIngressProbe([
+            RelayIngressProbe.reply(try AccessHostnameReplies.page([AccessHostnameReplies.own(f)],
+                info: ["total_count": 0, "total_pages": 0])),
+            RelayIngressProbe.reply(try AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: f.plan.hostname)],
+                number: 2, info: ["total_count": 5000, "total_pages": 101])),
+            try reply([], number: 3)])
+        let result = try await inspect(f, probe: probe)
+        XCTAssertEqual(result.applicationCount, 2); XCTAssertEqual(result.matches.count, 2)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+    }
+    func testTerminalPageFailureCannotReturnAPartialInventory() async throws {
+        let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)]), .lost])
+        do { _ = try await inspect(f, probe: probe); XCTFail() }
+        catch { XCTAssertEqual(error as? CloudflareProvisioningError, .unavailable) }
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
+    }
+    func testMaximumDataPagesCanCompleteWithAnEmptyTerminalProbe() async throws {
+        let f = try AccessApplicationFixture()
+        var steps = try (1...CloudflareAccessHostnameClient.maximumPages).map { number in
+            try reply(number == 1 ? [AccessHostnameReplies.own(f)] : [AccessHostnameReplies.row(number, uri: "other.invalid")],
+                number: number, size: 1)
+        }
+        steps.append(try reply([], number: CloudflareAccessHostnameClient.maximumRequests, size: 1))
+        let probe = RelayIngressProbe(steps), result = try await inspect(f, probe: probe)
+        XCTAssertEqual(result.applicationCount, CloudflareAccessHostnameClient.maximumPages)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, CloudflareAccessHostnameClient.maximumRequests)
+    }
     func testMalformedPaginationCannotTruncateTheInventory() async throws {
         let f = try AccessApplicationFixture()
-        let variants: [[String: Any]] = [["page": 2], ["per_page": 0], ["count": 0], ["total_count": 2], ["total_count": -1],
-            ["total_pages": 0], ["total_count": 1, "total_pages": 2], ["total_pages": 101]]
+        let variants: [[String: Any]] = [["page": 2], ["per_page": 0], ["per_page": 101],
+            ["count": 0], ["count": 2], ["total_count": -1]]
         for info in variants {
             let probe = RelayIngressProbe([RelayIngressProbe.reply(try AccessHostnameReplies.page([AccessHostnameReplies.own(f)], info: info))])
             do { _ = try await inspect(f, probe: probe); XCTFail(String(describing: info)) } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
         }
     }
-    func testChangingTotalsPageSizeAndRepeatedPagesAreRejected() async throws {
+    func testChangedPageSizeAndRepeatedPagesAreRejected() async throws {
         let f = try AccessApplicationFixture(), own = AccessHostnameReplies.own(f)
-        let variants = try [AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: "other.invalid")], number: 2, size: 1, total: 3),
-            AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: "other.invalid")], number: 2, size: 2, total: 2),
+        let variants = try [AccessHostnameReplies.page([AccessHostnameReplies.row(1, uri: "other.invalid")], number: 2, size: 2, total: 2),
             AccessHostnameReplies.page([own], number: 1, size: 1, total: 2), AccessHostnameReplies.page([own], number: 2, size: 1, total: 2)]
         for next in variants {
             let probe = try RelayIngressProbe([reply([own], size: 1, total: 2), RelayIngressProbe.reply(next)])
             do { _ = try await inspect(f, probe: probe); XCTFail() } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
         }
     }
-    func testMissingTotalsUsesTheFinalShortPageInsteadOfAssumingTheFirstPageIsComplete() async throws {
+    func testMissingTotalsUsesTheTerminalEmptyPage() async throws {
         let f = try AccessApplicationFixture(), probe = try RelayIngressProbe([reply([AccessHostnameReplies.own(f)], size: 1), reply([], number: 2, size: 1)])
         let result = try await inspect(f, probe: probe); XCTAssertEqual(result.applicationCount, 1)
         let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
     }
     func testPageLimitStopsWithoutFollowingProviderLinksOrClaimingCompleteness() async throws {
         let f = try AccessApplicationFixture()
-        let steps = try (1...CloudflareAccessHostnameClient.maximumPages).map { number in
+        let steps = try (1...CloudflareAccessHostnameClient.maximumRequests).map { number in
             RelayIngressProbe.reply(try AccessHostnameReplies.page([AccessHostnameReplies.row(number, uri: "other.invalid")], number: number, size: 1,
                 envelope: ["next": "https://untrusted.invalid/steal-credentials"]))
         }
         let probe = RelayIngressProbe(steps)
         do { _ = try await inspect(f, probe: probe); XCTFail() } catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
-        let requests = await probe.all(); XCTAssertEqual(requests.count, CloudflareAccessHostnameClient.maximumPages)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, CloudflareAccessHostnameClient.maximumRequests)
         XCTAssertTrue(requests.allSatisfy { $0.url?.host == "api.cloudflare.com" })
     }
     func testPermissionTransportAndOversizedFailuresNeverReturnAnInventory() async throws {
@@ -191,7 +229,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
         let rows = [AccessHostnameReplies.own(f),
             AccessHostnameReplies.row(1, uri: f.plan.hostname, type: "saas"),
             AccessHostnameReplies.row(2, uri: "https://" + f.plan.hostname, type: "bookmark")]
-        let observed = try await inspect(f, probe: RelayIngressProbe([reply(rows)]))
+        let observed = try await inspect(f, probe: RelayIngressProbe([reply(rows), reply([], number: 2)]))
         XCTAssertEqual(observed.applicationCount, 3)
         XCTAssertTrue(observed.unresolvedApplicationIDs.isEmpty)
         XCTAssertEqual(observed.matches.count, 1)
@@ -205,7 +243,7 @@ final class CloudflareAccessHostnameClientTests: XCTestCase, @unchecked Sendable
                 ["self_hosted_domains": [f.plan.hostname]]
             ] {
                 let rows = [AccessHostnameReplies.own(f), AccessHostnameReplies.row(1, uri: f.plan.hostname, type: type, extra: extra)]
-                let observed = try await inspect(f, probe: RelayIngressProbe([reply(rows)]))
+                let observed = try await inspect(f, probe: RelayIngressProbe([reply(rows), reply([], number: 2)]))
                 XCTAssertEqual(observed.unresolvedApplicationIDs.count, 1)
                 XCTAssertEqual(observed.matches.count, 1)
             }

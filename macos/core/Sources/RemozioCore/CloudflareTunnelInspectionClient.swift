@@ -1,9 +1,11 @@
 import Foundation
 
-/// Reads every bounded result page. This client cannot create, adopt, configure, delete or fetch a tunnel token.
+/// Reads bounded filtered pages through the terminal empty page. Account-wide totals do not prove filtered completeness.
+/// This client cannot create, adopt, configure, delete or fetch a tunnel token.
 struct CloudflareTunnelInspectionClient: Sendable {
     static let pageSize = 100
     static let maximumPages = 10
+    static let maximumRequests = maximumPages + 1
     static let maximumTotalBytes = 524_288
     typealias Send = CloudflareProvisioningScopeClient.Send
     private let send: Send
@@ -14,9 +16,9 @@ struct CloudflareTunnelInspectionClient: Sendable {
     }
     func inspect(_ configuration: SetupCloudflareConfiguration, expected: SharedSetupImportIntent,
                  plan: SharedSetupImportRelayPlan) async throws -> CloudflareTunnelObservation? {
-        var page = 1, totalBytes = 0, expectedTotal: Int?, selectedSize: Int?, seen = Set<String>()
+        var page = 1, totalBytes = 0, selectedSize: Int?, seen = Set<String>()
         var match: CloudflareTunnelObservation?
-        while page <= Self.maximumPages {
+        while page <= Self.maximumRequests {
             try Task.checkCancellation()
             let request = try configuration.tunnelInspectionRequest(expected: expected, plan: plan, page: page)
             let reply: FCMHTTPReply
@@ -43,17 +45,12 @@ struct CloudflareTunnelInspectionClient: Sendable {
             guard envelope.success, envelope.errors.isEmpty else { throw CloudflareProvisioningError.providerRejected }
             let info = envelope.result_info
             guard info.page == page, (1...Self.pageSize).contains(info.per_page),
-                  (0...Self.pageSize * Self.maximumPages).contains(info.total_count),
+                  (info.total_count.map { $0 >= 0 } ?? true),
                   info.count == envelope.result.count, info.count <= info.per_page,
-                  expectedTotal == nil || expectedTotal == info.total_count,
                   selectedSize == nil || selectedSize == info.per_page else { throw CloudflareProvisioningError.invalidResponse }
-            let pages = max(1, (info.total_count + info.per_page - 1) / info.per_page)
-            guard pages <= Self.maximumPages, page <= pages,
-                  info.total_pages == nil || info.total_pages == pages || (info.total_count == 0 && info.total_pages == 0),
-                  info.count == min(info.per_page, info.total_count - (page - 1) * info.per_page) else {
-                throw CloudflareProvisioningError.invalidResponse
-            }
-            expectedTotal = info.total_count; selectedSize = info.per_page
+            selectedSize = info.per_page
+            if envelope.result.isEmpty { try Task.checkCancellation(); return match }
+            guard page <= Self.maximumPages else { throw CloudflareProvisioningError.invalidResponse }
             for tunnel in envelope.result {
                 guard tunnel.account_tag == configuration.accountID else { throw CloudflareProvisioningError.wrongScope }
                 guard tunnel.id.utf8.count == 36, let uuid = UUID(uuidString: tunnel.id),
@@ -62,10 +59,6 @@ struct CloudflareTunnelInspectionClient: Sendable {
                 guard match == nil, tunnel.config_src == "cloudflare", tunnel.remote_config != false,
                       tunnel.tun_type == "cfd_tunnel", tunnel.deleted_at == nil else { throw CloudflareProvisioningError.wrongScope }
                 match = .init(accountID: configuration.accountID, tunnelID: uuid.uuidString.lowercased(), name: tunnel.name)
-            }
-            if page == pages {
-                guard seen.count == info.total_count else { throw CloudflareProvisioningError.invalidResponse }
-                try Task.checkCancellation(); return match
             }
             page += 1
         }
@@ -82,8 +75,7 @@ struct CloudflareTunnelInspectionClient: Sendable {
         let page: Int
         let per_page: Int
         let count: Int
-        let total_count: Int
-        let total_pages: Int?
+        let total_count: Int?
     }
     private struct Tunnel: Decodable {
         let id: String

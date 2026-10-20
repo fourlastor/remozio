@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -90,7 +91,8 @@ class ApprovalCommandReportTests(unittest.TestCase):
                 with self.subTest(code=code), patch.object(EXPERIMENT, "run_owned", return_value=(output, code, None, True)):
                     result = EXPERIMENT.invoke(Path("unused"), "crash-before-launch", directory, 1, 0)
                     self.assertEqual(result, EXPERIMENT.failure("UnexpectedCrashResult", True))
-            with patch.object(EXPERIMENT, "run_owned", return_value=(b"", 86, None, True)):
+            with patch.object(EXPERIMENT, "run_owned", return_value=(b"", 86, None, True)), \
+                 patch.object(EXPERIMENT, "shared_state_matches", return_value=True):
                 self.assertTrue(EXPERIMENT.invoke(Path("unused"), "crash-before-launch", directory, 1, 0)["passed"])
                 self.assertEqual(EXPERIMENT.invoke(Path("unused"), "crash-after-output", directory, 1, 1),
                                  EXPERIMENT.failure("ExecutionMarkerMismatch", True))
@@ -106,6 +108,56 @@ class ApprovalCommandReportTests(unittest.TestCase):
             with patch.object(EXPERIMENT, "run_owned", return_value=(raw, 0, None, False)):
                 self.assertEqual(EXPERIMENT.invoke(Path("unused"), "approve", directory, 1),
                                  EXPERIMENT.failure("CleanupFailure", False))
+
+    def test_legacy_fixture_claims_missing_reservations_and_shared_flags_are_rejected(self):
+        good = valid_report()
+        for change in ({"fixtureOnlyLedger": True}, {"sharedConsumptionTables": False},
+                       {"sharedReplayTables": False}, {"fixtureOnlyOwner": 1}, {"submissionReservations": 0}):
+            bad = {**good, "observations": {**good["observations"], **change}}
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                EXPERIMENT.validate_result(json.dumps(bad), "approve", 0)
+
+    def test_native_success_and_expected_crash_cannot_override_missing_shared_tables(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "command.marker").write_bytes(EXPERIMENT.MARKER)
+            with patch.object(EXPERIMENT, "run_owned", return_value=(json.dumps(valid_report()).encode(), 0, None, True)):
+                self.assertEqual(EXPERIMENT.invoke(Path("unused"), "approve", directory, 1),
+                                 EXPERIMENT.failure("SharedTableStateMismatch", True))
+            (directory / "command.marker").unlink()
+            with patch.object(EXPERIMENT, "run_owned", return_value=(b"", 86, None, True)):
+                self.assertEqual(EXPERIMENT.invoke(Path("unused"), "crash-before-launch", directory, 1, 0),
+                                 EXPERIMENT.failure("SharedTableStateMismatch", True))
+
+    def test_independent_sqlite_observation_rejects_wrong_scope_counts_catalog_and_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "fixture.sqlite"
+            scope = (bytes([1]) * 16, bytes([2]) * 16)
+            # Minimal disposable rows test this independent observer, not a production schema validator.
+            with contextlib.closing(sqlite3.connect(path)) as db, db:
+                for table, count in (("consumptions_v1", 1), ("consumption_outcomes_v1", 1),
+                                     ("audit_epochs_v1", 1), ("audit_records_v1", 3)):
+                    db.execute(f"CREATE TABLE {table}(mac BLOB, account BLOB)")
+                    db.executemany(f"INSERT INTO {table} VALUES(?,?)", [scope] * count)
+                db.execute("CREATE TABLE command_submissions_v1(mac BLOB,account BLOB,submission BLOB,nonce BLOB,caller BLOB,capture BLOB)")
+                db.execute("INSERT INTO command_submissions_v1 VALUES(?,?,?,?,?,?)",
+                           (*scope, bytes(16), bytes(32), bytes(16), bytes(32)))
+            before = path.read_bytes()
+            self.assertTrue(EXPERIMENT.shared_state_matches(directory, "approve"))
+            self.assertEqual(path.read_bytes(), before)
+            for sql in ("UPDATE consumptions_v1 SET mac=x'00'", "UPDATE consumption_outcomes_v1 SET account=NULL",
+                        "DELETE FROM audit_records_v1", "DELETE FROM audit_epochs_v1",
+                        "CREATE TABLE fixture_consumptions(request BLOB,phase TEXT)",
+                        "UPDATE command_submissions_v1 SET nonce=x'00'"):
+                with self.subTest(sql=sql), contextlib.closing(sqlite3.connect(path)) as db, db:
+                    db.execute(sql)
+                    db.commit()
+                    self.assertFalse(EXPERIMENT.shared_state_matches(directory, "approve"))
+                path.write_bytes(before)
+            path.unlink()
+            path.symlink_to(directory / "missing")
+            self.assertFalse(EXPERIMENT.shared_state_matches(directory, "approve"))
 
     def test_recovery_reopens_same_private_directory_after_crash_and_failed_seed_skips_recovery(self):
         calls = []
@@ -129,6 +181,20 @@ class ApprovalCommandReportTests(unittest.TestCase):
         self.assertEqual(report["cases"]["recover-before-launch"]["error_type"], "PrerequisiteFailed")
         self.assertFalse(report["passed"])
         self.assertFalse(any(directory.exists() for _, directory in calls))
+
+    def test_measure_keeps_original_controls_and_all_three_new_shared_table_refusals(self):
+        with ordinary_linux(), patch.object(EXPERIMENT, "subreaper", contextlib.nullcontext), \
+             patch.object(EXPERIMENT._helpers, "check_prerequisites"), \
+             patch.object(EXPERIMENT, "swift_version", return_value="6.2.4"), \
+             patch.object(EXPERIMENT, "build_fixture", return_value=Path("/not-executed")), \
+             patch.object(EXPERIMENT, "invoke", return_value={"passed": True}), \
+             patch.object(EXPERIMENT, "source_hashes", return_value={}):
+            report = EXPERIMENT.measure()
+        original = {"approve", "reopen-completed", "malformed-decision", "malformed-capture", "bad-signature",
+                    "decline", "expired", "expire-before-consume", "replay", "audit-failure",
+                    "crash-before-launch", "recover-before-launch", "crash-after-output", "recover-after-output"}
+        self.assertEqual(set(report["cases"]), original | {"submission-id-replay", "submission-nonce-replay", "expire-at-shared-consume"})
+        self.assertEqual(report["experiment"], "linux-approval-command-v2")
 
     def test_refused_runtime_elevation_paths_and_deadlines_never_build_or_spawn(self):
         with ordinary_linux(), patch.object(EXPERIMENT.platform, "system", return_value="Darwin"), \

@@ -27,6 +27,14 @@ A matching name cannot replace the tunnel ID from the retained acknowledgement.
 A configuration write response does not prove the applied configuration.
 An independent read checks the selected account, tunnel and complete ingress rules.
 
+The filtered inventory ends only after an empty result page.
+The account-wide `total_count` cannot describe the filtered matches.
+A short nonempty page still requires another read.
+The client permits ten nonempty pages and one final empty probe, within the existing response and aggregate byte limits.
+Missing pages, duplicate IDs and crossed account rows cannot produce partial evidence.
+This follows the official [tunnel list pagination](https://github.com/cloudflare/cloudflare-typescript/blob/main/src/resources/zero-trust/tunnels/cloudflared/cloudflared.ts)
+and [empty-page completion](https://github.com/cloudflare/cloudflare-typescript/blob/main/src/core/pagination.ts).
+
 The setup owner releases the machine lease during network waits.
 It keeps asynchronous admission and release activity until the operation settles.
 Before and after each wait, it rechecks the import, account, installation and retained plan identity.
