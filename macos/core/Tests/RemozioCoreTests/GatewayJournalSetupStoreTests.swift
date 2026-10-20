@@ -8,7 +8,7 @@ import XCTest
 
 final class GatewayJournalSetupStoreTests: XCTestCase {
     private struct Interrupted: Error {}
-    private final class Counter { var calls = 0; var creations = 0 }
+    final class Counter { var calls = 0; var creations = 0 }
     private static let pem = Result { () throws -> String in
         let p = Process(), out = Pipe(); p.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
         p.arguments = ["genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"]
@@ -16,10 +16,11 @@ final class GatewayJournalSetupStoreTests: XCTestCase {
         try p.run(); let bytes = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
         guard p.terminationStatus == 0 else { throw Interrupted() }; return String(decoding: bytes, as: UTF8.self)
     }
-    private final class Fixture {
+    final class Fixture {
         let runtime: RuntimeActivationFixture
         let root: URL
         let parent: ProtectedSetupDirectory
+        let provider: SetupFCMConfiguration
         let material: GatewayPreparationMaterial
         let bundle: GatewayConfigurationBundle
         let intent: GatewayJournalSetupIntent
@@ -32,7 +33,7 @@ final class GatewayJournalSetupStoreTests: XCTestCase {
             try runtime.machine.retainRuntimeActivation(runtime.plan)
             _ = try runtime.machine.enrollRuntimeActivation(runtime.plan)
             try runtime.machine.markRuntimeJobsRegistered(runtime.plan)
-            let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
+            provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
                 privateKeyID: "fixture-key", privateKeyPEM: GatewayJournalSetupStoreTests.pem.get())
             material = try .create(runtime: runtime.material.reference, provider: provider, senderID: "123",
                 packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
