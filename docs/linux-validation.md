@@ -65,6 +65,13 @@ TPM; its successful controls still leave protected code and production admission
 unsupported. Enable its live test explicitly as documented there. Existing
 historical checkpoints above remain scoped to their original source revisions.
 
+The [disposable approval-to-command experiment](experiments/linux-approval-command.md)
+connects the shared verifier, fixture-only consumption, audit tables and checkpoint/recovery
+selection to a fixed ordinary-user command. It runs automatically after the shared-host
+suite in `check-linux-host.sh`, on both the local Linux gate and Linux Swift CI job.
+Synthetic software keys and requester claims, a private fixture ledger and one fixed command
+do not establish production authority, physical-phone approval or protected caller admission.
+
 ## Local gate and CI coverage
 
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
@@ -81,16 +88,16 @@ portable Kotlin/phone tests and Android unit tests, debug assembly and lint. mac
 Unknown platforms and any failed phase fail the gate immediately.
 
 The [shared host core](../host/shared-core/README.md) contains the decision verifier,
-its authority-owned request, enrollment and clock inputs, the SQLite audit journal
-tables, checkpoint and history-intent codecs, and pure storage-reconciliation selection.
-These tests run through the Linux host check and native Mac check; Mac tests also
-retain audit signing integration. Mac consumers use the same implementations through
-compatibility type aliases. The table owner still supplies protected storage,
-durability configuration and outer transactions. Recovery selections are data-only
-recommendations; the Mac adapter retains its serialized journal reads and
-protected-store transitions, with its existing store integration tests. These
-extractions do not implement Linux protected persistence, an authority, durable
-decision consumption or command dispatch.
+its authority-owned request, enrollment and clock inputs, the sleep-inclusive clock
+sampler, SQLite audit journal tables, checkpoint and history-intent codecs, and pure
+storage-reconciliation selection. These tests run through the Linux host check and
+native Mac check; Mac tests also retain audit signing integration. Mac consumers
+use the same implementations through compatibility type aliases. The table owner
+still supplies protected storage, durability configuration and outer transactions.
+Recovery selections are data-only recommendations; the Mac adapter retains its
+serialized journal reads and protected-store transitions, with its existing store
+integration tests. These extractions do not implement Linux protected persistence,
+an authority, durable decision consumption or command dispatch.
 
 The complete Linux coordinator passed on 2026-10-18 for source revision `6984429`,
 including the shared-source inventory fix and its regression controls, on this
