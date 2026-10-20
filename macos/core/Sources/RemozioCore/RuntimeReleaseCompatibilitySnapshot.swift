@@ -58,6 +58,22 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         for runtime in inputs.runtimes {
             let plan = try runtime.activationRecord.map(RuntimeActivationPlan.decode)
+            let materialVersion: UInt64 = runtime.reference.serviceActivity == nil ? 1 : 2
+            for role in [AuthorityCodeRole.authority, .setupController] {
+                try include(role, RuntimePreparationMaterial.formatName, [materialVersion], role == .setupController ? [materialVersion] : [])
+                if let plan {
+                    let activationVersion: UInt64 = plan.consumerHosts == nil ? 1 : 2
+                    try include(role, RuntimeActivationPlan.formatName, [activationVersion], role == .setupController ? [activationVersion] : [])
+                }
+            }
+            for role in [AuthorityCodeRole.authority, .transport, .notificationGateway, .setupController] {
+                try include(role, RuntimeMaterialReference.formatName, [materialVersion], role == .setupController ? [materialVersion] : [])
+            }
+            if runtime.configurationPublished || plan != nil {
+                for role in [AuthorityCodeRole.transport, .setupController] {
+                    try include(role, "transport.pairing-config", [materialVersion], role == .setupController ? [materialVersion] : [])
+                }
+            }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
             let version: UInt64 = control ? 3 : 2
             for role in [AuthorityCodeRole.authority, .setupController] {

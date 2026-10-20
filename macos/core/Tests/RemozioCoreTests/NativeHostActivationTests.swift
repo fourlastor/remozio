@@ -12,11 +12,14 @@ enum NativeHostReleaseFixture {
             var formats: [ReleaseFormat] = []
             if [.authority, .setupController].contains(code.role) {
                 formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
+                formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
                 formats.append(try .init(name: "authority.installation-preparation", readers: Set(UInt64(1)...11), writers: Set(UInt64(1)...11)))
                 formats.append(try .init(name: "authority.command-host-config", readers: [1, 2, 3], writers: [1, 2, 3]))
                 formats.append(try .init(name: GatewaySettingsControlReleaseValidation.formatName, readers: [1], writers: [1]))
             }
             if [.authority, .transport, .notificationGateway, .setupController].contains(code.role) {
+                formats.append(try .init(name: RuntimeMaterialReference.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
+                formats.append(try .init(name: ServiceReleaseActivityReference.formatName, readers: [1], writers: code.role == .setupController ? [1] : []))
                 formats.append(try .init(name: GatewaySettingsConsumerHostConfiguration.formatName, readers: [1],
                     writers: code.role == .setupController ? [1] : []))
                 formats.append(try .init(name: GatewayRuntimeSettingsFenceReleaseValidation.formatName, readers: [1, 2],
@@ -131,6 +134,9 @@ final class NativeHostActivationTests: XCTestCase, @unchecked Sendable {
         let f = try RuntimeActivationFixture(nativeConsumerHosts: true), policy = f.plan.host.codePolicy
         let mutations: [(AuthorityCodeRole, String, Bool)] = [
             (.authority, RuntimeActivationPlan.formatName, false), (.setupController, RuntimeActivationPlan.formatName, true),
+            (.authority, RuntimePreparationMaterial.formatName, false), (.setupController, RuntimePreparationMaterial.formatName, true),
+            (.transport, RuntimeMaterialReference.formatName, false), (.setupController, RuntimeMaterialReference.formatName, true),
+            (.notificationGateway, ServiceReleaseActivityReference.formatName, false),
             (.authority, GatewaySettingsConsumerHostConfiguration.formatName, false),
             (.setupController, GatewaySettingsConsumerHostConfiguration.formatName, true),
             (.authority, "transport.pairing-config", false), (.notificationGateway, "transport.pairing-config", false),

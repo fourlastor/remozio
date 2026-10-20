@@ -62,12 +62,42 @@ final class RuntimeReleaseCompatibilityTests: XCTestCase {
             try .init(role: component.role, identifier: component.identifier, generation: component.generation,
                 relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash, build: component.build,
                 teamID: component.teamID, formats: component.formats.filter {
-                    ["authority.installation-preparation", "authority.command-host-config"].contains($0.name)
+                    ["authority.installation-preparation", "authority.command-host-config", RuntimePreparationMaterial.formatName,
+                        RuntimeMaterialReference.formatName, "transport.pairing-config"].contains($0.name)
                 })
         }
         try snapshot.validate(legacy, policy: f.plan.host.codePolicy, machine: f.machine)
         XCTAssertThrowsError(try snapshot.validate(without(f, role: .authority, format: "authority.installation-preparation"),
             policy: f.plan.host.codePolicy, machine: f.machine))
+    }
+    func testRetainedLegacyActivationRequiresVersionOneWithoutRequiringNativeHosts() throws {
+        let f = try RuntimeActivationFixture()
+        try f.machine.retainRuntimeActivation(f.plan)
+        let snapshot = try Snapshot.capture(machine: f.machine)
+        XCTAssertFalse(snapshot.requirements.formats.contains { $0.name == GatewaySettingsConsumerHostConfiguration.formatName })
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            let required = try XCTUnwrap(snapshot.requirements.formats.first { $0.role == role && $0.name == RuntimeActivationPlan.formatName })
+            XCTAssertEqual(required.readVersions, [1])
+            XCTAssertThrowsError(try snapshot.validate(without(f, role: role, format: RuntimeActivationPlan.formatName),
+                policy: f.plan.host.codePolicy, machine: f.machine))
+        }
+        try snapshot.validate(signature(f), policy: f.plan.host.codePolicy, machine: f.machine)
+    }
+    func testRetainedMaterialCannotPassCompatibilityWithoutItsNestedReaders() throws {
+        for native in [false, true] {
+            let f = try RuntimeActivationFixture(nativeConsumerHosts: native), snapshot = try Snapshot.capture(machine: f.machine)
+            let expected: Set<UInt64> = native ? [2] : [1]
+            for (role, format) in [(AuthorityCodeRole.authority, RuntimePreparationMaterial.formatName),
+                                   (.setupController, RuntimePreparationMaterial.formatName),
+                                   (.authority, RuntimeMaterialReference.formatName),
+                                   (.transport, RuntimeMaterialReference.formatName),
+                                   (.notificationGateway, RuntimeMaterialReference.formatName)] {
+                let required = try XCTUnwrap(snapshot.requirements.formats.first { $0.role == role && $0.name == format })
+                XCTAssertEqual(required.readVersions, expected)
+                XCTAssertThrowsError(try snapshot.validate(without(f, role: role, format: format),
+                    policy: f.plan.host.codePolicy, machine: f.machine))
+            }
+        }
     }
     func testNewActivationEnrollmentAndPublishedStateInvalidateAnEarlierSnapshotWithoutMutatingRecords() throws {
         let f = try RuntimeActivationFixture(nativeConsumerHosts: true), first = try Snapshot.capture(machine: f.machine)

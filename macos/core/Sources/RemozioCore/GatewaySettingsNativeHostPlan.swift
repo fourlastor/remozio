@@ -35,9 +35,12 @@ struct GatewaySettingsNativeHostPlan: Sendable {
             try add(role, "authority.installation-preparation", [6, 7, 8, 9, 10, 11], [6, 7, 8, 9, 10, 11])
             try add(role, "authority.command-host-config", [3], [3])
             try add(role, GatewaySettingsControlReleaseValidation.formatName, [1], [1])
+            try add(role, RuntimePreparationMaterial.formatName, [2], role == .setupController ? [2] : [])
         }
         for role in [AuthorityCodeRole.authority, .transport, .notificationGateway, .setupController] {
             try add(role, GatewaySettingsConsumerHostConfiguration.formatName, [1], role == .setupController ? [1] : [])
+            try add(role, RuntimeMaterialReference.formatName, [2], role == .setupController ? [2] : [])
+            try add(role, ServiceReleaseActivityReference.formatName, [1], role == .setupController ? [1] : [])
             // Gateway and Root also decode Transport's shared bootstrap and selected Gateway configuration.
             try add(role, "transport.pairing-config", [2], role == .setupController ? [2] : [])
             try add(role, "gateway.service-config", [2], role == .setupController ? [2] : [])

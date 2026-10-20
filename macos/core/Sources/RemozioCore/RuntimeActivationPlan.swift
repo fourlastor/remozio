@@ -41,7 +41,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             transport: bundle.transport, gatewaySettingsHost: bundle.gatewaySettingsHost)
         try validate(account: account, reference: reference)
     }
-    /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained import.
+    /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained account.
     func configurationBundle(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
                              inventory: InstallationInventory) throws -> RuntimeConfigurationBundle {
         try .initial(account: account, initialization: initialization, reference: reference, inventory: inventory,
