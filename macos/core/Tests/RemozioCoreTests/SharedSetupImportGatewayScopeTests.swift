@@ -95,6 +95,19 @@ final class SharedSetupImportGatewayScopeTests: XCTestCase, @unchecked Sendable 
         XCTAssertThrowsError(try f.run(proposal: altered) { _, _, _ in entered += 1 }) { XCTAssertEqual($0 as? SharedSetupImportError, .conflict) }
         XCTAssertEqual(entered, 0)
     }
+    func testPartialAndMismatchedProviderInputsAreRejected() throws {
+        let f = try Fixture(), selected = f.proposal
+        let mismatched = try SetupPushClientConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.remozio.android")
+        let noGateway = SharedSetupDefaults(presence: selected.defaults.presence)
+        for proposal in [PortableSetup(defaults: selected.defaults, fcm: selected.fcm),
+                         PortableSetup(defaults: selected.defaults, pushClient: selected.pushClient),
+                         PortableSetup(defaults: selected.defaults, fcm: selected.fcm, pushClient: mismatched),
+                         PortableSetup(defaults: noGateway, fcm: selected.fcm, pushClient: selected.pushClient)] {
+            XCTAssertThrowsError(try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: true)) {
+                XCTAssertEqual($0 as? PortableSetupError, .rejected)
+            }
+        }
+    }
     func testProviderCustodyAndTheRuntimePhaseAreRequiredBeforeTheOperation() throws {
         let f = try Fixture(); var entered = 0
         XCTAssertThrowsError(try f.run(custody: false) { _, _, _ in entered += 1 }) { XCTAssertEqual($0 as? GatewayPreparationError, .custodyNotAccepted) }
