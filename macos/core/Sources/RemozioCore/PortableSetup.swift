@@ -200,7 +200,7 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
 
     func accessAccountInventoryRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
                                        createdTunnel: SharedSetupRelayProvisioningRecord, page: Int) throws -> URLRequest {
-        guard (1...CloudflareAccessHostnameClient.maximumPages).contains(page) else { throw CloudflareProvisioningError.invalidResponse }
+        guard (1...CloudflareAccessHostnameClient.maximumRequests).contains(page) else { throw CloudflareProvisioningError.invalidResponse }
         var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
         var url = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/access/apps")!
         url.queryItems = [.init(name: "page", value: String(page)), .init(name: "per_page", value: "100")]
