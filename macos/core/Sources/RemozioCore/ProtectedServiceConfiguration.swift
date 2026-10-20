@@ -36,6 +36,14 @@ public enum ProtectedServiceConfiguration {
         return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: serviceUID, ancestorOwner: 0)
     }
 
+    /// Root validates a service-owned leaf without adopting the service account's identity.
+    static func readServicePrivateAsRoot(path: String, serviceUID: uid_t) throws -> Data {
+        guard geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard serviceUID > 0, serviceUID < UInt32.max else { throw ApprovalTransportStartupError.wrongAccount }
+        guard path.hasPrefix("/") else { throw JournalLeaseError.invalidPath }
+        return try read(anchor: "/", relativePath: String(path.dropFirst()), owner: serviceUID, ancestorOwner: 0)
+    }
+
     /// Fixture entry point. Production always walks from the filesystem root with Root-owned ancestors.
     static func read(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool = true,
                      ancestorOwner: uid_t? = nil) throws -> Data {
