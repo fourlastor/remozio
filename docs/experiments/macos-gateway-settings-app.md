@@ -16,7 +16,9 @@ Its footer adapts to narrower widths and keeps Close available during work. Disa
 Existing account setup text points to Settings instead of claiming push is always unconfigured.
 
 Controller and form fixtures test explicit actions, cancellation, uncertain replies, pending selections and legacy restoration.
-Rendered light/dark and narrow-width checks remain required before publication. They use disposable offscreen models and make no native setup calls.
+Offscreen native renders cover light, dark, pending, legacy, expanded limits and narrow-width states.
+Inspection confirmed the adaptive footer and explicit recovery actions. These disposable models make no native setup calls.
+The actual Debug and Release app builds also passed. Keyboard navigation and installed authorization remain interactive checks.
 Provider credential continuity, installed administrator consent and physical push delivery remain unproven.
 
 Advanced groups remain expandable for inspection during a pending or unsupported settings change. Their fields stay read-only.
