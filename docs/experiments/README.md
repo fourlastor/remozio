@@ -15,6 +15,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Release activity barrier | [Nine native lock controls passed](release-activity.md) | Bind all actual activity owners, protect file identity, and integrate durable activation |
 | Release signature inspection | [Reproducible default and opt-in Developer ID controls](macos-release-signing.md) | Notarization, protected placement, and activation |
 | Keys and durable authority | [Disposable enclave signing and restoration measured](macos-key-custody.md) | Pre-login availability, code access, crash and rollback cases |
+| System Keychain provider credentials | [Disposable probe prepared; 13 fake-backend controls pass](macos-system-keychain.md) | Dedicated-account reads, code isolation, lock/logout, pre-login and update continuity |
 | Installation inventory recovery | [Actual-store process exit and SIGKILL controls](installation-inventory-recovery.md) | Root isolation, native I/O faults, power loss and installed activation |
 | Journal consumption and recovery | [Process-crash boundaries measured](macos-authority-journal.md) | Protected local checkpoint, physical durability, production recovery |
 | Command executable binding | [Path replacement and descriptor behavior measured](macos-execution-binding.md) | Accepted pathname/recheck contract; protected executor integration |
