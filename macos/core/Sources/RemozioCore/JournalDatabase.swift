@@ -96,7 +96,7 @@ public final class JournalDatabase {
             let consumption = try ConsumptionJournal(connection: connection, macID: macID, accountID: accountID,
                 decisionLimits: decisionLimits, recordLimits: recordLimits, maximumRows: maximumConsumptions)
             self.consumption = consumption
-            commandReplay = CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
+            commandReplay = try CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy); configuredGatewayPolicy = gatewayPolicy }
