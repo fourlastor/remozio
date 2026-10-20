@@ -45,8 +45,9 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
         let request: IssuedRequestPayload
         let starts = Mutex(0), closes = Mutex(0), attempts = Mutex(0), retired = Mutex(false)
         let old = Data(repeating: 71, count: 32), selected = Data(repeating: 72, count: 32)
-        init() throws {
-            h = try .init(configureGateway: false, gatewayLedgerEnabled: false)
+        init(install: Bool = true, macID: Data = Data(repeating: 1, count: 16),
+             accountID: Data = Data(repeating: 2, count: 16)) throws {
+            h = try .init(configureGateway: false, gatewayLedgerEnabled: false, macID: macID, accountID: accountID)
             journal = AuthorityJournal(requests: h.owner)
             options = try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
                 gatewayReceiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
@@ -54,7 +55,7 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
             let h = h
             capability = .init(journal: journal, registration: h.registration,
                 clock: { .init(epoch: h.clock, milliseconds: 110) }, wall: { 1010 }, makeProvider: { _ in h.provider })
-            try capability.install(options, commitDigest: old, verifyCurrent: {})
+            if install { try capability.install(options, commitDigest: old, verifyCurrent: {}) }
             let draft = ApprovalRequestDraft(contract: try .init(requestKind: .command, wireVersion: 1, schemaVersion: 1),
                 requiredFeatures: [], capture: Data([0xa0]),
                 actions: [.init(choice: .execute, scope: .currentRequest), .init(choice: .decline, scope: .currentRequest)],
