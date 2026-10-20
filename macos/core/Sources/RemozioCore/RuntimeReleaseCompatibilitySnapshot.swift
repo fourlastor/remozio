@@ -23,9 +23,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let inventory: Data?
         let runtimes: [Runtime]
         let gateways: [Gateway]
-        init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway]) {
+        let sharedImport: SharedSetupImportCompatibilitySnapshot?
+        init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
+             sharedImport: SharedSetupImportCompatibilitySnapshot? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
-            self.runtimes = runtimes; self.gateways = gateways
+            self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport
         }
     }
     let inputs: Inputs
@@ -42,6 +44,12 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 formats[index] = try .init(role: role, name: name, readVersions: current.readVersions.union(reads),
                     writeVersions: current.writeVersions.union(writes))
             } else { formats.append(try .init(role: role, name: name, readVersions: reads, writeVersions: writes)) }
+        }
+        if let imports = inputs.sharedImport {
+            let versions = Set(imports.records.flatMap { [$0.portableVersion, $0.settingsVersion] })
+            try include(.setupController, SharedSetupImportJournal.formatName, SharedSetupImportJournal.supportedVersions,
+                SharedSetupImportJournal.supportedVersions)
+            if !versions.isEmpty { try include(.setupController, PortableSetup.formatName, versions, versions) }
         }
         if !inputs.gateways.isEmpty {
             let settings = inputs.gateways.contains { $0.activeSettings != nil || $0.pendingSettings != nil }
@@ -90,6 +98,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
     func validate(_ release: SignedReleaseEvidence, policy: AuthorityCodePolicy, machine: PreparationIntentStore) throws {
         try requireCurrent(machine: machine)
         try ReleaseCompatibilityPreflight.validate(release, policy: policy, requirements: requirements)
+        if inputs.sharedImport != nil {
+            guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath == AdministrativeSetupConfiguration.executablePath else {
+                throw RuntimeActivationError.changedScope
+            }
+        }
         if native || !inputs.gateways.isEmpty {
             let paths: [(AuthorityCodeRole, String)] = [
                 (.authority, InstalledAuthorityCommandConfiguration.executablePath),

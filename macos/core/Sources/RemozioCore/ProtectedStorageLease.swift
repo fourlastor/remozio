@@ -3,7 +3,7 @@ import Foundation
 
 /// Internal path and lock mechanics. Public wrappers fix the production ownership policy and file name.
 final class ProtectedStorageLease {
-    struct DirectoryIdentity: Equatable {
+    struct DirectoryIdentity: Equatable, Sendable {
         let device: dev_t
         let inode: ino_t
     }
@@ -41,7 +41,7 @@ final class ProtectedStorageLease {
          excludingDirectory: DirectoryIdentity? = nil) throws {
         let components = relativeDirectory.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !components.isEmpty, !anchor.utf8.contains(0),
-              ["journal.sqlite", "gateway.sqlite", "continuity.sqlite", "installation.sqlite"].contains(databaseName),
+              ["journal.sqlite", "gateway.sqlite", "continuity.sqlite", "installation.sqlite", "setup-import.sqlite"].contains(databaseName),
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }) else {
             throw JournalLeaseError.invalidPath
         }

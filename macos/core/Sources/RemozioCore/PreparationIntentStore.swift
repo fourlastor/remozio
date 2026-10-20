@@ -156,13 +156,44 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    func withSharedImportJournal<Value>(_ body: (SharedSetupImportJournal?) throws -> Value) throws -> Value {
+        guard !unavailable else { throw PreparationStoreError.unavailable }
+        guard db != nil else { throw PreparationStoreError.closed }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        guard let inventory = try self.inventory() else { throw PreparationStoreError.inventoryNotEnabled }
+        return try lease.withSharedImportJournal(macID: macID, installationID: inventory.installationID, body: body)
+    }
+
+    func publishSharedImport(_ intent: SharedSetupImportIntent, verifyCurrent: () throws -> Void,
+                             didStage: (SharedSetupImportPublication.Stage) throws -> Void) throws -> SharedSetupImportIntent {
+        guard !unavailable else { throw PreparationStoreError.unavailable }
+        guard db != nil else { throw PreparationStoreError.closed }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        guard let inventory = try self.inventory(), intent.scope.macID == macID,
+              let account = try accountPreparation(ownerUID: intent.scope.ownerUID),
+              intent.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)) else {
+            throw SharedSetupImportError.wrongScope
+        }
+        func verify() throws {
+            try verifyCurrent()
+            guard try self.inventory() == inventory,
+                  try accountPreparation(ownerUID: account.ownerUID) == account else {
+                throw AdministrativeSetupError.staleProgress
+            }
+        }
+        try verify()
+        let result = try lease.publishSharedImport(intent, verifyCurrent: verify, didStage: didStage)
+        try verify(); return result
+    }
+
     func retainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try transaction(write: false) {
             try identity(macID)
             let schema = try scalar("PRAGMA user_version")
             let inventory = try schema >= 2 ? loadInventoryRecord() : nil
+            let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
             guard schema >= 6 else {
-                return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [])
+                return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [], sharedImport: sharedImport)
             }
             func accounts(_ sql: String) throws -> [Data] {
                 try statement(sql) { row in
@@ -217,7 +248,7 @@ public final class PreparationIntentStore {
                     settingsPhase: settings.phase?.rawValue))
             }
             try identity(macID)
-            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways)
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport)
         }
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
