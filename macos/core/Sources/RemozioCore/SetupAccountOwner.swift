@@ -462,7 +462,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 let inventory = try currentInventory(machine)
                 let selectedRelease: SignedReleaseEvidence?
                 if state.plan == nil, runtime.reference?.serviceActivity != nil {
-                    guard let app = account.initialAuthority.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else {
+                    guard let app = try account.initialAuthority.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else {
                         throw AdministrativeSetupError.changedInstallation
                     }
                     selectedRelease = try SignedReleaseInspection.inspect(URL(fileURLWithPath: inventory.bundlePath),
