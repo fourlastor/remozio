@@ -2,12 +2,26 @@ import Foundation
 import RemozioProtocol
 
 public enum PortableSetupError: Error { case rejected }
-public enum SetupCategory: String, Sendable { case sharedDefaults, fcmCredentials, cloudflareProvisioning }
+/// Shared Firebase routing only. It contains no phone registration or device identity.
+public struct SetupPushClientConfiguration: Sendable, Equatable {
+    public let projectID: String
+    public let senderID: String
+    public let packageName: String
+    public init(projectID: String, senderID: String, packageName: String) throws {
+        do { _ = try PhonePushTokenOffer(token: "validation", projectID: projectID, senderID: senderID, packageName: packageName) }
+        catch { throw PortableSetupError.rejected }
+        self.projectID = projectID; self.senderID = senderID; self.packageName = packageName
+    }
+}
+
+public enum SetupCategory: String, Sendable { case sharedDefaults, gatewayOperationalDefaults, appPreferences, fcmCredentials, cloudflareProvisioning }
 
 /// Describes the import scope without exposing credential values. It does not assert provider authorization.
 public struct SetupPreview: Sendable {
     public let categories: [SetupCategory]
+    public let appPreferences: PortableAppPreferences?
     public let firebaseProject: String?
+    public let pushClient: SetupPushClientConfiguration?
     public let cloudflareAccount: String?
     public let cloudflareZone: String?
     public let dnsSuffix: String?
@@ -18,8 +32,13 @@ public struct SharedSetupDefaults: Sendable {
     public let presence: PresenceConfiguration
     public let wake: GatewayWakePolicy
     public let delivery: GatewayDeliveryPolicy
+    public let gateway: GatewayRuntimeSettingsSelection?
     public init(presence: PresenceConfiguration, wake: GatewayWakePolicy, delivery: GatewayDeliveryPolicy) {
-        self.presence = presence; self.wake = wake; self.delivery = delivery
+        self.presence = presence; self.wake = wake; self.delivery = delivery; gateway = nil
+    }
+    public init(presence: PresenceConfiguration, gateway: GatewayRuntimeSettingsSelection) {
+        self.presence = presence; self.gateway = gateway
+        wake = gateway.service.wake; delivery = gateway.service.delivery
     }
 }
 
@@ -85,17 +104,27 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
 /// A data-only setup proposal. Opening it neither installs configuration nor creates an identity.
 /// Only the protected Mac setup host may apply its settings after preview and explicit confirmation.
 public struct PortableSetup: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    public static let formatName = "setup.portable"
+    public static let supportedVersions: Set<UInt64> = [1, 2, 3, 4]
     public let defaults: SharedSetupDefaults
+    public let appPreferences: PortableAppPreferences?
     public let fcm: SetupFCMConfiguration?
     public let cloudflare: SetupCloudflareConfiguration?
-    private static let limits = try! CBORLimits(maxBytes: 65_536, maxDepth: 4, maxItems: 128)
+    public let pushClient: SetupPushClientConfiguration?
+    public static let maximumCanonicalByteCount = 65_536
+    private static let limits = try! CBORLimits(maxBytes: maximumCanonicalByteCount, maxDepth: 4, maxItems: 128)
 
-    public init(defaults: SharedSetupDefaults, fcm: SetupFCMConfiguration? = nil, cloudflare: SetupCloudflareConfiguration? = nil) {
-        self.defaults = defaults; self.fcm = fcm; self.cloudflare = cloudflare
+    public init(defaults: SharedSetupDefaults, fcm: SetupFCMConfiguration? = nil, cloudflare: SetupCloudflareConfiguration? = nil,
+                pushClient: SetupPushClientConfiguration? = nil, appPreferences: PortableAppPreferences? = nil) {
+        self.defaults = defaults; self.fcm = fcm; self.cloudflare = cloudflare; self.pushClient = pushClient; self.appPreferences = appPreferences
+    }
+    /// Adds explicit app preferences while retaining the provider and shared service scope.
+    public func addingAppPreferences(_ preferences: PortableAppPreferences) -> Self {
+        .init(defaults: defaults, fcm: fcm, cloudflare: cloudflare, pushClient: pushClient, appPreferences: preferences)
     }
     public var preview: SetupPreview {
-        SetupPreview(categories: [.sharedDefaults] + (fcm == nil ? [] : [.fcmCredentials]) +
-                     (cloudflare == nil ? [] : [.cloudflareProvisioning]), firebaseProject: fcm?.project,
+        SetupPreview(categories: [.sharedDefaults] + (defaults.gateway == nil ? [] : [.gatewayOperationalDefaults]) + (appPreferences == nil ? [] : [.appPreferences]) + (fcm == nil ? [] : [.fcmCredentials]) +
+                     (cloudflare == nil ? [] : [.cloudflareProvisioning]), appPreferences: appPreferences, firebaseProject: fcm?.project, pushClient: pushClient,
                      cloudflareAccount: cloudflare?.accountID, cloudflareZone: cloudflare?.zoneID, dnsSuffix: cloudflare?.dnsSuffix)
     }
     public var description: String { "PortableSetup(redacted)" }
@@ -111,34 +140,79 @@ public struct PortableSetup: Sendable, CustomStringConvertible, CustomDebugStrin
 
     func canonicalBytes() throws -> Data {
         let p = defaults.presence, w = defaults.wake, d = defaults.delivery
-        let settings: CBORValue = .map([
+        var settings: [UInt64: CBORValue] = [
             0: .array([p.idleMilliseconds, p.observationLifetimeMilliseconds, p.unavailableGraceMilliseconds].map(CBORValue.unsigned)),
-            1: .array([UInt64(w.maximumEntries), UInt64(w.maximumAttempts), w.minimumEnrollmentIntervalMillis,
-                       w.maximumLifetimeMillis, UInt64(w.maximumTTLSeconds)].map(CBORValue.unsigned)),
-            2: .array([UInt64(d.maximumFlights), d.minimumSendIntervalMillis, d.retryBaseDelayMillis,
-                       d.maximumRetryBackoffMillis].map(CBORValue.unsigned)),
-        ])
+            1: Self.wakeValue(w), 2: Self.deliveryValue(d),
+        ]
+        if let gateway = defaults.gateway { settings[3] = .bytes(try gateway.bytes) }
         let push: CBORValue = fcm.map { .map([0: .text($0.project), 1: .text($0.email), 2: .text($0.keyID), 3: .text($0.privateKeyPEM)]) } ?? .null
         let provision: CBORValue = cloudflare.map { .map([0: .text($0.accountID), 1: .text($0.zoneID), 2: .text($0.dnsSuffix), 3: .text($0.apiToken)]) } ?? .null
-        return try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: settings, 2: push, 3: provision]), limits: Self.limits)
+        var root: [UInt64: CBORValue] = [0: .unsigned(defaults.gateway == nil ? 1 : 2), 1: .map(settings), 2: push, 3: provision]
+        if let pushClient {
+            guard defaults.gateway != nil, fcm?.project == pushClient.projectID else { throw PortableSetupError.rejected }
+            root[0] = .unsigned(3)
+            root[4] = .array([pushClient.projectID, pushClient.senderID, pushClient.packageName].map(CBORValue.text))
+        }
+        if let appPreferences {
+            root[0] = .unsigned(4)
+            if root[4] == nil { root[4] = .null }
+            root[5] = .bytes(try appPreferences.bytes)
+        }
+        return try DeterministicCBOR.encode(.map(root), limits: Self.limits)
     }
 
+    private static func wakeValue(_ value: GatewayWakePolicy) -> CBORValue {
+        .array([UInt64(value.maximumEntries), UInt64(value.maximumAttempts), value.minimumEnrollmentIntervalMillis,
+                value.maximumLifetimeMillis, UInt64(value.maximumTTLSeconds)].map(CBORValue.unsigned))
+    }
+    private static func deliveryValue(_ value: GatewayDeliveryPolicy) -> CBORValue {
+        .array([UInt64(value.maximumFlights), value.minimumSendIntervalMillis, value.retryBaseDelayMillis,
+                value.maximumRetryBackoffMillis].map(CBORValue.unsigned))
+    }
     init(canonicalBytes: Data) throws {
         do {
-            let root = try Fields(DeterministicCBOR.decode(canonicalBytes, limits: Self.limits), count: 4)
-            guard root[0] == .unsigned(1) else { throw PortableSetupError.rejected }
-            let settings = try Fields(root[1], count: 3)
+            let value = try DeterministicCBOR.decode(canonicalBytes, limits: Self.limits)
+            guard case .map(let fields) = value, case .unsigned(let version) = fields[0],
+                  Self.supportedVersions.contains(version) else { throw PortableSetupError.rejected }
+            let root = try Fields(value, count: version == 4 ? 6 : version == 3 ? 5 : 4)
+            let hasGateway: Bool
+            if version == 4 {
+                guard case .map(let settings) = root[1] else { throw PortableSetupError.rejected }
+                hasGateway = settings[3] != nil
+            } else { hasGateway = version >= 2 }
+            let settings = try Fields(root[1], count: hasGateway ? 4 : 3)
             let p = try settings.numbers(0, count: 3), w = try settings.numbers(1, count: 5), d = try settings.numbers(2, count: 4)
             guard let entries = Int(exactly: w[0]), let attempts = Int(exactly: w[1]),
                   let ttl = UInt32(exactly: w[4]), let flights = Int(exactly: d[0]) else { throw PortableSetupError.rejected }
-            defaults = try SharedSetupDefaults(
+            let legacy = try SharedSetupDefaults(
                 presence: PresenceConfiguration(idleMilliseconds: p[0], observationLifetimeMilliseconds: p[1], unavailableGraceMilliseconds: p[2]),
                 wake: GatewayWakePolicy(maximumEntries: entries, maximumAttempts: attempts, minimumEnrollmentIntervalMillis: w[2], maximumLifetimeMillis: w[3], maximumTTLSeconds: ttl),
                 delivery: GatewayDeliveryPolicy(maximumFlights: flights, minimumSendIntervalMillis: d[1], retryBaseDelayMillis: d[2], maximumRetryBackoffMillis: d[3]))
+            if hasGateway {
+                guard case .bytes(let bytes) = settings[3] else { throw PortableSetupError.rejected }
+                let gateway = try GatewayRuntimeSettingsSelection.decode(bytes)
+                let expanded = SharedSetupDefaults(presence: legacy.presence, gateway: gateway)
+                guard Self.wakeValue(expanded.wake) == Self.wakeValue(legacy.wake),
+                      Self.deliveryValue(expanded.delivery) == Self.deliveryValue(legacy.delivery) else {
+                    throw PortableSetupError.rejected
+                }
+                defaults = expanded
+            } else { defaults = legacy }
             if root[2] == .null { fcm = nil } else {
                 let fields = try Fields(root[2], count: 4)
                 fcm = try SetupFCMConfiguration(project: fields.text(0), clientEmail: fields.text(1), privateKeyID: fields.text(2), privateKeyPEM: fields.text(3))
             }
+            if version == 3 || (version == 4 && root[4] != .null) {
+                guard hasGateway else { throw PortableSetupError.rejected }
+                guard case .array(let values) = root[4], values.count == 3,
+                      case .text(let project) = values[0], case .text(let sender) = values[1], case .text(let package) = values[2],
+                      fcm?.project == project else { throw PortableSetupError.rejected }
+                pushClient = try .init(projectID: project, senderID: sender, packageName: package)
+            } else { pushClient = nil }
+            if version == 4 {
+                guard case .bytes(let preferences) = root[5] else { throw PortableSetupError.rejected }
+                appPreferences = try PortableAppPreferences.decode(preferences)
+            } else { appPreferences = nil }
             if root[3] == .null { cloudflare = nil } else {
                 let fields = try Fields(root[3], count: 4)
                 cloudflare = try SetupCloudflareConfiguration(accountID: fields.text(0), zoneID: fields.text(1), dnsSuffix: fields.text(2), apiToken: fields.text(3))
