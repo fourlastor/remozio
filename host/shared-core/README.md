@@ -2,7 +2,7 @@
 
 `RemozioHostCore` contains the shared decision verifier, its retained-request,
 trust and clock value types, a sleep-inclusive clock sampler, the SQLite audit
-journal and decision-consumption tables, consumption outcomes, continuity
+journal, decision-consumption and command-submission replay tables, consumption outcomes, continuity
 checkpoints, history-recovery intent encoding and storage-reconciliation selection.
 The Mac authority uses the same implementations through the existing `RemozioCore`
 public names.
@@ -41,6 +41,18 @@ the owner's durable outer commit and checkpoint coordination before admission ca
 advance. The Mac adapter retains its enrollment lookup, revision checks, transaction
 failure and retirement behavior, SQLite configuration and protected-store recovery.
 
+`CommandSubmissionReplayTables` shares the existing permanent submission-ID and
+nonce reservations. It stores the supplied scope, caller binding and capture digest;
+those values do not authenticate a caller or attest a capture. Reads require an
+explicit transaction and reservations require a main-database write transaction.
+Duplicate IDs or nonces fail before the per-account capacity check; capacity never
+evicts old evidence. There is no expiry, replacement or deletion API.
+The Mac owner retains policy prerequisites, schema-version migration, continuity
+digests and checkpoint coordination. The shared table neither sets `user_version`
+nor marks an outer transaction failed: its owner must roll back an admission batch
+when any required operation fails. A reservation or absence observation grants no
+admission, retry or execution authority.
+
 Checkpoint and recovery APIs validate caller-supplied data only. They establish
 neither provenance nor protected storage, and their results grant no admission,
 replay or dispatch authority. The Mac adapter keeps lazy pending-first journal
@@ -65,6 +77,10 @@ Crypto on Linux, and temporary SQLite databases. They cover table transaction,
 rollback, reopen and bounded-read behavior. Consumption tests also cover approval
 and decline winners, competing write connections, replay, expiry, exact audit
 connection/scope, caught write failures and terminal unknown outcomes across reopen.
+Replay-table tests cover both identifier collisions across reopen, scope isolation,
+capacity, competing connections, outer rollback, malformed rows, storage errors and
+compatibility with the existing Mac table layout. Existing Mac tests retain replay
+migration, failed-transaction retirement and checkpoint integration coverage.
 Portable recovery tests cover data validation and selection. These results do not establish hardware custody, a
 protected Linux installation or a complete host approval flow. Mac tests retain
 audit signing integration with the shared table types and the existing store
