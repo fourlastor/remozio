@@ -460,7 +460,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     throw AdministrativeSetupError.staleProgress
                 }
                 let inventory = try currentInventory(machine)
-                let plan = try state.plan ?? RuntimeActivationPlan(account: account, initialization: initial, runtime: runtime, inventory: inventory)
+                let selectedRelease: SignedReleaseEvidence?
+                if state.plan == nil, runtime.reference?.serviceActivity != nil {
+                    guard let app = account.initialAuthority.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else {
+                        throw AdministrativeSetupError.changedInstallation
+                    }
+                    selectedRelease = try SignedReleaseInspection.inspect(URL(fileURLWithPath: inventory.bundlePath),
+                        teamID: app.teamID, appIdentifier: app.identifier)
+                } else { selectedRelease = nil }
+                let plan = try state.plan ?? RuntimeActivationPlan(account: account, initialization: initial,
+                    runtime: runtime, inventory: inventory, gatewaySettingsRelease: selectedRelease)
                 try machine.retainRuntimeActivation(plan); try activationOperations.didStage(.intentRetained)
                 func verify() throws {
                     _ = try verifyActivation(machine: machine, account: account, initialization: initial, plan: plan, callerUID: callerUID, enrolled: false)
