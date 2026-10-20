@@ -1,5 +1,6 @@
 import importlib.util
 import ctypes
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,17 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("linux_os_capture", ROOT / "scripts/run-linux-os-capture-experiment.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def lifecycle_host_supported():
+    if (sys.version_info < (3, 11) or platform.system() != "Linux" or platform.machine() != "x86_64" or
+            os.getuid() == 0 or os.getuid() != os.geteuid() or os.getgid() != os.getegid()):
+        return False
+    try:
+        Path(f"/proc/self/task/{os.getpid()}/children").read_text(encoding="ascii")
+    except (OSError, UnicodeDecodeError):
+        return False
+    return True
 
 
 class LinuxOSCaptureReportTests(unittest.TestCase):
@@ -68,10 +80,56 @@ class LinuxOSCaptureReportTests(unittest.TestCase):
             self.assertTrue(arguments[arguments.index(flag) + 1].startswith("/tmp/os-capture-test/"))
         self.assertEqual(arguments[arguments.index("--jobs") + 1], "4")
 
+    def test_lifecycle_gate_matches_runner_prerequisites(self):
+        supported = {"python": (3, 11), "system": "Linux", "machine": "x86_64",
+                     "uid": 1000, "euid": 1000, "gid": 1000, "egid": 1000}
+        cases = (
+            ("supported", {}, None),
+            ("old-python", {"python": (3, 10)}, None),
+            ("other-system", {"system": "Darwin"}, None),
+            ("other-architecture", {"machine": "aarch64"}, None),
+            ("root", {"uid": 0, "euid": 0}, None),
+            ("different-effective-uid", {"euid": 1001}, None),
+            ("different-effective-gid", {"egid": 1001}, None),
+            ("missing-children", {}, FileNotFoundError("children unavailable")),
+            ("unreadable-children", {}, PermissionError("children unavailable")),
+            ("non-ascii-children", {}, UnicodeDecodeError("ascii", b"\xff", 0, 1, "children unavailable")),
+        )
+        for name, changes, read_error in cases:
+            host = supported | changes
+            with self.subTest(host=name), ExitStack() as stack:
+                stack.enter_context(patch.object(sys, "version_info", host["python"]))
+                for field in ("system", "machine"):
+                    stack.enter_context(patch.object(platform, field, return_value=host[field]))
+                for field in ("uid", "euid", "gid", "egid"):
+                    stack.enter_context(patch.object(os, f"get{field}", return_value=host[field]))
+                stack.enter_context(patch.object(Path, "read_text", return_value="", side_effect=read_error))
+                inventory = stack.enter_context(patch.object(MODULE, "source_inventory",
+                    side_effect=RuntimeError("preflight reached")))
+                subreaper = stack.enter_context(patch.object(MODULE._helpers, "subreaper"))
+                worker = stack.enter_context(patch.object(MODULE._helpers, "run_owned"))
+                self.assertEqual(lifecycle_host_supported(), name == "supported")
+                if name == "supported":
+                    with self.assertRaisesRegex(RuntimeError, "preflight reached"):
+                        MODULE.run(Path("/tmp/os-capture-prerequisite-test"))
+                    inventory.assert_called_once_with()
+                else:
+                    case = LinuxOSCaptureCleanupTests("test_runner_owns_adopts_and_reaps_descendant_then_restores_state")
+                    with patch.object(ctypes, "CDLL") as libc, self.assertRaises(unittest.SkipTest):
+                        case.setUp()
+                    libc.assert_not_called()
+                    with self.assertRaisesRegex((ValueError, OSError, UnicodeDecodeError),
+                                                "unsupported host|children unavailable"):
+                        MODULE.run(Path("/tmp/os-capture-prerequisite-test"))
+                    inventory.assert_not_called()
+                subreaper.assert_not_called()
+                worker.assert_not_called()
 
-@unittest.skipUnless(platform.system() == "Linux", "Linux child subreaper lifecycle")
+
 class LinuxOSCaptureCleanupTests(unittest.TestCase):
     def setUp(self):
+        if not lifecycle_host_supported():
+            self.skipTest("requires the OS-capture runner's supported host and readable task children")
         self.libc = ctypes.CDLL(None, use_errno=True)
         self.previous = self.subreaper_state()
         self.assertEqual(self.libc.prctl(36, 0, 0, 0, 0), 0)
@@ -127,7 +185,7 @@ time.sleep(10)
         self.assertEqual(self.subreaper_state(), 0)
 
     def test_runner_restores_subreaper_after_each_worker_failure(self):
-        for failing_phase in range(3):
+        for failing_phase, reason in enumerate(("swift version", "build failed", "native result")):
             calls = []
 
             def worker(arguments, timeout, **kwargs):
@@ -138,8 +196,9 @@ time.sleep(10)
                 return (b"Swift version 6.2.4" if phase == 0 else b""), 0, None, True
 
             with self.subTest(phase=failing_phase), tempfile.TemporaryDirectory() as directory, \
-                    patch.object(MODULE._helpers, "run_owned", side_effect=worker), self.assertRaises(ValueError):
+                    patch.object(MODULE._helpers, "run_owned", side_effect=worker), self.assertRaisesRegex(ValueError, reason):
                 MODULE.run(Path(directory))
+            self.assertEqual(len(calls), failing_phase + 1)
             self.assertEqual(self.subreaper_state(), 0)
 
     def test_cancellation_reaps_adopted_child_and_restores_subreaper(self):
@@ -164,6 +223,7 @@ time.sleep(10)
                 self.assertRaises(KeyboardInterrupt):
             MODULE.run(Path(directory))
         self.assertEqual(self.subreaper_state(), 0)
+        self.assertEqual(len(calls), 2)
         self.assertEqual(len(adopted), 1)
         with self.assertRaises(ChildProcessError):
             os.waitpid(adopted[0], os.WNOHANG)
