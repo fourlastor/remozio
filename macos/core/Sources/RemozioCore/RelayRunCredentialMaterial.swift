@@ -31,13 +31,24 @@ struct RelayRunCredentialReference: Equatable, Sendable, CustomStringConvertible
     static func decode(_ bytes: Data, expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
                        created: SharedSetupRelayProvisioningRecord, runtime: RuntimeMaterialReference,
                        account: AccountPreparationIntent, inventory: InstallationInventory) throws -> Self {
-        let tunnel = try RelayRunCredentialMaterial.validateScope(expected: expected, plan: plan, created: created,
+        _ = try RelayRunCredentialMaterial.validateScope(expected: expected, plan: plan, created: created,
             runtime: runtime, account: account, inventory: inventory)
+        let value = try decodeRetainedMetadata(bytes, expected: expected, plan: plan, created: created)
+        guard value.runtime == runtime else { throw RuntimePreparationError.changedScope }
+        return value
+    }
+    // Metadata inspection does not establish the current machine runtime or authorize credential use.
+    static func decodeRetainedMetadata(_ bytes: Data, expected: SharedSetupImportIntent,
+                                       plan: SharedSetupImportRelayPlan, created: SharedSetupRelayProvisioningRecord) throws -> Self {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
         guard case let .map(f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...10),
               f[0] == .unsigned(1), f[1] == .text("remozio-relay-run-reference"), case let .bytes(id) = f[2],
-              case let .bytes(credentialDigest) = f[9], case let .bytes(materialDigest) = f[10] else {
-            throw RuntimePreparationError.invalidRecord
-        }
+              case let .bytes(runtimeBytes) = f[5], case let .bytes(credentialDigest) = f[9],
+              case let .bytes(materialDigest) = f[10] else { throw RuntimePreparationError.invalidRecord }
+        let runtime = try RuntimeMaterialReference.decode(runtimeBytes), scope = expected.scope, services = runtime.services
+        guard services.macID == scope.macID, services.accountID == scope.accountID,
+              services.installationID == scope.installationID, services.releaseDigest == scope.releaseDigest,
+              services.ownerUID == scope.ownerUID else { throw RuntimePreparationError.changedScope }
         let value = try Self(materialID: id, planBytes: plan.bytes, tunnelRecordDigest: Data(SHA256.hash(data: created.bytes)),
             runtime: runtime, tunnel: tunnel, credentialDigest: credentialDigest, materialDigest: materialDigest)
         guard try value.encoded == bytes else { throw RuntimePreparationError.conflictingMaterial }

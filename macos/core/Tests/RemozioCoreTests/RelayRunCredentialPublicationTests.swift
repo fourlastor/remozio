@@ -247,4 +247,152 @@ final class RelayRunCredentialPublicationTests: XCTestCase {
             expected: f.expected, plan: f.plan, created: f.created, runtime: f.runtime, reference: reference,
             mode: .prepareUnactivated, verifyCurrent: { XCTFail("Protected operation") })) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
     }
+
+    private func retainRuntimeAndTunnel(_ f: Fixture) throws -> SharedSetupImportIntent {
+        try f.host.machine { machine in
+            try machine.retainRuntimeMaterial(f.runtime); try machine.completeRuntimePublication(f.runtime)
+        }
+        let journal = try f.host.f.open()
+        let current = try journal.advance(f.host.intent, to: .runtimePublished)
+        try journal.close()
+        try f.host.directory { directory in
+            let old = try XCTUnwrap(SharedSetupRelayProvisioningStorage.read(expected: current, plan: f.plan,
+                directory: directory, owner: getuid()))
+            let sent = try old.transition(to: .dispatched)
+            try SharedSetupRelayProvisioningStorage.replace(sent, previous: old, expected: current, plan: f.plan,
+                directory: directory, owner: getuid(), verifyCurrent: {})
+            try SharedSetupRelayProvisioningStorage.replace(f.created, previous: sent, expected: current, plan: f.plan,
+                directory: directory, owner: getuid(), verifyCurrent: {})
+        }
+        return current
+    }
+    private func retainReference(_ reference: RelayRunCredentialReference, _ f: Fixture, _ directory: ProtectedSetupDirectory,
+                                 expected: SharedSetupImportIntent, runtime: RuntimeMaterialReference? = nil,
+                                 verify: () throws -> Void = {},
+                                 stage: (AdministrativeSetupPublication.Stage) throws -> Void = { _ in }) throws -> RelayRunCredentialReference {
+        try SharedSetupRelayRunReferenceStorage.retain(reference, expected: expected, plan: f.plan, created: f.created,
+            runtime: runtime ?? f.runtime, directory: directory, owner: getuid(), verifyCurrent: verify, didStage: stage)
+    }
+    private func referencePath(_ f: Fixture, _ directory: ProtectedSetupDirectory) -> String {
+        directory.path + "/" + AdministrativeSetupPublication.File.importRelayRunReference(accountID: f.account.accountID).name
+    }
+    func testAcceptedReferenceReopensWithoutCredentialBytesOrInodeReplacement() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), material = try f.material(), reference = try material.reference
+        try f.host.directory { directory in
+            _ = try retainReference(reference, f, directory, expected: expected)
+            var before = stat(); XCTAssertEqual(lstat(referencePath(f, directory), &before), 0)
+            _ = try retainReference(reference, f, directory, expected: expected)
+            var after = stat(); XCTAssertEqual(lstat(referencePath(f, directory), &after), 0)
+            XCTAssertEqual(before.st_ino, after.st_ino); XCTAssertEqual(after.st_mode & 0o7777, 0o600)
+            try material.withCredentialBytes { token in
+                XCTAssertNil(try Data(contentsOf: URL(fileURLWithPath: referencePath(f, directory))).range(of: token))
+            }
+        }
+        try f.host.directory { directory in
+            XCTAssertEqual(try SharedSetupRelayRunReferenceStorage.read(expected: expected, plan: f.plan, created: f.created,
+                directory: directory, owner: getuid()), reference)
+            let later = try expected.advanced(to: .gatewayPrepared).advanced(to: .relayPrepared)
+            XCTAssertEqual(try retainReference(reference, f, directory, expected: later), reference)
+        }
+    }
+    func testLostReferencePublicationReplyRetainsTheAcceptedIdentity() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+        try f.host.directory { directory in
+            XCTAssertThrowsError(try retainReference(reference, f, directory, expected: expected,
+                stage: { if $0 == .published { throw Interrupted() } }))
+            XCTAssertEqual(try retainReference(reference, f, directory, expected: expected), reference)
+            let different = try f.material().reference
+            XCTAssertThrowsError(try retainReference(different, f, directory, expected: expected)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .conflictingMaterial)
+            }
+            XCTAssertEqual(try SharedSetupRelayRunReferenceStorage.read(expected: expected, plan: f.plan, created: f.created,
+                directory: directory, owner: getuid()), reference)
+        }
+    }
+    func testMissingAcceptedReferenceCannotBeCreatedAfterRelayPreparation() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+        try f.host.directory { directory in
+            let later = try expected.advanced(to: .gatewayPrepared).advanced(to: .relayPrepared)
+            XCTAssertThrowsError(try retainReference(reference, f, directory, expected: later))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: referencePath(f, directory)))
+        }
+    }
+    func testReferenceRejectsStaleVerificationAndCrossedRuntimeBeforeWriting() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+        let other = try fixture()
+        try f.host.directory { directory in
+            XCTAssertThrowsError(try retainReference(reference, f, directory, expected: expected, runtime: other.runtime))
+            XCTAssertThrowsError(try retainReference(reference, f, directory, expected: expected, verify: { throw Interrupted() }))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: referencePath(f, directory)))
+        }
+    }
+    func testReferenceRequiresTheExactRetainedTunnelAndPlan() throws {
+        let f = try fixture(), reference = try f.material().reference
+        try f.host.directory { directory in
+            // The fixture has a prepared resource record until its explicit retention step.
+            XCTAssertThrowsError(try retainReference(reference, f, directory, expected: f.expected))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: referencePath(f, directory)))
+        }
+    }
+    func testReferencePublicationNeverRepairsUnsafeExistingFiles() throws {
+        for kind in ["corrupt", "readable", "hardlink", "symlink"] {
+            let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+            try f.host.directory { directory in
+                let target = referencePath(f, directory)
+                if kind == "symlink" { XCTAssertEqual(symlink("/dev/null", target), 0) }
+                else {
+                    try (kind == "corrupt" ? Data("corrupt".utf8) : reference.encoded).write(to: URL(fileURLWithPath: target))
+                    XCTAssertEqual(chmod(target, kind == "readable" ? 0o644 : 0o600), 0)
+                    if kind == "hardlink" { XCTAssertEqual(link(target, target + ".link"), 0) }
+                }
+                var before = stat(); XCTAssertEqual(lstat(target, &before), 0)
+                XCTAssertThrowsError(try retainReference(reference, f, directory, expected: expected))
+                var after = stat(); XCTAssertEqual(lstat(target, &after), 0)
+                XCTAssertEqual(before.st_ino, after.st_ino); XCTAssertEqual(before.st_mode, after.st_mode)
+            }
+        }
+    }
+    func testUpdateSnapshotIncludesReferenceAndPrivateMaterialCodecRequirements() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+        let before = try f.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) }
+        XCTAssertFalse(before.requirements.formats.contains { $0.name == RelayRunCredentialReference.formatName })
+        try f.host.directory { _ = try retainReference(reference, f, $0, expected: expected) }
+        XCTAssertThrowsError(try f.host.machine { try before.requireCurrent(machine: $0) })
+        let after = try f.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) }
+        XCTAssertNotNil(after.inputs.sharedImport?.records.first?.runCredential)
+        for (role, format, writes): (AuthorityCodeRole, String, Set<UInt64>) in [
+            (.setupController, RelayRunCredentialReference.formatName, [1]),
+            (.setupController, RelayRunCredentialMaterial.formatName, [1])] {
+            let requirement = try XCTUnwrap(after.requirements.formats.first { $0.role == role && $0.name == format })
+            XCTAssertEqual(requirement.readVersions, [1]); XCTAssertEqual(requirement.writeVersions, writes)
+        }
+        try f.host.directory { directory in
+            let target = referencePath(f, directory), replacement = target + ".replacement"
+            try reference.encoded.write(to: URL(fileURLWithPath: replacement)); XCTAssertEqual(chmod(replacement, 0o600), 0)
+            XCTAssertEqual(rename(replacement, target), 0)
+        }
+        XCTAssertThrowsError(try f.host.machine { try after.requireCurrent(machine: $0) })
+    }
+    func testUpdateSnapshotRejectsAReferenceForAnUnretainedRuntime() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f)
+        let other = try RuntimeMaterialReference(materialID: AccountPreparationIntent.randomID(), services: f.runtime.services,
+            materialDigest: Data(repeating: 0x22, count: 32), transportPublicKeyInfo: f.runtime.transportPublicKeyInfo, gateway: f.runtime.gateway)
+        let material = try RelayRunCredentialMaterial(expected: expected, plan: f.plan, created: f.created, runtime: other,
+            account: f.account, inventory: f.inventory, credential: f.credential)
+        try f.host.directory { _ = try retainReference(material.reference, f, $0, expected: expected, runtime: other) }
+        XCTAssertThrowsError(try f.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) }) {
+            XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+        }
+    }
+    func testOrphanReferenceAndGenericReplacementAreRefused() throws {
+        let f = try fixture(), expected = try retainRuntimeAndTunnel(f), reference = try f.material().reference
+        try f.host.directory { directory in
+            XCTAssertThrowsError(try AdministrativeSetupPublication.replaceSettings(reference.encoded, expected: nil,
+                file: .importRelayRunReference(accountID: f.account.accountID), directory: directory, owner: getuid(), verify: {}))
+            let orphan = directory.path + "/import-relay-run-" + String(repeating: "f", count: 32) + ".cbor"
+            try reference.encoded.write(to: URL(fileURLWithPath: orphan)); XCTAssertEqual(chmod(orphan, 0o600), 0)
+            XCTAssertThrowsError(try SharedSetupImportRelayStorage.validateTrackedFiles(records: [expected], directory: directory))
+            XCTAssertThrowsError(try f.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) })
+        }
+    }
 }

@@ -50,6 +50,10 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             try include(.setupController, SharedSetupImportJournal.formatName, SharedSetupImportJournal.supportedVersions,
                 SharedSetupImportJournal.supportedVersions)
             if !portableVersions.isEmpty { try include(.setupController, PortableSetup.formatName, portableVersions, portableVersions) }
+            if imports.records.contains(where: { $0.runCredential != nil }) {
+                try include(.setupController, RelayRunCredentialMaterial.formatName, [1], [1])
+                try include(.setupController, RelayRunCredentialReference.formatName, [1], [1])
+            }
             if imports.records.contains(where: { $0.dnsRecord != nil }) {
                 try include(.setupController, SharedSetupDNSRecord.formatName, [1], [1])
             }

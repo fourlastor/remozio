@@ -46,7 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data)
+        case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
         case runtimeRecord, gatewayMaterial, relayRunMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
@@ -66,6 +66,7 @@ public enum AdministrativeSetupPublication {
             case .importRelayProvisioning(let account): "import-relay-state-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .importAccessApplication(let account): "import-relay-access-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .importDNSRecord(let account): "import-relay-dns-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importRelayRunReference(let account): "import-relay-run-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
@@ -128,7 +129,7 @@ public enum AdministrativeSetupPublication {
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
-            case .importRelayPlan(let account), .importRelayProvisioning(let account), .importAccessApplication(let account), .importDNSRecord(let account):
+            case .importRelayPlan(let account), .importRelayProvisioning(let account), .importAccessApplication(let account), .importDNSRecord(let account), .importRelayRunReference(let account):
                 guard account.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .gatewayJournalJob(let account, let intent):
                 guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
