@@ -60,7 +60,8 @@ No physical device or installed Mac service was used.
 These results do not prove a real Mac-Pixel approval flow, tablet behavior, gestures or hardware performance.
 UI interaction across arrivals, filters and a biometric operation still needs runtime qualification.
 The unit tests establish the underlying identity and observation contracts.
-Exact authenticated notification navigation remains a separate integration task.
+Authenticated notification navigation now has source and emulator evidence in [the notification experiment](android-request-notifications.md).
+Its remaining installed and device gates are separate from these display fixtures.
 The private source still requires the full repository gate before publication.
 
 Private evidence is retained under `.build/agent-checkpoints/android-combined-inbox-visual-20261021/`.

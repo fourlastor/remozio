@@ -24,7 +24,7 @@ import kotlinx.coroutines.isActive
 
 /** Screens observe application-owned connections without opening or stopping their transports. */
 @Composable
-internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
+internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit, navigation: CommandInboxNavigation) {
     val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val runtimeState by runtime.state.collectAsState()
     val selectedOwner = (runtimeState as? ForegroundCommandState.Ready)?.owners?.singleOrNull { it.recordID == mac.recordID }
@@ -38,8 +38,6 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
         }
         else -> null
     }
-    var selected by remember(mac.recordID) { mutableStateOf<CommandRequestSession?>(null) }
-    LaunchedEffect(owner) { selected = null }
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(onClick = onBack) { Text(stringResource(R.string.commands_back)) }
         Text(mac.label, style = MaterialTheme.typography.headlineLarge, modifier = Modifier.semantics { heading() })
@@ -67,15 +65,10 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
             if (requests.isEmpty()) Text(stringResource(R.string.commands_empty))
             LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 itemsIndexed(requests, key = { _, session -> session.identity.requestID.copyBytes().joinToString("") { "%02x".format(it) } }) { index, session ->
-                    CommandRequestRow(session, index + 1, onOpen = { selected = session })
+                    CommandRequestRow(session, index + 1, onOpen = { navigation.show(ScopedCommandRequest(checkNotNull(selectedOwner), session)) })
                 }
             }
-            selected?.let { session ->
-                val approval = remember(connection, session) { connection.approval(session) }
-                CommandRequestInspection(session, commandMacLabel(checkNotNull(selectedOwner), (runtimeState as ForegroundCommandState.Ready).owners),
-                    stringResource(R.string.commands_account_suffix, commandAccountSuffix(selectedOwner, (runtimeState as ForegroundCommandState.Ready).owners)),
-                    onDismiss = { selected = null }, approval = approval)
-            }
+
         }
     }
 }

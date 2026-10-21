@@ -4,11 +4,11 @@ import android.Manifest
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.SystemClock
 import androidx.core.app.NotificationCompat
-import dev.remozio.android.MainActivity
+import dev.remozio.android.requests.CommandNotificationIntents
+import dev.remozio.android.requests.CommandNotificationTarget
 import dev.remozio.android.R
 import dev.remozio.phone.push.PhoneWakeScheduler
 import dev.remozio.phone.push.PushWakeRouter
@@ -27,7 +27,18 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
 
     fun post(enrollment: WakeEnrollment, alert: Boolean): WakeNotificationResult = post(tag(enrollment), alert)
     internal fun postForRecord(recordID: CborValue.Bytes, alert: Boolean): WakeNotificationResult = post(recordTag(recordID), alert)
-    private fun post(tag: String, alert: Boolean): WakeNotificationResult {
+    internal fun postRequest(target: CommandNotificationTarget, timeout: Long): WakeNotificationResult {
+        val generic = recordTag(target.recordID)
+        val hinted = try { manager.activeNotifications.any { it.id == NOTIFICATION_ID && it.tag == generic } }
+            catch (_: RuntimeException) { false }
+        val result = post(requestTag(target), !hinted, target, timeout)
+        if (result == WakeNotificationResult.POSTED) try { manager.cancel(generic, NOTIFICATION_ID) } catch (_: RuntimeException) { }
+        return result
+    }
+    internal fun cancelRequest(target: CommandNotificationTarget) { manager.cancel(requestTag(target), NOTIFICATION_ID) }
+    private fun requestTag(target: CommandNotificationTarget) = recordTag(target.recordID) + ".request." + target.encode()
+    private fun post(tag: String, alert: Boolean, target: CommandNotificationTarget? = null,
+                     timeout: Long = timeoutMillis): WakeNotificationResult {
         if (context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             return WakeNotificationResult.PERMISSION_DENIED
         }
@@ -37,8 +48,8 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
             if (manager.getNotificationChannel(RequestNotificationChannel.ID)?.importance == NotificationManager.IMPORTANCE_NONE) {
                 return WakeNotificationResult.CHANNEL_DISABLED
             }
-            // The intent opens the app only. No endpoint, request, decision, or approval action comes from a push.
-            val intent = Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            // A push supplies only the generic route. Specific targets come from authenticated sessions.
+            val intent = if (target == null) CommandNotificationIntents.inbox(context) else CommandNotificationIntents.request(context, target)
             val open = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
             val notification = NotificationCompat.Builder(context, RequestNotificationChannel.ID)
                 .setSmallIcon(R.drawable.ic_launcher_monochrome)
@@ -48,9 +59,9 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
                 .setCategory(NotificationCompat.CATEGORY_STATUS)
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setAutoCancel(true)
-                .setOnlyAlertOnce(!alert)
+                .setOnlyAlertOnce(target != null || !alert)
                 .setSilent(!alert)
-                .setTimeoutAfter(timeoutMillis)
+                .setTimeoutAfter(timeout)
                 .build()
             manager.notify(tag, NOTIFICATION_ID, notification)
             WakeNotificationResult.POSTED
@@ -62,7 +73,11 @@ class AndroidWakeNotifications(context: Context, private val timeoutMillis: Long
     }
 
     fun cancel(enrollment: WakeEnrollment) { manager.cancel(tag(enrollment), NOTIFICATION_ID) }
-    internal fun cancelRecord(recordID: CborValue.Bytes) { manager.cancel(recordTag(recordID), NOTIFICATION_ID) }
+    internal fun cancelRecord(recordID: CborValue.Bytes) {
+        val prefix = recordTag(recordID)
+        manager.activeNotifications.filter { it.id == NOTIFICATION_ID && (it.tag == prefix || it.tag?.startsWith(prefix + ".request.") == true) }
+            .forEach { manager.cancel(it.tag, it.id) }
+    }
     private fun recordTag(recordID: CborValue.Bytes): String {
         val bytes = recordID.copyBytes(); require(bytes.size == 16)
         return "remozio.wake.record." + bytes.joinToString("") { "%02x".format(it.toInt() and 255) }

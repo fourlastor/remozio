@@ -15,5 +15,6 @@
         <activity android:name=".requests.InboxExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".requests.InboxEmptyPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".requests.InboxUnavailablePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.NotificationNavigationProbeActivity" android:exported="true" android:excludeFromRecents="true" />
     </application>
 </manifest>

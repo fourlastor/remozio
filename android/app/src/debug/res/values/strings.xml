@@ -60,4 +60,5 @@
     <string name="adb_probe_result_scope">%1$s, port %2$d: %3$s</string>
     <string name="probe_policy_error">The existing key does not match the probe policy. Signing remains blocked. Do not delete it while diagnosing this result.\n\n%1$s</string>
     <string name="inbox_preview_notice">Synthetic preview · no pairing or command execution</string>
+    <string name="notification_navigation_probe">Testing notification navigation with fabricated targets. No pairing or approval.</string>
 </resources>

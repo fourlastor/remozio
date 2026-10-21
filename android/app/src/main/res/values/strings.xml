@@ -534,4 +534,7 @@
     <string name="commands_all_hosts">All Macs</string>
     <string name="commands_account_suffix">Account %1$s</string>
     <string name="commands_connections">Connections</string>
+    <string name="commands_opening_notification">Checking this request with its paired host…</string>
+    <string name="commands_keep_browsing">Keep browsing</string>
+    <string name="commands_notification_unavailable">This request is not available here. It may have expired, finished, or belonged to a pairing that changed.</string>
 </resources>

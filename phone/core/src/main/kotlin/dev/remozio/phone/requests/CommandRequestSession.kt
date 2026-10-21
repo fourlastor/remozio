@@ -38,6 +38,9 @@ class CommandRequestSession private constructor(
     private val challenge: CborValue.Bytes,
     private val permittedActions: Set<CapturedAction>,
 ) : AutoCloseable {
+    /** Public immutable digest for matching a local navigation hint to this authenticated request. */
+    val issuedRequestDigest: CborValue.Bytes get() = requestDigest
+
     private var memory: CommandMemoryBudget.Reservation? = null
     private var capture: CommandCapturePayload? = capture
 

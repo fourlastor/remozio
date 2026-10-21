@@ -20,24 +20,28 @@ import dev.remozio.android.R
 import dev.remozio.android.RemozioApplication
 
 @Composable
-internal fun CombinedCommandInboxScreen(onPair: () -> Unit) {
+internal fun CombinedCommandInboxScreen(onPair: () -> Unit, navigation: CommandInboxNavigation) {
     val runtime = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val state by runtime.state.collectAsStateWithLifecycle()
-    CombinedCommandInboxSurface(state, onPair, runtime::refresh)
+    CombinedCommandInboxSurface(state, onPair, runtime::refresh, navigation, renderInspection = false)
 }
 
 /** Filters and selection belong to the display. All foreground connection jobs remain app-owned. */
 @Composable
-internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: () -> Unit, onRetry: () -> Unit) {
+internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: () -> Unit, onRetry: () -> Unit,
+    navigation: CommandInboxNavigation = remember { CommandInboxNavigation() }, renderInspection: Boolean = true) {
     val owners = (state as? ForegroundCommandState.Ready)?.owners.orEmpty()
     var filter by rememberSaveable { mutableStateOf<String?>(null) }
-    var selected by remember { mutableStateOf<ScopedCommandRequest?>(null) }
+    val route by navigation.state.collectAsStateWithLifecycle()
     val requestFlow = remember(owners) { observeCommandInbox(owners) }
     val received by requestFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val requests = received.filter { it.isCurrent(owners) && (filter == null || commandIdentityText(it.owner.recordID) == filter) }
+    LaunchedEffect(route.showAllScopes) {
+        if (route.showAllScopes) { filter = null; navigation.allScopesShown() }
+    }
     val visibleOwners = owners.filter { filter == null || commandIdentityText(it.recordID) == filter }
-    LaunchedEffect(owners, state) {
-        if (selected?.isCurrent(owners) == false) selected = null
+    LaunchedEffect(owners, state, received, route.pending, route.selected) {
+        if (renderInspection) navigation.synchronize(owners, received, state is ForegroundCommandState.Ready)
         if (state is ForegroundCommandState.Ready && owners.none { commandIdentityText(it.recordID) == filter }) filter = null
     }
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -58,6 +62,11 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
                     })
                 }
             }
+            if (route.pending != null && route.selected == null) {
+                Text(stringResource(R.string.commands_opening_notification))
+                TextButton(onClick = navigation::cancelPending) { Text(stringResource(R.string.commands_keep_browsing)) }
+            }
+            if (route.unavailable) Text(stringResource(R.string.commands_notification_unavailable))
             when (state) {
                 ForegroundCommandState.Loading, ForegroundCommandState.Stopped -> {
                     LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -77,7 +86,7 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
                     } else {
                         if (requests.isEmpty()) item { Text(stringResource(R.string.commands_empty)) }
                         itemsIndexed(requests, key = { _, request -> request.key }) { index, request ->
-                            CommandRequestRow(request.session, index + 1, onOpen = { selected = request },
+                            CommandRequestRow(request.session, index + 1, onOpen = { navigation.show(request) },
                                 macName = commandMacLabel(request.owner, owners),
                                 accountName = stringResource(R.string.commands_account_suffix, commandAccountSuffix(request.owner, owners)))
                         }
@@ -91,12 +100,7 @@ internal fun CombinedCommandInboxSurface(state: ForegroundCommandState, onPair: 
             }
         }
     }
-    selected?.takeIf { it.isCurrent(owners) }?.let { request ->
-        val approval = remember(request.connection, request.session) { request.connection.approval(request.session) }
-        CommandRequestInspection(request.session, commandMacLabel(request.owner, owners),
-            stringResource(R.string.commands_account_suffix, commandAccountSuffix(request.owner, owners)),
-            onDismiss = { selected = null }, approval = approval)
-    }
+    if (renderInspection) CommandInspectionHost(navigation, owners)
 }
 
 @Composable

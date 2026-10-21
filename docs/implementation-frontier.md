@@ -2,12 +2,12 @@
 
 This source checkpoint follows the approved [plan](../IMPLEMENTATION-PLAN.md) and [later decisions](design-decisions.md).
 It is not a completion audit or a claim of product acceptance. The complete approved scope remains open.
-The default Android inbox now observes all active Mac/account scopes. Exact notification navigation is the next product integration.
+The default Android inbox observes all active Mac/account scopes. Notification taps resolve against the exact authenticated session.
 
 | Area | Current evidence or inspected source | Remaining boundary |
 | --- | --- | --- |
 | Command approval | CLI, authority, transport, execution and phone components exist. The interactive handoff identifies their installed gates. | First installed Mac-Pixel approval and denial; actual service and device behavior. |
-| Several Macs | The root lifecycle starts all active peers. The default combined inbox and scoped filters pass unit controls and native emulator visual checks. | Exact authenticated notification routing; interaction, tablet and real multi-host qualification. |
+| Several Macs | The root lifecycle starts all active peers. The default combined inbox and scoped filters pass unit controls and native emulator visual checks. | Installed notification delivery, interaction, tablet and real multi-host qualification. |
 | Phone routing control | Root routing journal supports signed Away control. No phone/app integration was found in the inspected sources. | Authenticated status and Set Away; preserve Mac-only Automatic and Present. |
 | Push | The application starts registration and wake workers. Mac import prepares the configured gateway. | Real registration, FCM delivery, background recovery and provider-backed results. |
 | Audit history | Cached history UI and a shared sync session exist. This pass did not verify the complete live sync composition. | Verify and integrate live synchronization and retention settings. |
@@ -25,14 +25,18 @@ Source documentation contains historical statements. Verify their current call p
 
 The application now uses one foreground coordinator across every active Mac/account.
 Eight coordinator tests cover healthy refresh, failure isolation, replacement cleanup, storage recovery, lifecycle replacement, missing owners, removal and a cancelled waiting host.
-The Android unit suite passes 349 cases, including five combined inbox tests. These tests do not prove installed activity or physical device behavior.
+The affected suites pass 356 Android cases and 281 phone-core cases, including twelve inbox and notification controls.
+These tests do not prove physical device behavior.
 The private source still needs the full repository gate before publication.
 Keep connection jobs independent. Filters and navigation must not reconnect peers or replace an open request or biometric operation.
 Key request rows and selections by their complete enrollment scope, rather than a request ID or label alone.
 Expose individual unavailable peers without disabling the other scopes.
 The default combined inbox and scoped filters now preserve the Macs/Audit/Settings surfaces.
 Seven final emulator captures and the two scored review fixes are recorded in [the inbox experiment](experiments/android-combined-inbox.md).
-Next bind notification navigation to authenticated requests without replacing an open approval.
+Notification navigation now preserves an open review, waits for signed status and rejects stale targets.
+An emulator probe exercised local publication, activity intent delivery and cancellation. It did not contact a host or FCM.
+See [the notification experiment](experiments/android-request-notifications.md) for the measured boundaries.
+Next validate the current private source through the full repository gate, then continue the approved product frontier.
 No new confirmation, biometric prompt, forced re-enrollment or hidden connection limit is authorized by this integration.
 
 The current private tree still needs its full local gate. PR #493 awaits its current-head review before the next own PR can publish.

@@ -2,6 +2,8 @@ package dev.remozio.android.requests
 
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.protocol.CborValue
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
@@ -26,12 +28,15 @@ internal class ScopedCommandRequest(val owner: StoredCommandOwner, val session: 
 }
 
 /** This projection only observes authenticated owners. It never opens, closes or retries a connection. */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal fun observeCommandInbox(owners: List<StoredCommandOwner>): Flow<List<ScopedCommandRequest>> {
     val connected = owners.filter { it.connection != null }
     if (connected.isEmpty()) return flowOf(emptyList())
-    return combine(connected.map { checkNotNull(it.connection).requests }) { sessions ->
-        sessions.flatMapIndexed { index, requests -> requests.map { ScopedCommandRequest(connected[index], it) } }
-    }
+    return combine(connected.map { owner -> checkNotNull(owner.connection).requests.flatMapLatest { sessions ->
+        if (sessions.isEmpty()) flowOf(emptyList()) else combine(sessions.map { session ->
+            combine(session.revisions, session.closed) { _, _ -> ScopedCommandRequest(owner, session) }
+        }) { it.toList() }
+    } }) { it.flatMap { requests -> requests } }
 }
 
 /** Equal labels gain identity suffixes. Prefix collisions expand until the distinct IDs are visible. */

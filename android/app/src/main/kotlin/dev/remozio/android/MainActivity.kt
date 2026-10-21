@@ -1,6 +1,10 @@
 package dev.remozio.android
 
 import android.os.Bundle
+import android.content.Intent
+import dev.remozio.android.requests.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -62,11 +66,22 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
+    private lateinit var requestNavigation: CommandNavigationViewModel
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        CommandNotificationIntents.receive(intent, requestNavigation.navigation)
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val pairing = ViewModelProvider(this, PairingViewModel.Factory(application as RemozioApplication))[PairingViewModel::class.java]
-        setContent { RemozioTheme { RemozioScreen(pairing, this) } }
+        requestNavigation = ViewModelProvider(this)[CommandNavigationViewModel::class.java]
+        if (!requestNavigation.initialIntentHandled) {
+            requestNavigation.initialIntentHandled = true
+            CommandNotificationIntents.receive(intent, requestNavigation.navigation)
+        }
+        setContent { RemozioTheme { RemozioScreen(pairing, this, requestNavigation.navigation) } }
     }
 }
 
@@ -82,21 +97,46 @@ internal fun RemozioTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @
 }
 
 @Composable
-private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity) {
+private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity, navigation: CommandInboxNavigation) {
     val commands = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     LaunchedEffect(commands, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { commands.runForeground() }
     }
     var destination by rememberSaveable { mutableIntStateOf(0) }
-    RemozioNavigation(destination, { destination = it }) {
-        when (destination) {
-            1 -> MacsScreen(pairing)
-            2 -> AuditScreen()
-            3 -> NotificationSettingsScreen()
-            else -> CombinedCommandInboxScreen(pairing::open)
+    val foreground by commands.state.collectAsStateWithLifecycle()
+    val owners = (foreground as? ForegroundCommandState.Ready)?.owners.orEmpty()
+    val requestFlow = remember(owners) { observeCommandInbox(owners) }
+    val requests by requestFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val route by navigation.state.collectAsStateWithLifecycle()
+    val setup by pairing.state.collectAsStateWithLifecycle()
+    val pairingOpen = setup.phase != PairingPhase.CLOSED
+    LaunchedEffect(owners, requests, route.pending, route.selected, foreground, pairingOpen) {
+        navigation.synchronize(owners, requests, foreground is ForegroundCommandState.Ready, canOpen = !pairingOpen)
+    }
+    LaunchedEffect(route.inboxRequested, route.selected, pairingOpen) {
+        if (route.inboxRequested && route.selected == null && !pairingOpen) {
+            destination = 0
+            navigation.inboxShown()
         }
     }
+    LaunchedEffect(route.pending, route.selected, lifecycle, pairingOpen) {
+        val pending = route.pending
+        if (pending != null && route.selected == null && !pairingOpen) lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            val app = activity.application as RemozioApplication
+            delay(app.wakeWorkSettings.read().snapshotSeconds * 1000L)
+            navigation.expire(pending.serial)
+        }
+    }
+    RemozioNavigation(destination, { destination = it }) {
+        when (destination) {
+            1 -> MacsScreen(pairing, navigation)
+            2 -> AuditScreen()
+            3 -> NotificationSettingsScreen()
+            else -> CombinedCommandInboxScreen(pairing::open, navigation)
+        }
+    }
+    CommandInspectionHost(navigation, owners)
     PairingSetupSheet(pairing, activity)
 }
 
@@ -134,11 +174,11 @@ internal fun RemozioNavigation(destination: Int, onDestination: (Int) -> Unit, c
 }
 
 @Composable
-private fun MacsScreen(pairing: PairingViewModel) {
+private fun MacsScreen(pairing: PairingViewModel, navigation: CommandInboxNavigation) {
     var selected by remember { mutableStateOf<StoredMac?>(null) }
     selected?.let { mac ->
         BackHandler { selected = null }
-        CommandInboxScreen(mac, onBack = { selected = null })
+        CommandInboxScreen(mac, onBack = { selected = null }, navigation = navigation)
         return
     }
     Column(

@@ -17,6 +17,8 @@ import dev.remozio.android.enrollment.StoredMacReader
 import dev.remozio.android.enrollment.PairingReceiptRecovery
 import dev.remozio.android.enrollment.androidPairingReceiptWire
 import dev.remozio.android.updates.androidUpdateHost
+import dev.remozio.android.requests.CommandRequestNotifications
+import dev.remozio.android.requests.RequestElapsedClock
 import dev.remozio.android.requests.ForegroundCommandConnections
 import dev.remozio.android.requests.StoredCommandConnections
 import dev.remozio.android.requests.androidCommandConnection
@@ -64,8 +66,13 @@ class RemozioApplication : Application() {
     internal val wakeWork by lazy { AndroidWakeWork(this, pushClient, wakeWorkSettings, wakeFetches) { generation, status ->
         pushClient.withCurrent(generation) { pushDelivery.record(generation, status) }
     } }
+    private val notificationPublisher by lazy { AndroidWakeNotifications(this, 60_000) }
+    private val commandNotifications by lazy {
+        CommandRequestNotifications(RequestElapsedClock::now,
+            { target, timeout -> notificationPublisher.postRequest(target, timeout) }, notificationPublisher::cancelRequest)
+    }
     internal val wakeNotifications by lazy {
-        val notifications = AndroidWakeNotifications(this, 60_000)
+        val notifications = notificationPublisher
         StoredWakeNotifications(
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, pushClient, { ElapsedInstant(1, SystemClock.elapsedRealtime().toULong()) },
@@ -88,7 +95,9 @@ class RemozioApplication : Application() {
     internal val commands by lazy {
         StoredCommandConnections(
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
-            { androidCommandConnection(this, it, commandRequestLimits(), commandMemory) }, enrollmentAccess,
+            { androidCommandConnection(this, it, commandRequestLimits(), commandMemory).also { owner ->
+                commandNotifications.observe(CoroutineScope(scope.coroutineContext + Dispatchers.IO), owner)
+            } }, enrollmentAccess,
         )
     }
     internal val foregroundCommands by lazy { ForegroundCommandConnections(commands::acquireActive) }
