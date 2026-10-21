@@ -66,6 +66,21 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         deinit { connection.invalidate() }
     }
 
+    private final class WorkGate: @unchecked Sendable {
+        private let state = Mutex((armed: false, entered: false))
+        private let releaseSignal = DispatchSemaphore(value: 0)
+        var entered: Bool { state.withLock { $0.entered } }
+        func arm() { state.withLock { $0.armed = true } }
+        func beforeOpen() throws {
+            let hold = state.withLock { value in
+                guard value.armed else { return false }
+                value.armed = false; value.entered = true; return true
+            }
+            if hold, releaseSignal.wait(timeout: .now() + 20) != .success { throw Refused() }
+        }
+        func release() { releaseSignal.signal() }
+    }
+
     private final class Server: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         let listener = NSXPCListener.anonymous()
         let owner: SetupAccountOwner
@@ -74,11 +89,13 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         let rightsAllowed = Mutex(false)
         let rights = Mutex(0)
         let invocations = Mutex(0)
+        let closedConnections = Mutex(0)
+        private let afterAuthorization: @Sendable () throws -> Void
         private let lock = NSLock()
         private var closed = false
         private var connections: [(NSXPCConnection, AdministrativeSetupXPCEndpoint)] = []
-        init(owner: SetupAccountOwner, requirement: String) throws {
-            self.owner = owner; self.requirement = requirement
+        init(owner: SetupAccountOwner, requirement: String, afterAuthorization: @escaping @Sendable () throws -> Void = {}) throws {
+            self.owner = owner; self.requirement = requirement; self.afterAuthorization = afterAuthorization
             policy = try .init(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.native-import-fixture",
                 approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: getuid())
             super.init()
@@ -98,11 +115,14 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                         guard let self, try invocation.verifyInvocation() == peer else { throw Refused() }
                         rights.withLock { $0 += 1 }
                         guard rightsAllowed.withLock({ $0 }) else { throw Refused() }
+                        try afterAuthorization()
                     }, invalidate: { [weak connection] in connection?.invalidate() })
                     connection.setCodeSigningRequirement(requirement)
                     connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupXPCProtocol.self)
                     connection.exportedObject = endpoint
-                    connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }
+                    connection.invalidationHandler = { [weak self, weak endpoint] in
+                        endpoint?.close(); self?.closedConnections.withLock { $0 += 1 }
+                    }
                     connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
                     connections.append((connection, endpoint)); connection.activate(); return true
                 } catch { connection.invalidate(); return false }
@@ -208,4 +228,70 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
             try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]).write(to: URL(fileURLWithPath: output))
         }
     }
+    func testNativeCancellationKeepsUpdateExcludedUntilOwnedWorkSettles() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        let host = try RelayProvisioningFixture(), f = host.f.accountFixture
+        let activity = try ReleaseActivityFixture(), installer = try activity.open(), gate = WorkGate()
+        let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() },
+            activate: { _, _, _, _, _ in throw Refused() })
+        let owner = try SetupAccountOwner(openMachine: { try gate.beforeOpen(); return try f.open() }, expectedReleaseDigest: f.release,
+            resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+            lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity },
+            releaseActivity: activity.open(), importedGatewayOperation: bridge)
+        defer { gate.release(); try? owner.close() }
+        let requirement = try testRequirement()
+        let server = try Server(owner: owner, requirement: requirement, afterAuthorization: { gate.arm() })
+        defer { server.close() }
+        server.rightsAllowed.withLock { $0 = true }
+        let request = try SetupPortableImportOperation(action: .prepareRelayPlan, expected: host.progress(owner), proposal: host.f.proposal())
+        let driver = Driver(server: server, requirement: requirement, mode: .normal)
+        let channel = PortableSetupImportChannel(driver: driver, timeoutMilliseconds: 5000, operationTimeoutMilliseconds: 15_000)
+        try await channel.start()
+        // An idle authenticated connection is not active work and must allow update admission.
+        try installer.acquireExclusive().close()
+        let pending = Task { try await channel.perform(request, authorization: Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)) }
+        func waitUntil(_ predicate: () -> Bool) async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+            while !predicate() {
+                guard ContinuousClock.now < deadline else { throw Refused() }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
+        func requireBusy() throws {
+            do { let admitted = try installer.acquireExclusive(); admitted.close(); throw Refused() }
+            catch ReleaseActivityError.busy { return }
+        }
+        do {
+            try await waitUntil { gate.entered }
+            try requireBusy()
+            pending.cancel()
+            do { _ = try await pending.value; XCTFail("Cancelled client confirmed an outcome") } catch {}
+            try await waitUntil { server.closedConnections.withLock { $0 > 0 } }
+            try requireBusy()
+        } catch {
+            pending.cancel(); gate.release(); _ = try? await pending.value
+            await channel.close(); try await owner.closeWhenIdle(); throw error
+        }
+        gate.release(); await channel.close(); try await owner.closeWhenIdle()
+        try installer.acquireExclusive().close()
+        // A cancelled admitted write can settle either way. Do not infer its outcome from client cancellation.
+        _ = try host.readPlan()
+        XCTAssertEqual(server.rights.withLock { $0 }, 1)
+        if let output = ProcessInfo.processInfo.environment["REMOZIO_PORTABLE_IMPORT_ACTIVITY_XPC_EVIDENCE"] {
+            let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "portable-import-native-xpc-activity", "status": "passed",
+                "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "hostArchitecture": "arm64",
+                "guiSessionAvailable": true, "sameProcessNativeConnection": true, "testCodeHashRequirementApplied": true,
+                "kernelPeerCredentialsChecked": true, "invocationConnectionChecked": true,
+                "idleConnectionAllowsUpdate": true, "admittedWorkExcludesUpdate": true,
+                "peerInvalidationObservedBeforeSettlement": true, "cancelledClientDoesNotReleaseOwnedActivity": true,
+                "settledOwnerAllowsUpdate": true, "cancellationOutcomeNotAssumed": true,
+                "installedRootAccountsTested": false, "developerIDPolicyTested": false,
+                "realAdministratorAuthorizationTested": false, "providerAPICalled": false, "serviceInstalled": false,
+                "realApprovalIssued": false, "replyCallbackBoundaryTested": false]
+            try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]).write(to: URL(fileURLWithPath: output))
+        }
+    }
+
 }

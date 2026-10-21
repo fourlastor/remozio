@@ -59,3 +59,33 @@ The production Mach service driver and native administrator prompt remain intera
 Same-process anonymous transport does not establish isolation between installed processes.
 The injected lost reply establishes local recovery behavior, not a provider or network failure.
 No installed Remozio service, physical phone or frozen recovery artifact was changed.
+
+## Update exclusion during cancellation
+
+The [activity result](evidence/2026-10-21-portable-import-xpc-activity.json) uses the same native transport with an independent update-lock descriptor.
+An owned latch holds the setup owner's machine-open operation after authorization.
+The client then cancels its request and invalidates the connection.
+The test waits for the server's actual invalidation handler before checking the update lock again.
+
+| State | Update admission |
+| --- | --- |
+| Authenticated idle connection | Allowed |
+| Admitted setup operation held by the fixture | Refused as busy |
+| Client cancelled and server invalidation observed, with owned work still held | Refused as busy |
+| Owned work released and account owner settled | Allowed |
+
+The activity check passed on Apple Silicon with macOS 27.0.1.
+The [wire regression](evidence/2026-10-21-portable-import-xpc-followup.json) also passed after the listener fixture changed.
+Both runs used the same native test source hash.
+
+To run the activity mode, choose another unused evidence path:
+
+```sh
+python3 scripts/run-macos-portable-import-xpc-experiment.py --activity --evidence /tmp/remozio-import-activity.json
+```
+
+The latch holds disposable ordinary-user work. It does not test an installed updater or a privileged Root process.
+Cancellation does not determine whether an already admitted write commits.
+The test reads retained storage after settlement without assuming an outcome from cancellation.
+This control does not isolate the final reply-callback boundary.
+The endpoint's reply-boundary checks remain separate from this native backend-settlement result.
