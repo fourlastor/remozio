@@ -26,6 +26,20 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
         }
         func close() async { await events.add("root.close") }
     }
+    private actor FirstOpenGate {
+        var held = false
+        private var released = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        func holdFirst() async {
+            guard !held, !released else { return }
+            held = true
+            await withCheckedContinuation { continuation = $0 }
+        }
+        func release() {
+            released = true
+            let saved = continuation; continuation = nil; saved?.resume()
+        }
+    }
     private actor Administrator: MacPortableSetupImportAdministrator {
         let events: Events
         let cancel: Bool
@@ -94,4 +108,48 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
         let observed = await events.values
         XCTAssertEqual(observed, ["start", "progress", "authorize", "root.close", "rights.close"])
     }
+    func testReadAndSingleStepReserveAdmissionBeforeOpeningRoot() async throws {
+        for firstIsRead in [true, false] {
+            let fixture = try RelayProvisioningFixture(), owner = try fixture.owner()
+            defer { try? owner.close() }
+            let expected = try fixture.progress(owner), proposal = try fixture.f.proposal()
+            let request = try SetupPortableImportOperation(action: .retain, expected: expected, proposal: proposal)
+            let reviewed = ReviewedSetupFile(proposal: proposal)
+            defer { reviewed.close() }
+            let events = Events(), gate = FirstOpenGate(), root = Root(events, expected: expected)
+            let driver = NativeMacPortableSetupImportDriver(open: {
+                await events.add("open"); await gate.holdFirst(); return root
+            }, administrator: { Administrator(events) })
+            let first = Task {
+                if firstIsRead { _ = try await driver.progress() }
+                else { _ = try await driver.perform(request) }
+            }
+            do {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while !(await gate.held) {
+                    guard ContinuousClock.now < deadline else { throw Failure.expected }
+                    try await Task.sleep(for: .milliseconds(2))
+                }
+                do { _ = try await driver.progress(); XCTFail("Overlapping read opened another connection") }
+                catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
+                do { _ = try await driver.perform(request); XCTFail("Overlapping step obtained another admission") }
+                catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
+                do {
+                    _ = try await driver.importFile(reviewed, expected: expected, custody: .init()) { _, _ in }
+                    XCTFail("Import overlapped an admitted operation")
+                } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
+                let heldEvents = await events.values
+                XCTAssertEqual(heldEvents, ["open"], "Rejected work must not open Root or request administrator rights")
+            } catch {
+                first.cancel(); await gate.release(); _ = try? await first.value; throw error
+            }
+            await gate.release(); try await first.value
+            let recovered = try await driver.progress()
+            XCTAssertEqual(recovered, expected, "Finished work must release admission")
+            let finished = await events.values
+            XCTAssertEqual(finished.filter { $0 == "open" }.count, 2)
+            XCTAssertEqual(finished.filter { $0 == "authorize" }.count, firstIsRead ? 0 : 1)
+        }
+    }
+
 }

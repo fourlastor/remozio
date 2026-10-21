@@ -46,7 +46,7 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
     private let open: @Sendable () async throws -> any MacPortableSetupImportRoot
     private let administrator: @Sendable () -> any MacPortableSetupImportAdministrator
     private let now: @Sendable () -> ContinuousClock.Instant
-    private var flowActive = false
+    private var operationActive = false
     init(open: @escaping @Sendable () async throws -> any MacPortableSetupImportRoot = {
         try await MacAccountSetupConnection.openPortableImport()
     }, administrator: @escaping @Sendable () -> any MacPortableSetupImportAdministrator = {
@@ -55,7 +55,9 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
         self.open = open; self.administrator = administrator; self.now = now
     }
     func progress() async throws -> SetupPortableImportProgress? {
-        guard !flowActive else { throw AdministrativeSetupChannelError.busy }
+        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
+        operationActive = true
+        defer { operationActive = false }
         try Task.checkCancellation()
         let root = try await open()
         do {
@@ -66,7 +68,9 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
         } catch { await root.close(); throw error }
     }
     func perform(_ request: SetupPortableImportOperation) async throws -> SetupPortableImportOperationResult {
-        guard !flowActive else { throw AdministrativeSetupChannelError.busy }
+        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
+        operationActive = true
+        defer { operationActive = false }
         let rights = administrator()
         do {
             let result = try await perform(request, rights: rights)
@@ -79,10 +83,10 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
     func importFile(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress,
                     custody: SetupPortableImportCustodyChoices,
                     step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
-        guard !flowActive else { throw AdministrativeSetupChannelError.busy }
+        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
         let actions = try reviewed.actions(expected: expected, custody: custody)
-        flowActive = true
-        defer { flowActive = false }
+        operationActive = true
+        defer { operationActive = false }
         let clock = now
         let started = clock(), deadline = started.advanced(by: .seconds(300))
         let rights = administrator()
