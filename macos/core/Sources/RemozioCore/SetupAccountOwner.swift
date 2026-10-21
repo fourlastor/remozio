@@ -1256,6 +1256,51 @@ public final class SetupAccountOwner: @unchecked Sendable {
         return result
     }
 
+    /// Advances historical setup markers only after validating the retained local outputs.
+    /// It creates no resource, repairs no file and makes no claim about a live provider connection.
+    func completePortableImport(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                operations: SharedSetupImportCompletionValidation.Operations = .native) throws -> SetupPortableImportProgress {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, var retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                guard try SetupPortableImportProgress(account: account, inventory: inventory, services: services,
+                    runtime: runtime, retained: retained) == expected else { throw AdministrativeSetupError.staleProgress }
+                guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                guard [.gatewayPrepared, .relayPrepared, .rootComplete].contains(retained.phase) else {
+                    throw SharedSetupImportCompletionValidation.Failure.incomplete
+                }
+                func verify() throws {
+                    try Task.checkCancellation(); try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                }
+                func validate() throws {
+                    try verify()
+                    try SharedSetupImportCompletionValidation.validate(machine: machine, account: account, retained: retained,
+                        proposal: proposal, operations: operations, verifyCurrent: verify)
+                    try verify()
+                }
+                while retained.phase != .rootComplete {
+                    try validate()
+                    let next: SetupPortableImportProgress.Phase = retained.phase == .gatewayPrepared ? .relayPrepared : .rootComplete
+                    retained = try journal.advance(retained, to: next)
+                    try verify()
+                }
+                try validate()
+                return try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+            }
+        }
+    }
+
     func verifiedPortableImportCompletion(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                            operations: SharedSetupImportCompletionValidation.Operations = .native) throws -> SetupPortableImportProgress {
         try withMachine { machine in

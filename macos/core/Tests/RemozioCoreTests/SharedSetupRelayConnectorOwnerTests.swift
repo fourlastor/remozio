@@ -7,7 +7,7 @@ import XCTest
 /// Disposable local state and synthetic HTTP exercise composition, without native publication or installed services.
 final class SharedSetupRelayConnectorOwnerTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
-    private struct Fixture: Sendable {
+    struct Fixture: Sendable {
         let dns: DNSRecordFixture
         let intent: SharedSetupImportIntent
         let runtime: RuntimeMaterialReference
