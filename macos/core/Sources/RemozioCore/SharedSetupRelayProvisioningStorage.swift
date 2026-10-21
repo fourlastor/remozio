@@ -44,6 +44,7 @@ enum SharedSetupRelayProvisioningStorage {
             throw RelayProvisioningError.wrongScope
         }
         if let current = try read(expected: expected, plan: plan, directory: directory, owner: owner) { try verifyCurrent(); return current }
+        guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase) else { throw RelayProvisioningError.invalidTransition }
         let record = try SharedSetupRelayProvisioningRecord(expected: expected, plan: plan)
         _ = try AdministrativeSetupPublication.replaceRelayProvisioning(record.bytes, previous: nil, expected: expected,
             plan: plan, directory: directory, owner: owner, verify: verifyCurrent)
@@ -58,6 +59,9 @@ enum SharedSetupRelayProvisioningStorage {
         guard try SharedSetupImportRelayStorage.read(expected: expected, directory: directory, owner: owner) == plan,
               try read(expected: expected, plan: plan, directory: directory, owner: owner) == previous else {
             throw RelayProvisioningError.staleRecord
+        }
+        if next.phase == .dispatched {
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase) else { throw RelayProvisioningError.invalidTransition }
         }
         _ = try AdministrativeSetupPublication.replaceRelayProvisioning(next.bytes, previous: previous.bytes, expected: expected,
             plan: plan, directory: directory, owner: owner, verify: verifyCurrent, didStage: didStage)

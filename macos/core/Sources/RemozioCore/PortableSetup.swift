@@ -107,6 +107,129 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
               }) else { throw PortableSetupError.rejected }
     }
 
+    /// Reads the selected zone through a fixed provider endpoint. It exposes no general credential or HTTP interface.
+    func zoneInspectionRequest() -> URLRequest {
+        let endpoint = URL(string: "https://api.cloudflare.com/client/v4/zones/" + zoneID)!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+    func tunnelInspectionRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan, page: Int) throws -> URLRequest {
+        try plan.validate(expected: expected)
+        guard let selected = expected.recipe.cloudflare, selected.accountID == accountID,
+              selected.zoneID == zoneID, selected.dnsSuffix == dnsSuffix,
+              (1...CloudflareTunnelInspectionClient.maximumRequests).contains(page) else {
+            throw CloudflareProvisioningError.wrongScope
+        }
+        var endpoint = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel")!
+        endpoint.queryItems = [URLQueryItem(name: "name", value: plan.tunnelName), URLQueryItem(name: "is_deleted", value: "false"),
+            URLQueryItem(name: "page", value: String(page)), URLQueryItem(name: "per_page", value: String(CloudflareTunnelInspectionClient.pageSize))]
+        var request = URLRequest(url: endpoint.url!)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+    func tunnelConfigurationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                    tunnel: CloudflareTunnelObservation) throws -> URLRequest {
+        try plan.validate(expected: expected)
+        guard let selected = expected.recipe.cloudflare, selected.accountID == accountID, selected.zoneID == zoneID,
+              selected.dnsSuffix == dnsSuffix, tunnel.accountID == accountID, tunnel.name == plan.tunnelName,
+              tunnel.tunnelID.utf8.count == 36, let uuid = UUID(uuidString: tunnel.tunnelID),
+              uuid.uuidString.lowercased() == tunnel.tunnelID else { throw CloudflareProvisioningError.wrongScope }
+        let endpoint = URL(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel/" + tunnel.tunnelID + "/configurations")!
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "GET"
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        return request
+    }
+    func tunnelCreationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                               dispatched: SharedSetupRelayProvisioningRecord) throws -> URLRequest {
+        try dispatched.validate(expected: expected, plan: plan)
+        guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase), dispatched.phase == .dispatched, let selected = expected.recipe.cloudflare,
+              selected.accountID == accountID, selected.zoneID == zoneID, selected.dnsSuffix == dnsSuffix else {
+            throw RelayProvisioningError.wrongScope
+        }
+        var request = URLRequest(url: URL(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel")!)
+        request.httpMethod = "POST"; request.httpBody = try SharedSetupRelayProvisioningRecord.requestBody(plan: plan)
+        request.setValue("Bearer " + apiToken, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    func createdTunnelRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                              created: SharedSetupRelayProvisioningRecord) throws -> URLRequest {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        var request = try tunnelConfigurationRequest(expected: expected, plan: plan, tunnel: tunnel)
+        request.url = URL(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/cfd_tunnel/" + tunnel.tunnelID)!
+        return request
+    }
+
+    func tunnelIngressUpdateRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                    created: SharedSetupRelayProvisioningRecord) throws -> URLRequest {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        var request = try tunnelConfigurationRequest(expected: expected, plan: plan, tunnel: tunnel)
+        request.httpMethod = "PUT"; request.httpBody = try CloudflareTunnelConfigurationClient.plannedConfiguration(plan)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        return request
+    }
+
+    func privateRouteInspectionRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                       created: SharedSetupRelayProvisioningRecord, kind: CloudflarePrivateRouteClient.Kind) throws -> URLRequest {
+        let tunnel = try created.createdTunnel(expected: expected, plan: plan)
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: created)
+        let path = kind == .ip ? "/teamnet/routes" : "/zerotrust/routes/hostname"
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + path)!
+        url.queryItems = [.init(name: "tunnel_id", value: tunnel.tunnelID), .init(name: "is_deleted", value: "false"),
+                          .init(name: "page", value: "1"), .init(name: "per_page", value: "100")]
+        request.url = url.url!; return request
+    }
+
+    func accessApplicationInventoryRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                           createdTunnel: SharedSetupRelayProvisioningRecord) throws -> URLRequest {
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/access/apps")!
+        url.queryItems = [.init(name: "domain", value: plan.hostname), .init(name: "exact", value: "true"),
+                          .init(name: "page", value: "1"), .init(name: "per_page", value: "100")]
+        request.url = url.url!; return request
+    }
+
+    func accessAccountInventoryRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                       createdTunnel: SharedSetupRelayProvisioningRecord, page: Int) throws -> URLRequest {
+        guard (1...CloudflareAccessHostnameClient.maximumRequests).contains(page) else { throw CloudflareProvisioningError.invalidResponse }
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/access/apps")!
+        url.queryItems = [.init(name: "page", value: String(page)), .init(name: "per_page", value: "100")]
+        request.url = url.url!; return request
+    }
+
+    func accessApplicationCreationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                          createdTunnel: SharedSetupRelayProvisioningRecord, dispatched: SharedSetupAccessApplicationRecord) throws -> URLRequest {
+        try dispatched.validate(expected: expected, plan: plan, createdTunnel: createdTunnel)
+        guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase), dispatched.phase == .dispatched else { throw RelayProvisioningError.wrongScope }
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
+        request.url = URL(string: "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/access/apps")!
+        request.httpMethod = "POST"; request.httpBody = try SharedSetupAccessApplicationRecord.requestBody(plan: plan)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type"); return request
+    }
+
+    func accessApplicationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                                  createdTunnel: SharedSetupRelayProvisioningRecord, application: SharedSetupAccessApplicationRecord,
+                                  policies: Bool = false) throws -> URLRequest {
+        let selected = try application.createdApplication(expected: expected, plan: plan, createdTunnel: createdTunnel)
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
+        let endpoint = "https://api.cloudflare.com/client/v4/accounts/" + accountID + "/access/apps/" + selected.applicationID
+        if policies {
+            var url = URLComponents(string: endpoint + "/policies")!
+            url.queryItems = [.init(name: "page", value: "1"), .init(name: "per_page", value: "100")]; request.url = url.url!
+        } else { request.url = URL(string: endpoint)! }
+        return request
+    }
+
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }
@@ -127,6 +250,14 @@ public struct PortableSetup: Sendable, CustomStringConvertible, CustomDebugStrin
     public init(defaults: SharedSetupDefaults, fcm: SetupFCMConfiguration? = nil, cloudflare: SetupCloudflareConfiguration? = nil,
                 pushClient: SetupPushClientConfiguration? = nil, appPreferences: PortableAppPreferences? = nil) {
         self.defaults = defaults; self.fcm = fcm; self.cloudflare = cloudflare; self.pushClient = pushClient; self.appPreferences = appPreferences
+    }
+    /// Import preparation requires complete shared configuration and a new local custody choice.
+    public func gatewayPreparationChoices(fileWakeCustodyAccepted: Bool) throws -> GatewaySetupPreparationChoices {
+        guard let gateway = defaults.gateway, let fcm, let pushClient, pushClient.projectID == fcm.project else {
+            throw PortableSetupError.rejected
+        }
+        return try .init(provider: fcm, senderID: pushClient.senderID, packageName: pushClient.packageName,
+            settings: gateway.service, fileWakeCustodyAccepted: fileWakeCustodyAccepted)
     }
     /// Adds explicit app preferences while retaining the provider and shared service scope.
     public func addingAppPreferences(_ preferences: PortableAppPreferences) -> Self {

@@ -3,9 +3,22 @@
 `RemozioHostCore` contains the shared decision verifier, its retained-request,
 trust and clock value types, a sleep-inclusive clock sampler, the SQLite audit
 journal, decision-consumption and command-submission replay tables, consumption outcomes, continuity
-checkpoints, history-recovery intent encoding and storage-reconciliation selection.
+checkpoints, history-recovery intent encoding and evidence tables, and storage-reconciliation selection.
 The Mac authority uses the same implementations through the existing `RemozioCore`
-public names.
+public names. `CommandElevationPolicy` also shares the existing canonical explicit
+account grants and disclosure requirement. Parsing a grant does not prove protected
+installation or authorize execution; the Mac adapter retains protected loading,
+native target resolution and capture validation.
+
+On Linux, `LinuxOwnAccountTargetResolver` resolves only the authenticated caller's
+own non-root account through NSS. `LinuxCurrentCommandElevationPolicy` requires
+explicit fresh policy-loading and retained-caller credential-reading closures.
+Every operation reloads grants; final validation compares all captured UID/GID
+roles and groups and resolves the target again. Neither closure establishes
+protected provenance or caller identity. The service's UID, a capture's claims
+and an unvalidated numeric PID cannot substitute for an authenticated caller.
+Authority serialization, monitor binding and the final stopped handoff remain
+the owner's responsibility. These helpers enable no production Linux admission.
 
 Verification checks the exact request, current enrollment, capabilities, permitted
 action, signing key and monotonic deadline. A `VerifiedDecision` is verification
@@ -60,9 +73,21 @@ reads and applies reconciliation inside its existing storage serialization
 boundary. Its protected stores, commit coordination and startup gates remain
 Mac-owned.
 
+`HistoryRecoveryJournalTables` stores the existing canonical history-gap evidence
+in the owner's connection and outer transaction. Reads require an explicit snapshot;
+schema creation and inserts require a main-database write transaction. Duplicate
+epochs fail instead of replacing evidence. The Mac adapter retains schema-version
+checks, migration, error mapping and failed-transaction handling. The table API
+does not authenticate the supplied intent or restore pending work or dispatch tokens.
+
 This package contains no protected database owner, caller monitor, TPM integration,
 service installation or command execution. It introduces no Linux capture schema and changes no protocol bytes or production
 authority policy.
+
+The disposable [Linux command fixture](../../docs/experiments/linux-approval-command.md)
+uses these consumption, outcome, replay and audit tables together around its fixed command.
+Its connection owner and checkpoint adapter remain fixture-only; stored evidence never
+recreates an old dispatch token. This does not implement a protected Linux authority.
 
 Run the shared host tests with Swift 6.2 or later. Linux also needs SQLite development
 headers and library (`libsqlite3-dev` on Ubuntu), discoverable through `pkg-config`.
@@ -81,6 +106,9 @@ Replay-table tests cover both identifier collisions across reopen, scope isolati
 capacity, competing connections, outer rollback, malformed rows, storage errors and
 compatibility with the existing Mac table layout. Existing Mac tests retain replay
 migration, failed-transaction retirement and checkpoint integration coverage.
+History-evidence tests cover canonical bytes across reopen, owner rollback, duplicate
+epochs, malformed records, transaction rules and temporary-table shadowing. The
+existing Mac history migration and checkpoint integration tests remain unchanged.
 Portable recovery tests cover data validation and selection. These results do not establish hardware custody, a
 protected Linux installation or a complete host approval flow. Mac tests retain
 audit signing integration with the shared table types and the existing store

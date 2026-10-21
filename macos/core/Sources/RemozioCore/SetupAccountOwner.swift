@@ -63,6 +63,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private let gatewayActivationOperation: GatewaySetupActivationOperations?
     private let gatewaySettingsOperation: GatewaySetupSettingsOperations?
+    private let importedGatewayOperation: GatewaySetupImportedRuntimeOperations?
     private var closing = false
     private var closed = false
 
@@ -74,7 +75,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
             resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, releaseActivity: activity,
             gatewayJournalOperation: .native(machineDirectory: machineDirectory, macID: macID),
             gatewayActivationOperation: .native(machineDirectory: machineDirectory, macID: macID),
-            gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID))
+            gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID),
+            importedGatewayOperation: .native(machineDirectory: machineDirectory, macID: macID))
     }
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
@@ -90,9 +92,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
-         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -108,9 +111,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
              try RuntimePublicationController.prepare(machine: $0, account: $1, expected: $2, fileCustodyAccepted: $3, verifyCurrent: $4)
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
-         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil) throws {
+         gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -120,9 +124,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareServices: @escaping (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State,
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
          activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?,
-         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?) throws {
+         gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?,
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?) throws {
         self.releaseActivity = releaseActivity; self.gatewayJournalOperation = gatewayJournalOperation
         self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
+        self.importedGatewayOperation = importedGatewayOperation
         self.machines = machines; self.expectedReleaseDigest = expectedReleaseDigest; self.resume = resume; self.verifyHost = verifyHost
         self.accountCodePolicy = accountCodePolicy; self.lookupAccount = lookupAccount; self.prepareAccount = prepareAccount; self.prepareServices = prepareServices; self.prepareRuntime = prepareRuntime; self.activationOperations = activationOperations
         do {
@@ -432,6 +438,161 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return value
         }
     }
+    func prepareImportedGateway(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                fileWakeCustodyAccepted: Bool,
+                                prepare: (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices, GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                    try GatewaySetupAccountPreparation.prepareImported(machine: $0, account: $1, choices: $2, selection: $3, verifyCurrent: $4)
+                                }, validate: (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices, GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                    try SharedSetupImportGatewayPreparedValidation.validateNative(machine: $0, account: $1, choices: $2, selection: $3, verifyCurrent: $4)
+                                }) throws -> SetupPortableImportProgress {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            func verifyDestination() throws {
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                guard try currentInventory(machine) == inventory,
+                      try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                      try machine.runtimePreparation(accountID: account.accountID) == runtime else {
+                    throw AdministrativeSetupError.staleProgress
+                }
+            }
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, var retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                let before = try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+                guard before == expected else { throw AdministrativeSetupError.staleProgress }
+                guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                guard retained.phase == .runtimePublished || retained.phase == .gatewayPrepared else {
+                    throw SharedSetupImportError.invalidTransition
+                }
+                func verify() throws {
+                    try verifyDestination()
+                    guard try journal.current(scope: scope) == retained else { throw SharedSetupImportError.staleRevision }
+                }
+                func validatePrepared(_ choices: GatewaySetupPreparationChoices?, _ verify: () throws -> Void) throws {
+                    if let choices {
+                        guard let selection = proposal.defaults.gateway else { throw PortableSetupError.rejected }
+                        try withoutActuallyEscaping(verify) { current in
+                            try validate(machine, account, choices, selection, current)
+                        }
+                    } else {
+                        try SharedSetupImportGatewayPreparedValidation.validateAbsent(machine: machine, account: account, verifyCurrent: verify)
+                    }
+                }
+                try verify()
+                if retained.phase == .runtimePublished {
+                    try SharedSetupImportGatewayScope.withReviewedPreparation(machine: machine, account: account,
+                        journal: journal, expected: retained, proposal: proposal, fileWakeCustodyAccepted: fileWakeCustodyAccepted,
+                        verifyCurrent: verify) { choices, current in
+                        try withoutActuallyEscaping(current) { preparedCurrent in
+                            if let choices {
+                                guard let selection = proposal.defaults.gateway else { throw PortableSetupError.rejected }
+                                try prepare(machine, account, choices, selection, preparedCurrent)
+                            }
+                            try validatePrepared(choices, preparedCurrent)
+                        }
+                    }
+                    try verify(); retained = try journal.advance(retained, to: .gatewayPrepared)
+                } else {
+                    let choices = proposal.fcm == nil && proposal.pushClient == nil ? nil
+                        : try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false)
+                    try validatePrepared(choices, verify)
+                }
+                try verify()
+                return try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+            }
+        }
+    }
+
+
+    func resumeImportedGateway(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                               validatePrepared: @Sendable (PreparationIntentStore, AccountPreparationIntent, GatewaySetupPreparationChoices,
+                                   GatewayRuntimeSettingsSelection, () throws -> Void) throws -> Void = {
+                                       try SharedSetupImportGatewayPreparedValidation.validateNative(machine: $0, account: $1,
+                                           choices: $2, selection: $3, verifyCurrent: $4)
+                                   }) async throws -> SetupImportedGatewayRuntimeResult {
+        let context = try lock.withLock {
+            guard !closed, !closing, getpid() == processID, let operation = importedGatewayOperation else {
+                throw AdministrativeSetupError.unavailable
+            }
+            let admission = try asynchronousWork.admit()
+            do { return (admission, try releaseActivity?.acquireShared(), operation) }
+            catch { admission.close(); throw error }
+        }
+        defer { context.1?.close(); context.0.close() }
+        func read() throws -> (SharedSetupImportIntent, SetupGatewayActivationProgress) {
+            try withMachine(admission: context.0) { machine in
+                guard expected.runtime.ownerUID == callerUID,
+                      let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+                let runtime = try machine.runtimePreparation(accountID: account.accountID)
+                let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+                let retained = try machine.withSharedImportJournal { journal in
+                    guard let journal, let retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                    let current = try SetupPortableImportProgress(account: account, inventory: inventory,
+                        services: services, runtime: runtime, retained: retained)
+                    guard current == expected else { throw AdministrativeSetupError.staleProgress }
+                    guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                    return retained
+                }
+                guard proposal.fcm != nil, proposal.pushClient != nil, let selection = proposal.defaults.gateway else {
+                    throw GatewayPreparationError.incomplete
+                }
+                let choices = try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false)
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime else {
+                        throw AdministrativeSetupError.staleProgress
+                    }
+                    try SharedSetupImportGatewayRuntimeScope.validate(machine: machine, account: account,
+                        expected: retained, activationSettings: selection.activation)
+                }
+                try verify(); try validatePrepared(machine, account, choices, selection, verify); try verify()
+                return (retained, try gatewayActivationProgress(machine: machine, account: account))
+            }
+        }
+        let before = try read(), retained = before.0
+        guard let digest = before.1.setup.journalIntentDigest, let selection = proposal.defaults.gateway else {
+            throw GatewayPreparationError.incomplete
+        }
+        let verifyHost: @Sendable (InstallationInventory) throws -> Void = { [self] inventory in
+            try lock.withLock {
+                guard !closed, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+                try context.1?.validate(); try releaseActivity?.validate()
+                guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
+                    throw AdministrativeSetupError.changedInstallation
+                }
+                try self.verifyHost(inventory)
+            }
+        }
+        try Task.checkCancellation()
+        let initialized = try await context.2.initialize(callerUID, digest, retained, verifyHost)
+        try Task.checkCancellation(); try context.1?.validate()
+        let ready = try read()
+        guard ready.0 == retained, initialized.intentDigest == digest, ready.1.setup.journalInitialized else {
+            throw AdministrativeSetupError.staleProgress
+        }
+        if !initialized.cleanupComplete {
+            return .init(progress: expected, cleanupComplete: false, activation: nil)
+        }
+        let report = try await context.2.activate(callerUID, ready.1, selection.activation, retained, verifyHost)
+        try Task.checkCancellation(); try context.1?.validate()
+        let final = try read()
+        guard final.0 == retained else { throw AdministrativeSetupError.staleProgress }
+        try final.1.validateActivation(of: ready.1, selectedSettings: selection.activation)
+        guard final.1.planDigest == report.planDigest else { throw AdministrativeSetupError.staleProgress }
+        return .init(progress: expected, cleanupComplete: true, activation: final.1)
+    }
+
+
     func prepareImportedRelayPlan(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                   selectPort: (Set<UInt16>) throws -> UInt16 = { try SharedSetupRelayPortSelection.choose(reserved: $0) }) throws -> SharedSetupImportRelayPlan {
         try withMachine { machine in
@@ -463,6 +624,392 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+
+    func inspectImportedRelayScope(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                   inspect: @escaping @Sendable (SetupCloudflareConfiguration) async throws -> CloudflareProvisioningScope = {
+                                       try await CloudflareProvisioningScopeClient.native().inspect($0)
+                                   }) async throws -> CloudflareProvisioningScope {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: false) { configuration, _ in
+            let result = try await inspect(configuration); try result.validate(configuration); return result
+        }
+    }
+
+    func inspectImportedRelayTunnel(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                    inspect: @escaping @Sendable (SetupCloudflareConfiguration, SharedSetupImportIntent, SharedSetupImportRelayPlan) async throws -> CloudflareImportedRelayInspection = {
+                                        try await CloudflareImportedRelayInspection.native(configuration: $0, expected: $1, plan: $2)
+                                    }) async throws -> CloudflareImportedRelayInspection {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            let result = try await inspect(configuration, binding.retained, plan)
+            try result.validate(configuration: configuration, expected: binding.retained, plan: plan); return result
+        }
+    }
+
+    private struct ImportedRelayInspectionBinding: Sendable {
+        let retained: SharedSetupImportIntent
+        let inventory: InstallationInventory
+        let plan: SharedSetupImportRelayPlan?
+        let planSnapshot: SharedSetupImportRelayStorage.Snapshot?
+        let admission: SetupOwnerAsyncWork.Token
+    }
+
+    func createImportedRelayTunnel(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                    inspect: @escaping @Sendable (SetupCloudflareConfiguration, SharedSetupImportIntent, SharedSetupImportRelayPlan) async throws -> CloudflareImportedRelayInspection = {
+                                        try await CloudflareImportedRelayInspection.native(configuration: $0, expected: $1, plan: $2)
+                                    },
+                                    create: @escaping @Sendable (SetupCloudflareConfiguration, SharedSetupImportIntent, SharedSetupImportRelayPlan, SharedSetupRelayProvisioningRecord) async throws -> CloudflareTunnelCreationOutcome = {
+                                        try await CloudflareTunnelCreationClient.native().create($0, expected: $1, plan: $2, dispatched: $3)
+                                    }) async throws -> SharedSetupRelayProvisioningRecord {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            let prepared = try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { retained, plan, directory, owner, verify in
+                try SharedSetupRelayProvisioningStorage.begin(expected: retained, plan: plan, directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            if prepared.phase == .created { return prepared }
+            guard prepared.phase == .prepared else { throw RelayProvisioningError.requiresReconciliation }
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            let observed = try await inspect(configuration, binding.retained, plan)
+            try observed.validate(configuration: configuration, expected: binding.retained, plan: plan)
+            guard observed.tunnel == nil else { throw RelayProvisioningError.wrongScope }
+            try Task.checkCancellation()
+            let dispatched = try prepared.transition(to: .dispatched)
+            try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { retained, plan, directory, owner, verify in
+                try Task.checkCancellation()
+                try SharedSetupRelayProvisioningStorage.replace(dispatched, previous: prepared, expected: retained, plan: plan,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            let outcome: CloudflareTunnelCreationOutcome
+            do { outcome = try await create(configuration, binding.retained, plan, dispatched) }
+            catch { outcome = .unknown }
+            let next: SharedSetupRelayProvisioningRecord
+            switch outcome {
+            case .created(let observation):
+                if observation.accountID == configuration.accountID, observation.name == plan.tunnelName,
+                   observation.tunnelID.utf8.count == 36, let uuid = UUID(uuidString: observation.tunnelID),
+                   uuid.uuidString.lowercased() == observation.tunnelID {
+                    next = try dispatched.transition(to: .created, tunnelID: observation.tunnelID)
+                } else { next = try dispatched.transition(to: .unknown) }
+            case .rejected(let refusal): next = try dispatched.transition(to: .rejected, refusal: refusal)
+            case .unknown: next = try dispatched.transition(to: .unknown)
+            }
+            // Record an acknowledgement before reporting cancellation. If closing or scope changes prevent this, dispatch remains unresolved.
+            try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { retained, plan, directory, owner, verify in
+                try SharedSetupRelayProvisioningStorage.replace(next, previous: dispatched, expected: retained, plan: plan,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            return next
+        }
+    }
+
+    func applyImportedRelayIngress(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                   send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareTunnelConfigurationObservation {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, created, _, scoped in
+            let intent = binding.retained
+            let routes = CloudflarePrivateRouteClient(send: scoped)
+            _ = try await routes.inspect(configuration, expected: intent, plan: plan, created: created)
+            let observed = try await CloudflareTunnelConfigurationClient(send: scoped).apply(configuration, expected: intent, plan: plan, created: created)
+            _ = try await routes.inspect(configuration, expected: intent, plan: plan, created: created)
+            return observed
+        }
+    }
+
+    func inspectImportedRelayPrivateRoutes(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                          send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflarePrivateRouteObservation {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, created, _, scoped in
+            let intent = binding.retained
+            return try await CloudflarePrivateRouteClient(send: scoped).inspect(configuration, expected: intent, plan: plan, created: created)
+        }
+    }
+
+    func createImportedAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                         send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupAccessApplicationRecord {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, scoped in
+            let initial = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                let record = try SharedSetupAccessApplicationStorage.begin(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                let snapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner))
+                return (record, snapshot)
+            }
+            if initial.0.phase == .created { return initial.0 }
+            guard initial.0.phase == .prepared else { throw RelayProvisioningError.requiresReconciliation }
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            let client = CloudflareAccessApplicationClient(send: scoped)
+            try await client.inspectAbsent(configuration, expected: binding.retained, plan: plan, createdTunnel: tunnel)
+            try Task.checkCancellation()
+            let dispatched = try initial.0.transition(to: .dispatched)
+            let sentSnapshot = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == initial.1 else { throw RelayProvisioningError.staleRecord }
+                try Task.checkCancellation()
+                try SharedSetupAccessApplicationStorage.replace(dispatched, previous: initial.0, expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                return try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner))
+            }
+            let outcome: CloudflareAccessApplicationCreationOutcome
+            do { outcome = try await client.create(configuration, expected: binding.retained, plan: plan, createdTunnel: tunnel, dispatched: dispatched) }
+            catch { outcome = .unknown }
+            let next: SharedSetupAccessApplicationRecord
+            switch outcome {
+            case .created(let app):
+                if app.accountID == configuration.accountID, app.name == plan.accessApplicationName, app.hostname == plan.hostname,
+                   let value = try? dispatched.transition(to: .created, applicationID: app.applicationID, audience: app.audience) { next = value }
+                else { next = try dispatched.transition(to: .unknown) }
+            case .rejected(let refusal): next = try dispatched.transition(to: .rejected, refusal: refusal)
+            case .unknown: next = try dispatched.transition(to: .unknown)
+            }
+            try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == sentSnapshot else { throw RelayProvisioningError.staleRecord }
+                try SharedSetupAccessApplicationStorage.replace(next, previous: dispatched, expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            return next
+        }
+    }
+
+    func inspectImportedInitialAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                                send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareInitialAccessObservation {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
+            try await CloudflareAccessApplicationClient(send: scoped).inspectInitial(configuration, expected: binding.retained,
+                plan: plan, createdTunnel: tunnel, application: application)
+        }
+    }
+
+    func inspectImportedAccessHostnameInventory(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                               send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareAccessHostnameInventory {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
+            try await CloudflareAccessHostnameClient(send: scoped).inspect(configuration, expected: binding.retained,
+                plan: plan, createdTunnel: tunnel, application: application)
+        }
+    }
+
+    private func withCreatedImportedAccessApplication<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                        send: CloudflareProvisioningScopeClient.Send?,
+                        operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
+                            SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, SharedSetupAccessApplicationRecord, @escaping CloudflareProvisioningScopeClient.Send) async throws -> Value) async throws -> Value {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, scoped in
+            let retained = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) else { throw RelayProvisioningError.requiresReconciliation }
+                _ = try record.createdApplication(expected: intent, plan: plan, createdTunnel: tunnel)
+                let snapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner)); try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyAccess() throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == retained.0,
+                          try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == retained.1 else { throw RelayProvisioningError.staleRecord }; try verify()
+                }
+            }
+            let accessSend: CloudflareProvisioningScopeClient.Send = { request in try Task.checkCancellation(); try verifyAccess(); return try await scoped(request) }
+            do {
+                let result = try await operation(configuration, binding, plan, tunnel, tunnelSnapshot, retained.0, accessSend)
+                try verifyAccess(); return result
+            } catch { try Task.checkCancellation(); try verifyAccess(); throw error }
+        }
+    }
+
+    private static func requireAccessSnapshot(_ value: SharedSetupAccessApplicationStorage.Snapshot?) throws -> SharedSetupAccessApplicationStorage.Snapshot {
+        guard let value else { throw RelayProvisioningError.staleRecord }; return value
+    }
+
+    private func withImportedAccessDirectory<Value>(binding: ImportedRelayInspectionBinding, tunnel: SharedSetupRelayProvisioningRecord,
+                        tunnelSnapshot: SharedSetupRelayProvisioningStorage.Snapshot, callerUID: uid_t, expected: SetupPortableImportProgress,
+                        proposal: PortableSetup,
+                        body: (SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {
+        try withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+            return try withoutActuallyEscaping(verify) { current in
+                func verifyAll() throws {
+                    try current()
+                    guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == tunnel,
+                          try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == tunnelSnapshot else {
+                        throw RelayProvisioningError.staleRecord
+                    }
+                }
+                try verifyAll(); let result = try body(intent, plan, directory, owner, verifyAll); try verifyAll(); return result
+            }
+        }
+    }
+
+    private func withCreatedImportedRelay<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                            send: CloudflareProvisioningScopeClient.Send?,
+                            operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
+                                SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, @escaping CloudflareProvisioningScopeClient.Send) async throws -> Value) async throws -> Value {
+        try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            let retained = try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner),
+                      let snapshot = try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) else {
+                    throw RelayProvisioningError.requiresReconciliation
+                }
+                _ = try record.createdTunnel(expected: intent, plan: plan); try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyRetained() throws {
+                try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == retained.0,
+                          try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == retained.1 else {
+                        throw RelayProvisioningError.staleRecord
+                    }
+                    try verify()
+                }
+            }
+            let transport: CloudflareProvisioningScopeClient.Send
+            if let send { transport = send }
+            else { let native = try FCMHTTPTransport(timeoutSeconds: 30); transport = { try await native.send($0) } }
+            let scoped: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyRetained()
+                return try await transport(request)
+            }
+            do {
+                _ = try await CloudflareCreatedTunnelClient(send: scoped).inspect(configuration, expected: binding.retained, plan: plan, created: retained.0)
+                try Task.checkCancellation(); try verifyRetained()
+                let observed = try await operation(configuration, binding, plan, retained.0, retained.1, scoped)
+                try Task.checkCancellation(); try verifyRetained(); return observed
+            } catch {
+                try Task.checkCancellation(); try verifyRetained()
+                throw error
+            }
+        }
+    }
+
+    private func withImportedRelayProvisioning<Value>(binding: ImportedRelayInspectionBinding, callerUID: uid_t,
+                    expected: SetupPortableImportProgress, proposal: PortableSetup,
+                    body: (SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {
+        try withMachine(admission: binding.admission) { machine in
+            guard expected.runtime.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            guard inventory == binding.inventory else { throw AdministrativeSetupError.staleProgress }
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, let retained = try journal.current(scope: scope), retained == binding.retained,
+                      try retained.matches(proposal),
+                      try SetupPortableImportProgress(account: account, inventory: inventory, services: services,
+                        runtime: runtime, retained: retained) == expected else { throw AdministrativeSetupError.staleProgress }
+                return try machine.withSharedImportRelayDirectory { directory, owner in
+                    try SharedSetupImportRelayStorage.validateTrackedFiles(records: journal.records(), directory: directory)
+                    guard let plan = try SharedSetupImportRelayStorage.read(expected: retained, directory: directory, owner: owner),
+                          plan == binding.plan,
+                          try SharedSetupImportRelayStorage.snapshot(expected: retained, directory: directory, owner: owner) == binding.planSnapshot else {
+                        throw AdministrativeSetupError.staleProgress
+                    }
+                    func verify() throws {
+                        try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                        guard try currentInventory(machine) == binding.inventory,
+                              try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                              try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                              try journal.current(scope: scope) == retained,
+                              try SharedSetupImportRelayStorage.snapshot(expected: retained, directory: directory, owner: owner) == binding.planSnapshot else {
+                            throw AdministrativeSetupError.staleProgress
+                        }
+                    }
+                    try verify(); let result = try body(retained, plan, directory, owner, verify); try verify(); return result
+                }
+            }
+        }
+    }
+
+    private func withImportedRelayInspection<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                requiresPlan: Bool,
+                                inspect: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding) async throws -> Value) async throws -> Value {
+        let context = try lock.withLock {
+            guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+            let admission = try asynchronousWork.admit()
+            do { return (admission, try releaseActivity?.acquireShared()) }
+            catch { admission.close(); throw error }
+        }
+        defer { context.1?.close(); context.0.close() }
+        func read() throws -> (SharedSetupImportIntent, InstallationInventory, SharedSetupImportRelayPlan?, SharedSetupImportRelayStorage.Snapshot?) {
+            try withMachine(admission: context.0) { machine in
+                guard expected.runtime.ownerUID == callerUID,
+                      let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+                try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+                let runtime = try machine.runtimePreparation(accountID: account.accountID)
+                let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+                return try machine.withSharedImportJournal { journal in
+                    guard let journal, let retained = try journal.current(scope: scope) else { throw SharedSetupImportError.wrongScope }
+                    let progress = try SetupPortableImportProgress(account: account, inventory: inventory,
+                        services: services, runtime: runtime, retained: retained)
+                    guard progress == expected else { throw AdministrativeSetupError.staleProgress }
+                    guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                    var plan: SharedSetupImportRelayPlan?, snapshot: SharedSetupImportRelayStorage.Snapshot?
+                    if requiresPlan {
+                        try machine.withSharedImportRelayDirectory { directory, owner in
+                            try SharedSetupImportRelayStorage.validateTrackedFiles(records: journal.records(), directory: directory)
+                            guard let value = try SharedSetupImportRelayStorage.read(expected: retained, directory: directory, owner: owner),
+                                  let identity = try SharedSetupImportRelayStorage.snapshot(expected: retained, directory: directory, owner: owner) else {
+                                throw SharedSetupImportCompletionValidation.Failure.incomplete
+                            }
+                            plan = value; snapshot = identity
+                        }
+                    }
+                    return (retained, inventory, plan, snapshot)
+                }
+            }
+        }
+        try Task.checkCancellation()
+        let before = try read()
+        guard let configuration = proposal.cloudflare else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+        try Task.checkCancellation()
+        let result = try await inspect(configuration, .init(retained: before.0, inventory: before.1, plan: before.2,
+            planSnapshot: before.3, admission: context.0))
+        try Task.checkCancellation(); try context.1?.validate()
+        let after = try read()
+        guard after.0 == before.0, after.1 == before.1, after.2 == before.2, after.3 == before.3 else {
+            throw AdministrativeSetupError.staleProgress
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
+    func verifiedPortableImportCompletion(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                           operations: SharedSetupImportCompletionValidation.Operations = .native) throws -> SetupPortableImportProgress {
+        try withMachine { machine in
+            guard expected.runtime.ownerUID == callerUID,
+                  let account = try machine.accountPreparation(ownerUID: callerUID) else { throw AdministrativeSetupError.wrongAccount }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let inventory = try currentInventory(machine), services = try machine.serviceAccountPlan(accountID: account.accountID)
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                guard let journal, let retained = try journal.current(scope: scope), retained.phase == .rootComplete else {
+                    throw SharedSetupImportCompletionValidation.Failure.incomplete
+                }
+                let current = try SetupPortableImportProgress(account: account, inventory: inventory,
+                    services: services, runtime: runtime, retained: retained)
+                guard current == expected else { throw AdministrativeSetupError.staleProgress }
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory,
+                          try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                }
+                try verify()
+                try SharedSetupImportCompletionValidation.validate(machine: machine, account: account, retained: retained,
+                    proposal: proposal, operations: operations, verifyCurrent: verify)
+                try verify(); return current
+            }
+        }
+    }
 
     func portableImportProgress(callerUID: uid_t) throws -> SetupPortableImportProgress? {
         try withMachine { machine in
