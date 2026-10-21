@@ -100,6 +100,42 @@ final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try f.start("normal")) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         try f.assertUpdateAvailable()
     }
+    func testPinnedVendorReportsDisconnectedThroughTheProductionProcessAndProbe() async throws {
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let environment = ProcessInfo.processInfo.environment
+        let override = environment["REMOZIO_CONNECTOR_FIXTURE_PATH"]
+        let vendor = override ?? repository.appendingPathComponent(
+            ".build/macos-app/DerivedData/Build/Products/Debug/Remozio.app/Contents/Helpers/RemozioCloudflared").path
+        guard FileManager.default.isExecutableFile(atPath: vendor) else {
+            throw XCTSkip("Build the native app fixture or provide the verified disposable vendor path.")
+        }
+        if override != nil {
+            let expected = try XCTUnwrap(environment["REMOZIO_CONNECTOR_FIXTURE_SHA256"])
+            let attributes = try FileManager.default.attributesOfItem(atPath: vendor)
+            XCTAssertLessThan(try XCTUnwrap(attributes[.size] as? NSNumber).uint64Value, 100_000_000)
+            let actual = SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: vendor))).map { String(format: "%02x", $0) }.joined()
+            guard actual == expected else { XCTFail("Disposable vendor hash changed"); throw RelayConnectorProcess.Failure.invalidConfiguration }
+        }
+        let f = try Fixture(), discovered = expectation(description: "vendor metrics")
+        let observation = Mutex<RelayConnectorDiscovery?>(nil)
+        let arguments = ["-p", "(version 1)(allow default)(deny network-outbound)", vendor,
+            "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:7844",
+            "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
+        let process = try RelayConnectorProcess.startForFixture(executable: "/usr/bin/sandbox-exec", arguments: arguments,
+            token: f.token, activity: f.service.acquireShared()) { event in
+                if case .discovered(let value) = event { observation.withLock { $0 = value }; discovered.fulfill() }
+            }
+        await fulfillment(of: [discovered], timeout: 5)
+        let result: Result<RelayConnectorReadiness.State, any Error>
+        do {
+            let value = try XCTUnwrap(observation.withLock { $0 })
+            result = .success(try await RelayConnectorReadiness().probe(value))
+        } catch { result = .failure(error) }
+        let completion = await process.stopAndWait()
+        XCTAssertTrue(completion.termination.settled); try f.assertUpdateAvailable()
+        XCTAssertEqual(try result.get(), .disconnected)
+    }
     func testDroppingTheOwnerRequestsShutdownAndRetainsActivityUntilCompletion() async throws {
         let f = try Fixture(), discovered = expectation(description: "metrics"), exited = expectation(description: "exit")
         let outcome = Mutex<RelayConnectorProcess.Completion?>(nil)
