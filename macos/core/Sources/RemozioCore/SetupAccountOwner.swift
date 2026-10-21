@@ -875,6 +875,55 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    /// Requires fresh administrator authorization for the exact rejected record. This operation sends reads only.
+    func prepareRefusedImportedAccessApplicationRetry(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                    expectedRecordDigest: Data, send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupAccessApplicationRecord {
+        guard expectedRecordDigest.count == 32 else { throw RelayProvisioningError.invalidRecord }
+        return try await withRetainedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) {
+            configuration, binding, plan, tunnel, tunnelSnapshot, scoped, _ in
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            let before = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner), Data(SHA256.hash(data: record.bytes)) == expectedRecordDigest else { throw RelayProvisioningError.staleRecord }
+                guard record.phase == .rejected else { throw RelayProvisioningError.invalidTransition }
+                let snapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner)); try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyRejected() throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == before.0,
+                          try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == before.1 else { throw RelayProvisioningError.staleRecord }
+                    try verify()
+                }
+            }
+            let reads: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyRejected()
+                let response = try await scoped(request)
+                try Task.checkCancellation(); try verifyRejected(); return response
+            }
+            do {
+                _ = try await CloudflareCreatedTunnelClient(send: reads).inspect(configuration, expected: binding.retained, plan: plan, created: tunnel)
+                try await CloudflareAccessApplicationClient(send: reads).inspectAbsent(configuration, expected: binding.retained, plan: plan, createdTunnel: tunnel)
+                try verifyRejected()
+            } catch { try Task.checkCancellation(); try verifyRejected(); throw error }
+            return try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == before.0,
+                      try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == before.1 else { throw RelayProvisioningError.staleRecord }
+                try Task.checkCancellation(); let next = try before.0.retryAfterRefusal()
+                try SharedSetupAccessApplicationStorage.replace(next, previous: before.0, expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner, verifyCurrent: verify)
+                return next
+            }
+        }
+    }
+
     func inspectImportedInitialAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                                 send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareInitialAccessObservation {
         try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
@@ -983,6 +1032,74 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     application: application, directory: directory, owner: owner, verifyCurrent: verify)
             }
             return next
+        }
+    }
+
+    /// Requires fresh administrator authorization for the exact rejected record. This operation sends reads only.
+    func prepareRefusedImportedDNSRecordRetry(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                    expectedRecordDigest: Data, send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupDNSRecord {
+        guard expectedRecordDigest.count == 32 else { throw RelayProvisioningError.invalidRecord }
+        return try await withRetainedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) {
+            configuration, binding, plan, tunnel, tunnelSnapshot, scoped, _ in
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            let before = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let application = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) else { throw RelayProvisioningError.requiresReconciliation }
+                _ = try application.createdApplication(expected: intent, plan: plan, createdTunnel: tunnel)
+                guard let record = try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner), Data(SHA256.hash(data: record.bytes)) == expectedRecordDigest else { throw RelayProvisioningError.staleRecord }
+                guard record.phase == .rejected else { throw RelayProvisioningError.invalidTransition }
+                guard let snapshot = try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) else { throw RelayProvisioningError.staleRecord }
+                let accessSnapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner)); try verify(); return (record, snapshot, application, accessSnapshot)
+            }
+            @Sendable func verifyRejected() throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == before.2,
+                          try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == before.3,
+                          try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: before.2, directory: directory, owner: owner) == before.0,
+                          try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: before.2, directory: directory, owner: owner) == before.1 else { throw RelayProvisioningError.staleRecord }
+                    try verify()
+                }
+            }
+            let reads: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyRejected()
+                let response = try await scoped(request)
+                try Task.checkCancellation(); try verifyRejected(); return response
+            }
+            let observed: CloudflareRelayPublicationPreflight
+            do {
+                _ = try await CloudflareCreatedTunnelClient(send: reads).inspect(configuration, expected: binding.retained, plan: plan, created: tunnel)
+                observed = try await CloudflareRelayPublicationPreflightClient(send: reads).inspect(configuration,
+                    expected: binding.retained, plan: plan, createdTunnel: tunnel, application: before.2)
+                try verifyRejected()
+            } catch { try Task.checkCancellation(); try verifyRejected(); throw error }
+            switch observed.hostnameAssessment {
+            case .noOtherMatchObserved, .exactHostnamePrecedesBroaderWildcardRoots: break
+            case .requiresPrecedenceVerification: throw RelayProvisioningError.requiresReconciliation
+            }
+            return try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == before.2,
+                      try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    directory: directory, owner: owner) == before.3,
+                      try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: before.2, directory: directory, owner: owner) == before.0,
+                      try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: before.2, directory: directory, owner: owner) == before.1 else { throw RelayProvisioningError.staleRecord }
+                try Task.checkCancellation(); let next = try before.0.retryAfterRefusal()
+                try SharedSetupDNSStorage.replace(next, previous: before.0, expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: before.2, directory: directory, owner: owner, verifyCurrent: verify)
+                return next
+            }
         }
     }
 
