@@ -127,7 +127,7 @@ actor RelayConnectorSupervisor {
         current = nil; probe = nil; cleanup = nil; incarnation = nil
         if mayRetry { scheduleRetry() } else { status = .refused }
     }
-    private static func isTemporary(_ error: any Error) -> Bool {
+    static func isTemporary(_ error: any Error) -> Bool {
         let code: Int32
         if let failure = error as? RelayConnectorProcess.Failure, case .system(let value) = failure { code = value }
         else if let failure = error as? JournalLeaseError, case .system(let value) = failure { code = value }

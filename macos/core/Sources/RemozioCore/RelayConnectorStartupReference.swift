@@ -15,6 +15,14 @@ struct RelayConnectorStartupReference: Equatable, Sendable {
         return try load(runtime: bootstrap.host.runtime, relayPort: bootstrap.base.relayPort,
             read: { try ProtectedServiceConfiguration.readOptionalPublic(path: path) }, verifyCurrent: { try scope.validate() })
     }
+    /// Checks declared codecs only. Native signature and activity admission remain separate prerequisites.
+    static func validateReleaseFormats(_ components: [ReleaseComponent]) throws {
+        let name = RelayRunCredentialReference.formatName, versions = RelayRunCredentialReference.supportedVersions
+        guard let reader = components.first(where: { $0.role == .transport })?.formats.first(where: { $0.name == name }),
+              reader.readers.isSuperset(of: versions),
+              let writer = components.first(where: { $0.role == .setupController })?.formats.first(where: { $0.name == name }),
+              writer.writers.isSuperset(of: versions) else { throw RuntimePreparationError.changedScope }
+    }
     func makeNativeSupervisor(scope: GatewaySettingsConsumerNativeScope, bootstrap: TransportSettingsConsumerBootstrap,
                               options: RelayConnectorSupervisor.Options = .standard) throws -> RelayConnectorSupervisor {
         try validateNative(scope: scope, bootstrap: bootstrap)
