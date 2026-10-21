@@ -21,6 +21,8 @@ final class PortableSetupImportChannelTests: XCTestCase, @unchecked Sendable {
         func invoke(_ call: PortableSetupImportCall, reply: @escaping @Sendable (SetupClientReply) -> Void) {
             let result: SetupClientReply? = state.withLock {
                 switch call {
+                case .recoveryHello: $0.history.append("recoveryHello"); return .version($0.version)
+                case .recovery: $0.history.append("recovery")
                 case .hello: $0.history.append("hello"); return .version($0.version)
                 case .progress: $0.history.append("progress")
                 case .perform: $0.history.append("perform")
@@ -83,6 +85,70 @@ final class PortableSetupImportChannelTests: XCTestCase, @unchecked Sendable {
         driver.deliver(.progress(try result.bytes)); let actual = try await first.value; XCTAssertEqual(actual, result)
         driver.deliver(.failed); driver.state.withLock { $0.hold = false; $0.response = .progress(Data()) }
         let progress = try await channel.progress(); XCTAssertNil(progress); await channel.close()
+    }
+    func testRecoveryRequiresExactNegotiationAndNeverFallsBackOrSendsRights() async throws {
+        for version: UInt64 in [0, 1, 8, 9, 11] {
+            let driver = Driver(); driver.state.withLock { $0.version = version }
+            let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true)
+            do { try await channel.start(); XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .unsupportedVersion) }
+            do { _ = try await channel.recovery(); XCTFail() } catch {}
+            XCTAssertEqual(driver.state.withLock { $0.history }, ["recoveryHello"])
+        }
+        let driver = Driver(), channel = PortableSetupImportChannel(driver: driver)
+        try await channel.start()
+        do { _ = try await channel.recovery(); XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .unsupportedVersion) }
+        let progress = try await channel.progress(); XCTAssertNil(progress)
+        XCTAssertEqual(driver.state.withLock { $0.history }, ["hello", "progress"])
+        await channel.close()
+        XCTAssertTrue(Set(UInt64(1)...9).isSubset(of: AdministrativeSetupInterface.supportedVersions))
+    }
+    func testRecoveryDecodesOnlyBoundedSameOwnerMetadataAndKeepsVersionNineOperations() async throws {
+        let (f, owner, request) = try request(); defer { try? owner.close() }
+        let value = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        let driver = Driver(); driver.state.withLock { $0.version = 10 }
+        let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true)
+        try await channel.start(); let empty = try await channel.recovery(); XCTAssertNil(empty)
+        driver.state.withLock { $0.response = .progress(try! value.bytes) }
+        let actual = try await channel.recovery(); XCTAssertEqual(actual, value)
+        XCTAssertNil(try f.readPlan())
+        driver.state.withLock { $0.response = .progress(try! request.expected.bytes) }
+        let progress = try await channel.progress(); XCTAssertEqual(progress, request.expected)
+        let result = try SetupPortableImportOperationResult(request: request, progress: request.expected, status: .applied)
+        driver.state.withLock { $0.response = .progress(try! result.bytes) }
+        let performed = try await channel.perform(request, authorization: form); XCTAssertEqual(performed, result)
+        XCTAssertEqual(driver.state.withLock { $0.history }, ["recoveryHello", "recovery", "recovery", "progress", "perform"])
+        await channel.close()
+    }
+    func testMalformedOversizedCrossedOrWrongOwnerRecoveryClosesTheChannel() async throws {
+        let (_, owner, request) = try request(); defer { try? owner.close() }
+        let value = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        for (bytes, uid): (Data?, uid_t) in [(nil, getuid()), (Data([0]), getuid()),
+            (Data(repeating: 0, count: SetupPortableImportRecovery.maximumByteCount + 1), getuid()),
+            (try request.expected.bytes, getuid()), (try value.bytes, getuid() + 1)] {
+            let driver = Driver(); driver.state.withLock { $0.version = 10; $0.response = .progress(bytes) }
+            let channel = PortableSetupImportChannel(driver: driver, ownerUID: uid, recoveryEnabled: true)
+            try await channel.start()
+            do { _ = try await channel.recovery(); XCTFail() } catch {}
+            do { _ = try await channel.progress(); XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .closed) }
+            XCTAssertEqual(driver.state.withLock { $0.history }, ["recoveryHello", "recovery"])
+        }
+    }
+    func testRecoveryBusyTimeoutAndCancellationNeverRetryOrDisturbOwnedWork() async throws {
+        for mode in 0..<3 {
+            let driver = Driver(); driver.state.withLock { $0.version = 10 }
+            let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true, timeoutMilliseconds: mode == 0 ? 50 : 5000)
+            try await channel.start(); driver.state.withLock { $0.hold = true }
+            let pending = Task { try await channel.recovery() }
+            try await until { driver.state.withLock { $0.held != nil } }
+            do { _ = try await channel.recovery(); XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
+            if mode == 1 { pending.cancel() }
+            if mode == 2 { driver.deliver(.progress(Data())) }
+            do { let value = try await pending.value; XCTAssertEqual(mode, 2); XCTAssertNil(value) }
+            catch { XCTAssertNotEqual(mode, 2) }
+            driver.deliver(.failed)
+            XCTAssertEqual(driver.state.withLock { $0.history }, ["recoveryHello", "recovery"])
+            await channel.close()
+        }
     }
     func testTimeoutAndAbortDoNotRetryAnUnknownOperation() async throws {
         let (_, owner, request) = try request(); defer { try? owner.close() }

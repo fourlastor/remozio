@@ -37,12 +37,14 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                 let callback = once.withLock { saved in let callback = saved; saved = nil; return callback }
                 callback?(value)
             }
-            do { if case .hello = call {} else { try verify() } }
+            do { switch call { case .hello, .recoveryHello: break; default: try verify() } }
             catch { finish(.failed); return }
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in finish(.failed) }) as? any AdministrativeSetupXPCProtocol else {
                 finish(.failed); return
             }
             switch call {
+            case .recoveryHello: proxy.portableImportRecoveryHello { [self] in checked(.version($0), reply: finish) }
+            case .recovery: proxy.portableImportRecovery { [self] in checked(.progress($0), reply: finish) }
             case .hello:
                 if mode == .legacyHello { proxy.hello { [self] in checked(.version($0), reply: finish) } }
                 else { proxy.portableImportHello { [self] in checked(.version($0), reply: finish) } }
@@ -227,6 +229,42 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                 "serviceInstalled": false, "realApprovalIssued": false]
             try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]).write(to: URL(fileURLWithPath: output))
         }
+    }
+    func testLiveAnonymousRecoveryReadsRejectedResourceWithoutRightsOrMutation() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        let fixture = try DNSRecordFixture(), f = fixture.base.h.f.accountFixture
+        let prepared = try fixture.begin(), dispatched = try prepared.transition(to: .dispatched)
+        let rejected = try dispatched.transition(to: .rejected, refusal: .unauthorized)
+        try fixture.replace(dispatched, previous: prepared); try fixture.replace(rejected, previous: dispatched)
+        let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() },
+            activate: { _, _, _, _, _ in throw Refused() })
+        let owner = try SetupAccountOwner(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
+            resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+            lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity }, importedGatewayOperation: bridge)
+        defer { try? owner.close() }
+        let requirement = try testRequirement(), server = try Server(owner: owner, requirement: requirement)
+        defer { server.close() }
+        let expected = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        let path = URL(fileURLWithPath: fixture.base.h.path).deletingLastPathComponent()
+        func files() throws -> [String: Data] {
+            try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(atPath: path.path).map {
+                ($0, try Data(contentsOf: path.appendingPathComponent($0)))
+            })
+        }
+        let before = try files()
+        for _ in 0..<2 {
+            let driver = Driver(server: server, requirement: requirement, mode: .normal)
+            let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true)
+            try await channel.start()
+            let actual = try await channel.recovery(); XCTAssertEqual(actual, expected)
+            XCTAssertEqual(actual?.rejectedRecord(for: .dnsRecord)?.refusal, .unauthorized)
+            XCTAssertEqual(try files(), before); XCTAssertEqual(server.rights.withLock { $0 }, 0)
+            XCTAssertGreaterThan(driver.checks.withLock { $0 }, 0); await channel.close()
+        }
+        XCTAssertGreaterThan(server.invocations.withLock { $0 }, 0)
+        server.close(); try await owner.closeWhenIdle()
     }
     func testNativeCancellationKeepsUpdateExcludedUntilOwnedWorkSettles() async throws {
         guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {

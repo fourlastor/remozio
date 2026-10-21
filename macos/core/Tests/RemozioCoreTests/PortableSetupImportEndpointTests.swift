@@ -40,6 +40,50 @@ final class PortableSetupImportEndpointTests: XCTestCase, @unchecked Sendable {
         endpoint.performPortableImport(try f.request.bytes, authorization: form) { XCTAssertNil($0); refused.fulfill() }
         wait(for: [refused], timeout: 2)
     }
+    func testAllLegacyHandshakesRefuseRecoveryBeforeRightsOrStorageMutation() throws {
+        for version in 1...9 {
+            let f = try Fixture(); defer { try? f.owner.close() }
+            let endpoint = AdministrativeSetupXPCEndpoint(owner: f.owner, verify: { getuid() }, authorize: { _ in XCTFail() }, invalidate: {})
+            let reply: @Sendable (UInt64) -> Void = { XCTAssertEqual($0, UInt64(version)) }
+            switch version {
+            case 1: endpoint.hello(reply: reply)
+            case 2: endpoint.enrollmentHello(reply: reply)
+            case 3: endpoint.serviceAccountsHello(reply: reply)
+            case 4: endpoint.runtimeHello(reply: reply)
+            case 5: endpoint.activationHello(reply: reply)
+            case 6: endpoint.gatewayHello(reply: reply)
+            case 7: endpoint.gatewayActivationHello(reply: reply)
+            case 8: endpoint.gatewaySettingsHello(reply: reply)
+            default: endpoint.portableImportHello(reply: reply)
+            }
+            let called = Mutex(false)
+            endpoint.portableImportRecovery { XCTAssertNil($0); called.withLock { $0 = true } }
+            XCTAssertTrue(called.withLock { $0 }); XCTAssertNil(try f.h.readPlan())
+            XCTAssertEqual(try f.h.progress(f.owner), f.request.expected); endpoint.close()
+        }
+    }
+    func testRecoveryNegotiationRequiresSupportAndReadRechecksInvocationWithoutRights() throws {
+        let unsupported = try Fixture(supported: false); defer { try? unsupported.owner.close() }
+        let denied = AdministrativeSetupXPCEndpoint(owner: unsupported.owner, verify: { getuid() }, authorize: { _ in XCTFail() }, invalidate: {})
+        denied.portableImportRecoveryHello { XCTAssertEqual($0, 0) }; denied.close()
+        let f = try Fixture(); defer { try? f.owner.close() }
+        let uid = Mutex(getuid()), replies = Mutex(0), calls = Mutex(0)
+        let endpoint = AdministrativeSetupXPCEndpoint(owner: f.owner, verify: { calls.withLock { $0 += 1 }; return uid.withLock { $0 } }, authorize: { _ in XCTFail() }, invalidate: {})
+        endpoint.portableImportRecoveryHello { XCTAssertEqual($0, 10) }
+        endpoint.portableImportRecovery { bytes in
+            do { XCTAssertEqual(try SetupPortableImportRecovery.decode(XCTUnwrap(bytes)).progress, f.request.expected) }
+            catch { XCTFail("Invalid recovery metadata") }
+            replies.withLock { $0 += 1 }
+        }
+        XCTAssertEqual(replies.withLock { $0 }, 1); XCTAssertEqual(calls.withLock { $0 }, 2)
+        XCTAssertNil(try f.h.readPlan()); XCTAssertEqual(try f.h.progress(f.owner), f.request.expected)
+        uid.withLock { $0 += 1 }
+        endpoint.portableImportRecovery { bytes in
+            XCTAssertTrue(bytes == nil || bytes == Data()); replies.withLock { $0 += 1 }
+        }
+        XCTAssertEqual(replies.withLock { $0 }, 2); XCTAssertEqual(calls.withLock { $0 }, 3)
+        endpoint.close()
+    }
     func testAuthorizedRetentionRepliesWithTheBoundResultAndPinsAdmissionThroughCallback() async throws {
         let f = try Fixture(); defer { try? f.owner.close() }
         let rights = Mutex(0), replied = expectation(description: "reply")

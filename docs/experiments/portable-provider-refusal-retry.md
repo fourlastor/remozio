@@ -83,3 +83,23 @@ The projection validation covered 65 distinct focused cases, including the read 
 It proves codec and owned-storage behavior. Native IPC delivery and app use remain separate integration work.
 The next native interface must negotiate support before sending these messages or accepting new retry writes.
 Existing native versions remain unchanged in this component.
+
+
+## Native recovery read interface
+
+Setup IPC 10 adds `portableImportRecoveryHello` and `portableImportRecovery`.
+The app must choose this handshake explicitly and authenticate the Root peer before using its reply.
+Every call and reply rechecks the peer. The endpoint reads only the invoking account's retained metadata.
+Versions 1 through 9 cannot read this report. Version 9 remains available with its original selectors and request bytes.
+Version 10 also accepts the existing version-1 import operations. A missing or different handshake causes a closed connection without fallback.
+
+An empty reply means account preparation has not reached the required stage. It does not mean the provider is ready.
+The client bounds report size, checks canonical encoding and requires its own account UID.
+It never exports administrator rights for this read. Cancellation and timeout close the channel without another attempt.
+Only the app and setup component declare IPC 10. The report is ephemeral and adds no persistent format declaration.
+
+The focused run passed 29 Swift cases and 23 manifest cases. The owned anonymous XPC test reads a rejected DNS record twice across fresh connections.
+It verifies the same retained files, rejected state, kernel invocation checks and zero rights requests.
+This is same-process, ordinary-user evidence. It does not prove an installed Root service, Developer ID admission or actual administrator consent.
+The host runs macOS 27.0.1 and compiles for macOS 26. This does not qualify the macOS 26 runtime.
+No native retry write or app recovery button is connected by this interface change.

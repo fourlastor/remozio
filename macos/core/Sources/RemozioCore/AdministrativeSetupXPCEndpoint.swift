@@ -13,11 +13,14 @@ public enum AdministrativeSetupInterface {
     public static let gatewayActivationVersion: UInt64 = 7
     public static let gatewaySettingsVersion: UInt64 = 8
     public static let portableImportVersion: UInt64 = 9
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion]
+    public static let portableImportRecoveryVersion: UInt64 = 10
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
 @objc public protocol PortableSetupImportXPCProtocol {
+    func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void)
     func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void)
     func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void)
     func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -72,6 +75,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var gatewayActivationReady = false
     private var gatewaySettingsReady = false
     private var portableImportReady = false
+    private var portableImportRecoveryReady = false
     private var asynchronousID: UUID?
     private var asynchronousTask: Task<Void, Never>?
     private var closed = false
@@ -107,6 +111,25 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         }
         changed.1?.cancel()
         if changed.0 { invalidate() }
+    }
+    public func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); try owner.requirePortableImportSupport()
+                ready = true; portableImportReady = true; portableImportRecoveryReady = true
+            }
+            defer { completed.activity?.close() }
+            onHandshake(); send { reply(AdministrativeSetupInterface.portableImportRecoveryVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard portableImportRecoveryReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.portableImportRecovery(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
     }
     public func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
