@@ -524,4 +524,27 @@ final class RelayRunCredentialPublicationTests: XCTestCase, @unchecked Sendable 
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
         let requests = await offline.all(); XCTAssertTrue(requests.isEmpty)
     }
+
+    func testPrivateRetentionBeforeReferenceCommitStillProtectsUpdatesAndRestoresOffline() async throws {
+        let f = try ownerFixture(); defer { try? f.owner.close() }
+        let interrupted = RelayRunCredentialSetupOperations(prepare: { context, credential, accepted, verify in
+            _ = try f.operations.prepare(context, credential, accepted, verify)
+            throw Interrupted()
+        }, publish: { _, _, _ in XCTFail("No reference was accepted") })
+        do {
+            _ = try await prepareOwner(f, operations: interrupted, probe: RelayIngressProbe(ownerReplies(f)))
+            XCTFail("The simulated lost private-write reply succeeded")
+        } catch { XCTAssertTrue(error is Interrupted) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: f.privatePath))
+        let snapshot = try f.base.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) }
+        XCTAssertNil(snapshot.inputs.sharedImport?.records.first?.runCredential)
+        let requirement = try XCTUnwrap(snapshot.requirements.formats.first {
+            $0.role == .setupController && $0.name == RelayRunCredentialMaterial.formatName
+        })
+        XCTAssertEqual(requirement.readVersions, [1]); XCTAssertEqual(requirement.writeVersions, [1])
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), offline = RelayIngressProbe([])
+        _ = try await prepareOwner(f, probe: offline)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+        let requests = await offline.all(); XCTAssertTrue(requests.isEmpty)
+    }
 }
