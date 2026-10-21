@@ -706,6 +706,46 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    /// The endpoint must obtain fresh administrator authorization and bind the exact rejected record before entry.
+    /// This reads provider absence and prepares local state only. Creation still requires its own complete preflight.
+    func prepareRefusedImportedRelayTunnelRetry(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                    expectedRecordDigest: Data,
+                    inspect: @escaping @Sendable (SetupCloudflareConfiguration, SharedSetupImportIntent, SharedSetupImportRelayPlan) async throws -> CloudflareImportedRelayInspection = {
+                        try await CloudflareImportedRelayInspection.native(configuration: $0, expected: $1, plan: $2)
+                    }) async throws -> SharedSetupRelayProvisioningRecord {
+        guard expectedRecordDigest.count == 32 else { throw RelayProvisioningError.invalidRecord }
+        return try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
+            guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else {
+                throw RelayProvisioningError.invalidTransition
+            }
+            let before = try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner),
+                      Data(SHA256.hash(data: record.bytes)) == expectedRecordDigest,
+                      let snapshot = try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) else {
+                    throw RelayProvisioningError.staleRecord
+                }
+                guard record.phase == .rejected else { throw RelayProvisioningError.invalidTransition }
+                try verify(); return (record, snapshot)
+            }
+            let observed = try await inspect(configuration, binding.retained, plan)
+            try observed.validate(configuration: configuration, expected: binding.retained, plan: plan)
+            guard observed.tunnel == nil else { throw RelayProvisioningError.requiresReconciliation }
+            try Task.checkCancellation()
+            return try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == before.0,
+                      try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == before.1 else {
+                    throw RelayProvisioningError.staleRecord
+                }
+                let next = try before.0.retryAfterRefusal()
+                try Task.checkCancellation()
+                try SharedSetupRelayProvisioningStorage.replace(next, previous: before.0, expected: intent, plan: plan,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                return next
+            }
+        }
+    }
+
     func applyImportedRelayIngress(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                    send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareTunnelConfigurationObservation {
         try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, created, _, scoped in
