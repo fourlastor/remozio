@@ -3,22 +3,28 @@ import Foundation
 
 public enum SetupPreviewReadError: Error { case unreadable, rejected }
 
-/// Serializes password derivation and returns metadata only. It never applies the decrypted proposal.
+/// Serializes password derivation. Opening a setup file does not apply its configuration.
 public actor SetupFilePreviewReader {
     public static let shared = SetupFilePreviewReader()
     public init() {}
 
     public func preview(file: URL, password: String) throws -> SetupPreview {
+        let reviewed = try review(file: file, password: password)
+        defer { reviewed.close() }
+        return reviewed.preview
+    }
+
+    public func review(file: URL, password: String) throws -> ReviewedSetupFile {
         try Task.checkCancellation()
         let scoped = file.startAccessingSecurityScopedResource()
         defer { if scoped { file.stopAccessingSecurityScopedResource() } }
         let encrypted = try Self.read(file)
         try Task.checkCancellation()
-        let preview: SetupPreview
-        do { preview = try PortableSetup(encryptedFile: encrypted, password: password).preview }
+        let proposal: PortableSetup
+        do { proposal = try PortableSetup(encryptedFile: encrypted, password: password) }
         catch { throw SetupPreviewReadError.rejected }
         try Task.checkCancellation()
-        return preview
+        return ReviewedSetupFile(proposal: proposal)
     }
 
     static func read(_ file: URL) throws -> Data {
