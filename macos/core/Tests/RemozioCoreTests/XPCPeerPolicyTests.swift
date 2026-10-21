@@ -58,9 +58,14 @@ final class XPCPeerPolicyTests: XCTestCase {
         }
     }
     func testAllApprovedHashesRetainTheirExactSortedRequirementText() throws {
-        let hashes = Set((0..<16).map { offset in
-            Data((0..<20).map { UInt8(($0 * 13 + offset * 17) & 255) })
-        })
+        var hashes = Set<Data>()
+        for offset in 0..<16 {
+            var bytes: [UInt8] = []
+            for index in 0..<20 {
+                bytes.append(UInt8((index * 13 + offset * 17) & 255))
+            }
+            hashes.insert(Data(bytes))
+        }
         let formatted = hashes.map { hash in
             "cdhash H\"" + hash.map { String(format: "%02x", $0) }.joined() + "\""
         }.sorted().joined(separator: " or ")

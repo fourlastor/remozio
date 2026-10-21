@@ -21,7 +21,7 @@ SOURCE = 'macos/core/Sources/RemozioCore/XPCPeerPolicy.swift'
 SOURCE_SHA256 = {'baseline': '0175c98e2f253b674fb8d0aade6d8e2cde36c859dd20ef10af38b1268ce50c01',
                  'candidate': '733b03399f655bb225d01215e86066b8444a49abe288e573e531a36c3e491792'}
 PARITY_TEST = 'macos/core/Tests/RemozioCoreTests/XPCPeerPolicyTests.swift'
-PARITY_TEST_SHA256 = '2de8fc252922b520b390ee55d0e94978b412f5569bba342b55b25e691cd634cd'
+PARITY_TEST_SHA256 = 'f72d6af5094ff957cb1c9cb9a4df304598fabe9f32f0da22ad37fbac7687f706'
 # The combined owned pilot may add the frozen candidate and explicitly audited non-native files.
 # Every other native source, package, fixture and test must remain exactly at BASELINE.
 ALLOWED_CHANGES = {SOURCE, PARITY_TEST,
