@@ -7,7 +7,7 @@ The next product change is the default Android inbox for all enrolled Macs.
 | Area | Current evidence or inspected source | Remaining boundary |
 | --- | --- | --- |
 | Command approval | CLI, authority, transport, execution and phone components exist. The interactive handoff identifies their installed gates. | First installed Mac-Pixel approval and denial; actual service and device behavior. |
-| Several Macs | The selected-Mac screen exists. The combined registry now passes its replacement, isolation and cancellation controls. | Foreground coordinator, combined inbox, filters and exact notification routing. |
+| Several Macs | The combined registry and app-owned foreground coordinator pass their isolation and cancellation controls. The root lifecycle starts all active peers; the selected-Mac screen observes them. | Default combined inbox, filters and exact notification routing. |
 | Phone routing control | Root routing journal supports signed Away control. No phone/app integration was found in the inspected sources. | Authenticated status and Set Away; preserve Mac-only Automatic and Present. |
 | Push | The application starts registration and wake workers. Mac import prepares the configured gateway. | Real registration, FCM delivery, background recovery and provider-backed results. |
 | Audit history | Cached history UI and a shared sync session exist. This pass did not verify the complete live sync composition. | Verify and integrate live synchronization and retention settings. |
@@ -23,7 +23,10 @@ Source documentation contains historical statements. Verify their current call p
 
 ## Next focused integration
 
-Use the application-owned registry for one foreground coordinator across every active Mac/account.
+The application now uses one foreground coordinator across every active Mac/account.
+Eight coordinator tests cover healthy refresh, failure isolation, replacement cleanup, storage recovery, lifecycle replacement, missing owners, removal and a cancelled waiting host.
+The Android unit suite passes 344 cases. These tests do not prove installed activity or physical device behavior.
+The private source still needs the full repository gate before publication.
 Keep connection jobs independent. Filters and navigation must not reconnect peers or replace an open request or biometric operation.
 Key request rows and selections by their complete enrollment scope, rather than a request ID or label alone.
 Expose individual unavailable peers without disabling the other scopes.

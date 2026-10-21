@@ -1,6 +1,10 @@
 package dev.remozio.android
 
 import android.os.Bundle
+import androidx.compose.runtime.LaunchedEffect
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.ViewModelProvider
 import dev.remozio.android.enrollment.PairingViewModel
 import dev.remozio.android.enrollment.PairingSetupSheet
@@ -78,6 +82,11 @@ internal fun RemozioTheme(content: @Composable () -> Unit) {
 
 @Composable
 private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity) {
+    val commands = (LocalContext.current.applicationContext as RemozioApplication).foregroundCommands
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    LaunchedEffect(commands, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { commands.runForeground() }
+    }
     var destination by rememberSaveable { mutableIntStateOf(0) }
     val labels = listOf(R.string.nav_macs, R.string.nav_audit, R.string.nav_settings)
     val icons = listOf(R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)

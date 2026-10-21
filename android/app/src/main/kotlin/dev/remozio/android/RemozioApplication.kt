@@ -17,6 +17,7 @@ import dev.remozio.android.enrollment.StoredMacReader
 import dev.remozio.android.enrollment.PairingReceiptRecovery
 import dev.remozio.android.enrollment.androidPairingReceiptWire
 import dev.remozio.android.updates.androidUpdateHost
+import dev.remozio.android.requests.ForegroundCommandConnections
 import dev.remozio.android.requests.StoredCommandConnections
 import dev.remozio.android.requests.androidCommandConnection
 import dev.remozio.android.requests.commandRequestLimits
@@ -90,6 +91,7 @@ class RemozioApplication : Application() {
             { androidCommandConnection(this, it, commandRequestLimits(), commandMemory) }, enrollmentAccess,
         )
     }
+    internal val foregroundCommands by lazy { ForegroundCommandConnections(commands::acquireActive) }
     internal val pairing by lazy {
         StoredPairingHost(
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
@@ -104,6 +106,7 @@ class RemozioApplication : Application() {
                     }
                 }
             }, ::validatePairingKeys, onChanged = {
+                foregroundCommands.refresh()
                 scope.launch(Dispatchers.IO) { pushRegistrationWork.changed() }
             },
         )
