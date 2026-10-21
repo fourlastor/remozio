@@ -132,8 +132,12 @@ def main():
         # No raw exception, process output or path enters evidence.
         result = {"passed": False, "error": "experimentFailed"}
     encoded = json.dumps(result, sort_keys=True, indent=2) + "\n"
-    if options.output is not None and options.output.is_absolute():
-        options.output.write_text(encoded, encoding="utf-8")
+    try:
+        if options.output is not None and options.output.is_absolute():
+            options.output.write_text(encoded, encoding="utf-8")
+    except (Exception, KeyboardInterrupt):
+        result = {"passed": False, "error": "experimentFailed"}
+        encoded = json.dumps(result, sort_keys=True, indent=2) + "\n"
     print(encoded, end="")
     return 0 if result["passed"] else 1
 

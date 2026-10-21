@@ -1,6 +1,7 @@
 import importlib.util
 import ctypes
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,56 @@ class LinuxOSCaptureReportTests(unittest.TestCase):
         for flag in ("--scratch-path", "--cache-path", "--config-path", "--security-path"):
             self.assertTrue(arguments[arguments.index(flag) + 1].startswith("/tmp/os-capture-test/"))
         self.assertEqual(arguments[arguments.index("--jobs") + 1], "4")
+
+    def run_cli(self, work, output, error=None):
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(sys, "argv", [str(MODULE.__file__), "--work-dir", str(work), "--output", str(output)]), \
+                patch.object(MODULE, "run", return_value=self.report(), side_effect=error) as run, \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            status = MODULE.main()
+        run.assert_called_once_with(work, 30, 600)
+        self.assertEqual(stderr.getvalue(), "")
+        for private in (str(ROOT), str(work), str(output), "Traceback"):
+            self.assertNotIn(private, stdout.getvalue())
+        return status, stdout.getvalue()
+
+    def assert_cli_failure(self, status, stdout):
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(stdout), {"passed": False, "error": "experimentFailed"})
+
+    def test_cli_publishes_success_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "report.json"
+            status, stdout = self.run_cli(root / "work", output)
+            self.assertEqual(status, 0)
+            self.assertEqual(json.loads(stdout), self.report())
+            self.assertEqual(output.read_text(encoding="utf-8"), stdout)
+
+    def test_cli_missing_output_parent_returns_sanitized_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "private-missing-parent" / "report.json"
+            for error in (None, RuntimeError(f"private failure at {ROOT}")):
+                with self.subTest(experiment_failed=error is not None):
+                    self.assert_cli_failure(*self.run_cli(root / "work", output, error))
+            self.assertFalse(output.parent.exists())
+
+    def test_cli_unwritable_output_does_not_report_stale_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "private-unwritable-report.json"
+            # Inject denial so this portable CLI test also works under root.
+            failure = PermissionError(13, "permission denied", str(output))
+            with patch.object(Path, "write_text", side_effect=failure) as write:
+                self.assert_cli_failure(*self.run_cli(root / "work", output))
+            write.assert_called_once()
+            self.assertTrue(json.loads(write.call_args.args[0])["passed"])
+            self.assertFalse(output.exists())
+
+    def test_cli_experiment_failure_still_publishes_sanitized_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "report.json"
+            status, stdout = self.run_cli(root / "work", output, RuntimeError(f"private failure at {ROOT}"))
+            self.assert_cli_failure(status, stdout)
+            self.assertEqual(output.read_text(encoding="utf-8"), stdout)
 
     def test_lifecycle_gate_matches_runner_prerequisites(self):
         supported = {"python": (3, 11), "system": "Linux", "machine": "x86_64",
