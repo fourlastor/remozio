@@ -12,11 +12,18 @@ public enum AdministrativeSetupInterface {
     public static let gatewayVersion: UInt64 = 6
     public static let gatewayActivationVersion: UInt64 = 7
     public static let gatewaySettingsVersion: UInt64 = 8
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion]
+    public static let portableImportVersion: UInt64 = 9
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
-@objc public protocol AdministrativeSetupXPCProtocol {
+@objc public protocol PortableSetupImportXPCProtocol {
+    func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void)
+    func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+}
+
+@objc public protocol AdministrativeSetupXPCProtocol: PortableSetupImportXPCProtocol {
     func gatewaySettingsHello(reply: @escaping @Sendable (UInt64) -> Void)
     func gatewaySettingsProgress(reply: @escaping @Sendable (Data?) -> Void)
     func retainGatewaySettings(_ expected: Data, selection: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -64,6 +71,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var gatewayReady = false
     private var gatewayActivationReady = false
     private var gatewaySettingsReady = false
+    private var portableImportReady = false
     private var asynchronousID: UUID?
     private var asynchronousTask: Task<Void, Never>?
     private var closed = false
@@ -100,6 +108,77 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         changed.1?.cancel()
         if changed.0 { invalidate() }
     }
+    public func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try operation(handshake: true) { _ in
+                try owner.verifyCurrent(); try owner.requirePortableImportSupport()
+                ready = true; portableImportReady = true
+            }
+            defer { completed.activity?.close() }
+            onHandshake(); send { reply(AdministrativeSetupInterface.portableImportVersion) }
+        } catch { close(); reply(0) }
+    }
+    public func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard portableImportReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.portableImportProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
+    }
+    public func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            // Invocation and administrator rights are checked on the exported invocation before task dispatch.
+            let uid = try verify()
+            let reservation = try lock.withLock { () -> (uid: uid_t, request: SetupPortableImportOperation, id: UUID,
+                                                         activity: ReleaseActivityToken?, admission: SetupOwnerAsyncWork.Token) in
+                guard !closed, !busy, ready, portableImportReady, request.count <= SetupPortableImportOperation.maximumBytes,
+                      authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AdministrativeSetupError.unavailable }
+                busy = true
+                let admission: SetupOwnerAsyncWork.Token
+                do { admission = try owner.acquireSetupReplyAdmission() } catch { busy = false; throw error }
+                let activity: ReleaseActivityToken?
+                do { activity = try owner.acquireReleaseActivity() } catch { busy = false; admission.close(); throw error }
+                do {
+                    let operation = try SetupPortableImportOperation.decode(request)
+                    guard operation.expected.runtime.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                    try authorize(authorization); try activity?.validate()
+                    let id = UUID(); asynchronousID = id
+                    return (uid, operation, id, activity, admission)
+                } catch { busy = false; activity?.close(); admission.close(); throw error }
+            }
+            lock.withLock {
+                guard !closed, asynchronousID == reservation.id else {
+                    reservation.activity?.close(); reservation.admission.close(); busy = false; asynchronousID = nil; return
+                }
+                asynchronousTask = Task { [self, reservation, reply] in
+                    defer {
+                        lock.withLock { if asynchronousID == reservation.id { asynchronousID = nil; asynchronousTask = nil; busy = false } }
+                        reservation.activity?.close(); reservation.admission.close()
+                    }
+                    let bytes: Data?, failed: Bool
+                    do {
+                        try Task.checkCancellation()
+                        let result = try await owner.performPortableImportOperation(callerUID: reservation.uid, request: reservation.request)
+                        try Task.checkCancellation(); try reservation.activity?.validate()
+                        bytes = try result.bytes; failed = false
+                    } catch { bytes = nil; failed = true }
+                    let terminate = lock.withLock { () -> Bool in
+                        guard !closed, asynchronousID == reservation.id else { return false }
+                        // The lock defers another invocation until admission is released after the actual reply callback.
+                        reply(bytes)
+                        reservation.activity?.close(); reservation.admission.close()
+                        asynchronousID = nil; asynchronousTask = nil; busy = false
+                        if failed { closed = true; ready = false }
+                        return failed
+                    }
+                    if terminate { invalidate() }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+
     public func gatewaySettingsHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             let completed = try operation(handshake: true) { _ in

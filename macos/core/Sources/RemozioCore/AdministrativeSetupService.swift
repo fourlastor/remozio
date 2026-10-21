@@ -150,6 +150,8 @@ public final class AdministrativeSetupService {
                 gatewayActivationOperation: nativeMode == .native
                     ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil,
                 gatewaySettingsOperation: nativeMode == .native
+                    ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil,
+                importedGatewayOperation: nativeMode == .native
                     ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil)
             owner = next
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,

@@ -183,6 +183,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return result
         }
     }
+    func requirePortableImportSupport() throws {
+        try lock.withLock {
+            guard !closed, !closing, importedGatewayOperation != nil else { throw AdministrativeSetupError.unavailable }
+        }
+    }
     func verifyCurrent() throws {
         try withMachine { _ = try currentInventory($0) }
     }
