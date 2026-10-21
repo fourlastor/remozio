@@ -30,6 +30,14 @@ struct CloudflareTunnelRunCredential: Sendable, CustomStringConvertible, CustomD
     }
 
     func withFileBytes<Value>(_ body: (Data) throws -> Value) rethrows -> Value { try body(fileBytes) }
+    static func restore(_ bytes: Data, tunnel: CloudflareTunnelObservation) throws -> Self {
+        guard bytes.count <= maximumTokenBytes, let token = String(data: bytes, encoding: .utf8) else {
+            throw CloudflareProvisioningError.invalidResponse
+        }
+        let value = try Self(token: token, tunnel: tunnel)
+        guard value.fileBytes == bytes else { throw CloudflareProvisioningError.invalidResponse }
+        return value
+    }
     private struct Fields: Decodable { let a: String; let t: String; let s: String; let e: String? }
 }
 
