@@ -232,4 +232,68 @@ final class MacPortableSetupImportFlowTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try reviewed.operation(action: .retain, expected: expected))
     }
 
+    @MainActor
+    func testCustodyRequirementsKeepThePreviewActionableWithoutAttemptingAWrite() async throws {
+        let fixture = try RelayProvisioningFixture(), owner = try fixture.owner(); defer { try? owner.close() }
+        let expected = try fixture.progress(owner), reviewed = ReviewedSetupFile(proposal: try fixture.f.proposal())
+        let requirements = try reviewed.custodyRequirements(expected: expected)
+        XCTAssertEqual(requirements, [.runtimeFiles, .relayCredential])
+        XCTAssertFalse(SetupPortableImportCustodyChoices().satisfies(requirements))
+        XCTAssertTrue(SetupPortableImportCustodyChoices(runtimeFiles: true, relayCredential: true).satisfies(requirements))
+        let events = Events(), root = Root(expected, events: events)
+        let controls = MacPortableSetupImportControls(reviewed: reviewed, driver: driver(root: root, events: events))
+        defer { controls.close() }
+        await controls.refresh(); await controls.importFile(custody: .init())
+        XCTAssertEqual(controls.requiredCustody, requirements); XCTAssertTrue(controls.loaded)
+        XCTAssertEqual(controls.progress, expected); XCTAssertEqual(controls.notice, .custodyRequired)
+        let actions = await events.actions, prompts = await events.prompts
+        XCTAssertTrue(actions.isEmpty); XCTAssertEqual(prompts, 0)
+        let different = ReviewedSetupFile(proposal: PortableSetup(defaults: try fixture.f.proposal().defaults))
+        defer { different.close() }
+        XCTAssertThrowsError(try different.custodyRequirements(expected: expected)) {
+            XCTAssertEqual($0 as? SetupPortableImportFlowError, .differentProposal)
+        }
+    }
+    func testPreferenceValuesRequireMatchingCompletionAndExcludeLocalOnlyKeys() async throws {
+        let fixture = try RelayProvisioningFixture(), owner = try fixture.owner(); defer { try? owner.close() }
+        let preferences = try PortableAppPreferences(preferences: [PortableAppPreferences.menuBarKey: false,
+            CommandFrontendCallerSettings.modeKey: "pipes", CommandFrontendCallerSettings.controlRetryKey: "17"])
+        let proposal = try fixture.f.proposal().addingAppPreferences(preferences)
+        let expected = try fresh(fixture.progress(owner)), reviewed = ReviewedSetupFile(proposal: proposal)
+        defer { reviewed.close() }
+        XCTAssertThrowsError(try reviewed.appPreferenceValues(completed: expected, readExisting: { _ in nil }))
+        let events = Events(), root = Root(expected, events: events)
+        let result = try await driver(root: root, events: events).importFile(reviewed, expected: expected, custody: custody) { _, _ in }
+        var destination: [String: Any] = [PortableAppPreferences.menuBarKey: true, "currentMode": "present", "loginRegistered": true]
+        let values = try reviewed.appPreferenceValues(completed: result.progress, readExisting: { destination[$0] })
+        XCTAssertEqual(Set(values.keys), Set([PortableAppPreferences.menuBarKey, CommandFrontendCallerSettings.modeKey, CommandFrontendCallerSettings.controlRetryKey]))
+        for (key, value) in values { destination[key] = value }
+        XCTAssertEqual(destination[PortableAppPreferences.menuBarKey] as? Bool, false)
+        XCTAssertEqual(destination[CommandFrontendCallerSettings.modeKey] as? String, "pipes")
+        XCTAssertEqual(destination["currentMode"] as? String, "present"); XCTAssertEqual(destination["loginRegistered"] as? Bool, true)
+        let different = ReviewedSetupFile(proposal: PortableSetup(defaults: proposal.defaults)); defer { different.close() }
+        XCTAssertThrowsError(try different.appPreferenceValues(completed: result.progress, readExisting: { _ in nil })) {
+            XCTAssertEqual($0 as? SetupPortableImportFlowError, .differentProposal)
+        }
+        XCTAssertTrue(try reviewed.custodyRequirements(expected: result.progress).isEmpty)
+    }
+    func testSparsePreferencesValidateTheDestinationBeforeReturningAnyWrite() async throws {
+        let fixture = try RelayProvisioningFixture(), owner = try fixture.owner(); defer { try? owner.close() }
+        let preferences = try PortableAppPreferences(preferences: [CommandFrontendCallerSettings.initialBackoffKey: "1500"])
+        let proposal = try fixture.f.proposal().addingAppPreferences(preferences)
+        let expected = try fresh(fixture.progress(owner)), reviewed = ReviewedSetupFile(proposal: proposal)
+        defer { reviewed.close() }
+        let events = Events(), root = Root(expected, events: events)
+        let result = try await driver(root: root, events: events).importFile(reviewed, expected: expected, custody: custody) { _, _ in }
+        var writes = 0
+        do {
+            let values = try reviewed.appPreferenceValues(completed: result.progress, readExisting: { key in
+                key == CommandFrontendCallerSettings.maximumBackoffKey ? "1000" : nil
+            })
+            for _ in values { writes += 1 }
+            XCTFail("Accepted an invalid destination merge")
+        } catch {}
+        XCTAssertEqual(writes, 0)
+    }
+
 }

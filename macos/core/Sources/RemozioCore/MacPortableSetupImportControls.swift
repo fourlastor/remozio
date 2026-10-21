@@ -4,12 +4,13 @@ import Observation
 public enum MacPortableSetupImportActivity: Equatable, Sendable {
     case refreshing, applying(SetupPortableImportOperation.Action)
 }
-public enum MacPortableSetupImportNotice: Equatable, Sendable { case refreshFailed, operationOutcomeUnknown }
+public enum MacPortableSetupImportNotice: Equatable, Sendable { case refreshFailed, operationOutcomeUnknown, custodyRequired, authorizationExpired, differentSetupFile }
 
 /// Controls explicit import steps. Local completion does not assert provider access or live service health.
 @MainActor @Observable
 public final class MacPortableSetupImportControls {
     public private(set) var progress: SetupPortableImportProgress?
+    public private(set) var requiredCustody = Set<SetupPortableImportCustodyRequirement>()
     public private(set) var loaded = false
     public private(set) var activity: MacPortableSetupImportActivity?
     public private(set) var notice: MacPortableSetupImportNotice?
@@ -27,13 +28,14 @@ public final class MacPortableSetupImportControls {
     }
     public func refresh() async {
         guard !closed, !working else { return }
-        activity = .refreshing; loaded = false; progress = nil; notice = nil; lastResult = nil
+        activity = .refreshing; loaded = false; progress = nil; requiredCustody = []; notice = nil; lastResult = nil
         defer { activity = nil }
         do {
             let value = try await driver.progress()
             try Task.checkCancellation()
             guard !closed else { return }
-            progress = value; loaded = true
+            let requirements = try value.map { try reviewed.custodyRequirements(expected: $0) } ?? []
+            progress = value; requiredCustody = requirements; loaded = true
         } catch { fail(error, reading: true) }
     }
     public func perform(_ action: SetupPortableImportOperation.Action, fileCustodyAccepted: Bool = false) async {
@@ -46,11 +48,13 @@ public final class MacPortableSetupImportControls {
             try Task.checkCancellation()
             try result.validate(request)
             guard !closed else { return }
+            requiredCustody = try reviewed.custodyRequirements(expected: result.progress)
             progress = result.progress; lastResult = result
         } catch { fail(error) }
     }
     public func importFile(custody: SetupPortableImportCustodyChoices) async {
         guard !closed, loaded, !working, let expected = progress else { return }
+        guard custody.satisfies(requiredCustody) else { notice = .custodyRequired; return }
         activity = .applying(.retain); notice = nil; lastResult = nil
         defer { activity = nil }
         do {
@@ -59,6 +63,7 @@ public final class MacPortableSetupImportControls {
             }
             try Task.checkCancellation()
             guard !closed else { return }
+            requiredCustody = try reviewed.custodyRequirements(expected: result.progress)
             progress = result.progress; lastResult = result
         } catch { fail(error) }
     }
@@ -68,13 +73,15 @@ public final class MacPortableSetupImportControls {
     }
 
     public func close() {
-        closed = true; reviewed.close(); loaded = false; progress = nil; notice = nil; lastResult = nil
+        closed = true; reviewed.close(); loaded = false; progress = nil; requiredCustody = []; notice = nil; lastResult = nil
     }
     private func fail(_ error: any Error, reading: Bool = false) {
-        loaded = false; progress = nil; lastResult = nil
+        loaded = false; progress = nil; requiredCustody = []; lastResult = nil
         guard !closed else { return }
         if Task.isCancelled || error is CancellationError || error as? SetupAdministratorAuthorizationError == .cancelled {
             notice = nil
+        } else if error as? SetupPortableImportFlowError == .authorizationExpired { notice = .authorizationExpired
+        } else if error as? SetupPortableImportFlowError == .differentProposal { notice = .differentSetupFile
         } else { notice = reading ? .refreshFailed : .operationOutcomeUnknown }
     }
 }

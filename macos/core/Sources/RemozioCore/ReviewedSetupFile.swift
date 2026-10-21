@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Holds an authenticated proposal in memory and exposes its credential-free preview.
@@ -21,10 +22,42 @@ public final class ReviewedSetupFile: @unchecked Sendable, CustomStringConvertib
         }
     }
 
-    func actions(expected: SetupPortableImportProgress, custody: SetupPortableImportCustodyChoices) throws -> [SetupPortableImportOperation.Action] {
+    public func custodyRequirements(expected: SetupPortableImportProgress) throws -> Set<SetupPortableImportCustodyRequirement> {
+        requirements(for: try plannedActions(expected: expected))
+    }
+
+    /// The caller must authenticate completion and read/apply these values without suspension.
+    /// This method returns imported app preferences only; it does not write or assert live readiness.
+    public func appPreferenceValues(completed: SetupPortableImportProgress, readExisting: (String) -> Any?) throws -> [String: Any] {
         try lock.withLock {
             guard let proposal else { throw AdministrativeSetupChannelError.closed }
-            _ = try SetupPortableImportOperation(action: .retain, expected: expected, proposal: proposal)
+            guard completed.phase == .rootComplete else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
+            try validateProposal(proposal, expected: completed)
+            return try proposal.appPreferences?.applicationValues(readExisting: readExisting) ?? [:]
+        }
+    }
+
+    func actions(expected: SetupPortableImportProgress, custody: SetupPortableImportCustodyChoices) throws -> [SetupPortableImportOperation.Action] {
+        let actions = try plannedActions(expected: expected)
+        guard custody.satisfies(requirements(for: actions)) else { throw SetupPortableImportFlowError.custodyNotAccepted }
+        return actions
+    }
+    private func requirements(for actions: [SetupPortableImportOperation.Action]) -> Set<SetupPortableImportCustodyRequirement> {
+        var result = Set<SetupPortableImportCustodyRequirement>()
+        if actions.contains(.prepareRuntime) { result.insert(.runtimeFiles) }
+        if actions.contains(.prepareGateway), preview.firebaseProject != nil { result.insert(.pushCredentials) }
+        if actions.contains(.prepareRunCredential) { result.insert(.relayCredential) }
+        return result
+    }
+    private func validateProposal(_ proposal: PortableSetup, expected: SetupPortableImportProgress) throws {
+        let digest = Data(SHA256.hash(data: try proposal.canonicalBytes()))
+        guard expected.proposalDigest == nil || expected.proposalDigest == digest else { throw SetupPortableImportFlowError.differentProposal }
+        _ = try SetupPortableImportOperation(action: .retain, expected: expected, proposal: proposal)
+    }
+    private func plannedActions(expected: SetupPortableImportProgress) throws -> [SetupPortableImportOperation.Action] {
+        try lock.withLock {
+            guard let proposal else { throw AdministrativeSetupChannelError.closed }
+            try validateProposal(proposal, expected: expected)
             let gateway = proposal.fcm != nil || proposal.pushClient != nil
             if gateway { _ = try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false) }
             if expected.phase == .rootComplete || expected.phase == .relayPrepared { return [.complete] }
@@ -39,11 +72,6 @@ public final class ReviewedSetupFile: @unchecked Sendable, CustomStringConvertib
                 actions += [.createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector]
             }
             actions.append(.complete)
-            guard !actions.contains(.prepareRuntime) || custody.runtimeFiles,
-                  !actions.contains(.prepareGateway) || !gateway || custody.pushCredentials,
-                  !actions.contains(.prepareRunCredential) || custody.relayCredential else {
-                throw SetupPortableImportFlowError.custodyNotAccepted
-            }
             return actions
         }
     }
