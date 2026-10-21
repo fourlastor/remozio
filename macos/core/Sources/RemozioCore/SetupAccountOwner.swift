@@ -721,6 +721,57 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func prepareImportedRelayRunCredential(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                        fileCustodyAccepted: Bool, operations: RelayRunCredentialSetupOperations = .native,
+                        send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> RelayRunCredentialReference {
+        try await withRetainedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) {
+            configuration, binding, plan, tunnel, tunnelSnapshot, scoped, verifyRetained in
+            @Sendable func prepare(_ credential: CloudflareTunnelRunCredential?) throws -> RelayRunCredentialReference {
+                try Task.checkCancellation()
+                return try self.withImportedRelayProvisioningContext(binding: binding, callerUID: callerUID, expected: expected,
+                    proposal: proposal) { account, inventory, state, intent, plan, directory, owner, verify in
+                    guard state.configurationPublished, let runtime = state.reference else { throw RuntimePreparationError.incomplete }
+                    func verifyAll() throws {
+                        try Task.checkCancellation(); try verify()
+                        guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == tunnel,
+                              try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == tunnelSnapshot else {
+                            throw RelayProvisioningError.staleRecord
+                        }
+                    }
+                    try verifyAll()
+                    let reference = try SharedSetupRelayRunReferenceStorage.read(expected: intent, plan: plan, created: tunnel,
+                        directory: directory, owner: owner)
+                    let context = RelayRunCredentialSetupContext(account: account, inventory: inventory, expected: intent,
+                        plan: plan, created: tunnel, runtime: runtime, reference: reference)
+                    let prepared: RelayRunCredentialReference
+                    do { prepared = try operations.prepare(context, credential, fileCustodyAccepted, verifyAll) }
+                    catch RelayRunCredentialSetupError.credentialRequired {
+                        guard reference == nil, credential == nil else { throw RuntimePreparationError.missingMaterial }
+                        guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
+                        guard [.runtimePublished, .gatewayPrepared].contains(intent.phase) else { throw RuntimePreparationError.incomplete }
+                        throw RelayRunCredentialSetupError.credentialRequired
+                    }
+                    _ = try RelayRunCredentialReference.decode(prepared.encoded, expected: intent, plan: plan, created: tunnel,
+                        runtime: runtime, account: account, inventory: inventory)
+                    try verifyAll()
+                    let accepted = try SharedSetupRelayRunReferenceStorage.retain(prepared, expected: intent, plan: plan,
+                        created: tunnel, runtime: runtime, directory: directory, owner: owner, verifyCurrent: verifyAll)
+                    try operations.publish(context, accepted, verifyAll)
+                    guard try SharedSetupRelayRunReferenceStorage.read(expected: intent, plan: plan, created: tunnel,
+                        directory: directory, owner: owner) == accepted else { throw RelayProvisioningError.staleRecord }
+                    try verifyAll(); return accepted
+                }
+            }
+            do { return try prepare(nil) }
+            catch RelayRunCredentialSetupError.credentialRequired {
+                let credential = try await CloudflareTunnelTokenClient(send: scoped).read(configuration,
+                    expected: binding.retained, plan: plan, created: tunnel)
+                try Task.checkCancellation(); try verifyRetained()
+                return try prepare(credential)
+            }
+        }
+    }
+
     func readImportedRelayRunCredential(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                         send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareTunnelRunCredential {
         try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, scoped in
@@ -977,6 +1028,18 @@ public final class SetupAccountOwner: @unchecked Sendable {
                             send: CloudflareProvisioningScopeClient.Send?,
                             operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
                                 SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, @escaping CloudflareProvisioningScopeClient.Send) async throws -> Value) async throws -> Value {
+        try await withRetainedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) {
+            configuration, binding, plan, tunnel, snapshot, scoped, verify in
+            _ = try await CloudflareCreatedTunnelClient(send: scoped).inspect(configuration, expected: binding.retained, plan: plan, created: tunnel)
+            try Task.checkCancellation(); try verify()
+            return try await operation(configuration, binding, plan, tunnel, snapshot, scoped)
+        }
+    }
+
+    private func withRetainedImportedRelay<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                            send: CloudflareProvisioningScopeClient.Send?,
+                            operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
+                                SharedSetupRelayProvisioningRecord, SharedSetupRelayProvisioningStorage.Snapshot, @escaping CloudflareProvisioningScopeClient.Send, @escaping @Sendable () throws -> Void) async throws -> Value) async throws -> Value {
         try await withImportedRelayInspection(callerUID: callerUID, expected: expected, proposal: proposal, requiresPlan: true) { configuration, binding in
             guard let plan = binding.plan else { throw SharedSetupImportCompletionValidation.Failure.incomplete }
             let retained = try self.withImportedRelayProvisioning(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
@@ -1003,9 +1066,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 return try await transport(request)
             }
             do {
-                _ = try await CloudflareCreatedTunnelClient(send: scoped).inspect(configuration, expected: binding.retained, plan: plan, created: retained.0)
-                try Task.checkCancellation(); try verifyRetained()
-                let observed = try await operation(configuration, binding, plan, retained.0, retained.1, scoped)
+                let observed = try await operation(configuration, binding, plan, retained.0, retained.1, scoped, verifyRetained)
                 try Task.checkCancellation(); try verifyRetained(); return observed
             } catch {
                 try Task.checkCancellation(); try verifyRetained()
@@ -1017,6 +1078,17 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private func withImportedRelayProvisioning<Value>(binding: ImportedRelayInspectionBinding, callerUID: uid_t,
                     expected: SetupPortableImportProgress, proposal: PortableSetup,
                     body: (SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {
+        try withImportedRelayProvisioningContext(binding: binding, callerUID: callerUID, expected: expected, proposal: proposal) {
+            _, _, _, intent, plan, directory, owner, verify in
+            try withoutActuallyEscaping(verify) { current in
+                try body(intent, plan, directory, owner, current)
+            }
+        }
+    }
+
+    private func withImportedRelayProvisioningContext<Value>(binding: ImportedRelayInspectionBinding, callerUID: uid_t,
+                    expected: SetupPortableImportProgress, proposal: PortableSetup,
+                    body: (AccountPreparationIntent, InstallationInventory, RuntimePreparationState, SharedSetupImportIntent, SharedSetupImportRelayPlan, ProtectedSetupDirectory, uid_t, () throws -> Void) throws -> Value) throws -> Value {
         try withMachine(admission: binding.admission) { machine in
             guard expected.runtime.ownerUID == callerUID, let account = try machine.accountPreparation(ownerUID: callerUID) else {
                 throw AdministrativeSetupError.wrongAccount
@@ -1048,7 +1120,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                             throw AdministrativeSetupError.staleProgress
                         }
                     }
-                    try verify(); let result = try body(retained, plan, directory, owner, verify); try verify(); return result
+                    try verify(); let result = try body(account, inventory, runtime, retained, plan, directory, owner, verify); try verify(); return result
                 }
             }
         }

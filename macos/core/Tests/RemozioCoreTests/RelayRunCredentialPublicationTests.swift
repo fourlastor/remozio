@@ -6,9 +6,9 @@ import XCTest
 @testable import RemozioCore
 
 /// Owned temporary files and disposable keys. These tests do not prove native service isolation.
-final class RelayRunCredentialPublicationTests: XCTestCase {
+final class RelayRunCredentialPublicationTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
-    private struct Fixture {
+    private struct Fixture: Sendable {
         let host: RelayProvisioningFixture
         let plan: SharedSetupImportRelayPlan
         let created: SharedSetupRelayProvisioningRecord
@@ -394,5 +394,134 @@ final class RelayRunCredentialPublicationTests: XCTestCase {
             XCTAssertThrowsError(try SharedSetupImportRelayStorage.validateTrackedFiles(records: [expected], directory: directory))
             XCTAssertThrowsError(try f.host.machine { try RuntimeReleaseCompatibilitySnapshot.capture(machine: $0) })
         }
+    }
+
+    private final class OwnerSharedDirectory: Sendable {
+        let path: String
+        init() throws {
+            path = "/private/tmp/remozio-relay-owner-" + UUID().uuidString
+            try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false)
+            guard chmod(path, 0o755) == 0 else {
+                let code = errno; try? FileManager.default.removeItem(atPath: path); throw JournalLeaseError.system(code)
+            }
+        }
+        deinit { try? FileManager.default.removeItem(atPath: path) }
+    }
+
+    private struct OwnerFixture: Sendable {
+        let base: Fixture
+        let owner: SetupAccountOwner
+        let expected: SetupPortableImportProgress
+        let proposal: PortableSetup
+        let operations: RelayRunCredentialSetupOperations
+        let shared: OwnerSharedDirectory
+        var privatePath: String { base.host.f.accountFixture.root.path + "/RelayRuntime/relay-run-material.cbor" }
+    }
+    private func ownerFixture() throws -> OwnerFixture {
+        let f = try fixture(); _ = try retainRuntimeAndTunnel(f)
+        let anchor = f.host.f.accountFixture.root.path, shared = try OwnerSharedDirectory()
+        let operations = RelayRunCredentialSetupOperations(prepare: { context, credential, accepted, verify in
+            let directory = try ProtectedSetupDirectory(anchor: anchor, relativePath: "RelayRuntime", owner: getuid())
+            defer { directory.close() }
+            return try RelayRunCredentialPreparation.restoreOrCreate(directory: directory, owner: getuid(),
+                account: context.account, inventory: context.inventory, expected: context.expected, plan: context.plan,
+                created: context.created, runtime: context.runtime, reference: context.reference, verifyCurrent: verify,
+                makeCredential: {
+                    guard accepted else { throw RuntimePreparationError.custodyNotAccepted }
+                    guard let credential else { throw RelayRunCredentialSetupError.credentialRequired }
+                    return credential
+                }).reference
+        }, publish: { context, reference, verify in
+            let privateDirectory = try ProtectedSetupDirectory(anchor: anchor, relativePath: "RelayRuntime", owner: getuid(), createIfMissing: false)
+            defer { privateDirectory.close() }
+            let material = try RelayRunCredentialMaterial.decode(ProtectedServiceConfiguration.read(anchor: privateDirectory.path,
+                relativePath: "relay-run-material.cbor", owner: getuid()), expected: context.expected, plan: context.plan,
+                created: context.created, runtime: context.runtime, account: context.account, inventory: context.inventory)
+            let sharedDirectory = try ProtectedSetupDirectory(anchor: shared.path, relativePath: "RelayService", owner: getuid(), visibility: .sharedMetadata)
+            defer { sharedDirectory.close() }
+            let mode: RelayRunCredentialPublication.Mode = [.runtimePublished, .gatewayPrepared].contains(context.expected.phase)
+                ? .prepareUnactivated : .validateRetained
+            _ = try RelayRunCredentialPublication.publish(material: material, reference: reference, expected: context.expected,
+                directory: sharedDirectory, owner: getuid(), transportUID: getuid(), transportGID: getgid(), mode: mode, verifyCurrent: verify)
+        })
+        let owner = try f.host.owner()
+        return try .init(base: f, owner: owner, expected: f.host.progress(owner), proposal: f.host.f.proposal(), operations: operations, shared: shared)
+    }
+    private func ownerReplies(_ f: OwnerFixture) throws -> [RelayIngressProbe.Step] {
+        let configuration = try XCTUnwrap(f.proposal.cloudflare)
+        let metadata = try RelayIngressProviderFixture.metadata(configuration: configuration, plan: f.base.plan)
+        let token = f.base.credential.withFileBytes { String(decoding: $0, as: UTF8.self) }
+        let reply = try JSONSerialization.data(withJSONObject: ["success": true, "errors": [], "result": token])
+        return [RelayIngressProbe.reply(metadata), RelayIngressProbe.reply(reply), RelayIngressProbe.reply(metadata)]
+    }
+    private func prepareOwner(_ f: OwnerFixture, accepted: Bool = true, owner: SetupAccountOwner? = nil,
+                              operations: RelayRunCredentialSetupOperations? = nil,
+                              probe: RelayIngressProbe) async throws -> RelayRunCredentialReference {
+        try await (owner ?? f.owner).prepareImportedRelayRunCredential(callerUID: getuid(), expected: f.expected,
+            proposal: f.proposal, fileCustodyAccepted: accepted, operations: operations ?? f.operations,
+            send: { try await probe.send($0) })
+    }
+    func testSetupOwnerReadsOnceWithoutHoldingTheMachineLeaseThenRestoresOffline() async throws {
+        let f = try ownerFixture(); defer { try? f.owner.close() }
+        let probe = try RelayIngressProbe(ownerReplies(f), hook: { _, _ in try f.base.host.machine { _ in } })
+        let reference = try await prepareOwner(f, probe: probe)
+        XCTAssertEqual(try f.base.host.progress(f.owner), f.expected)
+        let requests = await probe.all(); XCTAssertEqual(requests.count, 3)
+        let offline = RelayIngressProbe([])
+        let restored = try await prepareOwner(f, accepted: false, probe: offline)
+        XCTAssertEqual(restored, reference)
+        try f.owner.close()
+        let reopened = try f.base.host.owner(); defer { try? reopened.close() }
+        let afterReopen = try await prepareOwner(f, accepted: false, owner: reopened, probe: offline)
+        XCTAssertEqual(afterReopen, reference)
+        let unexpected = await offline.all(); XCTAssertTrue(unexpected.isEmpty)
+    }
+    func testSetupOwnerMissingAcceptedMaterialNeverFetchesAReplacement() async throws {
+        let f = try ownerFixture(); defer { try? f.owner.close() }
+        _ = try await prepareOwner(f, probe: RelayIngressProbe(ownerReplies(f)))
+        XCTAssertEqual(unlink(f.privatePath), 0)
+        let probe = RelayIngressProbe([])
+        do { _ = try await prepareOwner(f, probe: probe); XCTFail("Accepted material was recreated") }
+        catch { XCTAssertEqual(error as? RuntimePreparationError, .missingMaterial) }
+        let requests = await probe.all(); XCTAssertTrue(requests.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.privatePath))
+    }
+    func testSetupOwnerCannotFetchWithoutCustodyConsentOrAcceptLateInventoryChanges() async throws {
+        do {
+            let f = try ownerFixture(); defer { try? f.owner.close() }; let probe = RelayIngressProbe([])
+            do { _ = try await prepareOwner(f, accepted: false, probe: probe); XCTFail("Missing consent was accepted") }
+            catch { XCTAssertEqual(error as? RuntimePreparationError, .custodyNotAccepted) }
+            let requests = await probe.all(); XCTAssertTrue(requests.isEmpty)
+        }
+        for changedAt in 1...3 {
+            let f = try ownerFixture(); defer { try? f.owner.close() }
+            let probe = try RelayIngressProbe(ownerReplies(f), hook: { count, _ in
+                if count == changedAt {
+                    try f.base.host.machine { machine in
+                        let current = try XCTUnwrap(machine.inventory())
+                        _ = try machine.writeInventory(current, expectedRevision: current.revision)
+                    }
+                }
+            })
+            do { _ = try await prepareOwner(f, probe: probe); XCTFail("A stale operation retained a credential") }
+            catch { XCTAssertEqual(error as? AdministrativeSetupError, .staleProgress) }
+            let requests = await probe.all(); XCTAssertEqual(requests.count, changedAt)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: f.privatePath))
+        }
+    }
+    func testSetupOwnerRecoversAfterOperationalPublicationLosesItsReply() async throws {
+        let f = try ownerFixture(); defer { try? f.owner.close() }
+        let interrupted = RelayRunCredentialSetupOperations(prepare: f.operations.prepare, publish: { context, reference, verify in
+            try f.operations.publish(context, reference, verify); throw Interrupted()
+        })
+        let probe = try RelayIngressProbe(ownerReplies(f))
+        do { _ = try await prepareOwner(f, operations: interrupted, probe: probe); XCTFail("The simulated lost reply succeeded") }
+        catch { XCTAssertTrue(error is Interrupted) }
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), offline = RelayIngressProbe([])
+        let restored = try await prepareOwner(f, probe: offline)
+        XCTAssertEqual(restored, try RelayRunCredentialMaterial.decode(before, expected: f.base.expected, plan: f.base.plan,
+            created: f.base.created, runtime: f.base.runtime, account: f.base.account, inventory: f.base.inventory).reference)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+        let requests = await offline.all(); XCTAssertTrue(requests.isEmpty)
     }
 }
