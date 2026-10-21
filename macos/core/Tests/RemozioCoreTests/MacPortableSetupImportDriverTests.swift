@@ -59,7 +59,7 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
         let result = try await driver.perform(request)
         XCTAssertEqual(result.status, .applied)
         let observed = await events.values
-        XCTAssertEqual(observed, ["start", "progress", "authorize", "perform", "rights.close", "root.close"])
+        XCTAssertEqual(observed, ["start", "progress", "authorize", "perform", "root.close", "rights.close"])
     }
     func testFailedHandshakeAndChangedProgressCannotObtainRightsOrSendTheProposal() async throws {
         let fixture = try RelayProvisioningFixture(), owner = try fixture.owner()
@@ -69,7 +69,7 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
             let events = Events(), driver = make(events, root: Root(events, expected: nil, startFails: startFails))
             do { _ = try await driver.perform(request); XCTFail("Accepted missing destination") } catch {}
             let observed = await events.values
-            XCTAssertEqual(observed, startFails ? ["start", "root.close"] : ["start", "progress", "root.close"])
+            XCTAssertEqual(observed, startFails ? ["start", "root.close", "rights.close"] : ["start", "progress", "root.close", "rights.close"])
         }
     }
     func testLostWriteReplyClosesWithoutRetryingOrPretendingToReadBackTheOutcome() async throws {
@@ -80,7 +80,7 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
         let request = try SetupPortableImportOperation(action: .retain, expected: expected, proposal: fixture.f.proposal())
         do { _ = try await driver.perform(request); XCTFail("Accepted lost reply") } catch {}
         let observed = await events.values
-        XCTAssertEqual(observed, ["start", "progress", "authorize", "perform", "rights.close", "root.close"])
+        XCTAssertEqual(observed, ["start", "progress", "authorize", "perform", "root.close", "rights.close"])
     }
     func testCancellationAfterTheAdministratorPromptCannotDispatchAWrite() async throws {
         let fixture = try RelayProvisioningFixture(), owner = try fixture.owner()
@@ -92,6 +92,6 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
         do { _ = try await task.value; XCTFail("Accepted cancelled authorization") }
         catch { XCTAssertTrue(error is CancellationError) }
         let observed = await events.values
-        XCTAssertEqual(observed, ["start", "progress", "authorize", "rights.close", "root.close"])
+        XCTAssertEqual(observed, ["start", "progress", "authorize", "root.close", "rights.close"])
     }
 }

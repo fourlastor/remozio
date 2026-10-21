@@ -21,6 +21,33 @@ public final class ReviewedSetupFile: @unchecked Sendable, CustomStringConvertib
         }
     }
 
+    func actions(expected: SetupPortableImportProgress, custody: SetupPortableImportCustodyChoices) throws -> [SetupPortableImportOperation.Action] {
+        try lock.withLock {
+            guard let proposal else { throw AdministrativeSetupChannelError.closed }
+            _ = try SetupPortableImportOperation(action: .retain, expected: expected, proposal: proposal)
+            let gateway = proposal.fcm != nil || proposal.pushClient != nil
+            if gateway { _ = try proposal.gatewayPreparationChoices(fileWakeCustodyAccepted: false) }
+            if expected.phase == .rootComplete || expected.phase == .relayPrepared { return [.complete] }
+            var actions: [SetupPortableImportOperation.Action] = [.retain]
+            if expected.phase == nil || expected.phase == .retained {
+                if proposal.cloudflare != nil { actions.append(.prepareRelayPlan) }
+                actions.append(.prepareRuntime)
+            } else if expected.phase == .runtimePublished, proposal.cloudflare != nil { actions.append(.prepareRelayPlan) }
+            if expected.phase != .gatewayPrepared { actions += [.activateRuntime, .prepareGateway] }
+            if gateway { actions.append(.activateGateway) }
+            if proposal.cloudflare != nil {
+                actions += [.createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector]
+            }
+            actions.append(.complete)
+            guard !actions.contains(.prepareRuntime) || custody.runtimeFiles,
+                  !actions.contains(.prepareGateway) || !gateway || custody.pushCredentials,
+                  !actions.contains(.prepareRunCredential) || custody.relayCredential else {
+                throw SetupPortableImportFlowError.custodyNotAccepted
+            }
+            return actions
+        }
+    }
+
     public func close() { lock.withLock { proposal = nil } }
     public var description: String { "ReviewedSetupFile(redacted)" }
     public var debugDescription: String { description }

@@ -49,6 +49,24 @@ public final class MacPortableSetupImportControls {
             progress = result.progress; lastResult = result
         } catch { fail(error) }
     }
+    public func importFile(custody: SetupPortableImportCustodyChoices) async {
+        guard !closed, loaded, !working, let expected = progress else { return }
+        activity = .applying(.retain); notice = nil; lastResult = nil
+        defer { activity = nil }
+        do {
+            let result = try await driver.importFile(reviewed, expected: expected, custody: custody) { [weak self] action, progress in
+                await self?.observe(action, progress: progress)
+            }
+            try Task.checkCancellation()
+            guard !closed else { return }
+            progress = result.progress; lastResult = result
+        } catch { fail(error) }
+    }
+    private func observe(_ action: SetupPortableImportOperation.Action, progress: SetupPortableImportProgress) {
+        guard !closed else { return }
+        activity = .applying(action); self.progress = progress
+    }
+
     public func close() {
         closed = true; reviewed.close(); loaded = false; progress = nil; notice = nil; lastResult = nil
     }
