@@ -24,9 +24,18 @@ static bool stored_owner_fault;
 static dev_t stored_owner_device;
 static ino_t stored_owner_inode;
 static unsigned stored_owner_injections;
+static int later_object_fault;
+static dev_t later_anchor_device, later_target_device;
+static ino_t later_anchor_inode, later_target_inode;
+static bool later_anchor_observed;
+static unsigned later_object_injections;
 ssize_t __real_fgetxattr(int, const char *, void *, size_t);
 int __real_fstatfs(int, struct statfs *);
 int __real_fstat(int, struct stat *);
+int __real_fstatat(int, const char *, struct stat *, int);
+static bool later_target(const struct stat *value) {
+    return value->st_dev == later_target_device && value->st_ino == later_target_inode;
+}
 int __wrap_fstat(int fd, struct stat *value) {
     int result = __real_fstat(fd, value);
     if (!result && stored_owner_fault && value->st_dev == stored_owner_device && value->st_ino == stored_owner_inode) {
@@ -35,6 +44,18 @@ int __wrap_fstat(int fd, struct stat *value) {
         value->st_uid = getuid() ^ 1U;
         ++stored_owner_injections;
     }
+    if (!result && later_object_fault == 1 && later_anchor_observed && later_target(value)) {
+        value->st_dev ^= (dev_t)1;
+        ++later_object_injections;
+    }
+    return result;
+}
+int __wrap_fstatat(int fd, const char *name, struct stat *value, int flags) {
+    int result = __real_fstatat(fd, name, value, flags);
+    /* Keep held/named identity observations consistent in the device-only fixture.
+     * A removed filesystem comparison must not be rescued by an unrelated identity check. */
+    if (!result && later_object_fault == 1 && later_anchor_observed && later_target(value))
+        value->st_dev ^= (dev_t)1;
     return result;
 }
 ssize_t __wrap_fgetxattr(int fd, const char *name, void *value, size_t size) {
@@ -45,6 +66,17 @@ int __wrap_fstatfs(int fd, struct statfs *value) {
     if (filesystem_fault == 1) { errno = EIO; return -1; }
     int result = __real_fstatfs(fd, value);
     if (!result && filesystem_fault == 2) value->f_type = NFS_SUPER_MAGIC;
+    if (!result && later_object_fault) {
+        struct stat actual;
+        if (__real_fstat(fd, &actual)) return -1;
+        if (actual.st_dev == later_anchor_device && actual.st_ino == later_anchor_inode)
+            later_anchor_observed = true;
+        if (later_object_fault == 2 && later_anchor_observed && later_target(&actual)) {
+            /* Both choices pass the allowlist. Only the retained-anchor equality can refuse. */
+            value->f_type = value->f_type == TMPFS_MAGIC ? EXT4_SUPER_MAGIC : TMPFS_MAGIC;
+            ++later_object_injections;
+        }
+    }
     return result;
 }
 static int path(char *out, const char *base, const char *name) {
@@ -224,6 +256,22 @@ static int control(const char *case_name, const char *base, const char *self) {
         CHECK(lstat(data, &actual) == 0 && actual.st_uid == getuid());
         CHECK(rsl_acquire(anchor, "store", getuid(), &lease) == RSL_OK);
         rsl_destroy(lease);
+    } else if (!strcmp(case_name, "later-device-mismatch") || !strcmp(case_name, "later-filesystem-mismatch")) {
+        rsl_lease *lease = NULL;
+        CHECK(rsl_acquire(anchor, "store", getuid(), &lease) == RSL_OK);
+        rsl_destroy(lease);
+        struct stat anchor_info, data_info, after;
+        CHECK(lstat(anchor, &anchor_info) == 0 && lstat(data, &data_info) == 0);
+        later_anchor_device = anchor_info.st_dev; later_anchor_inode = anchor_info.st_ino;
+        later_target_device = data_info.st_dev; later_target_inode = data_info.st_ino;
+        later_anchor_observed = false; later_object_injections = 0;
+        later_object_fault = !strcmp(case_name, "later-device-mismatch") ? 1 : 2;
+        CHECK(refused(anchor, "store", getuid(), RSL_FILESYSTEM_UNAVAILABLE));
+        CHECK(later_anchor_observed && later_object_injections > 0);
+        later_object_fault = 0;
+        CHECK(lstat(data, &after) == 0 && after.st_dev == data_info.st_dev && after.st_ino == data_info.st_ino);
+        CHECK(rsl_acquire(anchor, "store", getuid(), &lease) == RSL_OK);
+        rsl_destroy(lease);
     } else if (!strcmp(case_name, "acl-unavailable") || !strcmp(case_name, "acl-denied")) {
         acl_fault = !strcmp(case_name, "acl-denied") ? EACCES : EOPNOTSUPP;
         CHECK(refused(anchor, "store", getuid(), RSL_ACL_UNAVAILABLE)); acl_fault = 0;
@@ -279,7 +327,10 @@ int main(int argc, char **argv) {
     if (!kind) return 77;
     int before = descriptor_count();
     if (before < 0 || control(argv[1], argv[2], argv[0]) || descriptor_count() != before) return 1;
+    const char *observation = !strcmp(argv[1], "stored-owner-mismatch") ? ",\"storedOwnerComparisonExercised\":true" :
+        (!strcmp(argv[1], "later-device-mismatch") || !strcmp(argv[1], "later-filesystem-mismatch")) ?
+        ",\"anchorFilesystemObservedBeforeInjection\":true,\"laterObjectComparisonExercised\":true" : "";
     printf("{\"case\":\"%s\",\"passed\":true,\"fixtureOnly\":true,\"protectedInstallation\":false,\"descriptorsClosed\":true,\"fixtureFilesystem\":\"%s\"%s}\n",
-           argv[1], kind, !strcmp(argv[1], "stored-owner-mismatch") ? ",\"storedOwnerComparisonExercised\":true" : "");
+           argv[1], kind, observation);
     return 0;
 }

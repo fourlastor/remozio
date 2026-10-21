@@ -22,6 +22,9 @@ def report(case="healthy"):
              "protectedInstallation": False, "descriptorsClosed": True, "fixtureFilesystem": "tmpfs"}
     if case == "stored-owner-mismatch":
         value["storedOwnerComparisonExercised"] = True
+    if case in {"later-device-mismatch", "later-filesystem-mismatch"}:
+        value["anchorFilesystemObservedBeforeInjection"] = True
+        value["laterObjectComparisonExercised"] = True
     return value
 
 
@@ -44,8 +47,8 @@ class ReportTests(unittest.TestCase):
                              else "owned-live-filesystem-control")
 
     def test_stored_owner_evidence_requires_injection_observation(self):
-        self.assertEqual(len(EXPERIMENT.CASES), 34)
-        self.assertEqual(len(EXPERIMENT.SIMULATED), 5)
+        self.assertEqual(len(EXPERIMENT.CASES), 36)
+        self.assertEqual(len(EXPERIMENT.SIMULATED), 7)
         self.assertNotIn("owner-mismatch", EXPERIMENT.SIMULATED)
         self.assertIn("stored-owner-mismatch", EXPERIMENT.SIMULATED)
         for flag in (None, False, 1):
@@ -56,6 +59,19 @@ class ReportTests(unittest.TestCase):
                 value["storedOwnerComparisonExercised"] = flag
             with self.assertRaises(ValueError):
                 EXPERIMENT.validate_result(json.dumps(value), "stored-owner-mismatch", 0)
+
+    def test_later_object_evidence_requires_anchor_and_target_observations(self):
+        for case in ("later-device-mismatch", "later-filesystem-mismatch"):
+            self.assertIn(case, EXPERIMENT.SIMULATED)
+            for key in ("anchorFilesystemObservedBeforeInjection", "laterObjectComparisonExercised"):
+                for flag in (None, False, 1):
+                    value = report(case)
+                    if flag is None:
+                        del value[key]
+                    else:
+                        value[key] = flag
+                    with self.assertRaises(ValueError):
+                        EXPERIMENT.validate_result(json.dumps(value), case, 0)
 
     def test_rejects_missing_extra_and_false_fields(self):
         for key in report():
@@ -157,12 +173,12 @@ class CoordinatorTests(unittest.TestCase):
         self.assertTrue(value["passed"])
         self.assertIs(value["protectedInstallation"], False)
         self.assertEqual(set(value["cases"]), set(EXPERIMENT.CASES))
-        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 5})
+        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 7})
         arguments, timeout = calls[0]
         self.assertEqual(timeout, 30)
         self.assertEqual(arguments[:6], ["/fixture/cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
-        self.assertEqual(arguments[6:11], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "controls.c"),
-                                           "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat"])
+        self.assertEqual(arguments[6:12], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "controls.c"),
+                                           "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-Wl,--wrap=fstatat"])
         self.assertEqual(len(calls), len(EXPERIMENT.CASES) + 1)
         self.assertNotIn("/fixture", json.dumps(value))
 
@@ -213,6 +229,39 @@ class WorkerTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("REMOZIO_LINUX_STORAGE_LEASE_LIVE") == "1", "explicit live filesystem controls")
 class LiveTests(unittest.TestCase):
+    def test_later_object_controls_detect_each_removed_filesystem_comparison(self):
+        source = (EXPERIMENT.SOURCE / "lease.c").read_text()
+        mutations = (("device != lease->private_device || ", "later-device-mismatch"),
+                     (" || value.f_type != lease->filesystem", "later-filesystem-mismatch"))
+        for comparison, failing_case in mutations:
+            with self.subTest(comparison=comparison):
+                self.assertEqual(source.count(comparison), 1)
+                with EXPERIMENT._cleanup.subreaper(), tempfile.TemporaryDirectory(prefix="storage-filesystem-mutation-") as temporary:
+                    directory = Path(temporary)
+                    mutant = directory / "lease-without-one-filesystem-check.c"
+                    mutant.write_text(source.replace(comparison, "", 1))
+                    binary = directory / "mutant-controls"
+                    compiler = EXPERIMENT.shutil.which("cc")
+                    self.assertIsNotNone(compiler)
+                    arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
+                                 "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "controls.c"),
+                                 "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat",
+                                 "-Wl,--wrap=fstatat", "-o", str(binary)]
+                    _raw, status, error, clean = EXPERIMENT.run_owned(arguments, 30)
+                    self.assertEqual((status, error, clean), (0, None, True))
+                    cases = ("healthy", "stored-owner-mismatch", "filesystem-unavailable", "unknown-filesystem",
+                             "later-device-mismatch", "later-filesystem-mismatch")
+                    for case in cases:
+                        with tempfile.TemporaryDirectory(prefix="case-", dir=directory) as workspace:
+                            raw, status, error, clean = EXPERIMENT.run_owned([str(binary), case, workspace], 15)
+                            self.assertIsNone(error)
+                            self.assertTrue(clean)
+                            if case == failing_case:
+                                self.assertEqual(status, 1)
+                                self.assertEqual(raw, b"")
+                            else:
+                                self.assertTrue(EXPERIMENT.validate_result(raw, case, status)["passed"])
+
     def test_stored_owner_control_detects_removed_uid_comparison(self):
         source = (EXPERIMENT.SOURCE / "lease.c").read_text()
         comparison = "info->st_uid != lease->owner || "
@@ -226,7 +275,7 @@ class LiveTests(unittest.TestCase):
             self.assertIsNotNone(compiler)
             arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
                          "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "controls.c"),
-                         "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-o", str(binary)]
+                         "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-Wl,--wrap=fstatat", "-o", str(binary)]
             _raw, status, error, clean = EXPERIMENT.run_owned(arguments, 30)
             self.assertEqual((status, error, clean), (0, None, True))
             for case in ("healthy", "stored-owner-mismatch"):
@@ -250,7 +299,7 @@ class LiveTests(unittest.TestCase):
                 os.umask(previous)
         self.assertTrue(value["passed"], json.dumps(value["cases"], sort_keys=True))
         self.assertEqual(len(value["cases"]), len(EXPERIMENT.CASES))
-        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 5})
+        self.assertEqual(value["controlCounts"], {"ownedLive": 29, "injected": 7})
         self.assertTrue(value["sourcesUnchanged"])
         self.assertTrue(all(case["ownedProcessesReaped"] for case in value["cases"].values()))
 

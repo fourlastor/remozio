@@ -48,7 +48,8 @@ bounded fixture policy, not a production filesystem certification. Unknown kinds
 and failed filesystem reads refuse. Unsupported ACL semantics cannot pass a live
 control. Each result names the observed fixture filesystem class. The controls create real extended/default ACLs without changing system
 policy. Error controls for unavailable/denied ACL reads, unavailable/unknown
-filesystems and a stored object's wrong observed UID use linker-wrapped calls
+filesystems, a stored object's wrong observed UID, and later-object device/type
+differences use linker-wrapped calls
 and are explicitly labelled injected evidence.
 
 The lease owns all descriptors. No descriptor-returning API exists. Files are
@@ -61,7 +62,7 @@ parent's shared open-file description. A fork copy refuses validation and a fres
 process may acquire only after the owner's descriptors close. `O_CLOEXEC` is
 checked by executing a fresh control process and counting its descriptors.
 
-The 34 controls comprise 29 live ordinary-user filesystem controls and five
+The 36 controls comprise 29 live ordinary-user filesystem controls and seven
 explicitly injected error controls; the report's `controlCounts` records both
 categories. `owner-mismatch` exercises only the requested
 owner/caller-identity guard. The separate injected `stored-owner-mismatch` first
@@ -71,6 +72,18 @@ wrapper was exercised, verifies the real file's owner remains unchanged, and
 reacquires without injection. No actual foreign-owned file or privilege transition
 is tested. An opt-in native mutation test removes only the stored-UID comparison:
 the healthy control must still pass and `stored-owner-mismatch` must fail.
+
+The injected `later-device-mismatch` and `later-filesystem-mismatch` controls first
+acquire the healthy fixture, then preserve the anchor's normal filesystem sample
+and alter only a later data object's observations. The first changes the reported
+device consistently for held/named identity checks, preserving filesystem type;
+the second preserves device and substitutes a different allowlisted filesystem
+type. Both require `RSL_FILESYSTEM_UNAVAILABLE`, an observed anchor sample before
+injection, and a target-object injection. Real metadata is unchanged and an
+uninjected reopen must succeed. Opt-in mutation controls remove each equality
+operand separately: the matching new control must fail, while the other new
+control, healthy fixture and existing stored-owner refusal remain successful.
+These are injected comparison controls, not actual mounts or cross-device evidence.
 
 Controls also cover ordinary reopen, invalid paths, missing objects, symlinks at
 file/directory/anchor/ancestor levels, FIFO and directory substitutions, hardlinks,
