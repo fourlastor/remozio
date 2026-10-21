@@ -64,3 +64,13 @@ extension RelayConnectorStartupPublication {
             owner: owner, mode: mode, verifyCurrent: verify, didStage: didStage)
     }
 }
+
+/// The caller holds the selected local scope. The native publisher revalidates protected machine files.
+struct RelayConnectorSetupOperations: Sendable {
+    let publish: @Sendable (RelayRunCredentialSetupContext, RelayRunCredentialReference,
+                            RelayRunCredentialPublication.Mode, () throws -> Void) throws -> AdministrativeSetupPublicationResult
+    static let native = Self(publish: { context, reference, mode, verify in
+        try RelayConnectorStartupPublication.publishNative(context: context, reference: reference,
+            mode: mode, verifyCurrent: verify)
+    })
+}

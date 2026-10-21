@@ -941,6 +941,77 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    private struct ImportedRelayConnectorSelection: Equatable, Sendable {
+        let context: RelayRunCredentialSetupContext
+        let dns: SharedSetupDNSRecord
+        let dnsSnapshot: SharedSetupDNSStorage.Snapshot
+        let accessSnapshot: SharedSetupAccessApplicationStorage.Snapshot
+        let runSnapshot: SharedSetupRelayRunReferenceStorage.Snapshot
+    }
+
+    /// Checks the live provider configuration before publishing the selected connector's startup metadata.
+    /// This does not advance import completion or claim that a connector has reached the provider.
+    func publishImportedRelayConnector(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                       operations: RelayConnectorSetupOperations = .native,
+                                       send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> AdministrativeSetupPublicationResult {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) {
+            configuration, binding, plan, tunnel, tunnelSnapshot, application, scoped in
+            @Sendable func withSelection<Value>(_ body: (ImportedRelayConnectorSelection, () throws -> Void) throws -> Value) throws -> Value {
+                try self.withImportedRelayProvisioningContext(binding: binding, callerUID: callerUID, expected: expected,
+                    proposal: proposal) { account, inventory, state, intent, plan, directory, owner, verify in
+                    guard state.configurationPublished, let runtime = state.reference else { throw RuntimePreparationError.incomplete }
+                    return try withoutActuallyEscaping(verify) { verifyBase in
+                        func read() throws -> ImportedRelayConnectorSelection {
+                            try Task.checkCancellation(); try verifyBase()
+                            guard try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: directory, owner: owner) == tunnel,
+                                  try SharedSetupRelayProvisioningStorage.snapshot(expected: intent, plan: plan, directory: directory, owner: owner) == tunnelSnapshot,
+                                  try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                                    directory: directory, owner: owner) == application,
+                                  let accessSnapshot = try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                                    createdTunnel: tunnel, directory: directory, owner: owner),
+                                  let dns = try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                                    application: application, directory: directory, owner: owner),
+                                  let dnsSnapshot = try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                                    application: application, directory: directory, owner: owner),
+                                  let run = try SharedSetupRelayRunReferenceStorage.snapshot(expected: intent, plan: plan,
+                                    created: tunnel, directory: directory, owner: owner) else { throw RelayProvisioningError.staleRecord }
+                            _ = try dns.createdRecord(expected: intent, plan: plan, createdTunnel: tunnel, application: application)
+                            _ = try RelayRunCredentialReference.decode(run.reference.encoded, expected: intent, plan: plan, created: tunnel,
+                                runtime: runtime, account: account, inventory: inventory)
+                            try verifyBase()
+                            return .init(context: .init(account: account, inventory: inventory, expected: intent, plan: plan,
+                                created: tunnel, runtime: runtime, reference: run.reference), dns: dns, dnsSnapshot: dnsSnapshot,
+                                accessSnapshot: accessSnapshot, runSnapshot: run)
+                        }
+                        let selected = try read()
+                        func verifySelection() throws {
+                            guard try read() == selected else { throw RelayProvisioningError.staleRecord }
+                        }
+                        try verifySelection(); let result = try body(selected, verifySelection); try verifySelection(); return result
+                    }
+                }
+            }
+            let selected = try withSelection { selected, _ in selected }
+            @Sendable func verifySelected() throws {
+                try withSelection { current, _ in guard current == selected else { throw RelayProvisioningError.staleRecord } }
+            }
+            let preflightSend: CloudflareProvisioningScopeClient.Send = { request in
+                try verifySelected(); return try await scoped(request)
+            }
+            do {
+                _ = try await CloudflareRelayConnectorPreflightClient(send: preflightSend).inspect(configuration,
+                    expected: binding.retained, plan: plan, createdTunnel: tunnel, application: application, record: selected.dns)
+                try Task.checkCancellation(); try verifySelected()
+            } catch { try Task.checkCancellation(); try verifySelected(); throw error }
+            return try withSelection { current, verify in
+                guard current == selected else { throw RelayProvisioningError.staleRecord }
+                let mode: RelayRunCredentialPublication.Mode = [.runtimePublished, .gatewayPrepared].contains(current.context.expected.phase)
+                    ? .prepareUnactivated : .validateRetained
+                return try operations.publish(current.context, current.runSnapshot.reference, mode, verify)
+            }
+        }
+    }
+
     func inspectImportedDNSRecord(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                   send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareDNSRecordObservation {
         try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, application, scoped in
