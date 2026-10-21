@@ -319,3 +319,18 @@ It neither opens enrollment storage nor creates a setup owner.
 Its expiry scene checks the Compose transition back from the biometric screen after the countdown ends. It uses no biometric hardware.
 
 Native layout captures and JVM tests do not establish installed Mac services, Pixel key custody, or a complete approval flow.
+
+
+## Combined inbox registry
+
+The request registry can acquire all active Mac/account owners from one archive snapshot.
+It retires changed owners before constructing replacements and preserves stable owners for unchanged records.
+Prepared and removed records do not create command owners. Archive read failure invalidates existing owners instead of returning stale rows.
+A construction failure affects its own row. A failed retirement blocks every replacement for that same Mac/account, including a new record ID.
+Other accounts remain independent. Cancellation stops new construction after mandatory stale-owner retirement.
+The returned metadata uses stable record, Mac and account identities; duplicate labels do not merge owners.
+
+Fourteen registry tests cover both individual and combined acquisition. The affected Android unit suite passed 336 cases through ATC.
+These tests use synthetic archives and software keys. They contact no device or peer.
+The application foreground coordinator, default combined inbox, filters and exact notification navigation remain the next integration slice.
+The existing screen still displays one selected Mac; acquiring owners alone does not connect them or grant an approval.

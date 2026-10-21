@@ -25,14 +25,14 @@ class StoredCommandConnectionsTest {
     private val limits = RequestLimits(bounds, bounds, bounds, bounds)
     private fun id(n: Int) = ByteArray(16) { n.toByte() }
     private fun publicKey() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair().public.encoded
-    private fun enrollment(n: Int, scope: Int = n): PhoneEnrollment {
+    private fun enrollment(n: Int, scope: Int = n, account: Int = 100): PhoneEnrollment {
         fun key(role: EnrollmentKeyRole): EnrollmentKeyReference {
             val public = publicKey()
             return EnrollmentKeyReference(role, id(3 * n + role.ordinal),
                 "remozio.${role.aliasPart}.v1.${"%032x".format(3 * n + role.ordinal)}",
                 if (role == EnrollmentKeyRole.TRANSPORT) public else public.takeLast(65).toByteArray())
         }
-        return PhoneEnrollment(id(n), id(scope), id(100), id(110 + n), id(120 + n), "Synthetic Mac",
+        return PhoneEnrollment(id(n), id(scope), id(account), id(110 + n), id(120 + n), "Synthetic Mac",
             publicKey().takeLast(65).toByteArray(), publicKey(), key(EnrollmentKeyRole.TRANSPORT),
             key(EnrollmentKeyRole.DECISION), key(EnrollmentKeyRole.BIOMETRIC), ByteArray(32) { n.toByte() }, null)
     }
@@ -46,6 +46,139 @@ class StoredCommandConnectionsTest {
     private fun registry(create: (StoredPhoneEnrollment) -> CommandConnection = ::connection) =
         StoredCommandConnections(::open, create, Mutex(), Dispatchers.Unconfined)
     init { EncryptedEnrollmentStore.create(storage, cipher, 10).close() }
+
+    @Test fun bulkAcquisitionReadsOneArchiveAndKeepsEqualLabelsInSeparateScopes() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        var opens = 0; var created = 0
+        val registry = StoredCommandConnections({ opens++; open() }, { created++; connection(it) }, Mutex(), Dispatchers.Unconfined)
+        val first = registry.acquireActive()
+        assertEquals(1, opens); assertEquals(2, created)
+        assertEquals(setOf(a.recordID, b.recordID), first.map { it.recordID }.toSet())
+        assertEquals(1, first.map { it.label }.toSet().size)
+        assertEquals(setOf(a.macID, b.macID), first.map { it.macID }.toSet())
+        assertNotSame(first[0].connection, first[1].connection)
+        val again = registry.acquireActive()
+        assertEquals(2, opens); assertEquals(2, created)
+        first.forEach { original -> assertSame(original.connection, again.single { it.recordID == original.recordID }.connection) }
+        assertEquals("StoredCommandOwner(redacted)", first.first().toString())
+        registry.invalidate()
+    }
+
+    @Test fun oneFailedConstructionDoesNotHideOrRecreateAnotherMac() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        var fail = true
+        val registry = registry { if (it.enrollment.recordID == a.recordID && fail) error("Synthetic create failure"); connection(it) }
+        val first = registry.acquireActive()
+        assertNull(first.single { it.recordID == a.recordID }.connection)
+        val healthy = assertNotNull(first.single { it.recordID == b.recordID }.connection)
+        fail = false
+        val again = registry.acquireActive()
+        assertNotNull(again.single { it.recordID == a.recordID }.connection)
+        assertSame(healthy, again.single { it.recordID == b.recordID }.connection)
+        registry.invalidate()
+    }
+
+    @Test fun bulkReplacementRetiresOldTrustBeforeConstructingNewAndPreservesOtherMacs() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); val replacement = enrollment(3, 1)
+        activate(a); activate(b)
+        var old: CommandConnection? = null
+        val registry = registry { record ->
+            if (record.enrollment.recordID == replacement.recordID) assertEquals(CommandConnectionState.CLOSED, old!!.connectionState.value)
+            connection(record)
+        }
+        val first = registry.acquireActive(); old = first.single { it.recordID == a.recordID }.connection
+        val other = first.single { it.recordID == b.recordID }.connection
+        activate(replacement, a)
+        val after = registry.acquireActive()
+        assertFalse(after.any { it.recordID == a.recordID })
+        assertNotNull(after.single { it.recordID == replacement.recordID }.connection)
+        assertSame(other, after.single { it.recordID == b.recordID }.connection)
+        registry.invalidate()
+    }
+
+    @Test fun failedRetirementBlocksOnlyItsScopeAndCannotBeBypassedByBulkRetry() = runBlocking<Unit> {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        var closes = 0
+        val registry = StoredCommandConnections(::open, ::connection, Mutex(), Dispatchers.Unconfined) { owner ->
+            if (owner.record.enrollment.recordID == a.recordID) { closes++; error("Synthetic close failure") }
+            owner.close()
+        }
+        val before = registry.acquireActive()
+        val healthy = before.single { it.recordID == b.recordID }.connection
+        // Removing retained trust forces retirement. A failed close must never permit replacement.
+        open().use { it.remove(a.recordID.copyBytes(), it.snapshot().revision) }
+        val after = registry.acquireActive()
+        assertEquals(listOf(b.recordID), after.map { it.recordID }); assertSame(healthy, after.single().connection)
+        registry.acquireActive(); assertEquals(1, closes)
+        assertFailsWith<CommandRegistryUnavailable> { registry.acquire(a.recordID) }
+        assertFailsWith<CommandRegistryUnavailable> { registry.invalidate() }
+        before.single { it.recordID == a.recordID }.connection?.close()
+    }
+
+    @Test fun bulkReadFailureInvalidatesEveryOwnerAndCannotExposeStaleRows() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        val registry = registry(); val owners = registry.acquireActive()
+        storage.fail = true
+        assertFailsWith<CommandRegistryUnavailable> { registry.acquireActive() }
+        owners.forEach { assertEquals(CommandConnectionState.CLOSED, it.connection!!.connectionState.value) }
+        storage.fail = false
+        val after = registry.acquireActive()
+        after.forEach { fresh -> assertNotSame(owners.single { it.recordID == fresh.recordID }.connection, fresh.connection) }
+        registry.invalidate()
+    }
+
+    @Test fun bulkReadNeverConstructsOwnersForPreparedOrRemovedRecords() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); val c = enrollment(3)
+        activate(a); activate(b)
+        open().use { it.prepare(c, it.snapshot().revision); it.remove(b.recordID.copyBytes(), it.snapshot().revision) }
+        val registry = registry(); val active = registry.acquireActive()
+        assertEquals(listOf(a.recordID), active.map { it.recordID }); assertNotNull(active.single().connection)
+        registry.invalidate()
+    }
+
+    @Test fun cancelledBulkConstructionStopsBeforeAnotherScopeAndRetainsOnlyItsValidOwner() = runBlocking {
+        val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
+        var creates = 0; var cancelFirst = true
+        lateinit var first: Deferred<List<StoredCommandOwner>>
+        val registry = registry { record ->
+            creates++
+            if (cancelFirst) { cancelFirst = false; first.cancel() }
+            connection(record)
+        }
+        first = async(start = CoroutineStart.LAZY) { registry.acquireActive() }
+        first.start()
+        assertFailsWith<CancellationException> { first.await() }; assertEquals(1, creates)
+        val after = registry.acquireActive()
+        assertEquals(2, after.size); assertEquals(2, creates)
+        assertTrue(after.all { it.connection?.connectionState?.value == CommandConnectionState.DISCONNECTED })
+        registry.invalidate()
+    }
+
+    @Test fun aNewRecordCannotBypassFailedRetirementForTheSameMacAccount() = runBlocking<Unit> {
+        val a = enrollment(1); val otherAccount = enrollment(2, scope = 1, account = 101)
+        val replacement = enrollment(3, scope = 1)
+        activate(a); activate(otherAccount)
+        var creates = 0
+        val registry = StoredCommandConnections(::open, { creates++; connection(it) }, Mutex(), Dispatchers.Unconfined) { owner ->
+            if (owner.record.enrollment.recordID == a.recordID) error("Synthetic close failure")
+            owner.close()
+        }
+        val before = registry.acquireActive()
+        val old = before.single { it.recordID == a.recordID }.connection!!
+        val healthy = before.single { it.recordID == otherAccount.recordID }.connection
+        try {
+            activate(replacement, a)
+            repeat(2) {
+                val after = registry.acquireActive()
+                assertNull(after.single { it.recordID == replacement.recordID }.connection)
+                assertSame(healthy, after.single { it.recordID == otherAccount.recordID }.connection)
+                assertFailsWith<CommandRegistryUnavailable> { registry.acquire(replacement.recordID) }
+            }
+            assertEquals(2, creates)
+        } finally {
+            old.close(); runCatching { registry.invalidate() }
+        }
+    }
 
     @Test fun repeatedAndConcurrentAcquisitionsShareOneOwnerPerMac() = runBlocking {
         val a = enrollment(1); val b = enrollment(2); activate(a); activate(b)
