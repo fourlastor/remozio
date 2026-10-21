@@ -124,7 +124,7 @@ private struct SetupOverview: View {
                 }
                 HStack(spacing: 12) {
                     Button("Pair a phone…") { showingPairing = true }
-                    Button("Preview setup file…") { showingSetupPreview = true }
+                    Button("Import setup file…") { showingSetupPreview = true }
                 }
                 HStack {
                     SettingsLink()
@@ -138,7 +138,9 @@ private struct SetupOverview: View {
         }
         .frame(minWidth: 440, minHeight: 340)
         .sheet(isPresented: $showingPairing) { PairingSheet() }
-        .sheet(isPresented: $showingSetupPreview) { SetupFilePreview() }
+        .sheet(isPresented: $showingSetupPreview) {
+            SetupFilePreview(setup: setup, accountPreparation: { AnyView(AccountSetupSheet(importingSetupFile: true)) })
+        }
         .sheet(isPresented: $showingAccountSetup) { AccountSetupSheet() }
     }
 }
@@ -269,6 +271,8 @@ private struct SetupServiceSection: View {
 }
 
 private struct AccountSetupSheet: View {
+    private let importingSetupFile: Bool
+    init(importingSetupFile: Bool = false) { self.importingSetupFile = importingSetupFile }
     @Environment(\.dismiss) private var dismiss
     @State private var controls = MacAccountSetupControls()
     @State private var fileCustodyAccepted = false
@@ -309,7 +313,7 @@ private struct AccountSetupSheet: View {
                                   systemImage: controls.services?.complete == true ? "checkmark.circle" : "circle")
                             Text("Remozio creates two hidden service accounts with disabled login, one for transport and one for push delivery.")
                                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            if controls.services?.complete == true {
+                            if controls.services?.complete == true && !importingSetupFile {
                                 Label(controls.runtime?.configurationPublished == true ? "Runtime files prepared" : "Runtime files pending",
                                       systemImage: controls.runtime?.configurationPublished == true ? "checkmark.circle" : "circle")
                                 if controls.runtime?.configurationPublished != true {
@@ -319,7 +323,10 @@ private struct AccountSetupSheet: View {
                                         .fixedSize(horizontal: false, vertical: true).disabled(controls.working || !controls.loaded)
                                 }
                             }
-                            if controls.runtime?.configurationPublished == true {
+                            if importingSetupFile {
+                                Text("Return to the setup file after the service accounts are prepared. Import will prepare the runtime with the reviewed settings.")
+                                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            } else if controls.runtime?.configurationPublished == true {
                                 Label(controls.activation?.jobsRegistered == true ? "Service registration saved" : "Services not registered",
                                       systemImage: controls.activation?.jobsRegistered == true ? "checkmark.circle" : "circle")
                                 Text("Start the authority and transport services for this account. Restore keeps the saved identity and registers any missing matching jobs.")
@@ -356,6 +363,9 @@ private struct AccountSetupSheet: View {
                         Button("Prepare service accounts…") { run { await controls.prepareServiceAccounts() } }
                             .keyboardShortcut(.defaultAction)
                             .disabled(!controls.loaded || controls.working || controls.services == nil)
+                    } else if importingSetupFile {
+                        Button("Return to import") { work?.cancel(); dismiss() }.keyboardShortcut(.defaultAction)
+                            .disabled(!controls.loaded || controls.working)
                     } else if controls.runtime?.configurationPublished != true {
                         Button("Prepare runtime files…") { run { await controls.prepareRuntime(fileCustodyAccepted: fileCustodyAccepted) } }
                             .keyboardShortcut(.defaultAction)

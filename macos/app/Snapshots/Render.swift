@@ -102,6 +102,45 @@ struct RenderSetupPreview {
             try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
             print(name + ": rendered synthetic portable scope; frame=\(host.frame); fitting=\(host.fittingSize)")
         }
+        let combinedScope = PortableSetup(defaults: portableDefaults, fcm: portableProvider, cloudflare: scope,
+            pushClient: portableClient, appPreferences: portablePreferences).preview
+        for (label, state, bottom) in [
+            ("ready", SetupFileImportSnapshot.ready, false),
+            ("ready-bottom", .ready, true),
+            ("running", .importing, true),
+            ("cleanup", .cleanup, true),
+            ("unresolved", .reconciliation, true),
+            ("completed", .completed, true),
+            ("unavailable", .unavailable, true),
+        ] {
+            for dark in [false, true] {
+                let name = "setup-import-" + label + (dark ? "-dark" : "-light")
+                let view = SetupFilePreview(snapshotPreview: combinedScope, importState: state, acceptedCustody: true)
+                app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
+                host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: 540, height: 640)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = host; host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                if bottom {
+                    func importScroll(_ view: NSView) -> NSScrollView? {
+                        if let scroll = view as? NSScrollView { return scroll }
+                        for child in view.subviews { if let scroll = importScroll(child) { return scroll } }
+                        return nil
+                    }
+                    if let scroll = importScroll(host), let document = scroll.documentView {
+                        let edge = document.isFlipped ? max(0, document.bounds.height - scroll.contentView.bounds.height) : 0
+                        scroll.contentView.scroll(to: NSPoint(x: 0, y: edge)); scroll.reflectScrolledClipView(scroll.contentView)
+                    }
+                }
+                host.displayIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+                try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
+                print(name + ": rendered inert import state")
+            }
+        }
         func gatewayProgress(stage: Int) throws -> SetupGatewayActivationProgress {
             let id = Data(repeating: 1, count: 16), digest = Data(repeating: 2, count: 32)
             let setup = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text("remozio-gateway-setup-progress"),

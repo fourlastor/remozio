@@ -2,107 +2,363 @@ import RemozioCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+#if DEBUG
+enum SetupFileImportSnapshot { case ready, importing, cleanup, reconciliation, completed, unavailable }
+#endif
+
 struct SetupFilePreview: View {
     @Environment(\.dismiss) private var dismiss
     @State private var choosingFile = false
+    @State private var showingAccountPreparation = false
     @State private var file: URL?
     @State private var password = ""
     @State private var preview: SetupPreview?
+    @State private var reviewed: ReviewedSetupFile?
+    @State private var controls: MacPortableSetupImportControls?
+    @State private var setup: MacSetupServiceControls
+    @State private var runtimeCustody = false
+    @State private var pushCustody = false
+    @State private var relayCustody = false
     @State private var failure: LocalizedStringKey?
+    @State private var paused: SetupPortableImportOperationResult.Status?
+    @State private var completed = false
+    @State private var verifiedCompletion: SetupPortableImportProgress?
     @State private var work: Task<Void, Never>?
     @FocusState private var passwordFocused: Bool
-
-    init() {}
+    private let accountPreparation: (@MainActor () -> AnyView)?
     #if DEBUG
-    init(snapshotPreview: SetupPreview?, snapshotError: LocalizedStringKey? = nil) {
-        _preview = State(initialValue: snapshotPreview)
-        _failure = State(initialValue: snapshotError)
+    private var snapshot: SetupFileImportSnapshot?
+    #endif
+
+    init(setup: MacSetupServiceControls? = nil, accountPreparation: (@MainActor () -> AnyView)? = nil) {
+        _setup = State(initialValue: setup ?? MacSetupServiceControls())
+        self.accountPreparation = accountPreparation
+    }
+    #if DEBUG
+    init(snapshotPreview: SetupPreview?, snapshotError: LocalizedStringKey? = nil,
+         importState: SetupFileImportSnapshot = .ready, acceptedCustody: Bool = false) {
+        _preview = State(initialValue: snapshotPreview); _failure = State(initialValue: snapshotError)
+        _setup = State(initialValue: MacSetupServiceControls()); accountPreparation = nil
+        snapshot = snapshotPreview == nil ? nil : importState
+        _runtimeCustody = State(initialValue: acceptedCustody)
+        _pushCustody = State(initialValue: acceptedCustody); _relayCustody = State(initialValue: acceptedCustody)
     }
     #endif
+    private var isSnapshot: Bool {
+        #if DEBUG
+        snapshot != nil
+        #else
+        false
+        #endif
+    }
+    private var busy: Bool {
+        #if DEBUG
+        if snapshot == .importing { return true }
+        #endif
+        return work != nil || controls?.working == true || setup.operation != nil
+    }
+    private var isComplete: Bool {
+        #if DEBUG
+        if snapshot == .completed { return true }
+        #endif
+        return completed
+    }
+    private var pausedStatus: SetupPortableImportOperationResult.Status? {
+        #if DEBUG
+        if snapshot == .cleanup { return .waitingForCleanup }
+        if snapshot == .reconciliation { return .requiresReconciliation }
+        #endif
+        return paused
+    }
+    private var required: Set<SetupPortableImportCustodyRequirement> {
+        #if DEBUG
+        if snapshot != nil {
+            guard !isComplete, snapshot != .unavailable else { return [] }
+            if snapshot == .cleanup || snapshot == .reconciliation {
+                return preview?.cloudflareAccount == nil ? [] : [.relayCredential]
+            }
+            var result: Set<SetupPortableImportCustodyRequirement> = [.runtimeFiles]
+            if preview?.firebaseProject != nil { result.insert(.pushCredentials) }
+            if preview?.cloudflareAccount != nil { result.insert(.relayCredential) }
+            return result
+        }
+        #endif
+        return controls?.requiredCustody ?? []
+    }
+    private var choices: SetupPortableImportCustodyChoices {
+        .init(runtimeFiles: runtimeCustody, pushCredentials: pushCustody, relayCredential: relayCustody)
+    }
+    private var rootCompleted: Bool {
+        verifiedCompletion != nil
+    }
+    private var canImport: Bool {
+        guard !busy, !isComplete, pausedStatus != .requiresReconciliation, pausedStatus != .providerRejected else { return false }
+        if isSnapshot {
+            #if DEBUG
+            if snapshot == .unavailable { return false }
+            #endif
+            return choices.satisfies(required)
+        }
+        if rootCompleted { return true }
+        return setup.state == .enabled && controls?.loaded == true && controls?.progress != nil && choices.satisfies(required)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Preview setup file").font(.title2).accessibilityAddTraits(.isHeader)
-                Text("Inspect shared configuration exported from another Mac.")
+                Text("Import setup file").font(.title2).accessibilityAddTraits(.isHeader)
+                Text("Review shared configuration exported from another Mac.")
                     .foregroundStyle(Color.primary.opacity(0.8))
             }
             if let preview {
-                SetupScopePreview(preview: preview)
-            } else {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Button("Choose file…") { choosingFile = true }.disabled(work != nil)
-                        if let file {
-                            Text(verbatim: file.lastPathComponent).lineLimit(1).truncationMode(.middle)
-                                .help(file.lastPathComponent)
-                        }
-                    }
-                    SecureField("Export password", text: $password)
-                        .focused($passwordFocused).disabled(file == nil || work != nil)
-                        .onSubmit { startPreview() }
-                    if work != nil { ProgressView("Opening encrypted file…").controlSize(.small) }
-                    if let failure {
-                        Label {
-                            Text(failure).foregroundStyle(.primary)
-                        } icon: {
-                            Image(systemName: "exclamationmark.triangle").foregroundStyle(.red)
-                        }
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
+                    importStatus
+                    if let failure { errorLabel(failure) }
+                    if !busy && !isComplete { Button("Refresh Mac status") { refreshMacStatus() } }
                 }
-            }
-            Text("This preview does not apply settings or create Mac resources. Setup is still being built.")
-                .font(.callout).foregroundStyle(Color.primary.opacity(0.8)).fixedSize(horizontal: false, vertical: true)
-            HStack {
-                Spacer()
-                Button("Close") { close() }.keyboardShortcut(.cancelAction)
-                if preview == nil {
-                    Button("Preview") { startPreview() }.keyboardShortcut(.defaultAction)
-                        .disabled(file == nil || password.isEmpty || work != nil)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        SetupScopePreview(preview: preview)
+                        if !required.isEmpty && !isComplete { Divider(); custodyChoices }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            }
+                .frame(maxHeight: 520)
+            } else { fileForm }
+            actions
         }
-        .padding(24)
-        .frame(width: 540)
+        .padding(24).frame(width: 540)
+        .frame(minHeight: preview == nil ? 280 : 480, idealHeight: preview == nil ? 330 : 640, maxHeight: 760)
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
             switch result {
-            case let .success(url): file = url; password = ""; failure = nil; passwordFocused = true
+            case let .success(url):
+                releaseReview(); file = url; password = ""; failure = nil; passwordFocused = true
             case .failure: failure = "Could not open the file picker. Try choosing the file again."
             }
         }
-        .onDisappear { work?.cancel(); password = "" }
+        .sheet(isPresented: $showingAccountPreparation, onDismiss: refreshMacStatus) {
+            if let accountPreparation { accountPreparation() }
+        }
+        .onDisappear { work?.cancel(); reviewed?.close(); controls?.close(); password = "" }
     }
-
+    private var fileForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button("Choose file…") { choosingFile = true }.disabled(busy)
+                if let file {
+                    Text(verbatim: file.lastPathComponent).lineLimit(1).truncationMode(.middle).help(file.lastPathComponent)
+                }
+            }
+            SecureField("Export password", text: $password).focused($passwordFocused)
+                .disabled(file == nil || busy).onSubmit { startPreview() }
+            if busy { ProgressView("Opening encrypted file…").controlSize(.small) }
+            if let failure { errorLabel(failure) }
+            Text("Reviewing the file does not apply settings or create resources.")
+                .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+        }
+    }
+    private var custodyChoices: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Storage on this Mac").font(.headline).accessibilityAddTraits(.isHeader)
+            Text("These choices apply locally. The setup file cannot accept them for you.")
+                .foregroundStyle(Color.primary.opacity(0.8))
+            if required.contains(.runtimeFiles) {
+                Toggle("Store this Mac’s transport key in a private file", isOn: $runtimeCustody)
+                Text("The authority key stays in hardware.").font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+            }
+            if required.contains(.pushCredentials) {
+                Toggle("Store push credentials in protected files", isOn: $pushCustody)
+            }
+            if required.contains(.relayCredential) {
+                Toggle("Store this Mac’s relay credential in a private file", isOn: $relayCustody)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true).disabled(busy)
+    }
+    @ViewBuilder private var importStatus: some View {
+        if isComplete {
+            Label("Setup saved on this Mac", systemImage: "checkmark.circle").font(.headline)
+            Text("Only the listed app preferences were applied. Phone pairing and live connection checks are separate.")
+                .foregroundStyle(Color.primary.opacity(0.8))
+        } else if busy {
+            ProgressView(activityTitle).controlSize(.small)
+            Text("Closing this sheet stops further steps. Completed changes stay saved for recovery.")
+                .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+        } else if let status = pausedStatus {
+            switch status {
+            case .waitingForCleanup:
+                Label("Setup cleanup is pending", systemImage: "exclamationmark.triangle").font(.headline)
+                Text("Continue import to check cleanup before another setup step.")
+            case .requiresReconciliation:
+                Label("A provider change needs review", systemImage: "exclamationmark.triangle").font(.headline)
+                Text("The provider did not confirm a change. Remozio stopped without repeating it. Keep this file for recovery.")
+                Text("Refreshing reads this Mac’s saved state. It does not resolve the provider change.")
+                    .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+            case .providerRejected:
+                Label("The provider rejected a change", systemImage: "exclamationmark.triangle").font(.headline)
+                Text("Review the provider configuration before continuing setup. Saved changes have not been removed.")
+            case .applied: EmptyView()
+            }
+        } else if isSnapshot {
+            #if DEBUG
+            if snapshot == .unavailable {
+                Text("Prepare this account and its service accounts before importing the file.")
+                Button("Prepare this account…") {}
+            } else { Text("Review the storage choices, then import on this Mac.") }
+            #endif
+        } else if rootCompleted {
+            Label("Mac setup is saved", systemImage: "checkmark.circle").font(.headline)
+            Text("App preferences still need to be applied. Review the current settings, then try applying them again.")
+            SettingsLink()
+        } else if setup.state != .enabled {
+            setupServiceStatus
+        } else if let notice = controls?.notice {
+            switch notice {
+            case .refreshFailed:
+                errorLabel("Could not read this Mac’s saved setup. Refresh its status to try again.")
+            case .operationOutcomeUnknown:
+                errorLabel("The last setup result could not be confirmed. Refresh this Mac’s status before continuing.")
+            case .custodyRequired:
+                Text("Accept the required storage choices before importing.")
+            case .authorizationExpired:
+                Text("Administrator approval expired. Refresh this Mac’s status before continuing.")
+            case .differentSetupFile:
+                errorLabel("This file does not match this Mac’s retained import. Reopen the matching setup file.")
+            }
+        } else if controls?.progress == nil {
+            Text("Prepare this account and its service accounts before importing the file.")
+            if accountPreparation != nil { Button("Prepare this account…") { showingAccountPreparation = true } }
+        } else if controls?.loaded != true {
+            Text("Refresh this Mac’s saved setup before continuing.")
+        } else { Text("Review the storage choices, then import on this Mac.") }
+    }
+    @ViewBuilder private var setupServiceStatus: some View {
+        switch setup.state {
+        case .requiresInstallation, .notFound:
+            Text("Install Remozio with its package, then open the installed app.")
+        case .notRegistered:
+            Text("Enable this Mac’s setup service before importing. macOS asks for administrator approval.")
+            Button("Enable setup service") {
+                run { await setup.enable(); await loadMacStatus() }
+            }
+        case .requiresApproval:
+            Text("Approve Remozio in Login Items & Extensions, then refresh this Mac’s status.")
+            Button("Approve in System Settings…") { setup.openSettings() }
+        case .unavailable:
+            Text("This Mac’s setup service status is unavailable. Refresh its status to try again.")
+        case .enabled: EmptyView()
+        }
+    }
+    private var activityTitle: LocalizedStringKey {
+        #if DEBUG
+        if snapshot == .importing { return "Preparing local services…" }
+        #endif
+        guard let activity = controls?.activity else { return "Checking this Mac…" }
+        switch activity {
+        case .refreshing: return "Reading saved setup…"
+        case .applying(let action):
+            switch action {
+            case .retain: return "Saving reviewed configuration…"
+            case .prepareRuntime, .prepareRelayPlan: return "Preparing local services…"
+            case .activateRuntime: return "Starting local services…"
+            case .prepareGateway, .activateGateway: return "Preparing push notifications…"
+            case .createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector: return "Preparing this Mac’s relay…"
+            case .complete: return "Checking saved setup…"
+            }
+        }
+    }
+    private var importTitle: LocalizedStringKey {
+        if rootCompleted { return "Apply app preferences" }
+        if controls?.progress?.operationID != nil || pausedStatus == .waitingForCleanup { return "Continue import…" }
+        return "Import…"
+    }
+    private var actions: some View {
+        HStack {
+            if preview != nil && !isComplete {
+                Button("Choose another file…") { choosingFile = true }.disabled(busy)
+            }
+            Spacer()
+            Button(isComplete ? LocalizedStringKey("Done") : LocalizedStringKey("Close")) { close() }
+                .keyboardShortcut(isComplete ? .defaultAction : .cancelAction)
+            if preview == nil {
+                Button("Review") { startPreview() }.keyboardShortcut(.defaultAction)
+                    .disabled(file == nil || password.isEmpty || busy)
+            } else if !isComplete {
+                Button(importTitle) { startImport() }.keyboardShortcut(.defaultAction).disabled(!canImport)
+            }
+        }
+    }
+    private func errorLabel(_ message: LocalizedStringKey) -> some View {
+        Label { Text(message).foregroundStyle(.primary) } icon: {
+            Image(systemName: "exclamationmark.triangle").foregroundStyle(.red)
+        }.fixedSize(horizontal: false, vertical: true)
+    }
+    private func run(_ operation: @escaping @MainActor () async -> Void) {
+        guard work == nil, !isSnapshot else { return }
+        work = Task { defer { work = nil }; await operation() }
+    }
     private func startPreview() {
-        guard let file, !password.isEmpty, work == nil else { return }
-        let enteredPassword = password
-        password = ""; failure = nil
-        work = Task {
+        guard let file, !password.isEmpty, !busy, !isSnapshot else { return }
+        let enteredPassword = password; password = ""; failure = nil
+        run {
             do {
-                let result = try await SetupFilePreviewReader.shared.preview(file: file, password: enteredPassword)
-                guard !Task.isCancelled else { return }
-                preview = result
+                let value = try await SetupFilePreviewReader.shared.review(file: file, password: enteredPassword)
+                guard !Task.isCancelled else { value.close(); return }
+                reviewed = value; preview = value.preview
+                controls = MacPortableSetupImportControls(reviewed: value)
+                await loadMacStatus()
             } catch is CancellationError { return }
             catch {
                 guard !Task.isCancelled else { return }
                 if case SetupPreviewReadError.unreadable = error {
                     failure = "Could not read this file. Choose a local setup file and try again."
-                } else {
-                    failure = "Could not open this setup file. Check the password and use a supported Remozio export."
-                }
+                } else { failure = "Could not open this setup file. Check the password and use a supported Remozio export." }
                 passwordFocused = true
             }
-            work = nil
         }
     }
-    private func close() { work?.cancel(); password = ""; dismiss() }
+    private func loadMacStatus() async {
+        await setup.refresh()
+        guard !Task.isCancelled, setup.state == .enabled else { return }
+        await controls?.refresh()
+    }
+    private func refreshMacStatus() { run { await loadMacStatus() } }
+    private func startImport() {
+        guard canImport, !isSnapshot, let reviewed, let controls else { return }
+        failure = nil
+        if rootCompleted { applyPreferences(reviewed, controls: controls); return }
+        do { _ = try preview?.appPreferences?.applicationValues(readExisting: { UserDefaults.standard.object(forKey: $0) }) }
+        catch { failure = "The imported command caller settings conflict with this Mac’s settings. Review Settings, then try again."; return }
+        run {
+            await controls.importFile(custody: choices)
+            guard !Task.isCancelled else { return }
+            if controls.lastResult?.action == .complete && controls.lastResult?.status == .applied {
+                verifiedCompletion = controls.progress
+                applyPreferences(reviewed, controls: controls)
+            } else if let result = controls.lastResult { paused = result.status }
+        }
+    }
+    private func applyPreferences(_ reviewed: ReviewedSetupFile, controls: MacPortableSetupImportControls) {
+        guard let progress = verifiedCompletion else { return }
+        do {
+            let defaults = UserDefaults.standard
+            let values = try reviewed.appPreferenceValues(completed: progress, readExisting: { defaults.object(forKey: $0) })
+            for key in values.keys.sorted() { defaults.set(values[key], forKey: key) }
+            completed = true; paused = nil; failure = nil; reviewed.close()
+        } catch { failure = "Mac setup is saved, but app preferences could not be applied. Review Settings, then try again." }
+    }
+    private func releaseReview() {
+        reviewed?.close(); controls?.close(); reviewed = nil; controls = nil; preview = nil
+        paused = nil; completed = false; verifiedCompletion = nil; runtimeCustody = false; pushCustody = false; relayCustody = false
+    }
+    private func close() { work?.cancel(); reviewed?.close(); controls?.close(); password = ""; dismiss() }
 }
 
 struct SetupScopePreview: View {
     let preview: SetupPreview
     var body: some View {
-        ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Included configuration").font(.headline).accessibilityAddTraits(.isHeader)
@@ -138,15 +394,13 @@ struct SetupScopePreview: View {
                     }
                 }
                 if preview.firebaseProject != nil || preview.cloudflareAccount != nil {
-                    Text("Provider access has not been checked. Credential values stay hidden.")
+                    Text("This file does not prove provider access. Credential values stay hidden.")
                         .foregroundStyle(Color.primary.opacity(0.8))
                 }
                 Text("Pairings, approval keys, audit history, and ADB grants are not included.")
                     .foregroundStyle(Color.primary.opacity(0.8))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxHeight: 360)
     }
     private func appPreferences(_ preferences: PortableAppPreferences) -> some View {
         VStack(alignment: .leading, spacing: 12) {
