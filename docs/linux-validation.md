@@ -89,6 +89,18 @@ do not establish production authority, physical-phone approval or protected call
 
 ## Local gate and CI coverage
 
+The [storage lease experiment](../experiments/linux-storage-lease/README.md) also
+runs in `check-linux-host.sh`. It retains existing private directories and files,
+checks ownership, modes, ACL absence and object identity, and holds a cooperative
+writer lock. Its 36 controls include 29 live ordinary-user filesystem controls
+and seven explicitly injected error controls, including a wrong stored-object UID
+and separate later-object device/filesystem-type differences after a normal anchor
+sample. The requested-owner guard remains a separate live control; no actual
+foreign-owned file, mount change or cross-device topology is tested. Filesystem and ACL prerequisites must be available,
+and Python must be 3.11 or later; unsupported semantics fail rather than skip. These are fixture
+mechanics, not a protected service identity, durable journal or production storage
+policy. Advisory locking does not exclude a malicious same-account writer.
+
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
 selects the checks executable on the current host. No Git hook is installed:
 
