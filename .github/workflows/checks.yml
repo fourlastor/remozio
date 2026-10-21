@@ -38,6 +38,47 @@ jobs:
           echo "$RUNNER_TEMP/remozio-swift/usr/bin" >> "$GITHUB_PATH"
       - run: ./scripts/check-linux-protocol.sh
       - run: ./scripts/check-linux-host.sh
+      - name: Prepare private native TPM simulator dependencies
+        run: |
+          sudo apt-get install --yes --no-install-recommends \
+            pkg-config libssl-dev tpm2-openssl swtpm tpm2-tools libtss2-tcti-tabrmd0 dbus-daemon
+          mkdir -p "$RUNNER_TEMP/remozio-native-tpm-debs" "$RUNNER_TEMP/remozio-native-tpm-runtime"
+          cd "$RUNNER_TEMP/remozio-native-tpm-debs"
+          apt-get download tpm2-abrmd=3.0.0-1ubuntu2
+          printf '%s  %s\n' \
+            bd65b246104f6feac832c1cfcb100378be9b885b98a980441f77a7ccb0bf3241 \
+            tpm2-abrmd_3.0.0-1ubuntu2_amd64.deb | sha256sum --check -
+          # Extract the resource manager without installing or starting its system service.
+          dpkg-deb --extract tpm2-abrmd_3.0.0-1ubuntu2_amd64.deb "$RUNNER_TEMP/remozio-native-tpm-runtime"
+          dpkg-deb --field tpm2-abrmd_3.0.0-1ubuntu2_amd64.deb Package Version
+          mkdir -p "$RUNNER_TEMP/remozio-native-tpm-runtime/usr/bin" "$RUNNER_TEMP/remozio-native-tpm-runtime/usr/lib"
+          ln -s /usr/bin/tpm2 "$RUNNER_TEMP/remozio-native-tpm-runtime/usr/bin/tpm2"
+          ln -s /usr/bin/swtpm "$RUNNER_TEMP/remozio-native-tpm-runtime/usr/bin/swtpm"
+          ln -s /usr/lib/x86_64-linux-gnu "$RUNNER_TEMP/remozio-native-tpm-runtime/usr/lib/x86_64-linux-gnu"
+          dpkg-query -W -f='${Package} ${Version}\n' \
+            libssl-dev libssl3t64 tpm2-openssl swtpm tpm2-tools libtss2-tcti-tabrmd0
+      - name: Build native Swift TPM provider probe
+        run: |
+          swift build --package-path experiments/linux-native-tpm-tls \
+            --scratch-path "$RUNNER_TEMP/remozio-native-tpm-build" \
+            --cache-path "$RUNNER_TEMP/remozio-native-tpm-cache" \
+            --config-path "$RUNNER_TEMP/remozio-native-tpm-config" \
+            --security-path "$RUNNER_TEMP/remozio-native-tpm-security" \
+            --disable-keychain --disable-netrc --jobs 4
+      - name: Exercise native Swift provider signing and private simulator TLS
+        run: |
+          timeout 120s python3 scripts/run-linux-native-tpm-tls-experiment.py \
+            --simulator --runtime-root "$RUNNER_TEMP/remozio-native-tpm-runtime" \
+            --probe "$RUNNER_TEMP/remozio-native-tpm-build/debug/NativeTPMProbe" \
+            > "$RUNNER_TEMP/remozio-native-tpm-report.json"
+      - name: Retain sanitized native TPM simulator evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-tpm-simulator-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/remozio-native-tpm-report.json
+          if-no-files-found: ignore
+          retention-days: 7
   mac:
     name: Mac build
     runs-on: macos-26
