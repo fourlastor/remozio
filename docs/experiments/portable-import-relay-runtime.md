@@ -16,13 +16,17 @@ Unknown files remain incompatible state. They are not removed or treated as an e
 
 ```mermaid
 flowchart TD
-  Recipe[Retained imported recipe] --> Port[Select and retain local relay port]
-  Port --> Tunnel[Retain tunnel operation and result]
-  Tunnel --> Access[Retain Access application identity]
-  Access --> DNS[Retain DNS operation and result]
-  DNS --> Runtime[Prepare exact local runtime]
-  Runtime --> Readback[Validate published runtime artifacts]
-  Readback --> Activate[Bind activation to retained import scope]
+  Recipe[Retained imported recipe] --> Port[Retain local relay plan and port]
+  Port --> Runtime[Prepare and verify runtime artifacts]
+  Runtime --> Activate[Activate native services]
+  Activate --> Gateway[Prepare gateway and optional push]
+  Gateway --> Tunnel[Create or verify tunnel]
+  Tunnel --> Ingress[Apply exact ingress]
+  Ingress --> Credential[Retain relay run credential]
+  Credential --> Access[Create or verify Access application]
+  Access --> DNS[Create or verify DNS record]
+  DNS --> Connector[Publish protected connector startup reference]
+  Connector --> Complete[Verify final import completion]
 ```
 
 The setup owner holds the machine and import leases while it validates these records.
@@ -32,14 +36,15 @@ The native preparation entry point reopens the current import and validates its 
 Activation uses the same retained recipe and configuration scope.
 The current root artifact reader and original service caller restrictions remain intact.
 
-## Validation boundary
+## Current implementation and validation
 
-Earlier focused controls passed on the private relay-retention source.
-The current source also includes the published runtime reader fix and the current main shared consumption ledger.
-It requires a fresh complete repository gate before publication.
-Retain that gate's actual reports and source hashes separately from the earlier focused results.
+The native import action now connects these records to runtime preparation and connector publication.
+[Refusal recovery](portable-provider-refusal-retry.md) adds scoped metadata reads and explicit retries for confirmed rejections.
+Unknown provider outcomes cannot be replayed or adopted by name.
+The diagram shows the default import order. Internal preparation methods still validate their own retained prerequisites.
 
-These internal records do not expose a production import action or a new setup capability.
-Native provider dispatch, credential custody, authenticated export/import and final import completion remain separate work.
-No provider request, credential access, service installation or physical device test is part of this slice.
-Real launchd operation and the Mac-Pixel approval session remain supervised gates.
+The [owned loopback experiment](relay-connector-loopback.md) combines the process primitive, supervisor and real readiness client.
+Its fixture responses test readiness behavior without a live provider connection.
+The installed factory still requires the dedicated service identity and protected signed release.
+That factory and the live Mac-Pixel approval flow remain supervised gates.
+The complete repository gate must pass before publication; earlier focused runs do not qualify the current private tree.
