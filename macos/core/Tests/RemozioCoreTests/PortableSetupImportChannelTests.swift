@@ -102,6 +102,23 @@ final class PortableSetupImportChannelTests: XCTestCase, @unchecked Sendable {
         await channel.close()
         XCTAssertTrue(Set(UInt64(1)...9).isSubset(of: AdministrativeSetupInterface.supportedVersions))
     }
+    func testVersionNineClientCannotSendRefusalRequestsAndTenBindsTheExactResult() async throws {
+        let (_, owner, original) = try request(); defer { try? owner.close() }
+        let driver = Driver(), old = PortableSetupImportChannel(driver: driver)
+        try await old.start()
+        let currentDriver = Driver(); currentDriver.state.withLock { $0.version = 10 }
+        let current = PortableSetupImportChannel(driver: currentDriver, recoveryEnabled: true); try await current.start()
+        for action: SetupPortableImportOperation.Action in [.prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry] {
+            let request = try SetupPortableImportOperation(action: action, expected: original.expected, proposal: original.proposal, expectedRejectedRecordDigest: Data(repeating: 7, count: 32))
+            do { _ = try await old.perform(request, authorization: form); XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .unsupportedVersion) }
+            let result = try SetupPortableImportOperationResult(request: request, progress: request.expected, status: .applied)
+            currentDriver.state.withLock { $0.response = .progress(try! result.bytes) }
+            let actual = try await current.perform(request, authorization: form); XCTAssertEqual(actual, result)
+        }
+        XCTAssertEqual(driver.state.withLock { $0.history }, ["hello"])
+        XCTAssertEqual(currentDriver.state.withLock { $0.history }, ["recoveryHello", "perform", "perform", "perform"])
+        await old.close(); await current.close()
+    }
     func testRecoveryDecodesOnlyBoundedSameOwnerMetadataAndKeepsVersionNineOperations() async throws {
         let (f, owner, request) = try request(); defer { try? owner.close() }
         let value = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))

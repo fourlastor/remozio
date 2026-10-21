@@ -266,6 +266,50 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThan(server.invocations.withLock { $0 }, 0)
         server.close(); try await owner.closeWhenIdle()
     }
+    func testLiveAnonymousRefusalRequestsRequireVersionTenRightsAndCurrentRecordDigest() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        let fixture = try DNSRecordFixture(), f = fixture.base.h.f.accountFixture
+        let prepared = try fixture.begin(), sent = try prepared.transition(to: .dispatched), rejected = try sent.transition(to: .rejected, refusal: .unauthorized)
+        try fixture.replace(sent, previous: prepared); try fixture.replace(rejected, previous: sent)
+        let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() }, activate: { _, _, _, _, _ in throw Refused() })
+        let owner = try SetupAccountOwner(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
+            resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+            lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity }, importedGatewayOperation: bridge)
+        defer { try? owner.close() }
+        let requirement = try testRequirement(), server = try Server(owner: owner, requirement: requirement)
+        defer { server.close() }
+        let before = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        let form = Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)
+        var expectedRights = 0
+        for action: SetupPortableImportOperation.Action in [.prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry] {
+            for recovery in [false, true] {
+                let driver = Driver(server: server, requirement: requirement, mode: .normal)
+                let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: recovery)
+                try await channel.start()
+                server.rightsAllowed.withLock { $0 = true }
+                let request = try SetupPortableImportOperation(action: action, expected: before.progress, proposal: fixture.base.h.f.proposal(), expectedRejectedRecordDigest: Data(repeating: 0, count: 32))
+                // Bypass the client guard to test the native endpoint's independent version check.
+                let reply: SetupClientReply = await withCheckedContinuation { continuation in
+                    driver.invoke(.perform(request, form)) { continuation.resume(returning: $0) }
+                }
+                switch reply { case .failed, .progress(nil): break; default: XCTFail("An unbound refusal request was admitted") }
+                if recovery { expectedRights += 1 }
+                XCTAssertEqual(server.rights.withLock { $0 }, expectedRights)
+                XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
+                await channel.close()
+            }
+        }
+        let driver = Driver(server: server, requirement: requirement, mode: .normal)
+        let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true); try await channel.start()
+        server.rightsAllowed.withLock { $0 = false }
+        let request = try ReviewedSetupFile(proposal: fixture.base.h.f.proposal()).refusalRetryOperation(resource: .dnsRecord, recovery: before)
+        do { _ = try await channel.perform(request, authorization: form); XCTFail("Refused rights authorized recovery") } catch {}
+        XCTAssertEqual(server.rights.withLock { $0 }, expectedRights + 1)
+        XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
+        await channel.close(); server.close(); try await owner.closeWhenIdle()
+    }
     func testNativeCancellationKeepsUpdateExcludedUntilOwnedWorkSettles() async throws {
         guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
             throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")

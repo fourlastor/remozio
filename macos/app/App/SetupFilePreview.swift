@@ -264,7 +264,8 @@ struct SetupFilePreview: View {
             case .prepareRuntime, .prepareRelayPlan: return "Preparing local services…"
             case .activateRuntime: return "Starting local services…"
             case .prepareGateway, .activateGateway: return "Preparing push notifications…"
-            case .createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector: return "Preparing this Mac’s relay…"
+            case .createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector,
+                 .prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry: return "Preparing this Mac’s relay…"
             case .complete: return "Checking saved setup…"
             }
         }

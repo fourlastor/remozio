@@ -1604,6 +1604,15 @@ public final class SetupAccountOwner: @unchecked Sendable {
         case .createDNS:
             let result = try await createImportedDNSRecord(callerUID: callerUID, expected: expected, proposal: proposal)
             switch result.phase { case .created: break; case .rejected: status = .providerRejected; default: status = .requiresReconciliation }
+        case .prepareRefusedTunnelRetry:
+            guard let digest = request.expectedRejectedRecordDigest else { throw AdministrativeSetupChannelError.invalidMessage }
+            try check(); _ = try await prepareRefusedImportedRelayTunnelRetry(callerUID: callerUID, expected: expected, proposal: proposal, expectedRecordDigest: digest)
+        case .prepareRefusedAccessRetry:
+            guard let digest = request.expectedRejectedRecordDigest else { throw AdministrativeSetupChannelError.invalidMessage }
+            try check(); _ = try await prepareRefusedImportedAccessApplicationRetry(callerUID: callerUID, expected: expected, proposal: proposal, expectedRecordDigest: digest)
+        case .prepareRefusedDNSRetry:
+            guard let digest = request.expectedRejectedRecordDigest else { throw AdministrativeSetupChannelError.invalidMessage }
+            try check(); _ = try await prepareRefusedImportedDNSRecordRetry(callerUID: callerUID, expected: expected, proposal: proposal, expectedRecordDigest: digest)
         case .publishConnector: _ = try await publishImportedRelayConnector(callerUID: callerUID, expected: expected, proposal: proposal)
         }
         try Task.checkCancellation(); try activity?.validate()

@@ -165,6 +165,7 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
                 do { activity = try owner.acquireReleaseActivity() } catch { busy = false; admission.close(); throw error }
                 do {
                     let operation = try SetupPortableImportOperation.decode(request)
+                    guard !operation.requiresRecoveryHandshake || portableImportRecoveryReady else { throw AdministrativeSetupError.unavailable }
                     guard operation.expected.runtime.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
                     try authorize(authorization); try activity?.validate()
                     let id = UUID(); asynchronousID = id

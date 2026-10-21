@@ -103,3 +103,33 @@ It verifies the same retained files, rejected state, kernel invocation checks an
 This is same-process, ordinary-user evidence. It does not prove an installed Root service, Developer ID admission or actual administrator consent.
 The host runs macOS 27.0.1 and compiles for macOS 26. This does not qualify the macOS 26 runtime.
 No native retry write or app recovery button is connected by this interface change.
+
+
+## Explicit native refusal requests
+
+The version-1 request bytes and action numbers 0 through 12 remain unchanged.
+Version 2 has one additional field: the SHA-256 digest of the exact rejected resource record.
+Its three actions prepare a new tunnel, Access or DNS attempt. They do not create the provider resource.
+Version 2 accepts only these actions and exactly seven fields. A digest on an old action, or a new action in version 1, is invalid.
+The result retains its version-1 envelope and binds the complete request digest, including the selected rejected record.
+An applied recovery result must preserve the exact public import progress. The resource record changes to a new prepared attempt.
+
+The reviewed-file factory accepts only an actually rejected resource in authenticated recovery metadata.
+It binds the original proposal. Unknown or dispatched outcomes cannot use this factory.
+Both the client and endpoint require the version-10 handshake for these requests.
+The endpoint checks the invoking UID, request bounds, selected version and fresh administrator rights before asynchronous dispatch.
+The owner then runs the existing scoped, read-only provider preflight and rechecks record identity before the local change.
+Later resource creation repeats its normal preflight. A lost recovery reply requires another metadata read; it never triggers an automatic write.
+
+Seventy distinct focused Swift cases passed. They cover the original request bytes, closed version-2 decoding, exact result binding and retained-file scope.
+The native fixture deliberately bypasses the client guard to test independent endpoint rejection after a version-9 handshake.
+Version 10 still refuses missing rights. With fixture rights granted, every stale resource digest fails and leaves all retained metadata unchanged.
+These are owned, same-process native connections with synthetic credentials and placeholder authorization forms.
+They do not prove a successful provider-backed native recovery, actual administrator consent or an installed Root service.
+The app recovery action and its bounded authorization session remain the next integration step.
+
+The Debug app compiled through ATC with the changed SwiftUI switch. It was not launched.
+The first fresh build stopped during dependency resolution because its cached JOSESwift repository lacked the pinned tree.
+A separate build passed using copied, clean dependency checkouts at the same pinned commits.
+The original app, installation artifacts and dependency checkouts were preserved.
+No full local gate or publication covers these private changes yet.

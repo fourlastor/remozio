@@ -118,6 +118,7 @@ public actor PortableSetupImportChannel {
         catch { close(); throw error }
     }
     public func perform(_ request: SetupPortableImportOperation, authorization: Data) async throws -> SetupPortableImportOperationResult {
+        guard !request.requiresRecoveryHandshake || recoveryEnabled else { throw AdministrativeSetupChannelError.unsupportedVersion }
         guard request.expected.runtime.ownerUID == ownerUID, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
             throw AdministrativeSetupChannelError.invalidMessage
         }

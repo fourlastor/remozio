@@ -62,6 +62,23 @@ final class PortableSetupImportEndpointTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(try f.h.progress(f.owner), f.request.expected); endpoint.close()
         }
     }
+    func testVersionNineEndpointCannotAuthorizeVersionTwoAndTenStillRequiresFreshRights() async throws {
+        for action: SetupPortableImportOperation.Action in [.prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry] {
+            for recovery in [false, true] {
+                let f = try Fixture(); defer { try? f.owner.close() }
+                let calls = Mutex(0), done = expectation(description: "refused")
+                let request = try SetupPortableImportOperation(action: action, expected: f.request.expected, proposal: f.request.proposal, expectedRejectedRecordDigest: Data(repeating: 7, count: 32))
+                let endpoint = AdministrativeSetupXPCEndpoint(owner: f.owner, verify: { getuid() }, authorize: { _ in calls.withLock { $0 += 1 }; throw Refused() }, invalidate: {})
+                if recovery { endpoint.portableImportRecoveryHello { XCTAssertEqual($0, 10) } }
+                else { endpoint.portableImportHello { XCTAssertEqual($0, 9) } }
+                endpoint.performPortableImport(try request.bytes, authorization: form) { XCTAssertNil($0); done.fulfill() }
+                await fulfillment(of: [done], timeout: 3)
+                XCTAssertEqual(calls.withLock { $0 }, recovery ? 1 : 0)
+                XCTAssertNil(try f.h.readPlan()); XCTAssertEqual(try f.h.progress(f.owner), f.request.expected)
+                endpoint.close()
+            }
+        }
+    }
     func testRecoveryNegotiationRequiresSupportAndReadRechecksInvocationWithoutRights() throws {
         let unsupported = try Fixture(supported: false); defer { try? unsupported.owner.close() }
         let denied = AdministrativeSetupXPCEndpoint(owner: unsupported.owner, verify: { getuid() }, authorize: { _ in XCTFail() }, invalidate: {})
