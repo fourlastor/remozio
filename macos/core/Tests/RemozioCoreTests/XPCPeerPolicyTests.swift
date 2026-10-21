@@ -44,6 +44,36 @@ final class XPCPeerPolicyTests: XCTestCase {
         XCTAssertThrowsError(try value.credentials(processID: 100, userID: 501, auditSessionID: 43))
         XCTAssertNoThrow(try policy().credentials(processID: 100, userID: 501, auditSessionID: 43))
     }
+    func testHexadecimalCodeDirectoryHashesMatchThePreviousFormatterForEveryByte() {
+        for byte in UInt8.min...UInt8.max {
+            let hash = Data(repeating: byte, count: 20)
+            XCTAssertEqual(XPCPeerPolicy.hexadecimalCodeDirectoryHash(hash),
+                           hash.map { String(format: "%02x", $0) }.joined())
+        }
+        let bytes = Data(UInt8.min...UInt8.max)
+        for start in 0...(bytes.count - 20) {
+            let hash = bytes[start..<(start + 20)]
+            XCTAssertEqual(XPCPeerPolicy.hexadecimalCodeDirectoryHash(hash),
+                           hash.map { String(format: "%02x", $0) }.joined())
+        }
+    }
+    func testAllApprovedHashesRetainTheirExactSortedRequirementText() throws {
+        let hashes = Set((0..<16).map { offset in
+            Data((0..<20).map { UInt8(($0 * 13 + offset * 17) & 255) })
+        })
+        let formatted = hashes.map { hash in
+            "cdhash H\"" + hash.map { String(format: "%02x", $0) }.joined() + "\""
+        }.sorted().joined(separator: " or ")
+        let expected = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
+            + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
+            + "and certificate leaf[subject.OU] = \"AB12345678\" and identifier \"dev.remozio.transport\" "
+            + "and (\(formatted)) and !(entitlement[\"com.apple.security.get-task-allow\"] exists) "
+            + "and !(entitlement[\"com.apple.security.cs.disable-library-validation\"] exists) "
+            + "and !(entitlement[\"com.apple.security.cs.allow-dyld-environment-variables\"] exists) "
+            + "and !(entitlement[\"com.apple.security.cs.allow-jit\"] exists) "
+            + "and !(entitlement[\"com.apple.security.cs.allow-unsigned-executable-memory\"] exists)"
+        XCTAssertEqual(try policy(hashes: hashes).requirement, expected)
+    }
     func testInvocationOutsideAcceptedConnectionIsRejected() throws {
         let connection = NSXPCConnection(machServiceName: "dev.remozio.synthetic.unavailable")
         defer { connection.invalidate() }
