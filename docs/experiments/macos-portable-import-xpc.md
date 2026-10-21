@@ -89,3 +89,10 @@ Cancellation does not determine whether an already admitted write commits.
 The test reads retained storage after settlement without assuming an outcome from cancellation.
 This control does not isolate the final reply-callback boundary.
 The endpoint's reply-boundary checks remain separate from this native backend-settlement result.
+
+
+Native reply delivery can precede release of the handshake activity reference.
+The fixture now waits up to five seconds for that reference to settle before it holds the next operation.
+The [activity repeat](evidence/2026-10-21-portable-import-xpc-idle-settlement.json) passed with this bounded initial observation on macOS 27.0.1.
+It does not relax either exclusion check while owned work remains active.
+This repeat has a later test source hash than the original paired wire and activity records above.

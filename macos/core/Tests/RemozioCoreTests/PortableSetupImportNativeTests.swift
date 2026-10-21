@@ -249,8 +249,15 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         let driver = Driver(server: server, requirement: requirement, mode: .normal)
         let channel = PortableSetupImportChannel(driver: driver, timeoutMilliseconds: 5000, operationTimeoutMilliseconds: 15_000)
         try await channel.start()
-        // An idle authenticated connection is not active work and must allow update admission.
-        try installer.acquireExclusive().close()
+        // The native reply can arrive before its server-side activity reference closes.
+        let idleDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while true {
+            do { try installer.acquireExclusive().close(); break }
+            catch ReleaseActivityError.busy {
+                guard ContinuousClock.now < idleDeadline else { throw Refused() }
+                try await Task.sleep(for: .milliseconds(2))
+            }
+        }
         let pending = Task { try await channel.perform(request, authorization: Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)) }
         func waitUntil(_ predicate: () -> Bool) async throws {
             let deadline = ContinuousClock.now.advanced(by: .seconds(10))
