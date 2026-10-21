@@ -230,4 +230,23 @@ final class SharedSetupDNSCreationOwnerTests: XCTestCase, @unchecked Sendable {
         XCTAssertNoThrow(try observed.validate(expected: f.base.h.intent, plan: f.base.plan, createdTunnel: f.base.tunnel, application: f.access, record: record))
         let requests = await probe.all(); XCTAssertEqual(requests.count, 2); XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
     }
+    func testMissingShadowMetadataRetainsUnknownAndCannotReplayCreation() async throws {
+        for null in [false, true] {
+            let f = try DNSRecordFixture(), owner = try f.base.h.owner(); defer { try? owner.close() }
+            var replies = try steps(f)
+            let body = null ? try f.dnsReply(changes: ["meta": NSNull()]) : try f.dnsReply(omitting: ["meta"])
+            replies[12] = RelayIngressProbe.reply(body)
+            let expected = try f.base.h.progress(owner), probe = RelayIngressProbe(replies)
+            let record = try await create(owner, f: f, expected: expected, probe: probe)
+            XCTAssertEqual(record.phase, .unknown); XCTAssertNil(record.dnsRecordID)
+            XCTAssertEqual(try f.read(), record)
+            let requests = await probe.all(); XCTAssertEqual(requests.filter { $0.httpMethod == "POST" }.count, 1)
+            let again = try RelayIngressProbe([steps(f)[0]])
+            do { _ = try await create(owner, f: f, expected: expected, probe: again); XCTFail() }
+            catch { XCTAssertEqual(error as? RelayProvisioningError, .requiresReconciliation) }
+            let repeated = await again.all(); XCTAssertEqual(repeated.count, 1)
+            XCTAssertTrue(repeated.allSatisfy { $0.httpMethod == "GET" })
+        }
+    }
+
 }

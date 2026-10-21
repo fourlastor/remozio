@@ -32,6 +32,7 @@ Complex paths, public overrides, duplicate matches and unresolved application fi
 The DNS client selects only the configured zone, planned hostname and retained tunnel target.
 Creation requests a proxied CNAME with automatic TTL.
 Readback verifies the recorded ID, exact target and proxy settings, including observable shadowing metadata.
+Creation and readback require the requested metadata object. A missing or null object cannot verify the record.
 A matching name cannot adopt an unrecorded resource.
 
 Creation is dispatched only after retaining its attempt.
