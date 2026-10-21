@@ -6,7 +6,7 @@ import XCTest
 @testable import RemozioCore
 
 final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
-    private final class Fixture {
+    final class Fixture: @unchecked Sendable {
         let files: ServiceReleaseActivityFixture
         let service: ServiceReleaseActivityBarrier
         let updater: ServiceReleaseActivityBarrier
