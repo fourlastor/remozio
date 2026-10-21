@@ -99,6 +99,46 @@ final class RelayConnectorSupervisorTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(starts.withLock { $0 }, 2)
         let settled = await owner.close(); XCTAssertTrue(settled); try f.assertUpdateAvailable()
     }
+    func testInvalidatedStartupMetadataStopsTheChildWithoutRetry() async throws {
+        let f = try Fixture(), allowed = Mutex(true), starts = Mutex(0)
+        let owner = Supervisor(options: try .init(probeMilliseconds: 100), operations: .init(start: { event in
+            starts.withLock { $0 += 1 }; return try f.start("normal", event: event)
+        }, probe: { _ in .connected }, validateCurrent: {
+            guard allowed.withLock({ $0 }) else { throw RuntimePreparationError.changedScope }
+        }))
+        try await owner.start(); try await waitUntil { await owner.status == .connected }
+        allowed.withLock { $0 = false }
+        try await waitUntil { await owner.status == .refused }
+        try f.assertUpdateAvailable(); XCTAssertEqual(starts.withLock { $0 }, 1)
+        let settled = await owner.close(); XCTAssertTrue(settled)
+    }
+    func testChangedScopeDuringReadinessCannotPublishItsLateSuccess() async throws {
+        let f = try Fixture(), gate = HeldProbe(), allowed = Mutex(true), starts = Mutex(0)
+        let owner = Supervisor(operations: .init(start: { event in
+            starts.withLock { $0 += 1 }; return try f.start("normal", event: event)
+        }, probe: { _ in await gate.run() }, validateCurrent: {
+            guard allowed.withLock({ $0 }) else { throw RuntimePreparationError.changedScope }
+        }))
+        try await owner.start(); try await waitUntil { await gate.entered }
+        allowed.withLock { $0 = false }; await gate.release()
+        try await waitUntil { await owner.status == .refused }
+        try f.assertUpdateAvailable(); XCTAssertEqual(starts.withLock { $0 }, 1)
+        let settled = await owner.close(); XCTAssertTrue(settled)
+    }
+    func testTemporaryScopeReadErrorRetriesOnlyAfterTheChildSettles() async throws {
+        let f = try Fixture(), starts = Mutex(0), failOnce = Mutex(true)
+        let owner = Supervisor(options: try .init(retryMilliseconds: 100), operations: .init(start: { event in
+            let index = starts.withLock { let old = $0; $0 += 1; return old }
+            if index == 1 { try f.assertUpdateAvailable() }
+            return try f.start("normal", event: event)
+        }, probe: { _ in .connected }, validateCurrent: {
+            let fail = failOnce.withLock { let old = $0; $0 = false; return old }
+            if fail { throw JournalLeaseError.system(EIO) }
+        }))
+        try await owner.start(); try await waitUntil { await owner.status == .connected }
+        XCTAssertEqual(starts.withLock { $0 }, 2)
+        let settled = await owner.close(); XCTAssertTrue(settled); try f.assertUpdateAvailable()
+    }
     func testCloseDuringRetryPreventsAnotherSpawn() async throws {
         let f = try Fixture(), starts = Mutex(0)
         let owner = Supervisor(options: try .init(retryMilliseconds: 60_000, maximumRetryMilliseconds: 60_000),

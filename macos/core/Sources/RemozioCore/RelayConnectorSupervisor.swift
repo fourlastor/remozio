@@ -27,6 +27,12 @@ actor RelayConnectorSupervisor {
     struct Operations: Sendable {
         let start: @Sendable (@escaping @Sendable (RelayConnectorProcess.Event) -> Void) throws -> RelayConnectorProcess
         let probe: @Sendable (RelayConnectorDiscovery) async throws -> RelayConnectorReadiness.State
+        let validateCurrent: @Sendable () throws -> Void
+        init(start: @escaping @Sendable (@escaping @Sendable (RelayConnectorProcess.Event) -> Void) throws -> RelayConnectorProcess,
+             probe: @escaping @Sendable (RelayConnectorDiscovery) async throws -> RelayConnectorReadiness.State,
+             validateCurrent: @escaping @Sendable () throws -> Void = {}) {
+            self.start = start; self.probe = probe; self.validateCurrent = validateCurrent
+        }
     }
     private let operations: Operations
     private let options: Options
@@ -45,11 +51,12 @@ actor RelayConnectorSupervisor {
         self.options = options; self.operations = operations; nextRetryMilliseconds = options.retryMilliseconds
     }
     static func native(scope: GatewaySettingsConsumerNativeScope, reference: RelayRunCredentialReference,
-                       options: Options = .standard) throws -> RelayConnectorSupervisor {
+                       options: Options = .standard,
+                       verifyCurrent: @escaping @Sendable () throws -> Void = {}) throws -> RelayConnectorSupervisor {
         let readiness = try RelayConnectorReadiness()
         return RelayConnectorSupervisor(options: options, operations: .init(start: { event in
-            try RelayConnectorProcess.startNative(scope: scope, reference: reference, event: event)
-        }, probe: { try await readiness.probe($0) }))
+            try RelayConnectorProcess.startNative(scope: scope, reference: reference, verifyCurrent: verifyCurrent, event: event)
+        }, probe: { try await readiness.probe($0) }, validateCurrent: { try scope.validate(); try verifyCurrent() }))
     }
     deinit {
         let probe = probe, retry = retry, pending = cleanup, process = current
@@ -76,10 +83,7 @@ actor RelayConnectorSupervisor {
             status = .discovering
         } catch {
             incarnation = nil
-            if let failure = error as? RelayConnectorProcess.Failure,
-               case .system(let code) = failure, [EAGAIN, ENOMEM, EMFILE, ENFILE, EINTR, ETXTBSY].contains(code) {
-                scheduleRetry()
-            } else { status = .refused }
+            if Self.isTemporary(error) { scheduleRetry() } else { status = .refused }
         }
     }
     private func receive(_ event: RelayConnectorProcess.Event, incarnation id: UUID) async {
@@ -88,13 +92,19 @@ actor RelayConnectorSupervisor {
         case .discovered(let discovery):
             guard probe == nil, status == .discovering else { return }
             status = .checking
-            let check = operations.probe, interval = options.probeMilliseconds
+            let check = operations.probe, verify = operations.validateCurrent, interval = options.probeMilliseconds
+            let invalidated: @Sendable (Bool) -> Void = { [weak self] mayRetry in
+                Task { [weak self] in await self?.retireCurrent(incarnation: id, mayRetry: mayRetry) }
+            }
             probe = Task { [weak self] in
                 while !Task.isCancelled {
+                    do { try verify() } catch { if !Task.isCancelled { invalidated(Self.isTemporary(error)) }; return }
                     let observed: Status
                     do { observed = try await check(discovery) == .connected ? .connected : .disconnected }
                     catch { if Task.isCancelled { return }; observed = .unavailable }
-                    guard !Task.isCancelled, await self?.record(observed, incarnation: id) == true else { return }
+                    guard !Task.isCancelled else { return }
+                    do { try verify() } catch { invalidated(Self.isTemporary(error)); return }
+                    guard await self?.record(observed, incarnation: id) == true else { return }
                     do { try await Task.sleep(for: .milliseconds(interval)) } catch { return }
                 }
             }
@@ -107,6 +117,22 @@ actor RelayConnectorSupervisor {
             current = nil; probe = nil; cleanup = nil; incarnation = nil
             scheduleRetry()
         }
+    }
+    private func retireCurrent(incarnation id: UUID, mayRetry: Bool) async {
+        guard !closed, incarnation == id, current != nil, cleanup == nil else { return }
+        status = .stopping
+        let pending = beginCleanup(), settled = await pending.value
+        guard !closed, incarnation == id else { return }
+        guard settled else { status = .unsettled; return }
+        current = nil; probe = nil; cleanup = nil; incarnation = nil
+        if mayRetry { scheduleRetry() } else { status = .refused }
+    }
+    private static func isTemporary(_ error: any Error) -> Bool {
+        let code: Int32
+        if let failure = error as? RelayConnectorProcess.Failure, case .system(let value) = failure { code = value }
+        else if let failure = error as? JournalLeaseError, case .system(let value) = failure { code = value }
+        else { return false }
+        return [EAGAIN, ENOMEM, EMFILE, ENFILE, EINTR, ETXTBSY, EIO, EBUSY, ENOSPC, ETIMEDOUT].contains(code)
     }
     private func record(_ observed: Status, incarnation id: UUID) -> Bool {
         guard !closed, incarnation == id, current != nil, cleanup == nil else { return false }
