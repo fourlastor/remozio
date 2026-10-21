@@ -101,6 +101,14 @@ and Python must be 3.11 or later; unsupported semantics fail rather than skip. T
 mechanics, not a protected service identity, durable journal or production storage
 policy. Advisory locking does not exclude a malicious same-account writer.
 
+The [OS-capture experiment](experiments/linux-os-capture.md) also runs in
+`check-linux-host.sh`. It observes its own current Linux task and retained objects,
+round-trips raw paths and real UID/GID roles through schema 4, and refuses changed
+objects or streams before a synchronous callback. It runs no command and uses
+synthetic monitor, caller and code-policy fields. Its controls do not establish a
+stopped caller handoff or protected admission; a monitor must independently
+observe its retained sender before this can join the command fixture.
+
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
 selects the checks executable on the current host. No Git hook is installed:
 
