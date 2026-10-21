@@ -14,6 +14,11 @@ enum RelayRunCredentialPreparation {
         let directory = try ProtectedSetupDirectory(anchor: "/", relativePath: String(paths.privateDirectory.dropFirst()),
             owner: 0, createIfMissing: false)
         defer { directory.close() }
+        try verifyCurrent()
+        let retainedRuntime = try RuntimePreparationMaterial.decode(ProtectedServiceConfiguration.read(anchor: directory.path,
+            relativePath: AdministrativeSetupPublication.File.runtimeRecord.name, owner: 0))
+        guard try retainedRuntime.reference == runtime else { throw RuntimePreparationError.changedScope }
+        try verifyCurrent()
         return try restoreOrCreate(directory: directory, owner: 0, account: account, inventory: inventory,
             expected: expected, plan: plan, created: created, runtime: runtime, reference: reference,
             verifyCurrent: verifyCurrent, makeCredential: {
