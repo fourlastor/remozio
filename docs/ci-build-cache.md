@@ -8,7 +8,8 @@ and interoperability check still runs. A cache hit is never a passing check.
 
 `scripts/ci-build-cache.py` lists the SwiftPM scratch directories used by the Mac
 gate, including the release-signing scratch directory, and the packaging and app
-Xcode DerivedData directories. Interoperability has its own cache containing its
+Xcode DerivedData directories. The System Keychain experiment's `.build` is included
+with the other Mac SwiftPM outputs. Interoperability has its own cache containing its
 SwiftPM peer build directory. The jobs do not cache the entire repository `.build`
 directory: disposable experiment state, reports, copied peers and logs are excluded.
 The peer builder still copies newly validated binaries before Gradle starts.
@@ -17,7 +18,8 @@ The compatibility prefix includes the job scope, resolved checkout path, CPU
 architecture, macOS build, runner image version, Xcode/Swift/Clang versions,
 developer directory, SDK path/version/build, build-related environment settings,
 and hashes of the build scripts, workflow, package manifests/lockfiles and Xcode
-project settings. A changed compatibility dimension starts a cold namespace.
+project settings, except the exact audited Linux-only inputs described below.
+A changed compatibility dimension starts a cold namespace.
 The exact key additionally hashes all tracked input bytes and modes. A compatible
 prefix restore can reuse outputs from another source revision.
 
@@ -26,7 +28,7 @@ regular files regain their exact recorded nanosecond modification times, only
 after their content hashes and modes match. Changed inputs are not backdated.
 Added/deleted/renamed build inputs, file-type changes, or a changed input whose
 timestamp collides with its old timestamp discard the explicit output roots and
-build cold. The file-set comparison excludes only regular, non-executable `.md`
+build cold. The file-set comparison exempts regular, non-executable `.md`
 files under top-level `docs/`, with no special permission bits. The cached native
 builds do not consume this documentation tree. Markdown elsewhere (including
 package resources), symlinks and executable documentation remain conservative.
@@ -34,8 +36,28 @@ Both the old and new inventories are classified, so changing an ordinary documen
 into one of those inputs, or back, still requires a cold build. A future build that
 consumes `docs/` must revisit this policy.
 
-Documentation remains in the exact content key, manifest, timestamp checks and
-save-stability check. Thus a documentation change can reuse a compatible-prefix
+The second narrow exemption is the helper's explicit `LINUX_ONLY_INPUT_MODES`
+table: 24 existing files in the Linux approval-command, native-TPM/TLS, caller,
+caller-monitor, storage-lease and TPM/TLS experiments, plus their eight dedicated
+Linux coordinator/runner scripts. These exact regular files, at their recorded
+expected modes, are omitted only from native compatibility settings and discovery
+invalidation. There is no `linux-*` prefix or directory exemption: an unknown new
+path, even inside one of those Linux packages, stays conservative. Both old and new
+inventories are classified, so type or unexpected-mode transitions still build cold.
+
+The dependency audit finds no Mac SwiftPM/Xcode graph consuming those experiment
+files. The Linux approval fixture depends on shared protocol/core, with no reverse
+dependency. The Mac native gate invokes none of the eight Linux entry points.
+Portable Python tests may import/test the runners or use owned temporary workers;
+those checks still execute on every cache hit and produce no cached Mac/interop
+compiler output. Shared protocol/core, `generate-linux-capture-fixtures.py`, Mac
+build scripts, the cache/smoke helpers, `check.sh`, `check-local.sh`, and every
+workflow remain sensitive. Workflow edits confined to Linux jobs still start a
+cold compatibility namespace. If a future Mac build consumes an exempt input,
+revisit the table; do not extend it without auditing dependencies.
+
+Documentation and the audited Linux inputs remain in the exact content key,
+manifest, byte/mode/type checks, timestamp checks and save-stability check. Thus a change can reuse a compatible-prefix
 cache but cannot masquerade as identical input. Even a changed document with its
 old timestamp still triggers the conservative collision fallback. Symlink targets
 are not timestamped. Missing, incompatible or malformed manifests also cause a
@@ -72,6 +94,13 @@ job runs it before the full native gate. It creates a disposable package, then:
    and a freshly executed test return the new value.
 5. Repeats with a deliberately colliding old timestamp, requiring the conservative
    cold-build fallback and another changed runtime result.
+
+Between the documentation and source controls, three additional stages add, edit
+and remove an exact audited Linux manifest/source pair. Each changes the full
+content inventory while preserving compatibility settings, restores identical
+source timestamps, performs no source frontend compilation, and executes both the
+test and executable again. These are eligibility/correctness controls for the
+disposable package, not a Mac cache hit or full-job timing claim.
 
 The JSON report and verbose logs are written under `.build/ci-cache-smoke` and
 uploaded with the Mac app build logs, including on failure. This is a small

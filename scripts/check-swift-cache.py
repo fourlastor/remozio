@@ -161,15 +161,15 @@ def experiment(output, report):
         source = fixture / SOURCE
         report["documentationRestores"] = {}
 
-        def documentation_stage(name, previous_inputs, changed_count, missing_count):
+        def documentation_stage(name, previous_inputs, changed_count, missing_count, restore_group="documentationRestores"):
             current = helper.capture_inputs(fixture)
             restore = helper.restore_inputs(fixture, previous_inputs)
-            report["documentationRestores"][name] = restore
+            report[restore_group][name] = restore
             require(restore["changed"] == changed_count and restore["missing"] == missing_count
                     and restore["restored"] == len(FILES),
-                    f"{name}: unexpected documentation restore counts: {restore}")
+                    f"{name}: unexpected non-native input restore counts: {restore}")
             require(not restore.get("requires_clean_build"),
-                    f"{name}: ordinary documentation unnecessarily requires a clean build")
+                    f"{name}: audited non-native input unnecessarily requires a clean build")
             require(source.stat().st_mtime_ns == cached_stat.st_mtime_ns,
                     f"{name}: unchanged source timestamp was not preserved exactly")
             require(helper.content_inventory(helper.capture_inputs(fixture))
@@ -179,7 +179,7 @@ def experiment(output, report):
             stage = run_stage(name, fixture, output, swift, env, 1)
             report["stages"][name] = stage
             require(stage["frontendCompileCommands"] == 0,
-                    f"{name}: documentation change recompiled package source")
+                    f"{name}: non-native input change recompiled package source")
             proven_inputs = helper.capture_inputs(fixture)
             require(proven_inputs == restored,
                     f"{name}: build or test changed tracked input content or timestamps")
@@ -215,6 +215,37 @@ def experiment(output, report):
         documentation_inputs = documentation_stage("documentation-remove", documentation_inputs, 0, 1)
         require(documentation_inputs == restored_inputs,
                 "documentation-remove: tracked inputs did not return to the original proven inventory")
+
+        # Exact audited Linux paths remain in the full key/inventory but are not
+        # consumed by this package or the cached Mac/interop build graphs.
+        report["linuxRestores"] = {}
+        linux_files = {
+            Path("experiments/linux-native-tpm-tls/Package.swift"): "// Synthetic Linux-only manifest input\n",
+            Path("experiments/linux-native-tpm-tls/Sources/NativeTPMProbe/main.swift"): "print(\"Linux-only source input\")\n",
+        }
+        linux_inputs = documentation_inputs
+        for change in ("add", "edit", "remove"):
+            for relative, contents in linux_files.items():
+                path = fixture / relative
+                if change == "remove":
+                    path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(contents if change == "add" else contents.replace("input", "value"))
+                    path.chmod(0o644)
+                    if change == "edit":
+                        stamp = linux_inputs[str(relative)]["mtime_ns"] + 1_000_000
+                        os.utime(path, ns=(stamp,) * 2)
+                command([git, "add", "-A", "--", str(relative)], cwd=fixture, env=env)
+            current = helper.capture_inputs(fixture)
+            require(helper.settings_inventory(current) == helper.settings_inventory(linux_inputs),
+                    f"linux-{change}: Linux-only input changed native compatibility settings")
+            require(helper.content_inventory(current) != helper.content_inventory(linux_inputs),
+                    f"linux-{change}: Linux-only input disappeared from the full content inventory")
+            linux_inputs = documentation_stage(f"linux-{change}", linux_inputs,
+                0 if change == "remove" else 2, 2 if change == "remove" else 0, "linuxRestores")
+        require(linux_inputs == restored_inputs,
+                "linux-remove: tracked inputs did not return to the original proven inventory")
 
         original = source.read_bytes()
         changed = original.replace(b"{ 1 }", b"{ 2 }")
