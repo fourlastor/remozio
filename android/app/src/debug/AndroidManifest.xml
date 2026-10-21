@@ -8,5 +8,12 @@
         <activity android:name=".PairingPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".AdbEndpointProbeActivity" android:exported="false" />
         <activity android:name=".BiometricProbeActivity" android:exported="false" />
+        <activity android:name=".requests.CombinedInboxPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxEmptyPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".requests.InboxUnavailablePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
     </application>
 </manifest>

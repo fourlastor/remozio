@@ -530,4 +530,8 @@
     <string name="registration_retry">Retry registration</string>
     <string name="registration_retry_queued">Registration recovery was queued</string>
     <string name="registration_lifecycle_hint">Registration progress for each paired Mac appears below.</string>
+    <string name="nav_requests">Requests</string>
+    <string name="commands_all_hosts">All Macs</string>
+    <string name="commands_account_suffix">Account %1$s</string>
+    <string name="commands_connections">Connections</string>
 </resources>

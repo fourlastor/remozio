@@ -14,6 +14,7 @@ import dev.remozio.android.audit.AuditScreen
 import dev.remozio.android.push.NotificationSettingsScreen
 import dev.remozio.android.enrollment.StoredMacList
 import dev.remozio.android.enrollment.StoredMac
+import dev.remozio.android.requests.CombinedCommandInboxScreen
 import dev.remozio.android.requests.CommandInboxScreen
 import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.mutableStateOf
@@ -70,9 +71,9 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-internal fun RemozioTheme(content: @Composable () -> Unit) {
+internal fun RemozioTheme(darkTheme: Boolean = isSystemInDarkTheme(), content: @Composable () -> Unit) {
     val context = LocalContext.current
-    val colors = if (isSystemInDarkTheme()) {
+    val colors = if (darkTheme) {
         dynamicDarkColorScheme(context)
     } else {
         dynamicLightColorScheme(context)
@@ -88,14 +89,28 @@ private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { commands.runForeground() }
     }
     var destination by rememberSaveable { mutableIntStateOf(0) }
-    val labels = listOf(R.string.nav_macs, R.string.nav_audit, R.string.nav_settings)
-    val icons = listOf(R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)
+    RemozioNavigation(destination, { destination = it }) {
+        when (destination) {
+            1 -> MacsScreen(pairing)
+            2 -> AuditScreen()
+            3 -> NotificationSettingsScreen()
+            else -> CombinedCommandInboxScreen(pairing::open)
+        }
+    }
+    PairingSetupSheet(pairing, activity)
+}
+
+/** The same adaptive navigation shell is used by the app and its debug display fixtures. */
+@Composable
+internal fun RemozioNavigation(destination: Int, onDestination: (Int) -> Unit, content: @Composable () -> Unit) {
+    val labels = listOf(R.string.nav_requests, R.string.nav_macs, R.string.nav_audit, R.string.nav_settings)
+    val icons = listOf(R.drawable.ic_requests, R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val expanded = maxWidth >= 600.dp
         Scaffold(bottomBar = {
             if (!expanded) NavigationBar {
                 labels.indices.forEach { index -> NavigationBarItem(
-                    selected = destination == index, onClick = { destination = index },
+                    selected = destination == index, onClick = { onDestination(index) },
                     icon = { Icon(painterResource(icons[index]), contentDescription = null) },
                     label = { Text(stringResource(labels[index])) },
                 ) }
@@ -104,18 +119,18 @@ private fun RemozioScreen(pairing: PairingViewModel, activity: ComponentActivity
             Row(Modifier.fillMaxSize().padding(insets)) {
                 if (expanded) NavigationRail {
                     labels.indices.forEach { index -> NavigationRailItem(
-                        selected = destination == index, onClick = { destination = index },
+                        selected = destination == index, onClick = { onDestination(index) },
                         icon = { Icon(painterResource(icons[index]), contentDescription = null) },
                         label = { Text(stringResource(labels[index])) },
                     ) }
                 }
                 Box(Modifier.weight(1f)) {
-                    when (destination) { 1 -> AuditScreen(); 2 -> NotificationSettingsScreen(); else -> MacsScreen(pairing) }
+                    content()
                 }
             }
         }
     }
-    PairingSetupSheet(pairing, activity)
+
 }
 
 @Composable

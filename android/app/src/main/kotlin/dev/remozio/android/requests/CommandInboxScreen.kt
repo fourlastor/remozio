@@ -72,7 +72,8 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
             }
             selected?.let { session ->
                 val approval = remember(connection, session) { connection.approval(session) }
-                CommandRequestInspection(session, mac.label, stringResource(R.string.commands_paired_account),
+                CommandRequestInspection(session, commandMacLabel(checkNotNull(selectedOwner), (runtimeState as ForegroundCommandState.Ready).owners),
+                    stringResource(R.string.commands_account_suffix, commandAccountSuffix(selectedOwner, (runtimeState as ForegroundCommandState.Ready).owners)),
                     onDismiss = { selected = null }, approval = approval)
             }
         }
@@ -80,7 +81,7 @@ internal fun CommandInboxScreen(mac: StoredMac, onBack: () -> Unit) {
 }
 
 @Composable
-private fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpen: () -> Unit) {
+internal fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpen: () -> Unit, macName: String? = null, accountName: String? = null) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var snapshot by remember(session) { mutableStateOf<CommandRequestSnapshot?>(null) }
     LaunchedEffect(session, lifecycle) {
@@ -93,9 +94,14 @@ private fun CommandRequestRow(session: CommandRequestSession, number: Int, onOpe
     snapshot?.takeUnless { it.closed }?.let { current ->
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(stringResource(R.string.commands_request_number, number), style = MaterialTheme.typography.titleMedium)
-                current.status?.let { RequestStatusCard(it) } ?: Text(stringResource(R.string.commands_waiting_status))
-                TextButton(onClick = onOpen) { Text(stringResource(R.string.commands_review)) }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(macName ?: stringResource(R.string.commands_request_number, number), style = MaterialTheme.typography.titleMedium)
+                        accountName?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    }
+                    TextButton(onClick = onOpen) { Text(stringResource(R.string.commands_review)) }
+                }
+                current.status?.let { RequestStatusSummary(it) } ?: Text(stringResource(R.string.commands_waiting_status))
             }
         }
     }

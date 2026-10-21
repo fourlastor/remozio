@@ -45,12 +45,7 @@ internal fun statusHeadline(status: TrackedRequestStatus): StatusHeadline = when
         StatusHeadline.TARGET_EXPIRED else StatusHeadline.AUTHORIZATION_EXPIRED
 }
 
-/** Read-only status. Countdown changes never enter the status announcement node. */
-@Composable
-internal fun RequestStatusCard(snapshot: TrackedRequestStatus) {
-    val status = snapshot.status
-    val timing = snapshot.timing
-    val headline = when (statusHeadline(snapshot)) {
+internal fun statusHeadlineResource(snapshot: TrackedRequestStatus): Int = when (statusHeadline(snapshot)) {
         StatusHeadline.QUEUED -> R.string.status_queued
         StatusHeadline.PRESENTED -> R.string.status_presented
         StatusHeadline.AUTHORIZED -> R.string.status_authorized
@@ -66,6 +61,13 @@ internal fun RequestStatusCard(snapshot: TrackedRequestStatus) {
         StatusHeadline.AUTHORIZATION_EXPIRED -> R.string.status_authorization_expired
         StatusHeadline.TARGET_EXPIRED -> R.string.status_target_expired
     }
+
+/** Read-only status. Countdown changes never enter the status announcement node. */
+@Composable
+internal fun RequestStatusCard(snapshot: TrackedRequestStatus) {
+    val status = snapshot.status
+    val timing = snapshot.timing
+    val headline = statusHeadlineResource(snapshot)
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(headline), style = MaterialTheme.typography.titleMedium,
@@ -89,6 +91,35 @@ internal fun RequestStatusCard(snapshot: TrackedRequestStatus) {
             }
             if (status.decisionPhoneID != null) Text(stringResource(R.string.status_phone_decided))
         }
+    }
+}
+
+/** List summary. Full inspection keeps the complete signed timing and outcome explanation. */
+@Composable
+internal fun RequestStatusSummary(snapshot: TrackedRequestStatus) {
+    val status = snapshot.status
+    val timing = snapshot.timing
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(stringResource(statusHeadlineResource(snapshot)), style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        Text(stringResource(R.string.status_age_lower_bound, seconds(timing.ageLowerBoundMs)), style = MaterialTheme.typography.bodySmall)
+        if (timing.clockUncertain) Text(stringResource(R.string.status_clock_uncertain), style = MaterialTheme.typography.bodySmall)
+        if (timing.deliveryDelayUnknown) Text(stringResource(R.string.status_delivery_unknown), style = MaterialTheme.typography.bodySmall)
+        if (!status.phase.isTerminal) {
+            timing.authorizationRemainingUpperBoundMs?.let { remaining ->
+                Text(if (remaining == 0uL) stringResource(R.string.status_authorization_elapsed)
+                    else stringResource(R.string.status_authorization_remaining, secondsCeiling(remaining)), style = MaterialTheme.typography.bodySmall)
+            }
+            timing.estimatedTargetRemainingMs?.let { remaining ->
+                Text(if (remaining == 0uL) stringResource(R.string.status_estimate_elapsed)
+                    else stringResource(R.string.status_estimate_remaining, secondsCeiling(remaining)), style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.status_estimate_explanation), style = MaterialTheme.typography.bodySmall)
+            }
+            if (status.lateObservation) Text(stringResource(R.string.status_late_observation), style = MaterialTheme.typography.bodySmall)
+        } else {
+            status.terminalAgeMs?.let { Text(stringResource(R.string.status_terminal_age, seconds(it)), style = MaterialTheme.typography.bodySmall) }
+        }
+        if (status.decisionPhoneID != null) Text(stringResource(R.string.status_phone_decided), style = MaterialTheme.typography.bodySmall)
     }
 }
 
