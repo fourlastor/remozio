@@ -45,7 +45,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
     }
-    func portableImportChannel() throws -> PortableSetupImportChannel {
+    func portableImportChannel(preferRecovery: Bool = false) throws -> PortableSetupImportChannel {
         var channel: PortableSetupImportChannel?
         let state = try perform(registering: false) { release in
             guard let component = release.manifest.components.first(where: { $0.role == .setupController }),
@@ -54,8 +54,13 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
             }
             let policy = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
                 approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
+            let recovery = preferRecovery && component.formats.contains {
+                $0.name == AdministrativeSetupInterface.formatName &&
+                $0.readers.contains(AdministrativeSetupInterface.portableImportRecoveryVersion) &&
+                $0.writers.contains(AdministrativeSetupInterface.portableImportRecoveryVersion)
+            }
             channel = try PortableSetupImportChannel(serviceName: AdministrativeSetupConfiguration.serviceName,
-                rootPolicy: policy, ownerUID: getuid())
+                rootPolicy: policy, ownerUID: getuid(), recoveryEnabled: recovery)
         }
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
@@ -178,8 +183,8 @@ public final class MacSetupServiceControls {
 
 /// Verifies protected placement and the running app before opening a pinned Root setup connection.
 public enum MacAccountSetupConnection {
-    public static func openPortableImport() async throws -> PortableSetupImportChannel {
-        try await NativeMacSetupServiceDriver().portableImportChannel()
+    public static func openPortableImport(preferRecovery: Bool = false) async throws -> PortableSetupImportChannel {
+        try await NativeMacSetupServiceDriver().portableImportChannel(preferRecovery: preferRecovery)
     }
 
     public static func open(serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false, gatewaySettings: Bool = false, gatewayOperationTimeoutMilliseconds: UInt64 = 60_000) async throws -> AdministrativeSetupChannel {

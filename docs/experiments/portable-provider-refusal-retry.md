@@ -133,3 +133,37 @@ The first fresh build stopped during dependency resolution because its cached JO
 A separate build passed using copied, clean dependency checkouts at the same pinned commits.
 The original app, installation artifacts and dependency checkouts were preserved.
 No full local gate or publication covers these private changes yet.
+
+
+## App recovery and continued import
+
+The app prefers setup IPC 10 only when the verified release declares its readers and writers.
+Otherwise it keeps the normal version-9 path. A failed version-10 handshake does not trigger a downgrade.
+Recovery metadata supplies progress and resource state from one authenticated read.
+Older logical drivers can still read ordinary progress. They cannot perform the new recovery actions.
+
+A named retry action appears only for an actually rejected resource. Unknown or dispatched outcomes remain blocked.
+The sheet shows the provider refusal, target hostname and required storage choices.
+It distinguishes provider rejection from missing recovery details. A confirmed result remains confirmed if a later metadata read fails.
+Such a read failure disables new work until an explicit refresh succeeds.
+A fresh read of a prepared record permits normal continuation after an uncertain recovery reply.
+It never rearms a record simply because progress did not advance.
+
+One explicit retry owns one administrator session for recovery and the remaining import steps.
+The driver authenticates Root and compares the complete rejected snapshot before exporting rights.
+It reserves admission before its first suspension. Reads and writes cannot overlap that attempt.
+The same five-minute continuous-clock window covers recovery and later steps; prompting cannot extend it.
+Each later operation still authenticates a fresh Root connection and validates current progress.
+Closing the review, cancellation, an expired window, a lost reply or another provider refusal stops subsequent steps.
+The next explicit retry starts a new session. No flow automatically repeats a provider write.
+
+The final focused run passed 51 cases, including changed snapshots, unavailable capabilities, storage consent, expiry, lost replies and confirmed-result retention.
+The app and synthetic renderer compile separately. The renderer uses no installed service, real credential or administrator prompt.
+Its recovery captures cover all three resources, both themes, long hostnames, missing storage consent and unavailable metadata.
+Synthetic previews do not prove keyboard focus, VoiceOver, real prompts, service registration or installed Mac-Pixel behavior.
+The host remains macOS 27.0.1 with a macOS 26 deployment target. The macOS 26 runtime remains unqualified.
+No full local gate or push covers this private integration yet.
+
+The final ATC Debug build passed. The confirmation renderer produced 59 images, including ten new recovery captures.
+Both themes were inspected in two bounded visual rounds. The first app build was retained before confirmation.
+No further visual iteration is planned for this change.

@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 #if DEBUG
-enum SetupFileImportSnapshot { case ready, importing, cleanup, reconciliation, completed, unavailable }
+enum SetupFileImportSnapshot { case ready, importing, cleanup, reconciliation, completed, unavailable, rejectedTunnel, rejectedAccess, rejectedDNS, refusalDetailsUnavailable }
 #endif
 
 struct SetupFilePreview: View {
@@ -67,14 +67,62 @@ struct SetupFilePreview: View {
         #if DEBUG
         if snapshot == .cleanup { return .waitingForCleanup }
         if snapshot == .reconciliation { return .requiresReconciliation }
+        if snapshot == .rejectedTunnel || snapshot == .rejectedAccess || snapshot == .rejectedDNS || snapshot == .refusalDetailsUnavailable { return .providerRejected }
         #endif
+        if let records = controls?.recovery?.records {
+            if records.contains(where: { $0.phase == .unknown || $0.phase == .dispatched }) { return .requiresReconciliation }
+            if records.contains(where: { $0.phase == .rejected }) { return .providerRejected }
+        }
         return paused
+    }
+    private var rejectedResource: SetupPortableImportRecovery.Resource? {
+        #if DEBUG
+        switch snapshot {
+        case .rejectedTunnel: return .tunnel
+        case .rejectedAccess: return .accessApplication
+        case .rejectedDNS: return .dnsRecord
+        default: break
+        }
+        #endif
+        return controls?.recovery?.records.first(where: { $0.phase == .rejected })?.resource
+    }
+    private var refusal: SetupPortableImportRecovery.Refusal? {
+        #if DEBUG
+        switch snapshot {
+        case .rejectedTunnel: return .rateLimited
+        case .rejectedAccess: return .providerRejected
+        case .rejectedDNS: return .unauthorized
+        default: break
+        }
+        #endif
+        guard let resource = rejectedResource else { return nil }
+        return controls?.recovery?.rejectedRecord(for: resource)?.refusal
+    }
+    private var recoveryHostname: String? {
+        #if DEBUG
+        if snapshot == .rejectedTunnel || snapshot == .rejectedAccess || snapshot == .rejectedDNS {
+            return "m-0123456789abcdef0123456789abcdef.a-long-test-label.for-synthetic-recovery.remozio.example.invalid"
+        }
+        #endif
+        return controls?.recovery?.relayScope?.hostname
+    }
+    private var canRetry: Bool {
+        guard !busy, !isComplete, rejectedResource != nil, choices.satisfies(required) else { return false }
+        return isSnapshot || (setup.state == .enabled && controls?.loaded == true && controls?.recovery != nil)
+    }
+    private var retryTitle: LocalizedStringKey {
+        switch rejectedResource {
+        case .tunnel: "Retry tunnel setup…"
+        case .accessApplication: "Retry access setup…"
+        case .dnsRecord: "Retry DNS setup…"
+        case nil: "Retry setup…"
+        }
     }
     private var required: Set<SetupPortableImportCustodyRequirement> {
         #if DEBUG
         if snapshot != nil {
             guard !isComplete, snapshot != .unavailable else { return [] }
-            if snapshot == .cleanup || snapshot == .reconciliation {
+            if snapshot == .cleanup || snapshot == .reconciliation || snapshot == .rejectedTunnel || snapshot == .rejectedAccess || snapshot == .rejectedDNS || snapshot == .refusalDetailsUnavailable {
                 return preview?.cloudflareAccount == nil ? [] : [.relayCredential]
             }
             var result: Set<SetupPortableImportCustodyRequirement> = [.runtimeFiles]
@@ -198,7 +246,24 @@ struct SetupFilePreview: View {
                     .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
             case .providerRejected:
                 Label("The provider rejected a change", systemImage: "exclamationmark.triangle").font(.headline)
-                Text("Review the provider configuration before continuing setup. Saved changes have not been removed.")
+                if rejectedResource != nil {
+                    switch refusal {
+                    case .unauthorized: Text("Check the provisioning credential’s permissions before retrying.")
+                    case .rateLimited: Text("The provider rate limit was reached. Wait before retrying.")
+                    default: Text("Check the provider configuration before retrying.")
+                    }
+                    if let hostname = recoveryHostname {
+                        Text(verbatim: hostname).textSelection(.enabled)
+                    }
+                    Text("Retry checks the provider state before preparing another attempt. Administrator approval is required.")
+                        .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+                    if !choices.satisfies(required) {
+                        Text("Accept the storage choices below before retrying.")
+                            .font(.callout).foregroundStyle(Color.primary.opacity(0.8))
+                    }
+                } else {
+                    Text("Refresh this Mac’s status to read recovery details. Saved changes have not been removed.")
+                }
             case .applied: EmptyView()
             }
         } else if isSnapshot {
@@ -264,8 +329,8 @@ struct SetupFilePreview: View {
             case .prepareRuntime, .prepareRelayPlan: return "Preparing local services…"
             case .activateRuntime: return "Starting local services…"
             case .prepareGateway, .activateGateway: return "Preparing push notifications…"
-            case .createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector,
-                 .prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry: return "Preparing this Mac’s relay…"
+            case .createTunnel, .applyIngress, .prepareRunCredential, .createAccess, .createDNS, .publishConnector: return "Preparing this Mac’s relay…"
+            case .prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry: return "Checking provider state…"
             case .complete: return "Checking saved setup…"
             }
         }
@@ -286,6 +351,8 @@ struct SetupFilePreview: View {
             if preview == nil {
                 Button("Review") { startPreview() }.keyboardShortcut(.defaultAction)
                     .disabled(file == nil || password.isEmpty || busy)
+            } else if !isComplete, let resource = rejectedResource {
+                Button(retryTitle) { startImport(retrying: resource) }.keyboardShortcut(.defaultAction).disabled(!canRetry)
             } else if !isComplete {
                 Button(importTitle) { startImport() }.keyboardShortcut(.defaultAction).disabled(!canImport)
             }
@@ -324,16 +391,18 @@ struct SetupFilePreview: View {
         await setup.refresh()
         guard !Task.isCancelled, setup.state == .enabled else { return }
         await controls?.refresh()
+        if controls?.loaded == true && controls?.recovery != nil { paused = nil }
     }
     private func refreshMacStatus() { run { await loadMacStatus() } }
-    private func startImport() {
-        guard canImport, !isSnapshot, let reviewed, let controls else { return }
-        failure = nil
+    private func startImport(retrying resource: SetupPortableImportRecovery.Resource? = nil) {
+        guard (resource == nil ? canImport : canRetry), !isSnapshot, let reviewed, let controls else { return }
+        failure = nil; paused = nil
         if rootCompleted { applyPreferences(reviewed, controls: controls); return }
         do { _ = try preview?.appPreferences?.applicationValues(readExisting: { UserDefaults.standard.object(forKey: $0) }) }
         catch { failure = "The imported command caller settings conflict with this Mac’s settings. Review Settings, then try again."; return }
         run {
-            await controls.importFile(custody: choices)
+            if let resource { await controls.retryImport(resource: resource, custody: choices) }
+            else { await controls.importFile(custody: choices) }
             guard !Task.isCancelled else { return }
             if controls.lastResult?.action == .complete && controls.lastResult?.status == .applied {
                 verifiedCompletion = controls.progress

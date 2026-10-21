@@ -112,10 +112,15 @@ struct RenderSetupPreview {
             ("unresolved", .reconciliation, true),
             ("completed", .completed, true),
             ("unavailable", .unavailable, true),
+            ("refused-tunnel", .rejectedTunnel, false),
+            ("refused-access", .rejectedAccess, false),
+            ("refused-dns", .rejectedDNS, false),
+            ("refused-dns-storage", .rejectedDNS, true),
+            ("refused-details-unavailable", .refusalDetailsUnavailable, false),
         ] {
             for dark in [false, true] {
                 let name = "setup-import-" + label + (dark ? "-dark" : "-light")
-                let view = SetupFilePreview(snapshotPreview: combinedScope, importState: state, acceptedCustody: true)
+                let view = SetupFilePreview(snapshotPreview: combinedScope, importState: state, acceptedCustody: label != "refused-dns-storage")
                 app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
                 host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: 540, height: 640)

@@ -1,6 +1,14 @@
 import Foundation
 
+struct MacPortableSetupImportSnapshot: Sendable {
+    let progress: SetupPortableImportProgress?
+    let recovery: SetupPortableImportRecovery?
+}
 protocol MacPortableSetupImportDriver: Sendable {
+    func snapshot() async throws -> MacPortableSetupImportSnapshot
+    func retryImportFile(_ reviewed: ReviewedSetupFile, recovery: SetupPortableImportRecovery,
+                         resource: SetupPortableImportRecovery.Resource, custody: SetupPortableImportCustodyChoices,
+                         step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult
     func progress() async throws -> SetupPortableImportProgress?
     func perform(_ request: SetupPortableImportOperation) async throws -> SetupPortableImportOperationResult
     func importFile(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress,
@@ -8,6 +16,12 @@ protocol MacPortableSetupImportDriver: Sendable {
                     step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult
 }
 extension MacPortableSetupImportDriver {
+    func snapshot() async throws -> MacPortableSetupImportSnapshot { .init(progress: try await progress(), recovery: nil) }
+    func retryImportFile(_ reviewed: ReviewedSetupFile, recovery: SetupPortableImportRecovery,
+                         resource: SetupPortableImportRecovery.Resource, custody: SetupPortableImportCustodyChoices,
+                         step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
+        throw AdministrativeSetupChannelError.unsupportedVersion
+    }
     func importFile(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress,
                     custody: SetupPortableImportCustodyChoices,
                     step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
@@ -15,10 +29,14 @@ extension MacPortableSetupImportDriver {
     }
 }
 protocol MacPortableSetupImportRoot: Sendable {
+    func recovery() async throws -> SetupPortableImportRecovery?
     func start() async throws
     func progress() async throws -> SetupPortableImportProgress?
     func perform(_ request: SetupPortableImportOperation, authorization: Data) async throws -> SetupPortableImportOperationResult
     func close() async
+}
+extension MacPortableSetupImportRoot {
+    func recovery() async throws -> SetupPortableImportRecovery? { throw AdministrativeSetupChannelError.unsupportedVersion }
 }
 protocol MacPortableSetupImportAdministrator: Sendable {
     func authorization() async throws -> Data
@@ -48,11 +66,29 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
     private let now: @Sendable () -> ContinuousClock.Instant
     private var operationActive = false
     init(open: @escaping @Sendable () async throws -> any MacPortableSetupImportRoot = {
-        try await MacAccountSetupConnection.openPortableImport()
+        try await MacAccountSetupConnection.openPortableImport(preferRecovery: true)
     }, administrator: @escaping @Sendable () -> any MacPortableSetupImportAdministrator = {
         NativePortableImportAdministrator()
     }, now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         self.open = open; self.administrator = administrator; self.now = now
+    }
+    func snapshot() async throws -> MacPortableSetupImportSnapshot {
+        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
+        operationActive = true
+        defer { operationActive = false }
+        try Task.checkCancellation()
+        let root = try await open()
+        do {
+            try await root.start()
+            let value: MacPortableSetupImportSnapshot
+            do {
+                let recovery = try await root.recovery()
+                value = .init(progress: recovery?.progress, recovery: recovery)
+            } catch AdministrativeSetupChannelError.unsupportedVersion {
+                value = .init(progress: try await root.progress(), recovery: nil)
+            }
+            try Task.checkCancellation(); await root.close(); return value
+        } catch { await root.close(); throw error }
     }
     func progress() async throws -> SetupPortableImportProgress? {
         guard !operationActive else { throw AdministrativeSetupChannelError.busy }
@@ -83,10 +119,27 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
     func importFile(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress,
                     custody: SetupPortableImportCustodyChoices,
                     step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
-        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
-        let actions = try reviewed.actions(expected: expected, custody: custody)
-        operationActive = true
+        let actions = try beginImport(reviewed, expected: expected, custody: custody, recovery: nil, resource: nil)
         defer { operationActive = false }
+        return try await runImport(reviewed, expected: expected, custody: custody, actions: actions, recovery: nil, resource: nil, step: step)
+    }
+    func retryImportFile(_ reviewed: ReviewedSetupFile, recovery: SetupPortableImportRecovery,
+                         resource: SetupPortableImportRecovery.Resource, custody: SetupPortableImportCustodyChoices,
+                         step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
+        let actions = try beginImport(reviewed, expected: recovery.progress, custody: custody, recovery: recovery, resource: resource)
+        defer { operationActive = false }
+        return try await runImport(reviewed, expected: recovery.progress, custody: custody, actions: actions, recovery: recovery, resource: resource, step: step)
+    }
+    private func beginImport(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress, custody: SetupPortableImportCustodyChoices,
+                             recovery: SetupPortableImportRecovery?, resource: SetupPortableImportRecovery.Resource?) throws -> [SetupPortableImportOperation.Action] {
+        guard !operationActive else { throw AdministrativeSetupChannelError.busy }
+        var actions = try reviewed.actions(expected: expected, custody: custody)
+        if let recovery, let resource { actions.insert(try reviewed.refusalRetryOperation(resource: resource, recovery: recovery).action, at: 0) }
+        operationActive = true; return actions
+    }
+    private func runImport(_ reviewed: ReviewedSetupFile, expected: SetupPortableImportProgress, custody: SetupPortableImportCustodyChoices,
+                           actions: [SetupPortableImportOperation.Action], recovery: SetupPortableImportRecovery?, resource: SetupPortableImportRecovery.Resource?,
+                           step: @escaping @Sendable (SetupPortableImportOperation.Action, SetupPortableImportProgress) async -> Void) async throws -> SetupPortableImportOperationResult {
         let clock = now
         let started = clock(), deadline = started.advanced(by: .seconds(300))
         let rights = administrator()
@@ -101,8 +154,11 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
                 try checkWindow()
                 await step(action, current)
                 try checkWindow()
-                let request = try reviewed.operation(action: action, expected: current, fileCustodyAccepted: custody.accepts(action))
-                let result = try await perform(request, rights: rights, beforeDispatch: checkWindow)
+                let request: SetupPortableImportOperation
+                if action.retryResource != nil, let recovery, let resource {
+                    request = try reviewed.refusalRetryOperation(resource: resource, recovery: recovery)
+                } else { request = try reviewed.operation(action: action, expected: current, fileCustodyAccepted: custody.accepts(action)) }
+                let result = try await perform(request, rights: rights, expectedRecovery: action.retryResource == nil ? nil : recovery, beforeDispatch: checkWindow)
                 current = result.progress
                 if result.status != .applied || action == .complete {
                     await rights.close(); return result
@@ -113,12 +169,14 @@ actor NativeMacPortableSetupImportDriver: MacPortableSetupImportDriver {
     }
 
     private func perform(_ request: SetupPortableImportOperation, rights: any MacPortableSetupImportAdministrator,
-                         beforeDispatch: @Sendable () throws -> Void = {}) async throws -> SetupPortableImportOperationResult {
+                         expectedRecovery: SetupPortableImportRecovery? = nil, beforeDispatch: @Sendable () throws -> Void = {}) async throws -> SetupPortableImportOperationResult {
         try Task.checkCancellation()
         let root = try await open()
         do {
             try await root.start()
-            guard try await root.progress() == request.expected else { throw AdministrativeSetupError.staleProgress }
+            if let expectedRecovery {
+                guard try await root.recovery() == expectedRecovery else { throw AdministrativeSetupError.staleProgress }
+            } else { guard try await root.progress() == request.expected else { throw AdministrativeSetupError.staleProgress } }
             try Task.checkCancellation()
             let form = try await rights.authorization()
             try beforeDispatch(); try Task.checkCancellation()
