@@ -1,0 +1,269 @@
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'benchmark-xpc-peer-policy-tests.py'
+spec = importlib.util.spec_from_file_location('benchmark_xpc_peer_policy_tests', SCRIPT)
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+
+
+def case_log():
+    lines = []
+    for name in sorted(bench.CASES):
+        prefix = f"Test Case '-[{bench.CLASS} {name}]' "
+        lines += [prefix + 'started.', prefix + 'passed (1.234 seconds).']
+    return '\n'.join(lines + [' Executed 9 tests, with 0 failures (0 unexpected) in 11.106 seconds'])
+
+
+
+class BenchmarkTests(unittest.TestCase):
+    def test_order_parser_defaults_and_rejects_unbalanced_or_unknown_orders(self):
+        required = ['--repo', '/unused', '--output', '/unused-output']
+        self.assertEqual(bench.argument_parser().parse_args(required).order, 'abba')
+        for order in ('abba', 'baab'):
+            self.assertEqual(bench.argument_parser().parse_args(required + ['--order', order]).order, order)
+        for order in ('abab', 'aabb', 'aaaa', 'BAAB', '', 'other'):
+            with self.subTest(order=order), patch('sys.stderr', new=io.StringIO()), self.assertRaises(SystemExit) as error:
+                bench.argument_parser().parse_args(required + ['--order', order])
+            self.assertEqual(error.exception.code, 2)
+
+    def test_reverse_order_priming_changes_source_and_requires_compilation_before_return(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp)
+            calls = []
+            def verify(data):
+                calls.append(('verify', data))
+            def select(data):
+                calls.append(('select', data))
+            def build(command, log, repo, timeout):
+                calls.append(('build', list(command), timeout))
+                log.write_text('/Xcode/swift-frontend -frontend -c -primary-file /same/path/XPCPeerPolicy.swift\n')
+                return {'returncode': 0}
+            with patch.object(bench, 'owned', side_effect=build):
+                result = bench.prime_baseline(b'A', b'B', select, verify, output, output)
+            self.assertEqual(calls, [('verify', b'B'), ('select', b'A'), ('verify', b'A'),
+                                     ('build', bench.BUILD, 600), ('verify', b'A')])
+            self.assertEqual(result['sourceSHA256'], bench.sha(b'A'))
+            self.assertEqual(result['primaryCompileCommands'], 1)
+            self.assertEqual(result['build']['returncode'], 0)
+            # Even a successful build command cannot permit trials without actual compiler evidence.
+            with patch.object(bench, 'owned', return_value={'returncode': 0}):
+                (output / 'prime-baseline.log').write_text('Build complete!')
+                with self.assertRaises(RuntimeError):
+                    bench.prime_baseline(b'A', b'B', select, verify, output, output)
+
+    def test_exact_nine_cases(self):
+        self.assertEqual(set(bench.test_cases(case_log())), bench.CASES)
+
+    def test_missing_duplicate_unknown_failed_and_skipped_cases_refuse(self):
+        log = case_log()
+        bad = [log.replace('Executed 9', 'Executed 8'), '\n'.join(log.splitlines()[2:]),
+               log + '\n' + log, log.replace(sorted(bench.CASES)[0], 'testUnexpected'),
+               log + '\n1 test skipped', log.replace('passed (1.234 seconds).', 'failed (1.234 seconds).', 1)]
+        for value in bad:
+            with self.subTest(value=value[-80:]), self.assertRaises(RuntimeError):
+                bench.test_cases(value)
+
+    def test_exact_reviewed_pair_and_parity_test_bytes_required(self):
+        variants = {'baseline': bench.sha(b'A'), 'candidate': bench.sha(b'B')}
+        with patch.object(bench, 'SOURCE_SHA256', variants), patch.object(bench, 'PARITY_TEST_SHA256', bench.sha(b'T')):
+            bench.reviewed_sources(b'A', b'B', b'T')
+            for args in ((b'changed', b'B', b'T'), (b'A', b'changed', b'T'), (b'A', b'B', b'changed')):
+                with self.subTest(args=args), self.assertRaises(RuntimeError):
+                    bench.reviewed_sources(*args)
+
+    def test_reviewed_scope_refuses_unrelated_or_missing_candidate_changes(self):
+        required = {bench.SOURCE, bench.PARITY_TEST}
+        bench.reviewed_scope(required)
+        bench.reviewed_scope(bench.ALLOWED_CHANGES)
+        for changed in (set(), {bench.SOURCE}, required | {'macos/core/Tests/RemozioCoreTests/RuntimeActivationFixture.swift'},
+                        required | {'macos/core/Tests/RemozioCoreTests/GatewayRuntimeActivationOperationTests.swift'},
+                        required | {'macos/core/Package.swift'},
+                        required | {'protocol/swift/Sources/RemozioProtocol/DeterministicCBOR.swift'},
+                        required | {'shared/host/Sources/RemozioHostCore/Unexpected.swift'},
+                        required | {'scripts/check.sh'}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                bench.reviewed_scope(changed)
+
+    def test_compile_requires_actual_primary_file(self):
+        prefix = '/Xcode/swift-frontend -frontend '
+        source = '/same/path/XPCPeerPolicy.swift'
+        self.assertEqual(bench.compiler_evidence(prefix + '-c -primary-file ' + source), 1)
+        for line in (prefix + '-emit-module -primary-file ' + source,
+                     prefix + '-c -primary-file /other.swift ' + source,
+                     '[4/5] Compiling RemozioCore XPCPeerPolicy.swift'):
+            with self.assertRaises(RuntimeError):
+                bench.compiler_evidence(line)
+
+    def test_reuse_requires_same_immediately_previous_proven_variant(self):
+        current = {'mode': 'candidate', 'sourceSHA256': 's', 'bundleExecutableSHA256': 'b', 'sourceObjectSHA256': 'o'}
+        self.assertEqual(bench.compilation_status(1, current, None), 'recompiled')
+        self.assertIn('reused', bench.compilation_status(0, current, current))
+        with self.assertRaises(RuntimeError):
+            bench.compilation_status(0, current, None)
+        for key in current:
+            changed = dict(current, **{key: 'changed'})
+            with self.subTest(key=key), self.assertRaises(RuntimeError):
+                bench.compilation_status(0, current, changed)
+
+    def test_source_restores_bytes_mode_and_mtime_on_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'source.swift'
+            for failure in (False, True):
+                path.write_bytes(b'candidate')
+                path.chmod(0o640)
+                os.utime(path, ns=(1000000000, 2000000000))
+                original = path.stat()
+                try:
+                    with bench.source_variants(path, b'baseline', b'candidate') as select:
+                        select(b'baseline')
+                        first = path.stat().st_mtime_ns
+                        select(b'candidate')
+                        self.assertGreater(path.stat().st_mtime_ns, first)
+                        if failure:
+                            raise ValueError('synthetic test failure')
+                except ValueError:
+                    self.assertTrue(failure)
+                self.assertEqual(path.read_bytes(), b'candidate')
+                self.assertEqual(path.stat().st_mtime_ns, original.st_mtime_ns)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+
+    def test_both_source_and_parity_tests_restore_after_success_and_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source, tests = root / bench.SOURCE, root / bench.PARITY_TEST
+            source.parent.mkdir(parents=True)
+            tests.parent.mkdir(parents=True)
+            for fail in (False, True):
+                source.write_bytes(b'candidate source')
+                tests.write_bytes(b'candidate tests')
+                os.utime(source, ns=(1000000000, 2000000000))
+                os.utime(tests, ns=(3000000000, 4000000000))
+                original = [p.stat().st_mtime_ns for p in (source, tests)]
+                try:
+                    with bench.comparison_variants(root, b'baseline source', b'candidate source',
+                                                   b'baseline tests', b'candidate tests') as select:
+                        self.assertEqual(tests.read_bytes(), b'baseline tests')
+                        for value in (b'baseline source', b'candidate source'):
+                            select(value)
+                            self.assertEqual(source.read_bytes(), value)
+                            self.assertEqual(tests.read_bytes(), b'baseline tests')
+                        if fail:
+                            raise ValueError('synthetic failure after selecting candidate')
+                except ValueError:
+                    self.assertTrue(fail)
+                self.assertEqual(source.read_bytes(), b'candidate source')
+                self.assertEqual(tests.read_bytes(), b'candidate tests')
+                self.assertEqual([p.stat().st_mtime_ns for p in (source, tests)], original)
+
+    def test_concurrent_source_edit_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'source.swift'
+            path.write_bytes(b'candidate')
+            with self.assertRaises(RuntimeError):
+                with bench.source_variants(path, b'baseline', b'candidate'):
+                    path.write_bytes(b'other human work')
+            self.assertEqual(path.read_bytes(), b'other human work')
+
+    def test_inventory_detects_content_mode_and_symlink_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'a').write_bytes(b'one')
+            (root / 'b').symlink_to('a')
+            with patch.object(bench, 'git', return_value=b'a\0b\0'):
+                initial = bench.inventory(root)
+                (root / 'a').write_bytes(b'two')
+                self.assertNotEqual(bench.inventory(root), initial)
+                (root / 'a').write_bytes(b'one')
+                (root / 'a').chmod(0o700)
+                self.assertNotEqual(bench.inventory(root), initial)
+                self.assertEqual(initial['b']['kind'], 'symlink')
+
+    def test_interrupt_after_reap_never_signals_the_reaped_pid(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            wait4 = os.wait4
+            def interrupt_after_reap(pid, options):
+                result = wait4(pid, options)
+                if result[0]:
+                    os.kill(os.getpid(), signal.SIGINT)
+                return result
+            with patch.object(bench.os, 'wait4', side_effect=interrupt_after_reap), patch.object(bench.os, 'killpg') as kill:
+                with self.assertRaises(KeyboardInterrupt):
+                    bench.owned([sys.executable, '-c', 'pass'], root / 'reaped.log', root, 5)
+                kill.assert_not_called()
+            result = json.loads((root / 'reaped.json').read_text())
+            self.assertEqual(result['returncode'], 0)
+            self.assertTrue(result['cleanupComplete'])
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux procfs validates child death')
+    def test_timeout_kills_the_owned_descendant_group(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = ('import os,time; child=os.fork(); '
+                      'print(child if child else os.getpid(), flush=True); time.sleep(30)')
+            with self.assertRaises(subprocess.TimeoutExpired):
+                bench.owned([sys.executable, '-c', script], root / 'group.log', root, 1.0)
+            children = {int(line) for line in (root / 'group.log').read_text().splitlines()}
+            self.assertEqual(len(children), 1)
+            for child in children:
+                info = Path(f'/proc/{child}/stat')
+                deadline = time.monotonic() + 1
+                while info.exists():
+                    try:
+                        state = info.read_text().split(') ', 1)[1][0]
+                    except FileNotFoundError:
+                        break
+                    if state == 'Z':
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail('owned descendant still running after group kill')
+                    time.sleep(0.01)
+
+    def test_owned_success_nonzero_timeout_and_interrupt_are_reaped(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            good = bench.owned([sys.executable, '-c', 'print("ok")'], root / 'ok.log', root, 5)
+            self.assertEqual(good['returncode'], 0)
+            self.assertGreater(good['wallSeconds'], 0)
+            self.assertGreaterEqual(good['userCPUSeconds'], 0)
+            for name, script, timeout, error in (
+                ('failure', 'raise SystemExit(7)', 5, RuntimeError),
+                ('timeout', 'import time; time.sleep(30)', 0.1, subprocess.TimeoutExpired),
+            ):
+                with self.assertRaises(error):
+                    bench.owned([sys.executable, '-c', script], root / (name + '.log'), root, timeout)
+                result = json.loads((root / (name + '.json')).read_text())
+                self.assertTrue(result['cleanupComplete'])
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(result['pid'], os.WNOHANG)
+            original_sleep = bench.time.sleep
+            calls = 0
+            def interrupt_once(duration):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise KeyboardInterrupt()
+                original_sleep(duration)
+            with patch.object(bench.time, 'sleep', side_effect=interrupt_once), self.assertRaises(KeyboardInterrupt):
+                bench.owned([sys.executable, '-c', 'import time; time.sleep(30)'], root / 'interrupt.log', root, 5)
+            result = json.loads((root / 'interrupt.json').read_text())
+            self.assertTrue(result['cleanupComplete'])
+            self.assertEqual(result['returncode'], -signal.SIGKILL)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(result['pid'], os.WNOHANG)
+
+
+if __name__ == '__main__':
+    unittest.main()

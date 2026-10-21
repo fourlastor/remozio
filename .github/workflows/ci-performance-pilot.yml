@@ -1,0 +1,141 @@
+name: CI performance pilot
+on:
+  push:
+    branches: [codex/ci-performance-pilot-20261021]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: ci-performance-pilot-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  xpc-hex:
+    name: Native XPC hex comparison
+    if: github.repository == 'fourlastor/remozio'
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Record native toolchain
+        run: |
+          mkdir -p .build/ci-performance-pilot/hex
+          {
+            git rev-parse HEAD
+            sw_vers
+            xcodebuild -version
+            swift --version
+          } > .build/ci-performance-pilot/hex/host.txt
+      - name: Run native policy regression tests
+        run: |
+          swift test --package-path macos/core \
+            --triple arm64-apple-macosx26.0 --jobs 4 --force-resolved-versions \
+            --filter XPCPeerPolicyTests \
+            2>&1 | tee .build/ci-performance-pilot/hex/policy-tests.log
+      - name: Verify every native policy regression executed
+        run: |
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+          expected = {
+              'testReleaseRequirementCompilesAndPinsCertificateRoleTeamIdentifierAndHashes',
+              'testMalformedAndUnboundedPolicyInputsCannotBecomeRequirements',
+              'testConnectionCredentialsRequireExpectedUserAndOptionalSession',
+              'testInvocationOutsideAcceptedConnectionIsRejected',
+              'testHexadecimalCodeDirectoryHashesMatchThePreviousFormatterForEveryByte',
+              'testAllApprovedHashesRetainTheirExactSortedRequirementText',
+          }
+          log = Path('.build/ci-performance-pilot/hex/policy-tests.log').read_text()
+          matches = re.findall(r"^Test Case '-\[([^ ]+) ([^]]+)\]' (started\.|passed \(([0-9.]+) seconds\)\.)$", log, re.M)
+          starts, passes = [], []
+          for suite, method, event, duration in matches:
+              assert suite == 'RemozioCoreTests.XPCPeerPolicyTests' and method in expected
+              (starts if event == 'started.' else passes).append(method)
+          assert len(starts) == len(passes) == 6 and set(starts) == set(passes) == expected
+          assert starts == passes
+          summaries = re.findall(r'Executed (\d+) tests?, with (\d+) failures', log)
+          assert summaries and all(count == '6' and failures == '0' for count, failures in summaries)
+          assert not re.search(r'\bskipped\b|\bfailed\b', log, re.I)
+          print('All six native XPC policy regression cases passed with no skips.')
+          PYTHON
+      - name: Compare the frozen full Gateway class once in ABBA order
+        run: |
+          python3 scripts/benchmark-xpc-peer-policy-tests.py \
+            --repo "$GITHUB_WORKSPACE" --order abba \
+            --output .build/ci-performance-pilot/hex/class-comparison
+      - name: Compare exact hash output and helper timings
+        run: |
+          git show 72744baa263ce6d8c8685972d9f7be87d381ee42:macos/core/Sources/RemozioCore/XPCPeerPolicy.swift \
+            > .build/ci-performance-pilot/hex/baseline-policy.swift
+          python3 scripts/benchmark-xpc-hex.py \
+            --baseline-source .build/ci-performance-pilot/hex/baseline-policy.swift \
+            --candidate-source macos/core/Sources/RemozioCore/XPCPeerPolicy.swift \
+            --baseline-sha256 0175c98e2f253b674fb8d0aade6d8e2cde36c859dd20ef10af38b1268ce50c01 \
+            --candidate-sha256 733b03399f655bb225d01215e86066b8444a49abe288e573e531a36c3e491792 \
+            --target arm64-apple-macosx26.0 --iterations 20000 --warmup 100 --pairs 6 \
+            --output .build/ci-performance-pilot/hex/microbenchmark
+      - name: Retain all observations and failures
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xpc-hex-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .build/ci-performance-pilot/hex/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+  native-cache:
+    name: Native full check and cache follow-up
+    if: github.repository == 'fourlastor/remozio'
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Record cold inputs and native toolchain
+        run: |
+          mkdir -p .build/ci-performance-pilot/cache
+          {
+            git rev-parse HEAD
+            sw_vers
+            xcodebuild -version
+            swift --version
+          } > .build/ci-performance-pilot/cache/host.txt
+          python3 scripts/ci-build-cache.py key --scope mac \
+            | tee .build/ci-performance-pilot/cache/cold-key.log
+      - name: Verify archive and fresh-checkout cache controls
+        run: python3 scripts/check-swift-cache.py
+      - name: Run the complete existing Mac check
+        run: |
+          started=$SECONDS
+          status=0
+          ./scripts/check.sh 2>&1 | tee .build/ci-performance-pilot/cache/cold-full-check.log || status=$?
+          printf '%s\n' "$((SECONDS - started))" > .build/ci-performance-pilot/cache/cold-full-check-seconds.txt
+          exit "$status"
+      - name: Verify warm app and protocol after a Linux-only edit
+        run: |
+          python3 scripts/check-native-cache-followup.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --output "$RUNNER_TEMP/remozio-native-cache-followup" \
+            --cold-key-log .build/ci-performance-pilot/cache/cold-key.log \
+            --cold-full-check-log .build/ci-performance-pilot/cache/cold-full-check.log \
+            --cold-full-check-seconds "$(cat .build/ci-performance-pilot/cache/cold-full-check-seconds.txt)"
+      - name: Retain full check and warm follow-up evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-cache-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .build/ci-performance-pilot/cache/
+            ${{ runner.temp }}/remozio-native-cache-followup/
+            .build/ci-cache-smoke/*.json
+            .build/ci-cache-smoke/*.log
+            .build/macos-app/xcodebuild-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
