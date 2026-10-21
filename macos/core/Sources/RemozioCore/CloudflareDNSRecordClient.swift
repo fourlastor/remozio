@@ -91,11 +91,11 @@ struct CloudflareDNSRecordClient: Sendable {
     private struct Envelope: Decodable { let success: Bool; let errors: [Ignored]; let result: Record? }
     private struct Record: Decodable {
         let id: String; let name: String; let type: String; let content: String; let proxied: Bool; let proxiable: Bool; let ttl: Int
-        let zone_id: String?; let meta: Metadata?
+        let zone_id: String?; let meta: Metadata
         func validate(zoneID: String, recordID: String, hostname: String, target: String) throws {
             guard id == recordID, name == hostname, type == "CNAME", content == target, proxied, proxiable, ttl == 1,
-                  zone_id == nil || zone_id == zoneID, meta?.shadowed_by?.isEmpty != false, meta?.dead_glue != true,
-                  meta?.is_glue != true else { throw CloudflareProvisioningError.wrongScope }
+                  zone_id == nil || zone_id == zoneID, meta.shadowed_by?.isEmpty != false, meta.dead_glue != true,
+                  meta.is_glue != true else { throw CloudflareProvisioningError.wrongScope }
         }
     }
     private struct Metadata: Decodable { let shadowed_by: [String]?; let dead_glue: Bool?; let is_glue: Bool? }

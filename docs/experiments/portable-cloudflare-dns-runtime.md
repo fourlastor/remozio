@@ -32,6 +32,7 @@ Complex paths, public overrides, duplicate matches and unresolved application fi
 The DNS client selects only the configured zone, planned hostname and retained tunnel target.
 Creation requests a proxied CNAME with automatic TTL.
 Readback verifies the recorded ID, exact target and proxy settings, including observable shadowing metadata.
+Creation and readback require the requested metadata object. A missing or null object cannot verify the record.
 A matching name cannot adopt an unrecorded resource.
 
 Creation is dispatched only after retaining its attempt.
@@ -45,7 +46,12 @@ The focused run passed 309 synthetic controls at source `8ba3dcc`, with no failu
 It covered the tunnel, Access, private-route and DNS sequence on the integrated dependency.
 This focused result does not substitute for the complete publication gate.
 
-The complete required publication gate remains pending on the final published dependency.
+The complete local publication gate passed at source `c447214` on 2026-10-20.
+The published source `a233b588` has the same complete tree.
+The run passed 3,853 native tests, with one existing skip, and 851 portable tests.
+It also passed Android assembly and lint, Mac interoperability, the unsigned iOS app build and both leased Kotlin simulator suites.
+
+The host used macOS 27; supported macOS 26 runtime behavior remains untested.
 Fixtures use temporary files and synthetic provider responses.
 They cover exact bindings, changed prerequisites, late creation, cancellation, unknown outcomes and independent record readback.
 

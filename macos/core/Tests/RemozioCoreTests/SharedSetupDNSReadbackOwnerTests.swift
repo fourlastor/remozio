@@ -108,4 +108,20 @@ final class SharedSetupDNSReadbackOwnerTests: XCTestCase, @unchecked Sendable {
         }
         let requests = await probe.all(); XCTAssertTrue(requests.isEmpty)
     }
+    func testMissingShadowMetadataCannotVerifyOrDiscardTheRetainedRecord() async throws {
+        for null in [false, true] {
+            let f = try DNSRecordFixture(), retained = try f.retainCreated(), owner = try f.base.h.owner()
+            defer { try? owner.close() }
+            var replies = try steps(f)
+            let body = null ? try f.dnsReply(changes: ["meta": NSNull()]) : try f.dnsReply(omitting: ["meta"])
+            replies[1] = RelayIngressProbe.reply(body)
+            let probe = RelayIngressProbe(replies)
+            do { _ = try await inspect(owner, f: f, expected: f.base.h.progress(owner), probe: probe); XCTFail() }
+            catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
+            XCTAssertEqual(try f.read(), retained)
+            let requests = await probe.all(); XCTAssertEqual(requests.count, 2)
+            XCTAssertTrue(requests.allSatisfy { $0.httpMethod == "GET" })
+        }
+    }
+
 }

@@ -159,4 +159,26 @@ final class CloudflareDNSRecordClientTests: XCTestCase, @unchecked Sendable {
         do { _ = try await task.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
         let requests = await probe.all(); XCTAssertEqual(requests.count, 1)
     }
+    func testCreationWithoutShadowMetadataStaysUnknown() async throws {
+        let f = try DNSRecordFixture()
+        let replies = try [f.dnsReply(omitting: ["meta"]), f.dnsReply(changes: ["meta": NSNull()])]
+        for body in replies {
+            let probe = RelayIngressProbe([RelayIngressProbe.reply(body)])
+            guard case .unknown = try await create(f, probe: probe) else { XCTFail("Missing metadata cannot acknowledge creation"); continue }
+            let requests = await probe.all(); XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.httpMethod, "POST")
+        }
+    }
+    func testReadbackWithoutShadowMetadataReturnsNoEvidence() async throws {
+        let f = try DNSRecordFixture(); _ = try f.retainCreated()
+        let replies = try [f.dnsReply(omitting: ["meta"]), f.dnsReply(changes: ["meta": NSNull()])]
+        for body in replies {
+            let probe = RelayIngressProbe([RelayIngressProbe.reply(body)])
+            do { _ = try await inspect(f, probe: probe); XCTFail("Missing metadata cannot prove readback") }
+            catch { XCTAssertEqual(error as? CloudflareProvisioningError, .invalidResponse) }
+            let requests = await probe.all(); XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.httpMethod, "GET")
+        }
+    }
+
 }
