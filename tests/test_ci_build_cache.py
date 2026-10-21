@@ -300,6 +300,156 @@ class BuildCacheTests(unittest.TestCase):
         self.source.write_text('print(2)\n')
         self.assertEqual(CACHE.settings_inventory(updated), CACHE.settings_inventory(CACHE.capture_inputs(self.root)))
 
+    def test_known_linux_add_edit_remove_preserve_outputs_and_exact_inventory(self):
+        for name, mode in CACHE.LINUX_ONLY_INPUT_MODES.items():
+            with self.subTest(name=name):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                for change in ('add', 'edit', 'remove'):
+                    old_key = self.key()['key']
+                    baseline_settings = CACHE.settings_inventory(CACHE.capture_inputs(self.root))
+                    output = self.output()
+                    self.operation('save')
+                    captured = CACHE.capture_inputs(self.root)
+                    if change != 'remove':
+                        path.write_text('first input' if change == 'add' else 'other input')
+                        path.chmod(mode)
+                        if change == 'edit':
+                            stamp = captured[name]['mtime_ns'] + 1_000_000
+                            os.utime(path, ns=(stamp,) * 2)
+                        self.track(path)
+                    else:
+                        path.unlink()
+                    current = CACHE.capture_inputs(self.root)
+                    self.assertEqual(name in current, change != 'remove')
+                    self.assertEqual(baseline_settings, CACHE.settings_inventory(current))
+                    self.assertNotEqual(old_key, self.key()['key'])
+                    result = self.operation('restore')
+                    self.assertEqual(result['result'], 'restored')
+                    self.assertFalse(result['requires_clean_build'])
+                    self.assertEqual(output.read_bytes(), b'cached output')
+                    self.assertEqual(self.source.stat().st_mtime_ns, 1_700_000_000_123456789)
+                    if change == 'edit':
+                        self.assertEqual(path.stat().st_mtime_ns, stamp)
+                    self.assertTrue(self.operation('save')['saved_manifest'])
+                    manifest = json.loads((self.root / '.build/ci-cache/interop.json').read_text())
+                    self.assertEqual(CACHE.content_inventory(manifest['inputs']), CACHE.content_inventory(current))
+
+    def test_known_linux_rename_to_known_path_preserves_outputs(self):
+        old = self.root / 'scripts/check-linux-host.sh'
+        new = self.root / 'scripts/check-linux-protocol.sh'
+        old.parent.mkdir()
+        old.write_text('fixture input'); old.chmod(0o755); self.track(old)
+        captured = CACHE.capture_inputs(self.root)
+        old.rename(new); self.track(new)
+        current = CACHE.capture_inputs(self.root)
+        self.assertEqual(CACHE.settings_inventory(captured), CACHE.settings_inventory(current))
+        result = CACHE.restore_inputs(self.root, captured)
+        self.assertFalse(result['requires_clean_build'])
+        self.assertEqual((result['changed'], result['missing']), (1, 1))
+
+    def test_unknown_linux_looking_paths_and_shared_inputs_stay_conservative(self):
+        names = ('scripts/run-linux-new-experiment.py',
+                 'experiments/linux-new/Package.swift',
+                 'experiments/linux-native-tpm-tls/Package.resolved',
+                 'experiments/linux-native-tpm-tls/Sources/NativeTPMProbe/Unexpected.swift',
+                 'experiments/linux-storage-lease/future.c',
+                 'protocol/swift/Sources/RemozioProtocol/LinuxCapture.swift',
+                 'host/shared-core/Sources/RemozioHostCore/LinuxAdapter.swift',
+                 'scripts/generate-linux-capture-fixtures.py')
+        for name in names:
+            with self.subTest(name=name):
+                captured = CACHE.capture_inputs(self.root)
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('new tracked input'); path.chmod(0o644); self.track(path)
+                self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+                path.unlink()
+
+    def test_mac_scripts_workflows_and_shared_manifests_partition_settings(self):
+        names = ('scripts/check.sh', 'scripts/check-local.sh', 'scripts/ci-build-cache.py',
+                 'scripts/check-swift-cache.py', 'scripts/build-approval-flow.py',
+                 'scripts/generate-linux-capture-fixtures.py', '.github/workflows/checks.yml',
+                 'host/shared-core/Package.swift', 'protocol/swift/Package.resolved',
+                 'experiments/system-keychain/Package.swift', 'macos/core/Package.swift')
+        for name in names:
+            with self.subTest(name=name):
+                before = CACHE.settings_inventory(CACHE.capture_inputs(self.root))
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('native build setting'); self.track(path)
+                self.assertNotEqual(before, CACHE.settings_inventory(CACHE.capture_inputs(self.root)))
+                path.unlink()
+
+    def test_linux_old_new_kind_and_mode_classification_remains_conservative(self):
+        names = ('scripts/check-linux-host.sh', 'experiments/linux-native-tpm-tls/Package.swift')
+        for name in names:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            expected = CACHE.LINUX_ONLY_INPUT_MODES[name]
+            for transition in ('mode', 'special-mode', 'symlink'):
+                for reverse in (False, True):
+                    with self.subTest(name=name, transition=transition, reverse=reverse):
+                        def create(ordinary):
+                            if path.exists() or path.is_symlink():
+                                path.unlink()
+                            if transition == 'symlink' and not ordinary:
+                                path.symlink_to(self.source)
+                            else:
+                                path.write_text('same input')
+                                mode = expected if ordinary else expected ^ 0o111 if transition == 'mode' else expected | 0o4000
+                                path.chmod(mode)
+                        create(not reverse); self.track(path)
+                        captured = CACHE.capture_inputs(self.root)
+                        create(reverse)
+                        stamp = captured[name]['mtime_ns'] + 1_000_000
+                        os.utime(path, ns=(stamp,) * 2, follow_symlinks=False)
+                        self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+            path.unlink()
+
+    def test_linux_collision_still_invalidates_and_never_backdates(self):
+        name = 'scripts/run-linux-storage-lease-experiment.py'
+        path = self.root / name
+        path.parent.mkdir()
+        path.write_text('first'); path.chmod(CACHE.LINUX_ONLY_INPUT_MODES[name]); self.track(path)
+        self.key(); output = self.output(); self.operation('save')
+        stamp = path.stat().st_mtime_ns
+        path.write_text('other'); os.utime(path, ns=(stamp,) * 2)
+        result = self.operation('restore')
+        self.assertTrue(result['requires_clean_build'])
+        self.assertFalse(output.exists())
+        self.assertEqual(path.read_text(), 'other')
+        self.assertEqual(path.stat().st_mtime_ns, stamp)
+
+    def test_linux_input_mutation_during_validation_prevents_save(self):
+        path = self.root / 'experiments/linux-approval-command/Package.swift'
+        path.parent.mkdir(parents=True)
+        path.write_text('first'); path.chmod(0o644); self.track(path)
+        self.key(); path.write_text('other')
+        self.assertFalse(self.operation('save')['saved_manifest'])
+        self.assertFalse((self.root / '.build/ci-cache/interop.json').exists())
+
+    def test_linux_change_does_not_hide_shared_source_change(self):
+        path = self.root / 'scripts/check-linux-host.sh'
+        path.parent.mkdir(); path.write_text('first'); path.chmod(0o755); self.track(path)
+        captured = CACHE.capture_inputs(self.root)
+        path.write_text('other')
+        os.utime(path, ns=(captured['scripts/check-linux-host.sh']['mtime_ns'] + 1_000_000,) * 2)
+        stamp = captured['source with spaces.swift']['mtime_ns']
+        self.source.write_text('print(2)\n'); os.utime(self.source, ns=(stamp,) * 2)
+        self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+        self.assertEqual(self.source.read_text(), 'print(2)\n')
+        self.assertEqual(self.source.stat().st_mtime_ns, stamp)
+
+    def test_system_keychain_output_root_is_cached_only_for_mac(self):
+        name = 'experiments/system-keychain/.build'
+        self.assertIn(name, CACHE.CACHE_PATHS['mac'])
+        self.assertNotIn(name, CACHE.CACHE_PATHS['interop'])
+        path = self.root / name / 'object.o'
+        path.parent.mkdir(parents=True); path.write_bytes(b'cached native output')
+        CACHE.clear_outputs(self.root, 'interop'); self.assertTrue(path.exists())
+        CACHE.clear_outputs(self.root, 'mac'); self.assertFalse(path.exists())
+
 
 if __name__ == '__main__':
     unittest.main()
