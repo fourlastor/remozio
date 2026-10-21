@@ -1519,6 +1519,42 @@ public final class SetupAccountOwner: @unchecked Sendable {
             }
         }
     }
+    /// Reads retained public metadata only. It creates no plan, credential or provider resource.
+    func portableImportRecovery(callerUID: uid_t) throws -> SetupPortableImportRecovery? {
+        try withMachine { machine in
+            let inventory = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+            let services = try machine.serviceAccountPlan(accountID: account.accountID)
+            guard services.complete else { return nil }
+            let runtime = try machine.runtimePreparation(accountID: account.accountID)
+            let scope = try SharedSetupImportIntent.Scope(account: account, inventory: inventory)
+            return try machine.withSharedImportJournal { journal in
+                let retained = try journal?.current(scope: scope)
+                func verify() throws {
+                    try verifyEnrollment(account, callerUID: callerUID, machine: machine)
+                    guard try currentInventory(machine) == inventory, try machine.serviceAccountPlan(accountID: account.accountID) == services,
+                          try machine.runtimePreparation(accountID: account.accountID) == runtime,
+                          try journal?.current(scope: scope) == retained else { throw AdministrativeSetupError.staleProgress }
+                }
+                try verify()
+                let progress = try SetupPortableImportProgress(account: account, inventory: inventory, services: services, runtime: runtime, retained: retained)
+                guard let retained else {
+                    let value = try SetupPortableImportRecovery(progress: progress, relayConfigured: false, relayScope: nil, records: [])
+                    try verify(); return value
+                }
+                guard let journal else { throw SharedSetupImportError.wrongScope }
+                return try machine.withSharedImportRelayDirectory { directory, owner in
+                    try SharedSetupImportRelayStorage.validateTrackedFiles(records: journal.records(), directory: directory)
+                    let snapshot = try SharedSetupImportRecoveryProjection.capture(expected: retained, directory: directory, owner: owner)
+                    let value = try snapshot.recovery(progress: progress, retained: retained)
+                    try verify(); try snapshot.requireCurrent(expected: retained, directory: directory, owner: owner)
+                    try verify(); return value
+                }
+            }
+        }
+    }
+
     /// The endpoint must authenticate the invocation and administrator authorization before dispatch.
     /// One request performs one step; unresolved provider writes are never replayed here.
     func performPortableImportOperation(callerUID: uid_t, request: SetupPortableImportOperation) async throws -> SetupPortableImportOperationResult {

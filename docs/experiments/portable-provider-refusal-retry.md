@@ -50,3 +50,36 @@ The native request format and app recovery action remain separate work.
 They must carry the rejected-record digest and preserve current progress binding and fresh administrator authorization.
 Automatic import does not invoke these operations. Unknown-outcome adoption remains unsupported.
 A complete local publication gate must pass before these private changes are pushed.
+
+
+## Read-only recovery snapshot
+
+The setup owner can read current import progress and public provider history in one bounded response.
+It returns no metadata until the account and its service accounts are prepared.
+Before an import exists, the read leaves the import directory absent.
+A missing relay plan stays missing. The read never prepares or repairs a resource.
+
+| Field | Meaning |
+| --- | --- |
+| Import progress | Existing destination and retained import binding |
+| Relay scope | Retained provider account, zone, hostname and tunnel name |
+| Resource state | Prepared, dispatched, created, rejected or unknown history |
+| Record digest | SHA-256 of the complete retained record, for exact retry binding |
+| Attempt number | The retained creation-attempt counter |
+| Provider ID | Present only after a recorded creation acknowledgement |
+| Refusal | A closed typed value, present only for a rejected attempt |
+
+The projection captures content digests and inode identities, then rechecks them before returning its derived metadata.
+It validates parent records and rejects corrupt or orphan files without rewriting them.
+A changed or newly created file invalidates an earlier capture, including replacement with identical content.
+Only rejected entries are returned by the explicit-retry selector. That selector grants no authorization.
+
+The canonical message has a version, purpose marker, closed field sets and a 4,096-byte limit.
+Its decoder rejects unsupported versions, crossed identities, duplicate or unordered resources and missing created parents.
+Credential fields and provider response bodies are absent. Default descriptions and reflection redact the report and its entries.
+This is an ephemeral read model; it changes no persisted format.
+
+The projection validation covered 65 distinct focused cases, including the read before import storage exists.
+It proves codec and owned-storage behavior. Native IPC delivery and app use remain separate integration work.
+The next native interface must negotiate support before sending these messages or accepting new retry writes.
+Existing native versions remain unchanged in this component.
