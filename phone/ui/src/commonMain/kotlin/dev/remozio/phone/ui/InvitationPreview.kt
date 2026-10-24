@@ -28,4 +28,10 @@ fun previewInvitation(text: String): InvitationPreview {
     )
 }
 
+/**
+ * The preview to show while the user types or pastes into the field: a complete invitation is read at once, and
+ * anything else returns null and waits for Read invitation, so a half-typed text never shows as invalid.
+ */
+fun previewWhileTyping(text: String): InvitationPreview.Parsed? = previewInvitation(text) as? InvitationPreview.Parsed
+
 internal fun hex(bytes: ByteArray): String = bytes.joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') }

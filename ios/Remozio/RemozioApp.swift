@@ -5,7 +5,8 @@ import SwiftUI
 struct RemozioApp: App {
     var body: some Scene {
         WindowGroup {
-            SharedRoot().ignoresSafeArea(.keyboard)
+            // Compose draws under the status bar and home indicator and pads its own content by those insets.
+            SharedRoot().ignoresSafeArea()
         }
     }
 }

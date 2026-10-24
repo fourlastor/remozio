@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		26E93B227B5F808579A594F0 /* NativePhoneServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */; };
 		2D80731155D29E8D4ECD3541 /* RemozioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */; };
+		5043DC6C40DF1988D99CB9B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -16,12 +17,14 @@
 		0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePhoneServices.swift; sourceTree = "<group>"; };
 		11D517B1E34851969CE37AB7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemozioApp.swift; sourceTree = "<group>"; };
+		9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
 		67A058C2E079F1705BA0E8EF /* Remozio */ = {
 			isa = PBXGroup;
 			children = (
+				9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */,
 				11D517B1E34851969CE37AB7 /* Info.plist */,
 				0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */,
 				5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */,
@@ -54,6 +57,7 @@
 			buildPhases = (
 				D5B348E5D28D04A50EE6809D /* Build the shared Kotlin framework */,
 				F21DD38BF6D0E395A4EF1BA0 /* Sources */,
+				4628E32E2E038C1F5D296727 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -98,6 +102,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		4628E32E2E038C1F5D296727 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5043DC6C40DF1988D99CB9B9 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
 		D5B348E5D28D04A50EE6809D /* Build the shared Kotlin framework */ = {
