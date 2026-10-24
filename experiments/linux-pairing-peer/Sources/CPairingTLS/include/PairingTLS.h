@@ -17,7 +17,8 @@ typedef enum {
     REMOZIO_TLS_CLOSED = 5,
     REMOZIO_TLS_IO = 6,
     REMOZIO_TLS_INVALID_ARGUMENT = 7,
-    REMOZIO_TLS_INTERNAL = 8
+    REMOZIO_TLS_INTERNAL = 8,
+    REMOZIO_TLS_PROTOCOL = 9 /* TLS failure on an established connection */
 } RemozioTLSStatus;
 
 typedef struct RemozioTLSContext RemozioTLSContext;
@@ -64,7 +65,8 @@ RemozioTLSStatus remozio_tls_connect(RemozioTLSContext *context, int fd, int can
 /* Reads at least one byte (up to capacity) or reports why not. */
 RemozioTLSStatus remozio_tls_read(RemozioTLSConnection *connection, uint8_t *buffer, size_t capacity,
                                   int cancel_fd, int64_t deadline_ms, size_t *count);
-/* Writes every byte or reports why not. */
+/* Writes every byte or reports why not. After any error other than success the connection is dead: a partial
+ * write is not reported, so the caller must close it and never retry on the same connection. */
 RemozioTLSStatus remozio_tls_write(RemozioTLSConnection *connection, const uint8_t *buffer, size_t length,
                                    int cancel_fd, int64_t deadline_ms);
 

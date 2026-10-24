@@ -84,6 +84,8 @@ final class PairingTLSTests: XCTestCase {
         XCTAssertNotEqual(s.point, c.point)
         // The server saw the client's key, and the client saw the server's.
         let again = handshake(server: server, client: client)
+        XCTAssertEqual(remozio_tls_session_was_reused(again.0.connection!), 0)
+        XCTAssertEqual(remozio_tls_context_tickets_received(client), 0)
         XCTAssertEqual(again.0.point, s.point)
         XCTAssertEqual(again.1.point, c.point)
         remozio_tls_connection_close(again.0.connection)
@@ -222,6 +224,37 @@ final class PairingTLSTests: XCTestCase {
         // The client never reads, so a payload larger than the socket buffers must stop at the deadline.
         let big = [UInt8](repeating: 7, count: 64 * 1024 * 1024)
         XCTAssertEqual(remozio_tls_write(serverConnection, big, big.count, -1, deadline(400)), REMOZIO_TLS_TIMEOUT)
+    }
+
+    func testExpiredDeadlineAndSignalledCancelWinBeforeAnyIO() {
+        let serverID = Identity.make(), clientID = Identity.make()
+        let server = serverContext(serverID), client = clientContext(clientID)
+        defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
+        let (s, c) = handshake(server: server, client: client)
+        let serverConnection = s.connection!, clientConnection = c.connection!
+        defer { remozio_tls_connection_close(serverConnection); remozio_tls_connection_close(clientConnection) }
+        var byte: UInt8 = 1, count = 0
+        XCTAssertEqual(remozio_tls_write(clientConnection, &byte, 1, -1, deadline(5000)), REMOZIO_TLS_OK) // data is now buffered
+        XCTAssertEqual(remozio_tls_read(serverConnection, &byte, 1, -1, deadline(-1), &count), REMOZIO_TLS_TIMEOUT)
+        var pipeFDs: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        defer { close(pipeFDs[0]); close(pipeFDs[1]) }
+        _ = write(pipeFDs[1], "x", 1)
+        XCTAssertEqual(remozio_tls_read(serverConnection, &byte, 1, pipeFDs[0], deadline(5000), &count), REMOZIO_TLS_CANCELLED)
+        let big = [UInt8](repeating: 7, count: 1024 * 1024)
+        XCTAssertEqual(remozio_tls_write(serverConnection, big, big.count, pipeFDs[0], deadline(5000)), REMOZIO_TLS_CANCELLED)
+    }
+
+    func testNullOutputPointersAreRefused() {
+        var cert: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        XCTAssertEqual(remozio_tls_make_identity("P-256", 1, 2, &cert, &length, nil, nil), REMOZIO_TLS_INVALID_ARGUMENT)
+        let identity = Identity.make()
+        let server = serverContext(identity)
+        defer { remozio_tls_context_free(server) }
+        let (fd, other) = socketPair()
+        XCTAssertEqual(remozio_tls_accept(server, fd, -1, deadline(100), nil, nil), REMOZIO_TLS_INVALID_ARGUMENT)
+        close(other)
     }
 
     func testPeerCloseReportsClosed() {

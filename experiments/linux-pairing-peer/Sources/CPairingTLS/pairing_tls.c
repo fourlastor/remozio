@@ -50,7 +50,9 @@ static RemozioTLSStatus wait_for(int fd, short events, int cancel_fd, int64_t de
             return REMOZIO_TLS_IO;
         }
         if (ready == 0) continue;
+        if (cancel_fd >= 0 && (fds[1].revents & POLLNVAL)) return REMOZIO_TLS_INVALID_ARGUMENT;
         if (cancel_fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) return REMOZIO_TLS_CANCELLED;
+        if (fds[0].revents & POLLNVAL) return REMOZIO_TLS_IO;
         if (fds[0].revents & (events | POLLHUP | POLLERR)) return REMOZIO_TLS_OK;
     }
 }
@@ -61,6 +63,12 @@ typedef int (*SSLOperation)(SSL *ssl, void *argument, size_t *transferred);
 static RemozioTLSStatus drive(SSL *ssl, int fd, int cancel_fd, int64_t deadline_ms, SSLOperation operation,
                               void *argument, size_t *transferred) {
     for (;;) {
+        /* Honour a passed deadline or a signalled cancel even when OpenSSL never needs to wait. */
+        if (deadline_ms - remozio_tls_now_ms() <= 0) return REMOZIO_TLS_TIMEOUT;
+        if (cancel_fd >= 0) {
+            struct pollfd cancel = {.fd = cancel_fd, .events = POLLIN};
+            if (poll(&cancel, 1, 0) > 0) return (cancel.revents & POLLNVAL) ? REMOZIO_TLS_INVALID_ARGUMENT : REMOZIO_TLS_CANCELLED;
+        }
         ERR_clear_error();
         errno = 0;
         int result = operation(ssl, argument, transferred);
@@ -80,8 +88,8 @@ static RemozioTLSStatus drive(SSL *ssl, int fd, int cancel_fd, int64_t deadline_
             unsigned long error = ERR_peek_last_error();
             unsigned long reason = ERR_GET_REASON(error);
             int reset = ERR_SYSTEM_ERROR(error) && (reason == EPIPE || reason == ECONNRESET);
-            return reset || (!ERR_SYSTEM_ERROR(error) && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING)
-                ? REMOZIO_TLS_CLOSED : REMOZIO_TLS_HANDSHAKE_FAILED;
+            if (reset || (!ERR_SYSTEM_ERROR(error) && reason == SSL_R_UNEXPECTED_EOF_WHILE_READING)) return REMOZIO_TLS_CLOSED;
+            return SSL_is_init_finished(ssl) ? REMOZIO_TLS_PROTOCOL : REMOZIO_TLS_HANDSHAKE_FAILED;
         }
         default: return REMOZIO_TLS_INTERNAL;
         }
@@ -233,6 +241,7 @@ static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel
                                   RemozioTLSConnection **connection, uint8_t point[REMOZIO_TLS_POINT_LENGTH]) {
     RemozioTLSStatus status = REMOZIO_TLS_INTERNAL;
     SSL *ssl = NULL;
+    if (!connection || !point) { close(fd); return REMOZIO_TLS_INVALID_ARGUMENT; }
     *connection = NULL;
     int64_t bound = remozio_tls_now_ms() + REMOZIO_TLS_MAX_HANDSHAKE_MS;
     if (deadline_ms > bound) deadline_ms = bound;
@@ -244,7 +253,7 @@ static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel
     }
     status = drive(ssl, fd, cancel_fd, deadline_ms, context->is_server ? do_accept : do_connect, NULL, NULL);
     if (status != REMOZIO_TLS_OK) goto fail;
-    if (SSL_version(ssl) != TLS1_3_VERSION && context->is_server) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
+    if (SSL_version(ssl) != TLS1_3_VERSION) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
     if (!alpn_is_pairing(ssl)) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }
     if (!check_peer(ssl, point)) { status = REMOZIO_TLS_PEER_CERTIFICATE; goto fail; }
     RemozioTLSConnection *created = calloc(1, sizeof(*created));
@@ -275,6 +284,7 @@ RemozioTLSStatus remozio_tls_connect(RemozioTLSContext *context, int fd, int can
 RemozioTLSStatus remozio_tls_read(RemozioTLSConnection *connection, uint8_t *buffer, size_t capacity, int cancel_fd,
                                   int64_t deadline_ms, size_t *count) {
     IOBuffer io = {buffer, capacity};
+    if (!count) return REMOZIO_TLS_INVALID_ARGUMENT;
     *count = 0;
     if (!connection || !buffer || capacity == 0) return REMOZIO_TLS_INVALID_ARGUMENT;
     return drive(connection->ssl, connection->fd, cancel_fd, deadline_ms, do_read, &io, count);
@@ -310,7 +320,6 @@ int remozio_tls_session_was_reused(const RemozioTLSConnection *connection) { ret
 
 void remozio_tls_connection_close(RemozioTLSConnection *connection) {
     if (!connection) return;
-    SSL_set_shutdown(connection->ssl, SSL_SENT_SHUTDOWN);
     SSL_shutdown(connection->ssl); /* Best effort on a nonblocking socket; the fd closes either way. */
     SSL_free(connection->ssl);
     close(connection->fd);
@@ -327,6 +336,7 @@ RemozioTLSStatus remozio_tls_make_identity(const char *curve, int64_t not_before
     ASN1_INTEGER *serial_asn1 = NULL;
     ASN1_TIME *before = NULL, *after = NULL;
     unsigned char random_bytes[16];
+    if (!cert_der || !key_der || !cert_length || !key_length) return REMOZIO_TLS_INVALID_ARGUMENT;
     *cert_der = NULL; *key_der = NULL; *cert_length = 0; *key_length = 0;
     if (!curve || not_after <= not_before) return REMOZIO_TLS_INVALID_ARGUMENT;
     key = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
