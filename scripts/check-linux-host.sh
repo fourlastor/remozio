@@ -33,3 +33,8 @@ swift test --package-path host/shared-core \
 
 python3 scripts/run-linux-approval-command-experiment.py \
     --work-dir "$work_root/approval-command"
+
+python3 scripts/run-linux-storage-lease-experiment.py
+
+python3 scripts/run-linux-os-capture-experiment.py \
+    --work-dir "$work_root/os-capture"

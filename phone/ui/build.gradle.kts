@@ -19,6 +19,7 @@ kotlin {
         commonMain.dependencies {
             implementation(project(":protocol-kotlin"))
             implementation("org.jetbrains.compose.runtime:runtime:1.12.2")
+            implementation("org.jetbrains.compose.animation:animation:1.12.2")
             implementation("org.jetbrains.compose.foundation:foundation:1.12.2")
             implementation("org.jetbrains.compose.ui:ui:1.12.2")
         }

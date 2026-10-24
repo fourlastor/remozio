@@ -43,4 +43,12 @@ class InvitationPreviewTest {
         assertNotEquals(original.macID, altered.macID)
         assertNotEquals(original.fingerprint, altered.fingerprint)
     }
+
+    @Test fun typingShowsOnlyACompleteInvitation() {
+        assertEquals<InvitationPreview?>(previewInvitation(text), previewWhileTyping(text))
+        assertEquals<InvitationPreview?>(previewInvitation(text), previewWhileTyping("  $text\n"))
+        for (partial in listOf("", "remozio-pairing:", text.dropLast(1), text + "A", text.replace("v1", "v2"))) {
+            assertEquals(null, previewWhileTyping(partial), partial)
+        }
+    }
 }

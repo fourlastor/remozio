@@ -9,11 +9,19 @@ appId: dev.remozio.ios
 - tapOn:
     id: "invitation-text"
 - inputText: "remozio-pairing:v1:pwABAVABAQEBAQEBAQEBAQEBAQEBAlACAgICAgICAgICAgICAgICA2ZTdHVkaW8EWEEEaxfR8uEsQkf4vOblY6RA8ncDfYEt6zOg9KE5RdiYwpZP40Li_hp_m47n60p8D54WK84zV2sxXs7LtkBoN79R9QVYQQR88nsYjQNPfopSOAMEtRrDwIlp4nfyGzWmC0j8R2aZeAd3VRDbjtBAKT2axp90MNu6fa3mPOmCKZ4Et50ieHPRBgE"
-- tapOn: "Read invitation"
+# A complete invitation is read as soon as it is entered, and the keyboard closes.
 - assertVisible: "Studio"
 - assertVisible: "01010101010101010101010101010101"
 - assertVisible: "02020202020202020202020202020202"
-- assertVisible: "15448DD8-80A3E42E-81C4BE45-FA94CE71-0E577125-96136E08-5F07F24D-E63288DF"
+# The fingerprint shows in groups of eight.
+- assertVisible: "15448DD8"
+- assertVisible: "80A3E42E"
+- assertVisible: "81C4BE45"
+- assertVisible: "FA94CE71"
+- assertVisible: "0E577125"
+- assertVisible: "96136E08"
+- assertVisible: "5F07F24D"
+- assertVisible: "E63288DF"
 - assertVisible: "These are unverified invitation claims.*"
 # A new Add computer screen starts empty; eraseText removes only the text before the cursor.
 # Tags, not text: "Add computer" is also the title of this screen.
@@ -25,6 +33,8 @@ appId: dev.remozio.ios
 - tapOn:
     id: "invitation-text"
 - inputText: "remozio-pairing:v2:not-an-invitation"
+# A tap outside the field closes the keyboard, which covers Read invitation.
+- tapOn: "Invitation text"
 - tapOn: "Read invitation"
 - assertVisible: "This is not a valid Remozio invitation."
 - assertNotVisible: "Studio"

@@ -58,6 +58,21 @@ timeouts, cleanup and untested cases. The [TPM/TLS experiment](experiments/linux
 has separate dependency and invocation instructions; simulator results must remain
 labelled as simulator results. None of these commands installs a production daemon.
 
+The separate [native Swift/provider experiment](../experiments/linux-native-tpm-tls/README.md)
+uses an internal C/OpenSSL shim for actual provider-backed signing and one TLS
+server exchange. Its private-simulator controls retain separate authority and
+transport keys, reject software keys and wrong peers, require negotiated ALPN
+even when the extension is omitted, and enforce bounded execution. It neither
+reuses the historical hardware fixture nor extends that device evidence to the
+native path. The portable runner tests are part of repository checks; the explicit
+native build and simulator run require their documented development/runtime
+dependencies. The Ubuntu 24.04 Linux Swift CI job installs those test dependencies,
+extracts the checksum-pinned resource manager into a private prefix without
+installing its service, and requires the native build and simulator controls.
+That runner's result remains pending until the PR check passes. A production signing API,
+TLS-stack choice, protected service identity and key-authorization policy remain
+separate reviewed decisions.
+
 The separate [controlled monitor experiment](experiments/linux-caller-monitor.md)
 extends the caller work with supervised fixture launch, event invalidation and a
 simulated stopped handoff. Its native fixture runs independently of a phone or
@@ -73,6 +88,26 @@ Synthetic software keys and requester claims, a private fixture ledger and one f
 do not establish production authority, physical-phone approval or protected caller admission.
 
 ## Local gate and CI coverage
+
+The [storage lease experiment](../experiments/linux-storage-lease/README.md) also
+runs in `check-linux-host.sh`. It retains existing private directories and files,
+checks ownership, modes, ACL absence and object identity, and holds a cooperative
+writer lock. Its 36 controls include 29 live ordinary-user filesystem controls
+and seven explicitly injected error controls, including a wrong stored-object UID
+and separate later-object device/filesystem-type differences after a normal anchor
+sample. The requested-owner guard remains a separate live control; no actual
+foreign-owned file, mount change or cross-device topology is tested. Filesystem and ACL prerequisites must be available,
+and Python must be 3.11 or later; unsupported semantics fail rather than skip. These are fixture
+mechanics, not a protected service identity, durable journal or production storage
+policy. Advisory locking does not exclude a malicious same-account writer.
+
+The [OS-capture experiment](experiments/linux-os-capture.md) also runs in
+`check-linux-host.sh`. It observes its own current Linux task and retained objects,
+round-trips raw paths and real UID/GID roles through schema 4, and refuses changed
+objects or streams before a synchronous callback. It runs no command and uses
+synthetic monitor, caller and code-policy fields. Its controls do not establish a
+stopped caller handoff or protected admission; a monitor must independently
+observe its retained sender before this can join the command fixture.
 
 The [repository pre-push requirement](../AGENTS.md) is one manual command that
 selects the checks executable on the current host. No Git hook is installed:
