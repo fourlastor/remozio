@@ -217,7 +217,8 @@ static int check_peer(SSL *ssl, uint8_t point[REMOZIO_TLS_POINT_LENGTH]) {
     size_t length = 0;
     if (!peer || !key) goto done;
     if (extras != (SSL_is_server(ssl) ? 0 : 1)) goto done;
-    if (X509_cmp_current_time(X509_get0_notBefore(peer)) >= 0 || X509_cmp_current_time(X509_get0_notAfter(peer)) <= 0) goto done;
+    /* -2 means the time could not be read: only an explicit -1 / +1 passes. */
+    if (X509_cmp_current_time(X509_get0_notBefore(peer)) != -1 || X509_cmp_current_time(X509_get0_notAfter(peer)) != 1) goto done;
     if (X509_NAME_cmp(X509_get_subject_name(peer), X509_get_issuer_name(peer)) != 0 || X509_verify(peer, key) != 1) goto done;
     if (EVP_PKEY_get_base_id(key) != EVP_PKEY_EC) goto done;
     if (!EVP_PKEY_get_utf8_string_param(key, OSSL_PKEY_PARAM_GROUP_NAME, group, sizeof(group), &length) ||
