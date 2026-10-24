@@ -73,10 +73,11 @@ static RemozioTLSStatus drive(SSL *ssl, int fd, int cancel_fd, int64_t deadline_
         errno = 0;
         int result = operation(ssl, argument, transferred);
         if (result > 0) return REMOZIO_TLS_OK;
-        switch (SSL_get_error(ssl, result)) {
+        int error = SSL_get_error(ssl, result);
+        switch (error) {
         case SSL_ERROR_WANT_READ:
         case SSL_ERROR_WANT_WRITE: {
-            short events = SSL_want_write(ssl) ? POLLOUT : POLLIN;
+            short events = error == SSL_ERROR_WANT_WRITE ? POLLOUT : POLLIN;
             RemozioTLSStatus waited = wait_for(fd, events, cancel_fd, deadline_ms);
             if (waited != REMOZIO_TLS_OK) return waited;
             break;
@@ -242,16 +243,16 @@ static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel
                                   RemozioTLSConnection **connection, uint8_t point[REMOZIO_TLS_POINT_LENGTH]) {
     RemozioTLSStatus status = REMOZIO_TLS_INTERNAL;
     SSL *ssl = NULL;
-    if (!connection || !point) { close(fd); return REMOZIO_TLS_INVALID_ARGUMENT; }
+    if (!connection || !point || fd == cancel_fd) { close(fd); return REMOZIO_TLS_INVALID_ARGUMENT; }
     *connection = NULL;
     int64_t bound = remozio_tls_now_ms() + REMOZIO_TLS_MAX_HANDSHAKE_MS;
     if (deadline_ms > bound) deadline_ms = bound;
     int flags = fcntl(fd, F_GETFL);
-    if (!context || flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 || !(ssl = SSL_new(context->ctx)) ||
-        !SSL_set_fd(ssl, fd)) {
+    if (!context || flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
         status = REMOZIO_TLS_INVALID_ARGUMENT;
         goto fail;
     }
+    if (!(ssl = SSL_new(context->ctx)) || !SSL_set_fd(ssl, fd)) goto fail; /* status stays INTERNAL */
     status = drive(ssl, fd, cancel_fd, deadline_ms, context->is_server ? do_accept : do_connect, NULL, NULL);
     if (status != REMOZIO_TLS_OK) goto fail;
     if (SSL_version(ssl) != TLS1_3_VERSION) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }

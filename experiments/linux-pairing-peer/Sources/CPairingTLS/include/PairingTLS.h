@@ -49,6 +49,7 @@ RemozioTLSContext *remozio_tls_server_context_new(const uint8_t *cert_der, size_
 RemozioTLSContext *remozio_tls_client_context_new(const RemozioTLSClientOptions *options,
                                                   const uint8_t *cert_der, size_t cert_length,
                                                   const uint8_t *key_der, size_t key_length);
+/* A context must outlive every connection made from it. */
 void remozio_tls_context_free(RemozioTLSContext *context);
 /* Tickets a client context received (tests assert zero). */
 int remozio_tls_context_tickets_received(const RemozioTLSContext *context);

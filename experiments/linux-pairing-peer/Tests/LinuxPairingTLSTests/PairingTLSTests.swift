@@ -245,6 +245,21 @@ final class PairingTLSTests: XCTestCase {
         XCTAssertEqual(remozio_tls_write(serverConnection, big, big.count, pipeFDs[0], deadline(5000)), REMOZIO_TLS_CANCELLED)
     }
 
+    func testInvalidReadAndWriteArgumentsAreRefused() {
+        let serverID = Identity.make(), clientID = Identity.make()
+        let server = serverContext(serverID), client = clientContext(clientID)
+        defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
+        let (s, c) = handshake(server: server, client: client)
+        let connection = s.connection!
+        defer { remozio_tls_connection_close(connection); remozio_tls_connection_close(c.connection) }
+        var byte: UInt8 = 0, count = 0
+        XCTAssertEqual(remozio_tls_read(connection, &byte, 0, -1, deadline(100), &count), REMOZIO_TLS_INVALID_ARGUMENT)
+        XCTAssertEqual(remozio_tls_read(connection, nil, 1, -1, deadline(100), &count), REMOZIO_TLS_INVALID_ARGUMENT)
+        XCTAssertEqual(remozio_tls_read(connection, &byte, 1, -1, deadline(100), nil), REMOZIO_TLS_INVALID_ARGUMENT)
+        XCTAssertEqual(remozio_tls_write(connection, nil, 1, -1, deadline(100)), REMOZIO_TLS_INVALID_ARGUMENT)
+        XCTAssertEqual(remozio_tls_write(connection, &byte, 0, -1, deadline(100)), REMOZIO_TLS_OK)
+    }
+
     func testNullOutputPointersAreRefused() {
         var cert: UnsafeMutablePointer<UInt8>?
         var length = 0
