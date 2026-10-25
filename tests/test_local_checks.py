@@ -22,7 +22,7 @@ class LocalChecksTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts/check-local.sh", repo / "scripts/check-local.sh")
             stub = '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$CHECK_LOG"\n[ "${0##*/}" != "$FAIL_CHECK" ] || exit 23\n'
             for name in ("scripts/check.sh", "scripts/check-linux-protocol.sh", "scripts/check-linux-host.sh",
-                         "scripts/build-ios-app.sh", "gradlew"):
+                         "scripts/check-linux-pairing-peer.sh", "scripts/build-ios-app.sh", "gradlew"):
                 path = repo / name
                 path.write_text(stub)
                 path.chmod(0o755)
@@ -40,7 +40,7 @@ class LocalChecksTests(unittest.TestCase):
         result, calls = self.run_gate("Linux")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["./scripts/check.sh"], ["./scripts/check-linux-protocol.sh"],
-                                 ["./scripts/check-linux-host.sh"],
+                                 ["./scripts/check-linux-host.sh"], ["./scripts/check-linux-pairing-peer.sh"],
                                  ["./gradlew", *COMMON_TASKS, *ANDROID_TASKS]])
 
     def test_mac_builds_peers_before_running_all_interoperability_checks(self):
@@ -65,7 +65,7 @@ class LocalChecksTests(unittest.TestCase):
                 self.assertEqual(calls, [["./scripts/check.sh"]])
 
     def test_linux_swift_failure_prevents_gradle(self):
-        phases = ["check.sh", "check-linux-protocol.sh", "check-linux-host.sh"]
+        phases = ["check.sh", "check-linux-protocol.sh", "check-linux-host.sh", "check-linux-pairing-peer.sh"]
         for failed_phase in phases[1:]:
             with self.subTest(phase=failed_phase):
                 result, calls = self.run_gate("Linux", failed_phase)

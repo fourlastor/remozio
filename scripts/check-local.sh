@@ -17,6 +17,7 @@ if [ "$host" = Darwin ]; then
 else
     ./scripts/check-linux-protocol.sh
     ./scripts/check-linux-host.sh
+    ./scripts/check-linux-pairing-peer.sh
 fi
 ./gradlew "$@" :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 if [ "$host" = Darwin ]; then
