@@ -28,11 +28,12 @@ final class DNSRecordFixture: @unchecked Sendable {
         let prepared = try begin(), sent = try prepared.transition(to: .dispatched), created = try sent.transition(to: .created, dnsRecordID: Self.providerID)
         try replace(sent, previous: prepared); try replace(created, previous: sent); return created
     }
-    func dnsReply(changes: [String: Any] = [:], envelope extra: [String: Any] = [:]) throws -> Data {
+    func dnsReply(changes: [String: Any] = [:], envelope extra: [String: Any] = [:], omitting fields: [String] = []) throws -> Data {
         var record: [String: Any] = ["id": Self.providerID, "name": base.plan.hostname, "type": "CNAME",
             "content": base.tunnel.tunnelID! + ".cfargotunnel.com", "proxied": true, "proxiable": true, "ttl": 1,
             "zone_id": try XCTUnwrap(base.h.f.proposal().cloudflare).zoneID, "meta": [:]]
         for (key, value) in changes { record[key] = value }
+        for key in fields { record.removeValue(forKey: key) }
         var result: [String: Any] = ["success": true, "errors": [], "result": record]
         for (key, value) in extra { result[key] = value }; return try JSONSerialization.data(withJSONObject: result)
     }

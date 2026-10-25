@@ -788,6 +788,132 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func inspectImportedRelayPublicationPreflight(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                                send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareRelayPublicationPreflight {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, application, scoped in
+            try await CloudflareRelayPublicationPreflightClient(send: scoped).inspect(configuration, expected: binding.retained,
+                plan: plan, createdTunnel: tunnel, application: application)
+        }
+    }
+
+    func createImportedDNSRecord(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                 send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupDNSRecord {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, application, scoped in
+            let initial = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                let record = try SharedSetupDNSStorage.begin(expected: intent, plan: plan, createdTunnel: tunnel, application: application,
+                    directory: directory, owner: owner, verifyCurrent: verify)
+                guard let snapshot = try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) else { throw RelayProvisioningError.staleRecord }
+                let accessSnapshot = try Self.requireAccessSnapshot(SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                    createdTunnel: tunnel, directory: directory, owner: owner))
+                return (record, snapshot, accessSnapshot)
+            }
+            if initial.0.phase == .created { return initial.0 }
+            guard initial.0.phase == .prepared else { throw RelayProvisioningError.requiresReconciliation }
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(binding.retained.phase) else { throw RelayProvisioningError.invalidTransition }
+            @Sendable func verifyDNS(_ record: SharedSetupDNSRecord, _ snapshot: SharedSetupDNSStorage.Snapshot) throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: application, directory: directory, owner: owner) == record,
+                          try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: application, directory: directory, owner: owner) == snapshot,
+                          try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                            directory: directory, owner: owner) == initial.2 else { throw RelayProvisioningError.staleRecord }
+                    try verify()
+                }
+            }
+            let preflightSend: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyDNS(initial.0, initial.1); return try await scoped(request)
+            }
+            let observed: CloudflareRelayPublicationPreflight
+            do {
+                observed = try await CloudflareRelayPublicationPreflightClient(send: preflightSend).inspect(configuration,
+                    expected: binding.retained, plan: plan, createdTunnel: tunnel, application: application)
+                try verifyDNS(initial.0, initial.1)
+            } catch { try Task.checkCancellation(); try verifyDNS(initial.0, initial.1); throw error }
+            switch observed.hostnameAssessment {
+            case .noOtherMatchObserved, .exactHostnamePrecedesBroaderWildcardRoots: break
+            case .requiresPrecedenceVerification: throw RelayProvisioningError.requiresReconciliation
+            }
+            try Task.checkCancellation()
+            let dispatched = try initial.0.transition(to: .dispatched)
+            let sentSnapshot = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) == initial.1,
+                      try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == initial.2 else { throw RelayProvisioningError.staleRecord }
+                try Task.checkCancellation()
+                try SharedSetupDNSStorage.replace(dispatched, previous: initial.0, expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner, verifyCurrent: verify)
+                guard let snapshot = try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) else { throw RelayProvisioningError.staleRecord }
+                return snapshot
+            }
+            let creationSend: CloudflareProvisioningScopeClient.Send = { request in
+                try Task.checkCancellation(); try verifyDNS(dispatched, sentSnapshot); return try await scoped(request)
+            }
+            let outcome: CloudflareDNSCreationOutcome
+            do {
+                outcome = try await CloudflareDNSRecordClient(send: creationSend).create(configuration, expected: binding.retained,
+                    plan: plan, createdTunnel: tunnel, application: application, dispatched: dispatched)
+            } catch { outcome = .unknown }
+            let next: SharedSetupDNSRecord
+            switch outcome {
+            case .created(let identity):
+                if identity.zoneID == configuration.zoneID, identity.hostname == plan.hostname,
+                   identity.target == dispatched.tunnelID + ".cfargotunnel.com",
+                   let created = try? dispatched.transition(to: .created, dnsRecordID: identity.recordID) { next = created }
+                else { next = try dispatched.transition(to: .unknown) }
+            case .rejected(let refusal): next = try dispatched.transition(to: .rejected, refusal: refusal)
+            case .unknown: next = try dispatched.transition(to: .unknown)
+            }
+            try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) == sentSnapshot,
+                      try SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        directory: directory, owner: owner) == initial.2 else { throw RelayProvisioningError.staleRecord }
+                try SharedSetupDNSStorage.replace(next, previous: dispatched, expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner, verifyCurrent: verify)
+            }
+            return next
+        }
+    }
+
+    func inspectImportedDNSRecord(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                  send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareDNSRecordObservation {
+        try await withCreatedImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, application, scoped in
+            let retained = try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                guard let record = try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) else { throw RelayProvisioningError.requiresReconciliation }
+                _ = try record.createdRecord(expected: intent, plan: plan, createdTunnel: tunnel, application: application)
+                guard let snapshot = try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                    application: application, directory: directory, owner: owner) else { throw RelayProvisioningError.staleRecord }
+                try verify(); return (record, snapshot)
+            }
+            @Sendable func verifyDNS() throws {
+                try self.withImportedAccessDirectory(binding: binding, tunnel: tunnel, tunnelSnapshot: tunnelSnapshot,
+                    callerUID: callerUID, expected: expected, proposal: proposal) { intent, plan, directory, owner, verify in
+                    guard try SharedSetupDNSStorage.read(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: application, directory: directory, owner: owner) == retained.0,
+                          try SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: application, directory: directory, owner: owner) == retained.1 else { throw RelayProvisioningError.staleRecord }
+                    try verify()
+                }
+            }
+            let dnsSend: CloudflareProvisioningScopeClient.Send = { request in try Task.checkCancellation(); try verifyDNS(); return try await scoped(request) }
+            do {
+                let result = try await CloudflareDNSRecordClient(send: dnsSend).inspect(configuration, expected: binding.retained,
+                    plan: plan, createdTunnel: tunnel, application: application, record: retained.0)
+                try verifyDNS(); return result
+            } catch { try Task.checkCancellation(); try verifyDNS(); throw error }
+        }
+    }
+
     private func withCreatedImportedAccessApplication<Value: Sendable>(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                         send: CloudflareProvisioningScopeClient.Send?,
                         operation: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding, SharedSetupImportRelayPlan,
