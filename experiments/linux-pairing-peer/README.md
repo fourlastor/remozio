@@ -11,7 +11,9 @@ This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for th
   shim requires one self-signed, currently valid P-256 leaf and exports its 65-byte uncompressed point. The
   phone pins that key, not the certificate bytes.
 - Every handshake, read and write takes an absolute deadline on `CLOCK_BOOTTIME` and an optional cancel
-  descriptor. A handshake never runs longer than 60 s. A timeout is never reported as a rejection.
+  descriptor. Each wait polls an absolute `CLOCK_BOOTTIME` timer alongside the socket and cancel descriptor.
+  The timer includes suspend time and becomes readable after expiry. A handshake has a 60 s deadline cap.
+  A timeout is never reported as a rejection.
 - `remozio_tls_make_identity` mirrors the Mac `TransportTLSCertificate` profile (CN `Remozio transport`, critical
   `CA:FALSE`, critical `digitalSignature`, EKU `serverAuth` and `clientAuth`). It uses OpenSSL, not
   swift-certificates, so the shim has no Swift dependency; the profile is the same.
@@ -20,4 +22,5 @@ This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for th
 Run `./scripts/check-linux-pairing-peer.sh`. The tests assert the negotiated version, ALPN, ticket count and
 resumption, not library defaults, and cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid
 client certificates, a silent peer, cancellation during handshake and read, a stalled write, peer close and
-descriptor leaks.
+descriptor leaks. They inspect the timer clock, absolute arming, handshake cap and descriptor cleanup through
+`/proc/self/fdinfo`. An actual host suspend/resume test remains pending.

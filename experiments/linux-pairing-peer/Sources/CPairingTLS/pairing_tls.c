@@ -9,11 +9,11 @@
 #include <openssl/x509v3.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <limits.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,21 +40,38 @@ void remozio_tls_free(void *pointer) { OPENSSL_free(pointer); }
 
 /* Waits for the socket, the deadline or the cancel descriptor, whichever comes first. */
 static RemozioTLSStatus wait_for(int fd, short events, int cancel_fd, int64_t deadline_ms) {
+    if (deadline_ms <= remozio_tls_now_ms()) return REMOZIO_TLS_TIMEOUT;
+    int timer = timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (timer < 0) return REMOZIO_TLS_IO;
+    struct itimerspec expiry = {
+        .it_value = {.tv_sec = deadline_ms / 1000, .tv_nsec = (deadline_ms % 1000) * 1000000}
+    };
+    if (timerfd_settime(timer, TFD_TIMER_ABSTIME, &expiry, NULL) != 0) {
+        close(timer);
+        return REMOZIO_TLS_IO;
+    }
+    RemozioTLSStatus status = REMOZIO_TLS_IO;
     for (;;) {
-        int64_t remaining = deadline_ms - remozio_tls_now_ms();
-        if (remaining <= 0) return REMOZIO_TLS_TIMEOUT;
-        struct pollfd fds[2] = {{.fd = fd, .events = events}, {.fd = cancel_fd, .events = POLLIN}};
-        int ready = poll(fds, cancel_fd >= 0 ? 2 : 1, remaining > INT_MAX ? INT_MAX : (int)remaining);
+        if (deadline_ms <= remozio_tls_now_ms()) { status = REMOZIO_TLS_TIMEOUT; break; }
+        struct pollfd fds[3] = {
+            {.fd = fd, .events = events},
+            {.fd = cancel_fd, .events = POLLIN},
+            {.fd = timer, .events = POLLIN}
+        };
+        int ready = poll(fds, 3, -1);
         if (ready < 0) {
             if (errno == EINTR) continue;
-            return REMOZIO_TLS_IO;
+            break;
         }
-        if (ready == 0) continue;
-        if (cancel_fd >= 0 && (fds[1].revents & POLLNVAL)) return REMOZIO_TLS_INVALID_ARGUMENT;
-        if (cancel_fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) return REMOZIO_TLS_CANCELLED;
-        if (fds[0].revents & POLLNVAL) return REMOZIO_TLS_IO;
-        if (fds[0].revents & (events | POLLHUP | POLLERR)) return REMOZIO_TLS_OK;
+        if (fds[2].revents & POLLIN) { status = REMOZIO_TLS_TIMEOUT; break; }
+        if (fds[2].revents & (POLLNVAL | POLLHUP | POLLERR)) break;
+        if (cancel_fd >= 0 && (fds[1].revents & POLLNVAL)) { status = REMOZIO_TLS_INVALID_ARGUMENT; break; }
+        if (cancel_fd >= 0 && (fds[1].revents & (POLLIN | POLLHUP | POLLERR))) { status = REMOZIO_TLS_CANCELLED; break; }
+        if (fds[0].revents & POLLNVAL) break;
+        if (fds[0].revents & (events | POLLHUP | POLLERR)) { status = REMOZIO_TLS_OK; break; }
     }
+    close(timer);
+    return status;
 }
 
 /* Runs one nonblocking OpenSSL call to completion. operation returns the SSL_* result and sets *ret. */

@@ -1,6 +1,7 @@
 import CPairingTLS
 import Dispatch
 import Foundation
+import Glibc
 import XCTest
 
 /// Holds C handles across the concurrent server and client halves of one test.
@@ -206,6 +207,65 @@ final class PairingTLSTests: XCTestCase {
         var point = [UInt8](repeating: 0, count: 65)
         XCTAssertEqual(remozio_tls_accept(server, serverFD, pipeFDs[0], deadline(10000), &connection, &point), REMOZIO_TLS_CANCELLED)
         close(clientFD); close(pipeFDs[0]); close(pipeFDs[1])
+    }
+
+    func testSilentHandshakeUsesAbsoluteBootTimeTimerAndReleasesItOnCancel() {
+        let server = serverContext(.make())
+        defer { remozio_tls_context_free(server) }
+        let existing = Set((try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fdinfo")) ?? [])
+        let (serverFD, clientFD) = socketPair()
+        var pipeFDs: [Int32] = [0, 0]
+        XCTAssertEqual(pipe(&pipeFDs), 0)
+        let cancelFD = pipeFDs[0]
+        defer { close(clientFD); close(pipeFDs[0]); close(pipeFDs[1]) }
+        let outcome = Outcome()
+        let done = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            outcome.status = remozio_tls_accept(server, serverFD, cancelFD, deadline(600_000),
+                                                &outcome.connection, &outcome.point)
+            done.signal()
+        }
+
+        var timerFD: Int32?
+        var timerInfo: [String: String] = [:]
+        let observeUntil = deadline(2000)
+        while timerFD == nil && remozio_tls_now_ms() < observeUntil {
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: "/proc/self/fdinfo")) ?? [] {
+                guard !existing.contains(name), let fd = Int32(name),
+                      let info = try? String(contentsOfFile: "/proc/self/fdinfo/" + name, encoding: .utf8) else { continue }
+                var fields: [String: String] = [:]
+                for line in info.split(separator: "\n") {
+                    let parts = line.split(separator: ":", maxSplits: 1)
+                    if parts.count == 2 {
+                        fields[String(parts[0]).trimmingCharacters(in: .whitespaces)] =
+                            String(parts[1]).trimmingCharacters(in: .whitespaces)
+                    }
+                }
+                if fields["clockid"] != nil { timerFD = fd; timerInfo = fields; break }
+            }
+            if timerFD == nil { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        XCTAssertNotNil(timerFD)
+        XCTAssertEqual(Int(timerInfo["clockid"] ?? ""), Int(CLOCK_BOOTTIME))
+        XCTAssertEqual(Int(timerInfo["settime flags"] ?? "", radix: 8), 1)
+        let remaining = (timerInfo["it_value"] ?? "").components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .compactMap { Int($0) }
+        XCTAssertEqual(remaining.count, 2)
+        if remaining.count == 2 {
+            XCTAssertGreaterThan(remaining[0] + remaining[1], 0)
+            XCTAssertLessThanOrEqual(remaining[0], 60)
+        }
+        if let timerFD {
+            let flags = fcntl(timerFD, F_GETFD)
+            XCTAssertGreaterThanOrEqual(flags, 0)
+            XCTAssertEqual(flags & FD_CLOEXEC, FD_CLOEXEC)
+        }
+
+        _ = write(pipeFDs[1], "x", 1)
+        done.wait()
+        XCTAssertEqual(outcome.status, REMOZIO_TLS_CANCELLED)
+        remozio_tls_connection_close(outcome.connection)
+        if let timerFD { XCTAssertEqual(fcntl(timerFD, F_GETFD), -1) }
     }
 
     func testCancellationDuringReadAndStalledWriteTimesOut() {
