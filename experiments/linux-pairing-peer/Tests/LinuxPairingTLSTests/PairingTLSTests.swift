@@ -127,7 +127,8 @@ final class PairingTLSTests: XCTestCase {
             return clientContext(.make(), options: options)
         }
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, _) = handshake(server: server, client: client)
+        let (s, c) = handshake(server: server, client: client)
+        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
         XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
         XCTAssertNil(s.connection)
     }
@@ -138,7 +139,8 @@ final class PairingTLSTests: XCTestCase {
         options.offer_no_alpn = 1
         let client = clientContext(.make(), options: options)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, _) = handshake(server: server, client: client)
+        let (s, c) = handshake(server: server, client: client)
+        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
         XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
     }
 
@@ -149,7 +151,8 @@ final class PairingTLSTests: XCTestCase {
         options.max_version = 0x0303
         let client = clientContext(.make(), options: options)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, _) = handshake(server: server, client: client)
+        let (s, c) = handshake(server: server, client: client)
+        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
         XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
     }
 
@@ -157,7 +160,8 @@ final class PairingTLSTests: XCTestCase {
         let server = serverContext(.make())
         let client = clientContext(nil)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, _) = handshake(server: server, client: client)
+        let (s, c) = handshake(server: server, client: client)
+        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
         XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
     }
 
@@ -165,7 +169,8 @@ final class PairingTLSTests: XCTestCase {
         let server = serverContext(.make())
         let client = clientContext(.make(curve: "P-384"))
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, _) = handshake(server: server, client: client)
+        let (s, c) = handshake(server: server, client: client)
+        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
         XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
     }
 
@@ -175,7 +180,8 @@ final class PairingTLSTests: XCTestCase {
             let server = serverContext(.make())
             let client = clientContext(.make(before: before, after: after))
             defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-            let (s, _) = handshake(server: server, client: client)
+            let (s, c) = handshake(server: server, client: client)
+            defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
             XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
         }
     }
