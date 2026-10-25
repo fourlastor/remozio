@@ -1,7 +1,8 @@
 # Linux pairing peer (experiment)
 
-Software-key mode only. The TLS identity is a file-backed P-256 key, not a TPM key, so nothing here is evidence of
-host key custody. The peer is operator-confirmed and is not the protected host service.
+Software keys only. The identity generator returns a P-256 key and certificate in DER buffers. This adapter does
+not persist the identity. Host key custody remains unqualified. The peer requires operator confirmation.
+Protected host service integration remains pending.
 
 This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for the `remozio-pairing/1` channel.
 
@@ -19,8 +20,11 @@ This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for th
   swift-certificates, so the shim has no Swift dependency; the profile is the same.
 - The shim sets `SIGPIPE` to ignored for the whole process.
 
-Run `./scripts/check-linux-pairing-peer.sh`. The tests assert the negotiated version, ALPN, ticket count and
-resumption, not library defaults, and cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid
-client certificates, a silent peer, cancellation during handshake and read, a stalled write, peer close and
-descriptor leaks. They inspect the timer clock, absolute arming, handshake cap and descriptor cleanup through
-`/proc/self/fdinfo`. An actual host suspend/resume test remains pending.
+Run `./scripts/check-linux-pairing-peer.sh`. The tests assert the negotiated version and ALPN. They observe zero
+tickets and no reused session in two fresh handshakes. A saved-session resumption attempt and a positive control
+for the ticket counter remain pending in [issue 496](https://github.com/rock3r/remozio/issues/496).
+
+The tests cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid client certificates, a silent
+peer, cancellation during handshake and read, a stalled write, peer close and descriptor leaks. They inspect the
+timer clock, absolute arming, handshake cap and descriptor cleanup through `/proc/self/fdinfo`. An actual host
+suspend/resume test remains pending.
