@@ -113,7 +113,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9]))
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
@@ -254,13 +254,13 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertNotIn('setup.portable', declarations)
             if role in (1, 8):
                 self.assertIn(9, declarations['setup.local-ipc'][1])
-                self.assertNotIn(10, declarations['setup.local-ipc'][1])
+                self.assertIn(10, declarations['setup.local-ipc'][1])
 
-    def test_portable_import_capability_nine_keeps_every_existing_setup_version(self):
+    def test_portable_import_recovery_capability_ten_keeps_every_existing_setup_version(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (1, 8):
-                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 10))))
+                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 11))))
             else:
                 self.assertNotIn('setup.local-ipc', declarations)
 

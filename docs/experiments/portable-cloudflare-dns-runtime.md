@@ -61,3 +61,6 @@ The app import action and native relay startup remain separate implementation wo
 
 The hostname assessment is based on [Cloudflare application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
 Its native behavior must be checked before claiming provider compatibility.
+
+The Root owner now has separate [explicit refusal preparation](portable-provider-refusal-retry.md).
+It does not automatically retry creation or adopt an unknown resource. Native and app dispatch remain unconnected.

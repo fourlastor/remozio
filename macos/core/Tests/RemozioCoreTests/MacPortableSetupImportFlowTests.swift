@@ -14,6 +14,8 @@ final class MacPortableSetupImportFlowTests: XCTestCase, @unchecked Sendable {
     }
     private actor Events {
         var actions: [SetupPortableImportOperation.Action] = []
+        var recoveryReads = 0
+        func recoveryRead() { recoveryReads += 1 }
         var prompts = 0, forms = 0, rightsClosed = 0, connectionsClosed = 0, connectionsStarted = 0
         func action(_ action: SetupPortableImportOperation.Action) { actions.append(action) }
         func authorize(prompt: Bool) { if prompt { prompts += 1 }; forms += 1 }
@@ -35,22 +37,33 @@ final class MacPortableSetupImportFlowTests: XCTestCase, @unchecked Sendable {
     private actor Root: MacPortableSetupImportRoot {
         var current: SetupPortableImportProgress
         let events: Events
+        let recoveryValue: SetupPortableImportRecovery?
+        let failureAction: SetupPortableImportOperation.Action?
+        let failRecoveryAfterWrites: Bool
+        private var hasWritten = false
         let pausedAction: SetupPortableImportOperation.Action?
         let pausedStatus: SetupPortableImportOperationResult.Status
         let didPerform: @Sendable (SetupPortableImportOperation.Action) -> Void
-        init(_ expected: SetupPortableImportProgress, events: Events, pausedAction: SetupPortableImportOperation.Action? = nil,
+        init(_ expected: SetupPortableImportProgress, events: Events, recovery: SetupPortableImportRecovery? = nil, failureAction: SetupPortableImportOperation.Action? = nil, failRecoveryAfterWrites: Bool = false, pausedAction: SetupPortableImportOperation.Action? = nil,
              status: SetupPortableImportOperationResult.Status = .requiresReconciliation,
              didPerform: @escaping @Sendable (SetupPortableImportOperation.Action) -> Void = { _ in }) {
-            current = expected; self.events = events; self.pausedAction = pausedAction; pausedStatus = status; self.didPerform = didPerform
+            current = expected; self.events = events; recoveryValue = recovery; self.failureAction = failureAction; self.failRecoveryAfterWrites = failRecoveryAfterWrites; self.pausedAction = pausedAction; pausedStatus = status; self.didPerform = didPerform
+        }
+        func recovery() async throws -> SetupPortableImportRecovery? {
+            await events.recoveryRead()
+            if hasWritten && failRecoveryAfterWrites { throw AdministrativeSetupChannelError.invalidMessage }
+            guard let recoveryValue else { throw AdministrativeSetupChannelError.unsupportedVersion }
+            return try .init(progress: current, relayConfigured: recoveryValue.relayConfigured, relayScope: recoveryValue.relayScope, records: recoveryValue.records)
         }
         func start() async throws { await events.started() }
         func progress() async throws -> SetupPortableImportProgress? { current }
         func perform(_ request: SetupPortableImportOperation, authorization: Data) async throws -> SetupPortableImportOperationResult {
             XCTAssertEqual(authorization, Data([1, 2, 3])); XCTAssertEqual(request.expected, current)
-            await events.action(request.action)
+            await events.action(request.action); hasWritten = true
             let status: SetupPortableImportOperationResult.Status = request.action == pausedAction ? pausedStatus : .applied
             current = try Self.advance(current, request: request)
             didPerform(request.action)
+            if failureAction == request.action { throw AdministrativeSetupChannelError.closed }
             return try .init(request: request, progress: current, status: status)
         }
         func close() async { await events.closed(rights: false) }
@@ -85,6 +98,141 @@ final class MacPortableSetupImportFlowTests: XCTestCase, @unchecked Sendable {
         NativeMacPortableSetupImportDriver(open: { root }, administrator: {
             Administrator(events, onAuthorization: { if expireOnAuthorization { clock.expire() } })
         }, now: { clock.now() })
+    }
+    private func rejectedDNS() throws -> (DNSRecordFixture, SetupAccountOwner, SetupPortableImportRecovery, ReviewedSetupFile) {
+        let f = try DNSRecordFixture(), owner = try f.base.h.owner()
+        let first = try f.begin(), sent = try first.transition(to: .dispatched), rejected = try sent.transition(to: .rejected, refusal: .unauthorized)
+        try f.replace(sent, previous: first); try f.replace(rejected, previous: sent)
+        return try (f, owner, XCTUnwrap(owner.portableImportRecovery(callerUID: getuid())), ReviewedSetupFile(proposal: f.base.h.f.proposal()))
+    }
+    func testRefusalRetryAndLaterImportStepsShareOneBoundedRightsOwner() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close(); reviewed.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery)
+        let driver = driver(root: root, events: events)
+        let snapshot = try await driver.snapshot(); XCTAssertEqual(snapshot.recovery, recovery); XCTAssertEqual(snapshot.progress, recovery.progress)
+        let formsBefore = await events.forms; XCTAssertEqual(formsBefore, 0)
+        let result = try await driver.retryImportFile(reviewed, recovery: recovery, resource: .dnsRecord, custody: custody) { _, _ in }
+        XCTAssertEqual(result.action, .complete); XCTAssertEqual(result.progress.phase, .rootComplete)
+        let actions = await events.actions, prompts = await events.prompts, forms = await events.forms, closed = await events.rightsClosed
+        XCTAssertEqual(actions.first, .prepareRefusedDNSRetry); XCTAssertEqual(actions.dropFirst().first, .retain)
+        XCTAssertEqual(actions.filter { $0 == .prepareRefusedDNSRetry }.count, 1)
+        XCTAssertEqual(actions.filter { $0 == .createDNS }.count, 1)
+        XCTAssertEqual(prompts, 1); XCTAssertEqual(forms, actions.count); XCTAssertEqual(closed, 1)
+    }
+    func testChangedRejectedMetadataOrMissingRecoveryCapabilityCannotObtainRights() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close(); reviewed.close() }
+        let rows = try recovery.records.map { row in
+            try SetupPortableImportRecovery.Record(resource: row.resource, phase: row.phase, digest: Data(repeating: 55, count: 32),
+                attempt: row.attemptNumber, providerID: row.providerID, refusal: row.refusal)
+        }
+        let changed = try SetupPortableImportRecovery(progress: recovery.progress, relayConfigured: true, relayScope: recovery.relayScope, records: rows)
+        for actual in [changed, nil] {
+            let events = Events(), root = Root(recovery.progress, events: events, recovery: actual)
+            do {
+                _ = try await driver(root: root, events: events).retryImportFile(reviewed, recovery: recovery, resource: .dnsRecord, custody: custody) { _, _ in }; XCTFail()
+            } catch {
+                if actual == nil { XCTAssertEqual(error as? AdministrativeSetupChannelError, .unsupportedVersion) }
+                else { XCTAssertEqual(error as? AdministrativeSetupError, .staleProgress) }
+            }
+            let actions = await events.actions, prompts = await events.prompts, closed = await events.rightsClosed
+            XCTAssertTrue(actions.isEmpty); XCTAssertEqual(prompts, 0); XCTAssertEqual(closed, 1)
+        }
+    }
+    func testRetryWindowCannotBeExtendedByItsFirstPromptOrPreparedAttempt() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close(); reviewed.close() }
+        for duringPrompt in [true, false] {
+            let events = Events(), clock = Clock()
+            let root = Root(recovery.progress, events: events, recovery: recovery, didPerform: { _ in if !duringPrompt { clock.expire() } })
+            do {
+                _ = try await driver(root: root, events: events, clock: clock, expireOnAuthorization: duringPrompt)
+                    .retryImportFile(reviewed, recovery: recovery, resource: .dnsRecord, custody: custody) { _, _ in }; XCTFail()
+            } catch { XCTAssertEqual(error as? SetupPortableImportFlowError, .authorizationExpired) }
+            let actions = await events.actions, closed = await events.rightsClosed
+            XCTAssertEqual(actions, duringPrompt ? [] : [.prepareRefusedDNSRetry]); XCTAssertEqual(closed, 1)
+        }
+    }
+    func testRecoveryRefusesUnknownStateOrMissingCustodyBeforeOpeningRoot() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close(); reviewed.close() }
+        let unknownRows = try recovery.records.map { row in
+            try SetupPortableImportRecovery.Record(resource: row.resource, phase: row.resource == .dnsRecord ? .unknown : row.phase,
+                digest: row.recordDigest, attempt: row.attemptNumber, providerID: row.providerID, refusal: row.resource == .dnsRecord ? nil : row.refusal)
+        }
+        let unknown = try SetupPortableImportRecovery(progress: recovery.progress, relayConfigured: true, relayScope: recovery.relayScope, records: unknownRows)
+        for missingCustody in [true, false] {
+            let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery)
+            do {
+                _ = try await driver(root: root, events: events).retryImportFile(reviewed, recovery: missingCustody ? recovery : unknown,
+                    resource: .dnsRecord, custody: missingCustody ? .init() : custody) { _, _ in }; XCTFail()
+            } catch {}
+            let actions = await events.actions, prompts = await events.prompts, started = await events.connectionsStarted
+            XCTAssertTrue(actions.isEmpty); XCTAssertEqual(prompts, 0); XCTAssertEqual(started, 0)
+        }
+    }
+    func testClosingTheReviewAfterRecoveryStopsAllLaterSteps() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery)
+        do {
+            _ = try await driver(root: root, events: events).retryImportFile(reviewed, recovery: recovery, resource: .dnsRecord, custody: custody) { action, _ in
+                if action == .retain { reviewed.close() }
+            }; XCTFail()
+        } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .closed) }
+        let actions = await events.actions, closed = await events.rightsClosed
+        XCTAssertEqual(actions, [.prepareRefusedDNSRetry]); XCTAssertEqual(closed, 1)
+    }
+    func testLostRecoveryReplyStopsWithoutReadbackOrAnotherWrite() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close(); reviewed.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery, failureAction: .prepareRefusedDNSRetry)
+        do {
+            _ = try await driver(root: root, events: events).retryImportFile(reviewed, recovery: recovery, resource: .dnsRecord, custody: custody) { _, _ in }; XCTFail()
+        } catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .closed) }
+        let actions = await events.actions, reads = await events.recoveryReads, closed = await events.rightsClosed
+        XCTAssertEqual(actions, [.prepareRefusedDNSRetry]); XCTAssertEqual(reads, 1); XCTAssertEqual(closed, 1)
+    }
+    @MainActor
+    func testAppReadsARejectedResourceAndRetriesWithoutAnotherPromptBetweenSteps() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery)
+        let controls = MacPortableSetupImportControls(reviewed: reviewed, driver: driver(root: root, events: events))
+        defer { controls.close() }
+        await controls.refresh(); XCTAssertEqual(controls.recovery, recovery)
+        await controls.retryImport(resource: .dnsRecord, custody: .init())
+        XCTAssertTrue(controls.loaded); XCTAssertEqual(controls.notice, .custodyRequired); XCTAssertEqual(controls.recovery, recovery)
+        await controls.retryImport(resource: .dnsRecord, custody: custody)
+        XCTAssertNil(controls.notice); XCTAssertNil(controls.recovery)
+        XCTAssertEqual(controls.lastResult?.action, .complete); XCTAssertEqual(controls.progress?.phase, .rootComplete)
+        let prompts = await events.prompts, actions = await events.actions
+        XCTAssertEqual(prompts, 1); XCTAssertEqual(actions.first, .prepareRefusedDNSRetry)
+    }
+    @MainActor
+    func testAppReadsFreshRecoveryAfterAnotherProviderRefusalWithoutRepeatingIt() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery, pausedAction: .createDNS, status: .providerRejected)
+        let controls = MacPortableSetupImportControls(reviewed: reviewed, driver: driver(root: root, events: events))
+        defer { controls.close() }
+        await controls.refresh(); await controls.retryImport(resource: .dnsRecord, custody: custody)
+        XCTAssertNil(controls.notice); XCTAssertTrue(controls.loaded)
+        XCTAssertEqual(controls.lastResult?.status, .providerRejected)
+        XCTAssertEqual(controls.recovery?.progress, controls.progress)
+        XCTAssertNotNil(controls.recovery?.rejectedRecord(for: .dnsRecord))
+        let prompts = await events.prompts, actions = await events.actions
+        XCTAssertEqual(prompts, 1); XCTAssertEqual(actions.last, .createDNS)
+        XCTAssertEqual(actions.filter { $0 == .prepareRefusedDNSRetry }.count, 1)
+        XCTAssertFalse(actions.contains(.complete))
+    }
+    @MainActor
+    func testFailedMetadataReadPreservesAConfirmedProviderRefusalAndDisablesNewWork() async throws {
+        let (_, owner, recovery, reviewed) = try rejectedDNS(); defer { try? owner.close() }
+        let events = Events(), root = Root(recovery.progress, events: events, recovery: recovery,
+            failRecoveryAfterWrites: true, pausedAction: .createDNS, status: .providerRejected)
+        let controls = MacPortableSetupImportControls(reviewed: reviewed, driver: driver(root: root, events: events))
+        defer { controls.close() }
+        await controls.refresh(); await controls.retryImport(resource: .dnsRecord, custody: custody)
+        XCTAssertFalse(controls.loaded); XCTAssertEqual(controls.notice, .refreshFailed); XCTAssertNil(controls.recovery)
+        XCTAssertEqual(controls.lastResult?.status, .providerRejected); XCTAssertEqual(controls.lastResult?.action, .createDNS)
+        XCTAssertEqual(controls.progress, controls.lastResult?.progress)
+        let before = await events.actions
+        await controls.importFile(custody: custody); await controls.retryImport(resource: .dnsRecord, custody: custody)
+        let after = await events.actions; XCTAssertEqual(after, before)
     }
     func testCompleteRelayAttemptReusesOneRightsOwnerAndAuthenticatesEveryStep() async throws {
         let fixture = try RelayProvisioningFixture(), owner = try fixture.owner(); defer { try? owner.close() }
