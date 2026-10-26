@@ -48,7 +48,8 @@ int main(int argc, char **argv) {
     pid_t child = fork(); if (child < 0) return 67;
     if (!child) {
         close(start[1]); close(report[0]); char ready;
-        if (setpgid(0, 0) || read(start[0], &ready, 1) != 1 || ready != 'F') _exit(68);
+        if (read(start[0], &ready, 1) != 1 || ready != 'F' || getpgrp() != getpid() ||
+            getsid(0) != getppid() || tcgetpgrp(slave) != getpgrp()) _exit(68);
         close(start[0]);
         if (signal(SIGTERM, SIG_DFL) == SIG_ERR) _exit(69);
         if (export_descriptor("REMOZIO_FIXTURE_TTY_MASTER", master) || export_descriptor("REMOZIO_FIXTURE_TTY_SLAVE", slave) ||
@@ -65,7 +66,13 @@ int main(int argc, char **argv) {
             pid_t found = waitpid(child, &status, WNOHANG | WUNTRACED);
             if (found == child) {
                 reaped = WIFEXITED(status) || WIFSIGNALED(status);
-                if (!reaped || !WIFEXITED(status) || WEXITSTATUS(status) != 13) error = 84;
+                if (!reaped || !WIFEXITED(status) || WEXITSTATUS(status) != 13) {
+                    error = 84;
+                    fprintf(stderr, "Passive frontend: exited=%d status=%d signalled=%d signal=%d stopped=%d stop=%d\n",
+                        WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                        WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : -1,
+                        WIFSTOPPED(status), WIFSTOPPED(status) ? WSTOPSIG(status) : -1);
+                }
             } else if (found < 0 && errno != EINTR) error = 85;
             usleep(1000);
         }
