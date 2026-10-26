@@ -721,6 +721,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    func readImportedRelayRunCredential(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
+                                        send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> CloudflareTunnelRunCredential {
+        try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, _, scoped in
+            try await CloudflareTunnelTokenClient(send: scoped).read(configuration, expected: binding.retained, plan: plan, created: tunnel)
+        }
+    }
+
     func createImportedAccessApplication(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,
                                          send: CloudflareProvisioningScopeClient.Send? = nil) async throws -> SharedSetupAccessApplicationRecord {
         try await withCreatedImportedRelay(callerUID: callerUID, expected: expected, proposal: proposal, send: send) { configuration, binding, plan, tunnel, tunnelSnapshot, scoped in
