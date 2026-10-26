@@ -95,7 +95,15 @@ final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
             token: f.token, activity: f.service.acquireShared())) {
             XCTAssertEqual($0 as? RelayConnectorProcess.Failure, .system(ENOENT))
         }
-        try f.token.validate(); try f.assertUpdateAvailable()
+        try f.token.validate()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while true {
+            do { try f.assertUpdateAvailable(); break }
+            catch ReleaseActivityError.busy {
+                guard ContinuousClock.now < deadline else { throw ReleaseActivityError.busy }
+                Thread.sleep(forTimeInterval: 0.001)
+            }
+        }
         f.token.close()
         XCTAssertThrowsError(try f.start("normal")) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         try f.assertUpdateAvailable()
