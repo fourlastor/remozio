@@ -183,6 +183,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return result
         }
     }
+    func requirePortableImportSupport() throws {
+        try lock.withLock {
+            guard !closed, !closing, importedGatewayOperation != nil else { throw AdministrativeSetupError.unavailable }
+        }
+    }
     func verifyCurrent() throws {
         try withMachine { _ = try currentInventory($0) }
     }
@@ -1357,6 +1362,62 @@ public final class SetupAccountOwner: @unchecked Sendable {
             }
         }
     }
+    /// The endpoint must authenticate the invocation and administrator authorization before dispatch.
+    /// One request performs one step; unresolved provider writes are never replayed here.
+    func performPortableImportOperation(callerUID: uid_t, request: SetupPortableImportOperation) async throws -> SetupPortableImportOperationResult {
+        let activity = try acquireReleaseActivity()
+        defer { activity?.close() }
+        func check() throws {
+            try Task.checkCancellation(); try activity?.validate()
+            guard callerUID == request.expected.runtime.ownerUID,
+                  try portableImportProgress(callerUID: callerUID) == request.expected else { throw AdministrativeSetupError.staleProgress }
+        }
+        var status = SetupPortableImportOperationResult.Status.applied
+        let proposal = request.proposal, expected = request.expected
+        switch request.action {
+        case .retain, .prepareRelayPlan, .prepareRuntime, .activateRuntime, .prepareGateway, .complete:
+            try lock.withLock {
+                try check()
+                switch request.action {
+                case .retain: _ = try retainPortableImport(callerUID: callerUID, expected: expected, proposal: proposal)
+                case .prepareRelayPlan: _ = try prepareImportedRelayPlan(callerUID: callerUID, expected: expected, proposal: proposal)
+                case .prepareRuntime:
+                    _ = try resumeRuntime(callerUID: callerUID, expected: expected.runtime, fileCustodyAccepted: request.fileCustodyAccepted)
+                case .activateRuntime:
+                    guard let progress = try activationProgress(callerUID: callerUID) else { throw RuntimeActivationError.incomplete }
+                    _ = try resumeActivation(callerUID: callerUID, expected: progress)
+                case .prepareGateway:
+                    _ = try prepareImportedGateway(callerUID: callerUID, expected: expected, proposal: proposal,
+                        fileWakeCustodyAccepted: request.fileCustodyAccepted)
+                case .complete: _ = try completePortableImport(callerUID: callerUID, expected: expected, proposal: proposal)
+                default: throw AdministrativeSetupError.invalidConfiguration
+                }
+            }
+        case .activateGateway:
+            try check()
+            let result = try await resumeImportedGateway(callerUID: callerUID, expected: expected, proposal: proposal)
+            if !result.cleanupComplete { status = .waitingForCleanup }
+            else { guard result.activation != nil else { throw GatewayPreparationError.incomplete } }
+        case .createTunnel:
+            let result = try await createImportedRelayTunnel(callerUID: callerUID, expected: expected, proposal: proposal)
+            switch result.phase { case .created: break; case .rejected: status = .providerRejected; default: status = .requiresReconciliation }
+        case .applyIngress: _ = try await applyImportedRelayIngress(callerUID: callerUID, expected: expected, proposal: proposal)
+        case .prepareRunCredential:
+            _ = try await prepareImportedRelayRunCredential(callerUID: callerUID, expected: expected, proposal: proposal,
+                fileCustodyAccepted: request.fileCustodyAccepted)
+        case .createAccess:
+            let result = try await createImportedAccessApplication(callerUID: callerUID, expected: expected, proposal: proposal)
+            switch result.phase { case .created: break; case .rejected: status = .providerRejected; default: status = .requiresReconciliation }
+        case .createDNS:
+            let result = try await createImportedDNSRecord(callerUID: callerUID, expected: expected, proposal: proposal)
+            switch result.phase { case .created: break; case .rejected: status = .providerRejected; default: status = .requiresReconciliation }
+        case .publishConnector: _ = try await publishImportedRelayConnector(callerUID: callerUID, expected: expected, proposal: proposal)
+        }
+        try Task.checkCancellation(); try activity?.validate()
+        guard let progress = try portableImportProgress(callerUID: callerUID) else { throw AdministrativeSetupError.staleProgress }
+        return try .init(request: request, progress: progress, status: status)
+    }
+
     // A future native endpoint must supply the authenticated UID and fresh administrator authorization.
     // Retention grants no credential custody, runtime publication or service activation.
     func retainPortableImport(callerUID: uid_t, expected: SetupPortableImportProgress, proposal: PortableSetup,

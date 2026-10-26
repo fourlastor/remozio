@@ -45,6 +45,21 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
     }
+    func portableImportChannel() throws -> PortableSetupImportChannel {
+        var channel: PortableSetupImportChannel?
+        let state = try perform(registering: false) { release in
+            guard let component = release.manifest.components.first(where: { $0.role == .setupController }),
+                  let team = component.teamID, let hash = release.codeDirectoryHashes[.setupController] else {
+                throw SetupRegistrationError.wrongRelease
+            }
+            let policy = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
+                approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
+            channel = try PortableSetupImportChannel(serviceName: AdministrativeSetupConfiguration.serviceName,
+                rootPolicy: policy, ownerUID: getuid())
+        }
+        guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
+        return channel
+    }
     private func perform(registering: Bool, onVerified: ((SignedReleaseEvidence) throws -> Void)? = nil) throws -> MacSetupServiceState {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupRegistrationError.wrongProcess }
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
@@ -163,6 +178,10 @@ public final class MacSetupServiceControls {
 
 /// Verifies protected placement and the running app before opening a pinned Root setup connection.
 public enum MacAccountSetupConnection {
+    public static func openPortableImport() async throws -> PortableSetupImportChannel {
+        try await NativeMacSetupServiceDriver().portableImportChannel()
+    }
+
     public static func open(serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false, gatewaySettings: Bool = false, gatewayOperationTimeoutMilliseconds: UInt64 = 60_000) async throws -> AdministrativeSetupChannel {
         try await NativeMacSetupServiceDriver().enrollmentChannel(serviceAccounts: serviceAccounts, runtime: runtime, activation: activation, gateway: gateway,
             gatewayActivation: gatewayActivation, gatewaySettings: gatewaySettings, gatewayOperationTimeoutMilliseconds: gatewayOperationTimeoutMilliseconds)
