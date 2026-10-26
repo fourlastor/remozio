@@ -113,7 +113,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8]))
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 2, 3, 4, 5, 6, 7, 8, 9]))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
@@ -240,7 +240,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 else:
                     self.assertNotIn(name, declarations)
 
-    def test_portable_preview_declares_readers_without_export_or_import_capabilities(self):
+    def test_portable_preview_and_root_import_have_separate_codec_declarations(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role == 1:
@@ -248,16 +248,33 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(payload[1], [1, 2, 3, 4])
                 self.assertEqual(payload[2], [])
                 self.assertEqual(payload[3], {})
+            elif role == 8:
+                self.assertEqual(declarations['setup.portable'], MANIFEST.format_declaration('setup.portable', [1, 2, 3, 4]))
             else:
                 self.assertNotIn('setup.portable', declarations)
             if role in (1, 8):
-                self.assertNotIn(9, declarations['setup.local-ipc'][1])
+                self.assertIn(9, declarations['setup.local-ipc'][1])
                 self.assertNotIn(10, declarations['setup.local-ipc'][1])
 
-    def test_settings_setup_capability_eight_does_not_advertise_future_portable_calls(self):
+    def test_portable_import_capability_nine_keeps_every_existing_setup_version(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (1, 8):
-                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 9))))
+                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 10))))
             else:
                 self.assertNotIn('setup.local-ipc', declarations)
+
+    def test_import_retained_records_have_only_the_setup_owner_and_keep_the_manifest_bound(self):
+        records = {'setup.shared-import-journal': [2], 'setup.shared-import-relay-plan': [1],
+                   'setup.shared-import-relay-provisioning': [1], 'setup.shared-import-access-application': [1],
+                   'setup.shared-import-dns': [1]}
+        for role, *_ in MANIFEST.COMPONENTS:
+            declared = {item[0]: item for item in MANIFEST.declarations(role)}
+            for name, versions in records.items():
+                if role == 8:
+                    self.assertEqual(declared[name], MANIFEST.format_declaration(name, versions))
+                else:
+                    self.assertNotIn(name, declared)
+            self.assertLessEqual(len(declared), 32)
+            self.assertNotIn('setup.portable-import-operation', declared)
+            self.assertNotIn('setup.portable-import-result', declared)
