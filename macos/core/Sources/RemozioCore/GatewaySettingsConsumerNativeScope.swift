@@ -111,6 +111,11 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
         let current = try lock.withLock { guard !closed, let barrier else { throw GatewayPreparationError.changedScope }; return barrier }
         return try current.acquireShared()
     }
+    func acquireChildActivity() throws -> ServiceReleaseActivityToken {
+        guard configuration.role == .transport else { throw GatewayPreparationError.changedScope }
+        let current = try lock.withLock { guard !closed, let barrier else { throw GatewayPreparationError.changedScope }; return barrier }
+        return try current.acquireShared()
+    }
     func close() {
         let previous = lock.withLock { () -> ServiceReleaseActivityToken? in
             guard !closed else { return nil }; closed = true
