@@ -96,6 +96,22 @@ final class ServiceReleaseActivityBarrier: @unchecked Sendable {
             let id = UUID(); holders.insert(id); return .init(barrier: self, id: id)
         }
     }
+    /// Lends the existing shared lock to synchronous spawn actions. Closing a copy must never unlock its shared description.
+    fileprivate func withSharedDescriptorForSpawn<Value>(_ id: UUID, _ body: (Int32) throws -> Value) throws -> Value {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        let copied = try lock.withLock {
+            guard holders.contains(id) else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            guard !exclusive, active >= 0 else { throw JournalLeaseError.unsafeMetadata }
+            let copied = fcntl(active, F_DUPFD_CLOEXEC, 32)
+            guard copied >= 0 else { throw JournalLeaseError.system(errno) }
+            return copied
+        }
+        defer { _ = Darwin.close(copied) }
+        // The copy pins activity while the callback runs without the barrier mutex.
+        // The caller owns any child it creates. No validation can hide that child afterward.
+        return try body(copied)
+    }
     fileprivate func validate(_ id: UUID) throws {
         guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
         try lock.withLock { guard holders.contains(id) else { throw JournalLeaseError.invalidated }; try validateLocked() }
@@ -146,6 +162,9 @@ final class ServiceReleaseActivityToken: OwnedReleaseActivity {
     private let id: UUID
     fileprivate init(barrier: ServiceReleaseActivityBarrier, id: UUID) { self.barrier = barrier; self.id = id }
     func validate() throws { try barrier.validate(id) }
+    func withSharedDescriptorForSpawn<Value>(_ body: (Int32) throws -> Value) throws -> Value {
+        try barrier.withSharedDescriptorForSpawn(id, body)
+    }
     func close() { barrier.release(id) }
     deinit { close() }
 }
