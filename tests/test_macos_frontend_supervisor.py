@@ -79,5 +79,97 @@ int main(void) {
         self.assertIn(b"stage 71", stderr)
 
 
+@unittest.skipUnless(sys.platform == "darwin", "The supervisor requires Darwin terminal definitions")
+class FrontendSupervisorPassiveDiagnosticsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix="remozio-supervisor-diagnostics-")
+        cls.addClassCleanup(cls.directory.cleanup)
+        root = Path(cls.directory.name)
+        source = Path(__file__).resolve().parents[1] / "experiments/command-frontend/job-supervisor.c"
+        wrapper = root / "diagnostics.c"
+        wrapper.write_text('''#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+#include <termios.h>
+static struct termios fixture_seen;
+static int fixture_errno, fixture_reads;
+static int fixture_tcgetattr(int descriptor, struct termios *value) {
+    (void)descriptor; fixture_reads++;
+    if (fixture_errno) { errno = fixture_errno; return -1; }
+    *value = fixture_seen; return 0;
+}
+#define tcgetattr fixture_tcgetattr
+#define main fixture_supervisor_main
+''' + '#include ' + json.dumps(str(source)) + '''
+#undef main
+int main(int argc, char **argv) {
+    if (argc != 2) return 90;
+    struct termios original = {0};
+    bool reaped = true;
+    uint64_t started = now(), deadline = started + 45000;
+    if (!strcmp(argv[1], "unreaped")) { reaped = false; deadline = started; }
+    else if (!strcmp(argv[1], "cancelled")) { reaped = false; cancelled = 1; }
+    else if (!strcmp(argv[1], "read-error")) fixture_errno = EBADF;
+    else if (!strcmp(argv[1], "mismatch")) {
+        fixture_seen.c_iflag = IGNBRK; fixture_seen.c_cc[VINTR] = 3;
+    } else if (!strcmp(argv[1], "pendin")) fixture_seen.c_lflag = PENDIN;
+    else if (strcmp(argv[1], "restored")) return 91;
+    bool complete = passive_frontend_complete(reaped, 13 << 8, 0, &original, started, deadline);
+    printf("complete=%d terminalReads=%d\\n", complete, fixture_reads);
+    return 0;
+}
+''')
+        cls.program = root / "diagnostics"
+        result = subprocess.run(["xcrun", "clang", "-Wall", "-Wextra", "-Werror", str(wrapper), "-o", str(cls.program)],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError(result.stdout + result.stderr)
+
+    def invoke(self, mode):
+        result = subprocess.run([str(self.program), mode], env={"PATH": "/usr/bin:/bin"},
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout, result.stderr
+
+    def test_restored_terminal_has_no_failure_diagnostic(self):
+        output, error = self.invoke("restored")
+        self.assertEqual(output, "complete=1 terminalReads=1\n")
+        self.assertEqual(error, "")
+
+    def test_pendin_keeps_the_existing_restoration_exception(self):
+        output, error = self.invoke("pendin")
+        self.assertEqual(output, "complete=1 terminalReads=1\n")
+        self.assertEqual(error, "")
+
+    def test_unreaped_child_reports_deadline_without_reading_terminal(self):
+        output, error = self.invoke("unreaped")
+        self.assertEqual(output, "complete=0 terminalReads=0\n")
+        self.assertIn("reaped=0 cancelled=0", error)
+        self.assertIn("deadlineReached=1 terminalChecked=0 terminalRead=0 terminalErrno=0", error)
+        self.assertNotIn("Passive terminal mismatch", error)
+
+    def test_terminal_read_failure_reports_errno_without_comparing_fields(self):
+        output, error = self.invoke("read-error")
+        self.assertEqual(output, "complete=0 terminalReads=1\n")
+        self.assertIn("terminalChecked=1 terminalRead=0 terminalErrno=9", error)
+        self.assertNotIn("Passive terminal mismatch", error)
+
+    def test_mismatch_reports_field_changes_without_control_character_values(self):
+        output, error = self.invoke("mismatch")
+        self.assertEqual(output, "complete=0 terminalReads=1\n")
+        self.assertIn("terminalChecked=1 terminalRead=1 terminalErrno=0", error)
+        self.assertIn("iflagChanged=1 oflagChanged=0 cflagChanged=0 lflagChanged=0", error)
+        self.assertIn("ispeedChanged=0 ospeedChanged=0 controlCharactersChanged=1", error)
+        self.assertEqual(len(error.splitlines()), 2)
+
+    def test_cancellation_is_distinct_from_deadline_expiry(self):
+        output, error = self.invoke("cancelled")
+        self.assertEqual(output, "complete=0 terminalReads=0\n")
+        self.assertIn("reaped=0 cancelled=1", error)
+        self.assertIn("deadlineReached=0 terminalChecked=0 terminalRead=0", error)
+
+
 if __name__ == "__main__":
     unittest.main()
