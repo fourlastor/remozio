@@ -46,12 +46,12 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
-        case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data)
+        case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
-        case runtimeRecord, gatewayMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
+        case runtimeRecord, gatewayMaterial, relayRunMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
-        case transportIdentity(ownerUID: uid_t, groupID: gid_t)
+        case transportIdentity(ownerUID: uid_t, groupID: gid_t), transportTunnelToken(ownerUID: uid_t, groupID: gid_t)
         case gatewayProvider(ownerUID: uid_t, groupID: gid_t), gatewayReceiptKey(ownerUID: uid_t, groupID: gid_t)
         case transportWakeKey(ownerUID: uid_t, groupID: gid_t)
         case presenceClient(ownerUID: uid_t), pairingClient(ownerUID: uid_t), frontendClient(ownerUID: uid_t)
@@ -66,11 +66,14 @@ public enum AdministrativeSetupPublication {
             case .importRelayProvisioning(let account): "import-relay-state-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .importAccessApplication(let account): "import-relay-access-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .importDNSRecord(let account): "import-relay-dns-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importRelayRunReference(let account): "import-relay-run-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .gatewayMaterial: "gateway-material.cbor"
+            case .relayRunMaterial: "relay-run-material.cbor"
+            case .transportTunnelToken: "transport-tunnel.token"
             case .gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration.gatewayFileName
             case .gatewayConfiguration: "gateway-host.cbor"
             case .gatewayJournalSetup: "gateway-journal-setup.cbor"
@@ -102,31 +105,31 @@ public enum AdministrativeSetupPublication {
         }
         var requiresSharedDirectory: Bool {
             switch self {
-            case .transportIdentity, .gatewayProvider, .gatewayReceiptKey, .transportWakeKey: return true
+            case .transportIdentity, .transportTunnelToken, .gatewayProvider, .gatewayReceiptKey, .transportWakeKey: return true
             default: return mode == 0o644
             }
         }
         func fileOwner(processOwner: uid_t) -> uid_t {
             switch self {
-            case .transportIdentity(let uid, _), .gatewayProvider(let uid, _), .gatewayReceiptKey(let uid, _), .transportWakeKey(let uid, _): return uid
+            case .transportIdentity(let uid, _), .transportTunnelToken(let uid, _), .gatewayProvider(let uid, _), .gatewayReceiptKey(let uid, _), .transportWakeKey(let uid, _): return uid
             default: return processOwner
             }
         }
         var groupID: gid_t? {
             switch self {
-            case .transportIdentity(_, let gid), .gatewayProvider(_, let gid), .gatewayReceiptKey(_, let gid), .transportWakeKey(_, let gid): return gid
+            case .transportIdentity(_, let gid), .transportTunnelToken(_, let gid), .gatewayProvider(_, let gid), .gatewayReceiptKey(_, let gid), .transportWakeKey(_, let gid): return gid
             default: return nil
             }
         }
         func validate() throws {
             let uid: uid_t
             switch self {
-            case .transportIdentity(let value, let group), .gatewayProvider(let value, let group),
+            case .transportIdentity(let value, let group), .transportTunnelToken(let value, let group), .gatewayProvider(let value, let group),
                  .gatewayReceiptKey(let value, let group), .transportWakeKey(let value, let group):
                 guard group > 0, group < UInt32.max else { throw AdministrativeSetupPublicationError.invalidArtifact }
                 uid = value
             case .presenceClient(let value), .pairingClient(let value), .frontendClient(let value): uid = value
-            case .importRelayPlan(let account), .importRelayProvisioning(let account), .importAccessApplication(let account), .importDNSRecord(let account):
+            case .importRelayPlan(let account), .importRelayProvisioning(let account), .importAccessApplication(let account), .importDNSRecord(let account), .importRelayRunReference(let account):
                 guard account.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .gatewayJournalJob(let account, let intent):
                 guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return

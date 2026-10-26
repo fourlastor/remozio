@@ -204,6 +204,17 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             else:
                 self.assertNotIn(material, declarations)
 
+    def test_relay_recovery_codecs_belong_to_setup_without_claiming_connector_startup(self):
+        names = ('relay.run-credential-reference', 'relay.run-credential-material')
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            self.assertLessEqual(len(declarations), 32)
+            for name in names:
+                if role == 8:
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)
+
     def test_portable_preview_declares_readers_without_export_or_import_capabilities(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}

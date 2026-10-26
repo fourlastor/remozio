@@ -82,10 +82,11 @@ enum SharedSetupImportRelayStorage {
         let names = Set(records.flatMap { [AdministrativeSetupPublication.File.importRelayPlan(accountID: $0.scope.accountID).name,
             AdministrativeSetupPublication.File.importRelayProvisioning(accountID: $0.scope.accountID).name,
             AdministrativeSetupPublication.File.importAccessApplication(accountID: $0.scope.accountID).name,
-            AdministrativeSetupPublication.File.importDNSRecord(accountID: $0.scope.accountID).name] })
+            AdministrativeSetupPublication.File.importDNSRecord(accountID: $0.scope.accountID).name,
+            AdministrativeSetupPublication.File.importRelayRunReference(accountID: $0.scope.accountID).name] })
         let allNames = Set(try FileManager.default.contentsOfDirectory(atPath: directory.path))
         let retained = allNames.filter { $0.hasPrefix("import-relay-") }
-        guard retained.allSatisfy({ $0.range(of: #"^import-relay-(?:(?:state|access|dns)-)?[0-9a-f]{32}\.cbor$"#,
+        guard retained.allSatisfy({ $0.range(of: #"^import-relay-(?:(?:state|access|dns|run)-)?[0-9a-f]{32}\.cbor$"#,
             options: .regularExpression) != nil }) else { throw SharedSetupImportError.incompatibleStore }
         guard retained.allSatisfy({ names.contains($0) }) else { throw SharedSetupImportError.corruptRecord }
         guard allNames.isSubset(of: names.union(["setup-import.sqlite", "writer.lock"])) else { throw SharedSetupImportError.incompatibleStore }
@@ -132,6 +133,7 @@ enum SharedSetupImportRelayStorage {
             let tunnel = try SharedSetupRelayProvisioningStorage.read(expected: record, plan: plan, directory: directory, owner: owner)
             let access = try SharedSetupAccessApplicationStorage.read(expected: record, plan: plan, createdTunnel: tunnel, directory: directory, owner: owner)
             _ = try SharedSetupDNSStorage.read(expected: record, plan: plan, createdTunnel: tunnel, application: access, directory: directory, owner: owner)
+            _ = try SharedSetupRelayRunReferenceStorage.read(expected: record, plan: plan, created: tunnel, directory: directory, owner: owner)
             if let plan {
                 guard ports.insert(plan.port).inserted else { throw SharedSetupImportError.conflict }
                 if record.scope.accountID == expected.scope.accountID { retained = plan }

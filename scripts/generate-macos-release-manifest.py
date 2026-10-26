@@ -70,6 +70,8 @@ def declarations(role):
         values.append({0: name, 1: readers, 2: writers, 3: {}})
     if role == 8:
         values.append(format_declaration('authority.command-host-config', [1, 2, 3]))
+        values.append(format_declaration('relay.run-credential-reference', [1]))
+        values.append(format_declaration('relay.run-credential-material', [1]))
     if role in (2, 8):
         values.append(format_declaration('authority.gateway-settings-control', [1]))
     if role in (2, 4, 6, 8):

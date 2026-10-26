@@ -17,6 +17,16 @@ struct SharedSetupImportCompatibilitySnapshot: Equatable, Sendable {
         let relayProvisioning: SharedSetupRelayProvisioningStorage.Snapshot?
         let accessApplication: SharedSetupAccessApplicationStorage.Snapshot?
         let dnsRecord: SharedSetupDNSStorage.Snapshot?
+        let runCredential: SharedSetupRelayRunReferenceStorage.Snapshot?
+        init(accountID: Data, operationID: Data, revision: Data, phase: UInt64, digest: Data, portableVersion: UInt64,
+             settingsVersion: UInt64, relay: SharedSetupImportRelayStorage.Snapshot?,
+             relayProvisioning: SharedSetupRelayProvisioningStorage.Snapshot?, accessApplication: SharedSetupAccessApplicationStorage.Snapshot?,
+             dnsRecord: SharedSetupDNSStorage.Snapshot?, runCredential: SharedSetupRelayRunReferenceStorage.Snapshot? = nil) {
+            self.accountID = accountID; self.operationID = operationID; self.revision = revision; self.phase = phase
+            self.digest = digest; self.portableVersion = portableVersion; self.settingsVersion = settingsVersion
+            self.relay = relay; self.relayProvisioning = relayProvisioning; self.accessApplication = accessApplication
+            self.dnsRecord = dnsRecord; self.runCredential = runCredential
+        }
     }
     let directories: [ProtectedStorageLease.DirectoryIdentity]
     let database: ProtectedStorageLease.DirectoryIdentity
@@ -61,7 +71,9 @@ struct SharedSetupImportCompatibilitySnapshot: Equatable, Sendable {
                     accessApplication: SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
                         createdTunnel: tunnel, directory: relayDirectory, owner: owner),
                     dnsRecord: SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
-                        application: access, directory: relayDirectory, owner: owner))
+                        application: access, directory: relayDirectory, owner: owner),
+                    runCredential: SharedSetupRelayRunReferenceStorage.snapshot(expected: intent, plan: plan, created: tunnel,
+                        directory: relayDirectory, owner: owner))
             }
             return try .init(directories: lease.directoryIdentities(), database: lease.fileIdentity(name: "setup-import.sqlite"),
                 writer: lease.fileIdentity(name: "writer.lock"), records: records)
