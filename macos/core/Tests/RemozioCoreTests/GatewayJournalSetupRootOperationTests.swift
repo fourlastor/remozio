@@ -86,11 +86,16 @@ final class GatewayJournalSetupRootOperationTests: XCTestCase, @unchecked Sendab
     }
     private actor Gate {
         private var continuation: CheckedContinuation<Void, Never>?
+        private var released = false
+        private(set) var entered = false
         func wait(started: XCTestExpectation) async {
-            await withCheckedContinuation { continuation in self.continuation = continuation; started.fulfill() }
+            entered = true; started.fulfill()
+            guard !released else { return }
+            await withCheckedContinuation { continuation = $0 }
         }
-        func release() { continuation?.resume(); continuation = nil }
+        func release() { released = true; continuation?.resume(); continuation = nil }
     }
+    private static let exchangeReadinessSeconds: TimeInterval = 10
     func testOwnedOperationCompletesTheJournalAndRemovesOnlyItsStoppedJob() async throws {
         let h = try Harness(), scope = try h.scope(), inventory = try h.fixture.runtime.machine.inventory()
         let result = try await GatewayJournalSetupRootOperation.resume(scope: scope, operations: h.operations(scope))
@@ -153,6 +158,12 @@ final class GatewayJournalSetupRootOperationTests: XCTestCase, @unchecked Sendab
         XCTAssertTrue(result.state.initialized); XCTAssertEqual(h.value.withLock { $0.created }, false)
     }
     func testCancellationRetainsTheMachineScopeUntilTheExchangeActuallySettles() async throws {
+        try await cancellationAtHeldExchange(preparationDelay: 0)
+    }
+    func testSlowPreparationStillChecksCancellationAtTheHeldExchange() async throws {
+        try await cancellationAtHeldExchange(preparationDelay: 2.2)
+    }
+    private func cancellationAtHeldExchange(preparationDelay: TimeInterval) async throws {
         let h = try Harness(), scope = try h.scope(), gate = Gate(), started = expectation(description: "exchange entered")
         let operations = h.operations(scope, exchange: {
             h.value.withLock { $0.job = .matchingActive }
@@ -160,12 +171,47 @@ final class GatewayJournalSetupRootOperationTests: XCTestCase, @unchecked Sendab
             h.value.withLock { $0.job = .matchingStopped }
             try Task.checkCancellation(); throw Interrupted()
         })
-        let task = Task { try await GatewayJournalSetupRootOperation.resume(scope: scope, operations: operations) }
-        await fulfillment(of: [started], timeout: 2); task.cancel()
+        let beginning = ContinuousClock.now, phases = Mutex<[(String, Int64)]>([]), delayed = Mutex(false)
+        let task = Task {
+            try await GatewayJournalSetupRootOperation.resume(scope: scope, operations: operations, didStage: { stage in
+                if stage == .verified, preparationDelay > 0 {
+                    delayed.withLock { $0 = true }; Thread.sleep(forTimeInterval: preparationDelay)
+                }
+                let elapsed = beginning.duration(to: ContinuousClock.now).components
+                let milliseconds = elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000
+                phases.withLock { if $0.count < 16 { $0.append((String(describing: stage), milliseconds)) } }
+            })
+        }
+        await fulfillment(of: [started], timeout: Self.exchangeReadinessSeconds)
+        let entered = await gate.entered
+        task.cancel()
+        guard entered else {
+            XCTFail("Exchange readiness phases in milliseconds: \(phases.withLock { $0 })")
+            await gate.release(); _ = await task.result; return
+        }
+        print("Root cancellation fixture phases in milliseconds: \(phases.withLock { $0 })")
+        XCTAssertEqual(delayed.withLock { $0 }, preparationDelay > 0)
         XCTAssertNoThrow(try scope.verifyPending())
         await gate.release()
         do { _ = try await task.value; XCTFail() } catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertThrowsError(try scope.verifyCurrent()) { XCTAssertEqual($0 as? GatewayPreparationError, .incomplete) }
+        XCTAssertFalse(try h.fixture.state().initialized)
+    }
+    func testEarlyGateReleaseDoesNotStrandTheRootOperation() async throws {
+        let h = try Harness(), scope = try h.scope(), gate = Gate()
+        let started = expectation(description: "exchange entered"), finished = expectation(description: "operation settled")
+        await gate.release()
+        let task = Task {
+            defer { finished.fulfill() }
+            return try await GatewayJournalSetupRootOperation.resume(scope: scope, operations: h.operations(scope, exchange: {
+                h.value.withLock { $0.job = .matchingActive }
+                await gate.wait(started: started)
+                h.value.withLock { $0.job = .matchingStopped }; throw Interrupted()
+            }))
+        }
+        await fulfillment(of: [started, finished], timeout: Self.exchangeReadinessSeconds)
+        await gate.release()
+        do { _ = try await task.value; XCTFail() } catch { XCTAssertTrue(error is Interrupted) }
         XCTAssertFalse(try h.fixture.state().initialized)
     }
     func testOrdinaryIdentityCannotOpenTheNativeRootOperation() async throws {

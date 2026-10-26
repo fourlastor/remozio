@@ -230,6 +230,38 @@ public struct SetupCloudflareConfiguration: Sendable, CustomStringConvertible, C
         return request
     }
 
+    func dnsInventoryRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                             createdTunnel: SharedSetupRelayProvisioningRecord, application: SharedSetupAccessApplicationRecord,
+                             shadowing: Bool = false) throws -> URLRequest {
+        _ = try application.createdApplication(expected: expected, plan: plan, createdTunnel: createdTunnel)
+        var request = try createdTunnelRequest(expected: expected, plan: plan, created: createdTunnel)
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/zones/" + zoneID + "/dns_records")!
+        url.queryItems = [.init(name: shadowing ? "shadowing_name" : "name.exact", value: plan.hostname),
+            .init(name: "include_shadow_metadata", value: "true"), .init(name: "page", value: "1"), .init(name: "per_page", value: "100")]
+        request.url = url.url!; return request
+    }
+
+    func dnsCreationRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                            createdTunnel: SharedSetupRelayProvisioningRecord, application: SharedSetupAccessApplicationRecord,
+                            dispatched: SharedSetupDNSRecord) throws -> URLRequest {
+        try dispatched.validate(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
+        guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase), dispatched.phase == .dispatched else { throw RelayProvisioningError.wrongScope }
+        var request = try dnsInventoryRequest(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/zones/" + zoneID + "/dns_records")!
+        url.queryItems = [.init(name: "include_shadow_metadata", value: "true")]; request.url = url.url!
+        request.httpMethod = "POST"; request.httpBody = try SharedSetupDNSRecord.requestBody(plan: plan, tunnelID: dispatched.tunnelID)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type"); return request
+    }
+
+    func dnsRecordRequest(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
+                          createdTunnel: SharedSetupRelayProvisioningRecord, application: SharedSetupAccessApplicationRecord,
+                          record: SharedSetupDNSRecord) throws -> URLRequest {
+        let selected = try record.createdRecord(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
+        var request = try dnsInventoryRequest(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
+        var url = URLComponents(string: "https://api.cloudflare.com/client/v4/zones/" + zoneID + "/dns_records/" + selected.recordID)!
+        url.queryItems = [.init(name: "include_shadow_metadata", value: "true")]; request.url = url.url!; return request
+    }
+
     public var description: String { "SetupCloudflareConfiguration(redacted)" }
     public var debugDescription: String { description }
 }

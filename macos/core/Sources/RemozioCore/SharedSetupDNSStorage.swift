@@ -46,6 +46,7 @@ enum SharedSetupDNSStorage {
             throw RelayProvisioningError.wrongScope
         }
         if let current = try read(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application, directory: directory, owner: owner) { try verifyCurrent(); return current }
+        guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase) else { throw RelayProvisioningError.invalidTransition }
         let record = try SharedSetupDNSRecord(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application)
         _ = try AdministrativeSetupPublication.replaceDNSRecord(record.bytes, previous: nil, expected: expected,
             plan: plan, createdTunnel: createdTunnel, application: application, directory: directory, owner: owner, verify: verifyCurrent)
@@ -62,6 +63,9 @@ enum SharedSetupDNSStorage {
               try SharedSetupAccessApplicationStorage.read(expected: expected, plan: plan, createdTunnel: createdTunnel, directory: directory, owner: owner) == application,
               try read(expected: expected, plan: plan, createdTunnel: createdTunnel, application: application, directory: directory, owner: owner) == previous else {
             throw RelayProvisioningError.staleRecord
+        }
+        if next.phase == .dispatched {
+            guard [.retained, .runtimePublished, .gatewayPrepared].contains(expected.phase) else { throw RelayProvisioningError.invalidTransition }
         }
         _ = try AdministrativeSetupPublication.replaceDNSRecord(next.bytes, previous: previous.bytes, expected: expected,
             plan: plan, createdTunnel: createdTunnel, application: application, directory: directory, owner: owner, verify: verifyCurrent, didStage: didStage)
