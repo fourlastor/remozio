@@ -22,6 +22,28 @@ static bool same(const struct termios *a, const struct termios *b) {
         (a->c_lflag & ~PENDIN) == (b->c_lflag & ~PENDIN) && a->c_ispeed == b->c_ispeed && a->c_ospeed == b->c_ospeed &&
         !memcmp(a->c_cc, b->c_cc, sizeof(a->c_cc));
 }
+static bool passive_frontend_complete(bool reaped, int status, int slave, const struct termios *original,
+                                      uint64_t started, uint64_t deadline) {
+    struct termios seen; int terminal_error = 0; bool checked = false, inspected = false, restored = false;
+    if (reaped) {
+        checked = true;
+        if (tcgetattr(slave, &seen)) terminal_error = errno;
+        else { inspected = true; restored = same(original, &seen); }
+    }
+    if (reaped && !terminal_error && restored) return true;
+    uint64_t stopped = now();
+    fprintf(stderr, "Passive frontend result: reaped=%d cancelled=%d waitStatus=%d elapsedMilliseconds=%llu "
+        "deadlineReached=%d terminalChecked=%d terminalRead=%d terminalErrno=%d\n", reaped, cancelled != 0, status,
+        (unsigned long long)(stopped - started), stopped >= deadline, checked, inspected, terminal_error);
+    if (inspected) {
+        fprintf(stderr, "Passive terminal mismatch: iflagChanged=%d oflagChanged=%d cflagChanged=%d lflagChanged=%d "
+            "ispeedChanged=%d ospeedChanged=%d controlCharactersChanged=%d\n",
+            original->c_iflag != seen.c_iflag, original->c_oflag != seen.c_oflag, original->c_cflag != seen.c_cflag,
+            (original->c_lflag & ~PENDIN) != (seen.c_lflag & ~PENDIN), original->c_ispeed != seen.c_ispeed,
+            original->c_ospeed != seen.c_ospeed, memcmp(original->c_cc, seen.c_cc, sizeof(original->c_cc)) != 0);
+    }
+    return false;
+}
 static int export_descriptor(const char *name, int descriptor) {
     char text[32]; snprintf(text, sizeof(text), "%d", descriptor);
     return setenv(name, text, 1);
@@ -60,7 +82,7 @@ int main(int argc, char **argv) {
     int error = 0, status = 0; bool reaped = false, stopped = false;
     if ((setpgid(child, child) && errno != EACCES) || tcsetpgrp(slave, child) || write(start[1], "F", 1) != 1) error = 71;
     close(start[1]);
-    uint64_t deadline = now() + (passive ? 45000 : 15000);
+    uint64_t started = now(), deadline = started + (passive ? 45000 : 15000);
     if (passive) {
         while (!error && !cancelled && !reaped && now() < deadline) {
             pid_t found = waitpid(child, &status, WNOHANG | WUNTRACED);
@@ -76,7 +98,7 @@ int main(int argc, char **argv) {
             } else if (found < 0 && errno != EINTR) error = 85;
             usleep(1000);
         }
-        if (!error && (!reaped || tcgetattr(slave, &seen) || !same(&original, &seen))) error = 86;
+        if (!error && !passive_frontend_complete(reaped, status, slave, &original, started, deadline)) error = 86;
         goto cleanup;
     }
     while (!error && !cancelled && !stopped && now() < deadline) {
