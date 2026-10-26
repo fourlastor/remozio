@@ -209,6 +209,7 @@ public final class PreparationIntentStore {
             let inventory = try schema >= 2 ? loadInventoryRecord() : nil
             let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
             guard schema >= 6 else {
+                guard sharedImport?.records.allSatisfy({ $0.runCredential == nil }) ?? true else { throw PreparationStoreError.corruptRecord }
                 return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [], sharedImport: sharedImport)
             }
             func accounts(_ sql: String) throws -> [Data] {
@@ -241,6 +242,14 @@ public final class PreparationIntentStore {
                 }
                 values.append(.init(reference: reference, configurationPublished: state.configurationPublished,
                     activationRecord: record, jobsRegistered: registered))
+            }
+            for record in sharedImport?.records ?? [] {
+                if let retained = record.runCredential {
+                    guard let runtime = values.first(where: { $0.reference.services.accountID == record.accountID }),
+                          runtime.configurationPublished, retained.reference.runtime == runtime.reference else {
+                        throw PreparationStoreError.corruptRecord
+                    }
+                }
             }
             let gatewayIDs = try schema >= 10 ? accounts("SELECT account FROM gateway_runtime_activation_v1 ORDER BY account") : []
             let settingsIDs = try schema >= 11 ? accounts("SELECT account FROM gateway_settings_transition_v1 ORDER BY account") : []
