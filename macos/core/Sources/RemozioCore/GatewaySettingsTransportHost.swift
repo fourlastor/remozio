@@ -75,7 +75,8 @@ public final class GatewaySettingsTransportHost: Sendable {
                 codePolicy: configuration.codePolicy, release: release, access: access, acquireActivity: scope.acquireActivity)
             let activity = try scope.acquireActivity(); controlActivity = activity
             let control = try GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: activity, recoveryListener: recovery)
-            let host = try TransportSettingsConsumerHost(control: control, lifetime: scope, makeForeground: {
+            let connector = try RelayConnectorRuntime.native(scope: scope, bootstrap: bootstrap, release: release)
+            let host = try TransportSettingsConsumerHost(control: control, lifetime: scope, connector: connector, makeForeground: {
                 try TransportSettingsForegroundRuntime(bootstrap: bootstrap, verifyCurrent: scope.validate,
                     report: reportDirect, reportRelay: reportRelay)
             })

@@ -20,6 +20,12 @@ enum SharedSetupImportCompletionValidation {
     struct Operations {
         let foreground: (Foreground, () throws -> Void) throws -> Void
         let gateway: (PreparationIntentStore, Gateway, () throws -> Void) throws -> Void
+        let relay: ((PreparationIntentStore, AccountPreparationIntent, SharedSetupImportIntent, () throws -> Void) throws -> Void)?
+        init(foreground: @escaping (Foreground, () throws -> Void) throws -> Void,
+             gateway: @escaping (PreparationIntentStore, Gateway, () throws -> Void) throws -> Void,
+             relay: ((PreparationIntentStore, AccountPreparationIntent, SharedSetupImportIntent, () throws -> Void) throws -> Void)? = nil) {
+            self.foreground = foreground; self.gateway = gateway; self.relay = relay
+        }
         static var native: Self {
             .init(foreground: { value, verify in
                 try RuntimeActivationFiles.validate(plan: value.plan, account: value.account,
@@ -37,6 +43,9 @@ enum SharedSetupImportCompletionValidation {
                 try verify()
                 guard try GatewayJournalSetupJobRegistration.isAbsent(.init(configuration: configuration)) else { throw Failure.incomplete }
                 try verify()
+            }, relay: { machine, account, retained, verify in
+                try SharedSetupImportRelayPreparedValidation.validateNative(machine: machine, account: account,
+                    retained: retained, verifyCurrent: verify)
             })
         }
     }
@@ -48,8 +57,7 @@ enum SharedSetupImportCompletionValidation {
             throw Failure.incomplete
         }
         guard try retained.matches(proposal) else { throw SharedSetupImportError.conflict }
-        // Relay verification must exist before a proposal that selects Cloudflare can complete.
-        guard proposal.cloudflare == nil else { throw Failure.relayNotImplemented }
+        guard proposal.cloudflare == nil || operations.relay != nil else { throw Failure.relayNotImplemented }
         guard let inventory = try machine.inventory(),
               retained.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)),
               let initialization = try machine.initialization(accountID: account.accountID), initialization.complete else {
@@ -62,8 +70,12 @@ enum SharedSetupImportCompletionValidation {
               reference.services == services.plan, activation.jobsRegistered, let plan = activation.plan,
               plan.reference == reference, try plan.enrolledInventory(inventory) == inventory else { throw Failure.incomplete }
         try plan.validate(account: account, reference: reference)
+        let relay = try proposal.cloudflare.map { _ in
+            try SharedSetupImportRelayPreparedValidation.capture(machine: machine, account: account,
+                retained: retained, verifyCurrent: verifyCurrent)
+        }
         let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
-            reference: reference, inventory: inventory, importIntent: retained)
+            reference: reference, inventory: inventory, importIntent: retained, relayPlan: relay?.context.plan)
         guard bundle.command.canonicalBytes == plan.host.command.canonicalBytes,
               bundle.transport.canonicalBytes == plan.transport.canonicalBytes else { throw Failure.changedOutputs }
         let material = try machine.gatewayPreparation(accountID: account.accountID)
@@ -86,6 +98,10 @@ enum SharedSetupImportCompletionValidation {
                   currentGateway.filesPublished == gateway.filesPublished, currentGateway.jobRegistered == gateway.jobRegistered,
                   try currentGateway.plan?.encoded == gatewayBytes,
                   settings.active == nil, settings.pending == nil, settings.phase == nil else { throw Failure.changedOutputs }
+            if let relay {
+                guard try SharedSetupImportRelayPreparedValidation.capture(machine: machine, account: account,
+                    retained: retained, verifyCurrent: verifyCurrent) == relay else { throw Failure.changedOutputs }
+            }
         }
         let foreground = Foreground(account: account, initialization: initialization, plan: plan, inventory: inventory)
         try verify(); try operations.foreground(foreground, verify); try verify()
@@ -101,6 +117,10 @@ enum SharedSetupImportCompletionValidation {
                   try inventory.services.contains(gatewayPlan.gatewayJob.declaration) else { throw Failure.changedOutputs }
             try operations.gateway(machine, .init(foreground: foreground, choices: choices, selection: selection,
                 journal: journal, plan: gatewayPlan), verify)
+        }
+        if relay != nil {
+            guard let validateRelay = operations.relay else { throw Failure.relayNotImplemented }
+            try verify(); try validateRelay(machine, account, retained, verify)
         }
         try verify()
     }

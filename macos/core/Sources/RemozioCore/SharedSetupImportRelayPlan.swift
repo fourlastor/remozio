@@ -33,6 +33,30 @@ struct SharedSetupImportRelayPlan: Equatable, Sendable, CustomStringConvertible,
     func validate(expected: SharedSetupImportIntent) throws {
         guard try Self(expected: expected, port: port).bytes == bytes else { throw SharedSetupImportError.wrongScope }
     }
+    /// Checks the public runtime projection. The Root publisher still verifies the complete retained import.
+    static func validateForTransport(_ bytes: Data, runtime: RuntimeMaterialReference, relayPort: UInt16,
+                                     tunnel: CloudflareTunnelObservation) throws {
+        let scope = runtime.services
+        guard relayPort >= 1024,
+              case let .map(f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...13),
+              f[0] == .unsigned(1), f[1] == .text("remozio-local-import-relay"),
+              f[2] == .bytes(scope.macID), f[3] == .bytes(scope.installationID),
+              f[4] == .bytes(scope.releaseDigest), f[5] == .bytes(scope.accountID),
+              f[6] == .unsigned(UInt64(scope.ownerUID)),
+              case let .bytes(accountBinding) = f[7], accountBinding.count == 32,
+              case let .bytes(operation) = f[8], operation.count == 16,
+              case let .bytes(proposalDigest) = f[9], proposalDigest.count == 32,
+              f[10] == .unsigned(UInt64(relayPort)), case let .text(accountID) = f[11],
+              case let .text(zoneID) = f[12], case let .text(dnsSuffix) = f[13] else {
+            throw RuntimePreparationError.changedScope
+        }
+        try SetupCloudflareConfiguration.validateScope(accountID: accountID, zoneID: zoneID, dnsSuffix: dnsSuffix)
+        let suffix = operation.map { String(format: "%02x", $0) }.joined()
+        guard tunnel.accountID == accountID, tunnel.name == "remozio-" + suffix,
+              try DeterministicCBOR.encode(.map(f), limits: limits) == bytes else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
     static func decode(_ bytes: Data, expected: SharedSetupImportIntent) throws -> Self {
         guard case let .map(fields) = try DeterministicCBOR.decode(bytes, limits: limits),
               Set(fields.keys) == Set(UInt64(0)...13), case let .unsigned(value) = fields[10],
