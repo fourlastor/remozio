@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate the app Info.plist input from signed helper products, before app signing."""
 import os
+import importlib.util
 from pathlib import Path
 import plistlib
 import re
@@ -156,6 +157,13 @@ def signed_identity(executable, identifier, generation):
     return digest, None if team == 'not set' else team
 
 
+def signed_connector_identity(path, identifier):
+    source = Path(__file__).with_name('cloudflared_artifact.py')
+    spec = importlib.util.spec_from_file_location('remozio_connector_artifact', source)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module.signed_tool_identity(path, identifier)
+
+
 def generate(environment):
     source = Path(environment['SRCROOT'])
     products = Path(environment['BUILT_PRODUCTS_DIR'])
@@ -181,10 +189,16 @@ def generate(environment):
         requests = [{0: 0, 1: 1, 2: schema, 3: [0, 2], 4: [1, 2, 4, 5]} for schema in (1, 2, 3)] if role in (2, 4) else []
         components.append({0: role, 1: expected, 2: int(generation), 3: path, 4: digest, 5: component_build,
                            6: team, 7: declarations(role), 8: requests, 9: 0})
+    connector_identifier = 'dev.remozio.cloudflared' + suffix
+    connector_hash, connector_team = signed_connector_identity(products / 'RemozioCloudflared', connector_identifier)
+    teams.add(connector_team)
+    connector_path = 'Contents/Helpers/RemozioCloudflared'
+    dependencies = [{0: 4, 1: 4, 2: connector_path, 3: connector_path, 4: connector_identifier,
+                     5: connector_hash, 6: connector_team, 7: None, 8: []}]
     if len(teams) != 1:
         raise ValueError('helper Team IDs differ')
     components[0][6] = teams.pop()
-    manifest = encode({0: 1, 1: release, 2: build, 3: 'arm64', 4: '26.0', 5: components})
+    manifest = encode({0: 2, 1: release, 2: build, 3: 'arm64', 4: '26.0', 5: components, 6: dependencies})
     if len(manifest) > 65536:
         raise ValueError('manifest exceeds size limit')
     return {'CFBundleIdentifier': identifier, 'CFBundleName': 'Remozio', 'CFBundleExecutable': 'Remozio',

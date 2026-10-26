@@ -103,6 +103,106 @@ final class ServiceReleaseActivityBarrierTests: XCTestCase, @unchecked Sendable 
         two.close(); two.close(); XCTAssertThrowsError(try two.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         let update = try updater.acquireExclusive(); update.close()
     }
+    func testInheritedDescriptionExcludesUpdatesAfterTheParentTokenCloses() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(role: .transport)
+        let updater = try f.open(role: .transport, update: true), token = try service.acquireShared()
+        var inherited: Int32 = -1
+        defer { if inherited >= 0 { _ = Darwin.close(inherited) }; token.close() }
+        inherited = try token.withSharedDescriptorForSpawn { fd in
+            XCTAssertGreaterThanOrEqual(fd, 32)
+            XCTAssertNotEqual(fcntl(fd, F_GETFD) & FD_CLOEXEC, 0)
+            XCTAssertEqual(fcntl(fd, F_GETFL) & O_ACCMODE, O_RDONLY)
+            let copied = fcntl(fd, F_DUPFD_CLOEXEC, 32)
+            guard copied >= 0 else { throw JournalLeaseError.system(errno) }
+            return copied
+        }
+        token.close()
+        XCTAssertThrowsError(try updater.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        let next = try service.acquireShared(); next.close()
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        XCTAssertEqual(Darwin.close(inherited), 0); inherited = -1
+        let update = try updater.acquireExclusive(); update.close()
+    }
+    func testSpawnCallbackPermitsConcurrentParentReleaseWhileItsCopyStillBlocksUpdates() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let token = try service.acquireShared(), joined = DispatchGroup(), released = DispatchSemaphore(value: 0)
+        let failed = Mutex(false)
+        var inherited: Int32 = -1
+        defer { if inherited >= 0 { _ = Darwin.close(inherited) }; token.close() }
+        inherited = try token.withSharedDescriptorForSpawn { fd in
+            joined.enter()
+            DispatchQueue.global().async {
+                defer { released.signal(); joined.leave() }
+                token.close()
+                do { let next = try service.acquireShared(); next.close() }
+                catch { failed.withLock { $0 = true } }
+            }
+            XCTAssertEqual(released.wait(timeout: .now() + 2), .success)
+            XCTAssertThrowsError(try updater.acquireExclusive())
+            let copied = fcntl(fd, F_DUPFD_CLOEXEC, 32)
+            guard copied >= 0 else { throw JournalLeaseError.system(errno) }
+            return copied
+        }
+        XCTAssertEqual(joined.wait(timeout: .now() + 5), .success)
+        XCTAssertFalse(failed.withLock { $0 })
+        XCTAssertThrowsError(try token.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        XCTAssertEqual(Darwin.close(inherited), 0); inherited = -1
+        let update = try updater.acquireExclusive(); update.close()
+    }
+    func testEveryInheritedCopyMustCloseBeforeAnUpdateCanProceed() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let one = try service.acquireShared(), two = try service.acquireShared()
+        var copies: [Int32] = []
+        defer { for fd in copies where fd >= 0 { _ = Darwin.close(fd) }; one.close(); two.close() }
+        for token in [one, two] {
+            copies.append(try token.withSharedDescriptorForSpawn { fd in
+                let copied = fcntl(fd, F_DUPFD_CLOEXEC, 32)
+                guard copied >= 0 else { throw JournalLeaseError.system(errno) }
+                return copied
+            })
+        }
+        one.close(); two.close()
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        XCTAssertEqual(Darwin.close(copies[0]), 0); copies[0] = -1
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        XCTAssertEqual(Darwin.close(copies[1]), 0); copies[1] = -1
+        let update = try updater.acquireExclusive(); update.close()
+    }
+    func testReleasedExclusiveAndRetiredTokensCannotLendADescriptor() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let released = try service.acquireShared(); released.close()
+        let current = try service.acquireShared()
+        XCTAssertThrowsError(try released.withSharedDescriptorForSpawn { _ in XCTFail("Released token lent another holder's descriptor") }) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+        current.close()
+        let exclusive = try updater.acquireExclusive()
+        XCTAssertThrowsError(try exclusive.withSharedDescriptorForSpawn { _ in XCTFail("Exclusive update lock reached a child") }) {
+            XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+        }
+        exclusive.close()
+        let valid = Mutex(true)
+        let retiring = try f.open(verify: { if !valid.withLock({ $0 }) { throw Rejected() } })
+        let token = try retiring.acquireShared(); defer { token.close() }
+        valid.withLock { $0 = false }
+        XCTAssertThrowsError(try token.withSharedDescriptorForSpawn { _ in XCTFail("Changed scope reached spawn") }) { XCTAssertTrue($0 is Rejected) }
+        valid.withLock { $0 = true }
+        XCTAssertThrowsError(try token.withSharedDescriptorForSpawn { _ in XCTFail("Retired barrier reached spawn") }) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        token.close(); let update = try updater.acquireExclusive(); update.close()
+    }
+    func testSpawnCallbackFailureKeepsTheParentActivityAndAllowsRetry() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let token = try service.acquireShared(); defer { token.close() }
+        XCTAssertThrowsError(try token.withSharedDescriptorForSpawn { _ in throw Rejected() }) { XCTAssertTrue($0 is Rejected) }
+        try token.validate()
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        try token.withSharedDescriptorForSpawn { XCTAssertGreaterThanOrEqual($0, 32) }
+        token.close(); let update = try updater.acquireExclusive(); update.close()
+    }
     func testNativeFactoriesRefuseTheOrdinaryOwnerBeforeScopeOrPathAccess() throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary owner refusal") }
         let f = try GatewaySettingsConsumerControlFixture(), services = f.plan.pair.authority.material.runtime.services

@@ -11,10 +11,33 @@ SPEC.loader.exec_module(MANIFEST)
 
 
 class ReleaseManifestBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.connector_identity = patch.object(MANIFEST, 'signed_connector_identity', return_value=(bytes([9]) * 20, None)).start()
+        self.addCleanup(patch.stopall)
+
     def environment(self, configuration='Debug'):
         return {'SRCROOT': str(ROOT / 'macos/app'), 'BUILT_PRODUCTS_DIR': '/unused-test-products',
                 'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.remozio.mac' + ('.debug' if configuration == 'Debug' else ''),
                 'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
+
+    def test_connector_is_verified_and_declared_as_a_transport_tool(self):
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
+            MANIFEST.generate(self.environment())
+        declaration = encode.call_args_list[0].args[0]
+        self.assertEqual(declaration[0], 2)
+        self.assertEqual(declaration[6], [{0: 4, 1: 4, 2: 'Contents/Helpers/RemozioCloudflared',
+            3: 'Contents/Helpers/RemozioCloudflared', 4: 'dev.remozio.cloudflared.debug',
+            5: bytes([9]) * 20, 6: None, 7: None, 8: []}])
+        self.assertEqual(len(declaration[5]), 8)
+        self.connector_identity.assert_called_once_with(Path('/unused-test-products/RemozioCloudflared'), 'dev.remozio.cloudflared.debug')
+
+    def test_missing_or_differently_signed_connector_cannot_produce_app_metadata(self):
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
+            self.connector_identity.side_effect = ValueError('missing verified connector')
+            with self.assertRaisesRegex(ValueError, 'missing verified connector'): MANIFEST.generate(self.environment())
+            self.connector_identity.side_effect = None
+            self.connector_identity.return_value = (bytes([9]) * 20, 'ABCDEFGHIJ')
+            with self.assertRaisesRegex(ValueError, 'Team IDs differ'): MANIFEST.generate(self.environment())
 
     def test_cbor_uses_shortest_integers_and_numeric_map_order(self):
         self.assertEqual(MANIFEST.encode({24: [24, 256], 0: None}), bytes.fromhex('a200f61818821818190100'))

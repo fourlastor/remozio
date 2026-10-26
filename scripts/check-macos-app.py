@@ -6,6 +6,7 @@ import os
 import subprocess
 
 from macos_build_checks import require, run, verify_executable
+from cloudflared_artifact import PRODUCT, RELATIVE_PATH, PIN_DIRECTORY, pin, signed_tool_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / '.build' / 'macos-app'
@@ -19,6 +20,10 @@ def check(configuration):
     log = BUILD / f'xcodebuild-{configuration.lower()}.log'
     log.write_text(result.stdout + result.stderr)
     require(result.returncode == 0, f'Mac app build failed; see {log}')
+    inspect_built_app(configuration)
+
+
+def inspect_built_app(configuration):
     app = BUILD / f'DerivedData/Build/Products/{configuration}/Remozio.app'
     identity = 'dev.remozio.mac.debug' if configuration == 'Debug' else 'dev.remozio.mac'
     run('codesign', '--verify', '--deep', '--strict', str(app))
@@ -165,6 +170,19 @@ def check(configuration):
         finally:
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
+    connector = app / RELATIVE_PATH
+    connector_identifier = 'dev.remozio.cloudflared' + ('.debug' if configuration == 'Debug' else '')
+    require(connector.is_file(), 'Missing pinned connector')
+    require(run('lipo', '-archs', str(connector)).stdout.strip() == 'arm64', 'Unexpected connector architecture')
+    signed_tool_identity(connector, connector_identifier)
+    require(connector.read_bytes() == (BUILD / f'DerivedData/Build/Products/{configuration}' / PRODUCT).read_bytes(),
+            'Embedding changed the signed connector')
+    connector_entitlements = run('codesign', '--display', '--entitlements', '-', '--xml', str(connector)).stdout
+    require((plistlib.loads(connector_entitlements.encode()) if connector_entitlements.strip() else {}) == {},
+            'Unexpected connector entitlements')
+    pin()
+    require((app / 'Contents/Resources/ThirdParty/cloudflared/LICENSE').read_bytes() == (PIN_DIRECTORY / 'LICENSE').read_bytes(),
+            'Missing pinned connector license')
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['CFBundleIdentifier'] == identity, 'Unexpected bundle identity')
     require(info.get('RemozioSecurityGeneration') == '1', 'Missing app security generation')
