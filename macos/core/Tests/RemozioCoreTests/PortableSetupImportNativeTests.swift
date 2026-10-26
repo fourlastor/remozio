@@ -37,12 +37,14 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                 let callback = once.withLock { saved in let callback = saved; saved = nil; return callback }
                 callback?(value)
             }
-            do { if case .hello = call {} else { try verify() } }
+            do { switch call { case .hello, .recoveryHello: break; default: try verify() } }
             catch { finish(.failed); return }
             guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in finish(.failed) }) as? any AdministrativeSetupXPCProtocol else {
                 finish(.failed); return
             }
             switch call {
+            case .recoveryHello: proxy.portableImportRecoveryHello { [self] in checked(.version($0), reply: finish) }
+            case .recovery: proxy.portableImportRecovery { [self] in checked(.progress($0), reply: finish) }
             case .hello:
                 if mode == .legacyHello { proxy.hello { [self] in checked(.version($0), reply: finish) } }
                 else { proxy.portableImportHello { [self] in checked(.version($0), reply: finish) } }
@@ -81,6 +83,33 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         func release() { releaseSignal.signal() }
     }
 
+    /// Holds the actual native reply callback after production work returns its bound result.
+    private final class ReplyProbe: NSObject, PortableSetupImportXPCProtocol, @unchecked Sendable {
+        let endpoint: AdministrativeSetupXPCEndpoint
+        let gate: WorkGate
+        let deliverBeforeHold: Bool
+        let produced: @Sendable (Data?) -> Void
+        let returned: @Sendable () -> Void
+        init(endpoint: AdministrativeSetupXPCEndpoint, gate: WorkGate, deliverBeforeHold: Bool,
+             produced: @escaping @Sendable (Data?) -> Void, returned: @escaping @Sendable () -> Void) {
+            self.endpoint = endpoint; self.gate = gate; self.deliverBeforeHold = deliverBeforeHold; self.produced = produced; self.returned = returned
+        }
+        func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) { endpoint.portableImportHello(reply: reply) }
+        func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) { endpoint.portableImportRecoveryHello(reply: reply) }
+        func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) { endpoint.portableImportProgress(reply: reply) }
+        func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) { endpoint.portableImportRecovery(reply: reply) }
+        func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+            endpoint.performPortableImport(request, authorization: authorization) { [self] value in
+                produced(value)
+                if deliverBeforeHold { reply(value) }
+                do { try gate.beforeOpen() } catch {
+                    if !deliverBeforeHold { reply(nil) }; returned(); return
+                }
+                if !deliverBeforeHold { reply(value) }; returned()
+            }
+        }
+    }
+
     private final class Server: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
         let listener = NSXPCListener.anonymous()
         let owner: SetupAccountOwner
@@ -90,12 +119,17 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         let rights = Mutex(0)
         let invocations = Mutex(0)
         let closedConnections = Mutex(0)
+        let invalidationEntered = Mutex(0)
+        let replyPayload = Mutex<Data?>(nil)
+        let replyReturned = Mutex(false)
+        private let replyGate: WorkGate?
+        private let deliverBeforeReplyHold: Bool
         private let afterAuthorization: @Sendable () throws -> Void
         private let lock = NSLock()
         private var closed = false
         private var connections: [(NSXPCConnection, AdministrativeSetupXPCEndpoint)] = []
-        init(owner: SetupAccountOwner, requirement: String, afterAuthorization: @escaping @Sendable () throws -> Void = {}) throws {
-            self.owner = owner; self.requirement = requirement; self.afterAuthorization = afterAuthorization
+        init(owner: SetupAccountOwner, requirement: String, replyGate: WorkGate? = nil, deliverBeforeReplyHold: Bool = false, afterAuthorization: @escaping @Sendable () throws -> Void = {}) throws {
+            self.owner = owner; self.requirement = requirement; self.replyGate = replyGate; self.deliverBeforeReplyHold = deliverBeforeReplyHold; self.afterAuthorization = afterAuthorization
             policy = try .init(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.native-import-fixture",
                 approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: getuid())
             super.init()
@@ -119,8 +153,13 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                     }, invalidate: { [weak connection] in connection?.invalidate() })
                     connection.setCodeSigningRequirement(requirement)
                     connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupXPCProtocol.self)
-                    connection.exportedObject = endpoint
+                    if let replyGate {
+                        connection.exportedObject = ReplyProbe(endpoint: endpoint, gate: replyGate, deliverBeforeHold: deliverBeforeReplyHold,
+                            produced: { [weak self] value in self?.replyPayload.withLock { $0 = value } },
+                            returned: { [weak self] in self?.replyReturned.withLock { $0 = true } })
+                    } else { connection.exportedObject = endpoint }
                     connection.invalidationHandler = { [weak self, weak endpoint] in
+                        self?.invalidationEntered.withLock { $0 += 1 }
                         endpoint?.close(); self?.closedConnections.withLock { $0 += 1 }
                     }
                     connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
@@ -225,6 +264,171 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                 "verifiedInvocations": server.invocations.withLock { $0 }, "installedRootAccountsTested": false,
                 "developerIDPolicyTested": false, "realAdministratorAuthorizationTested": false, "providerAPICalled": false,
                 "serviceInstalled": false, "realApprovalIssued": false]
+            try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]).write(to: URL(fileURLWithPath: output))
+        }
+    }
+    func testLiveAnonymousRecoveryReadsRejectedResourceWithoutRightsOrMutation() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        let fixture = try DNSRecordFixture(), f = fixture.base.h.f.accountFixture
+        let prepared = try fixture.begin(), dispatched = try prepared.transition(to: .dispatched)
+        let rejected = try dispatched.transition(to: .rejected, refusal: .unauthorized)
+        try fixture.replace(dispatched, previous: prepared); try fixture.replace(rejected, previous: dispatched)
+        let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() },
+            activate: { _, _, _, _, _ in throw Refused() })
+        let owner = try SetupAccountOwner(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
+            resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+            lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity }, importedGatewayOperation: bridge)
+        defer { try? owner.close() }
+        let requirement = try testRequirement(), server = try Server(owner: owner, requirement: requirement)
+        defer { server.close() }
+        let expected = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        let path = URL(fileURLWithPath: fixture.base.h.path).deletingLastPathComponent()
+        func files() throws -> [String: Data] {
+            try Dictionary(uniqueKeysWithValues: FileManager.default.contentsOfDirectory(atPath: path.path).map {
+                ($0, try Data(contentsOf: path.appendingPathComponent($0)))
+            })
+        }
+        let before = try files()
+        for _ in 0..<2 {
+            let driver = Driver(server: server, requirement: requirement, mode: .normal)
+            let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true)
+            try await channel.start()
+            let actual = try await channel.recovery(); XCTAssertEqual(actual, expected)
+            XCTAssertEqual(actual?.rejectedRecord(for: .dnsRecord)?.refusal, .unauthorized)
+            XCTAssertEqual(try files(), before); XCTAssertEqual(server.rights.withLock { $0 }, 0)
+            XCTAssertGreaterThan(driver.checks.withLock { $0 }, 0); await channel.close()
+        }
+        XCTAssertGreaterThan(server.invocations.withLock { $0 }, 0)
+        server.close(); try await owner.closeWhenIdle()
+    }
+    func testLiveAnonymousRefusalRequestsRequireVersionTenRightsAndCurrentRecordDigest() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        let fixture = try DNSRecordFixture(), f = fixture.base.h.f.accountFixture
+        let prepared = try fixture.begin(), sent = try prepared.transition(to: .dispatched), rejected = try sent.transition(to: .rejected, refusal: .unauthorized)
+        try fixture.replace(sent, previous: prepared); try fixture.replace(rejected, previous: sent)
+        let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() }, activate: { _, _, _, _, _ in throw Refused() })
+        let owner = try SetupAccountOwner(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
+            resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+            lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity }, importedGatewayOperation: bridge)
+        defer { try? owner.close() }
+        let requirement = try testRequirement(), server = try Server(owner: owner, requirement: requirement)
+        defer { server.close() }
+        let before = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
+        let form = Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)
+        var expectedRights = 0
+        for action: SetupPortableImportOperation.Action in [.prepareRefusedTunnelRetry, .prepareRefusedAccessRetry, .prepareRefusedDNSRetry] {
+            for recovery in [false, true] {
+                let driver = Driver(server: server, requirement: requirement, mode: .normal)
+                let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: recovery)
+                try await channel.start()
+                server.rightsAllowed.withLock { $0 = true }
+                let request = try SetupPortableImportOperation(action: action, expected: before.progress, proposal: fixture.base.h.f.proposal(), expectedRejectedRecordDigest: Data(repeating: 0, count: 32))
+                // Bypass the client guard to test the native endpoint's independent version check.
+                let reply: SetupClientReply = await withCheckedContinuation { continuation in
+                    driver.invoke(.perform(request, form)) { continuation.resume(returning: $0) }
+                }
+                switch reply { case .failed, .progress(nil): break; default: XCTFail("An unbound refusal request was admitted") }
+                if recovery { expectedRights += 1 }
+                XCTAssertEqual(server.rights.withLock { $0 }, expectedRights)
+                XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
+                await channel.close()
+            }
+        }
+        let driver = Driver(server: server, requirement: requirement, mode: .normal)
+        let channel = PortableSetupImportChannel(driver: driver, recoveryEnabled: true); try await channel.start()
+        server.rightsAllowed.withLock { $0 = false }
+        let request = try ReviewedSetupFile(proposal: fixture.base.h.f.proposal()).refusalRetryOperation(resource: .dnsRecord, recovery: before)
+        do { _ = try await channel.perform(request, authorization: form); XCTFail("Refused rights authorized recovery") } catch {}
+        XCTAssertEqual(server.rights.withLock { $0 }, expectedRights + 1)
+        XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
+        await channel.close(); server.close(); try await owner.closeWhenIdle()
+    }
+    func testNativeReplyBoundaryExcludesUpdateAfterWorkAndPeerInvalidation() async throws {
+        guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
+            throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
+        }
+        for cancel in [false, true] {
+            let host = try RelayProvisioningFixture(), f = host.f.accountFixture
+            let activity = try ReleaseActivityFixture(), installer = try activity.open(), gate = WorkGate()
+            let bridge = GatewaySetupImportedRuntimeOperations(initialize: { _, _, _, _ in throw Refused() }, activate: { _, _, _, _, _ in throw Refused() })
+            let owner = try SetupAccountOwner(openMachine: { try f.open() }, expectedReleaseDigest: f.release,
+                resume: { _, _ in throw Refused() }, accountCodePolicy: f.policy,
+                lookupAccount: { uid in guard uid == f.identity.uid else { throw Refused() }; return f.identity },
+                releaseActivity: activity.open(), importedGatewayOperation: bridge)
+            defer { gate.release(); try? owner.close() }
+            let requirement = try testRequirement(), server = try Server(owner: owner, requirement: requirement, replyGate: gate, deliverBeforeReplyHold: !cancel)
+            defer { gate.release(); server.close() }
+            server.rightsAllowed.withLock { $0 = true }
+            let request = try SetupPortableImportOperation(action: .prepareRelayPlan, expected: host.progress(owner), proposal: host.f.proposal())
+            XCTAssertNil(try host.readPlan())
+            let driver = Driver(server: server, requirement: requirement, mode: .normal)
+            let channel = PortableSetupImportChannel(driver: driver, timeoutMilliseconds: 5000, operationTimeoutMilliseconds: 15_000)
+            try await channel.start()
+            func waitUntil(_ predicate: () -> Bool) async throws {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+                while !predicate() {
+                    guard ContinuousClock.now < deadline else { throw Refused() }
+                    try await Task.sleep(for: .milliseconds(2))
+                }
+            }
+            let idleDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while true {
+                do { try installer.acquireExclusive().close(); break }
+                catch ReleaseActivityError.busy {
+                    guard ContinuousClock.now < idleDeadline else { throw Refused() }
+                    try await Task.sleep(for: .milliseconds(2))
+                }
+            }
+            gate.arm()
+            let pending = Task { try await channel.perform(request, authorization: Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)) }
+            func requireBusy() throws {
+                do { let admitted = try installer.acquireExclusive(); admitted.close(); throw Refused() }
+                catch ReleaseActivityError.busy { return }
+            }
+            do {
+                try await waitUntil { gate.entered }
+                let produced = try SetupPortableImportOperationResult.decode(XCTUnwrap(server.replyPayload.withLock { $0 }), request: request)
+                XCTAssertEqual(produced.status, .applied)
+                XCTAssertNotNil(try host.readPlan(), "The plan must be committed before the reply hold")
+                XCTAssertFalse(server.replyReturned.withLock { $0 })
+                XCTAssertThrowsError(try owner.close()) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
+                try requireBusy()
+                if cancel {
+                    pending.cancel()
+                    do { _ = try await pending.value; XCTFail("Cancelled client confirmed an outcome") } catch {}
+                    // The native invalidation handler enters before it can obtain the held endpoint lock.
+                    try await waitUntil { server.invalidationEntered.withLock { $0 > 0 } }
+                    XCTAssertFalse(server.replyReturned.withLock { $0 }); try requireBusy()
+                } else {
+                    let result = try await pending.value; XCTAssertEqual(result, produced)
+                    XCTAssertFalse(server.replyReturned.withLock { $0 }); try requireBusy()
+                }
+                gate.release()
+                try await waitUntil { server.replyReturned.withLock { $0 } }
+                await channel.close(); try await owner.closeWhenIdle()
+                try installer.acquireExclusive().close()
+                XCTAssertNotNil(try host.readPlan()); XCTAssertEqual(server.rights.withLock { $0 }, 1)
+            } catch {
+                pending.cancel(); gate.release(); _ = try? await pending.value
+                await channel.close(); try await owner.closeWhenIdle(); throw error
+            }
+        }
+        if let output = ProcessInfo.processInfo.environment["REMOZIO_PORTABLE_IMPORT_REPLY_XPC_EVIDENCE"] {
+            let evidence: [String: Any] = ["schemaVersion": 1, "experiment": "portable-import-native-xpc-reply-boundary", "status": "passed",
+                "osVersion": ProcessInfo.processInfo.operatingSystemVersionString, "hostArchitecture": "arm64",
+                "guiSessionAvailable": true, "sameProcessNativeConnection": true, "testCodeHashRequirementApplied": true,
+                "kernelPeerCredentialsChecked": true, "invocationConnectionChecked": true,
+                "committedPlanObservedBeforeReplyReturn": true, "boundResultObservedBeforeReplyReturn": true,
+                "replyHoldExcludesUpdate": true, "replyHoldPreventsOwnerClose": true,
+                "peerInvalidationObservedBeforeReplyReturn": true, "cancelledClientDoesNotReleaseReplyActivity": true,
+                "returnedReplyAllowsUpdate": true, "normalAndCancelledVariantsPassed": true, "replyCallbackBoundaryTested": true,
+                "clientConfirmedBeforeCallbackReturn": true, "deliveredReplyStillExcludesUpdate": true,
+                "installedRootAccountsTested": false, "developerIDPolicyTested": false,
+                "realAdministratorAuthorizationTested": false, "providerAPICalled": false, "serviceInstalled": false, "realApprovalIssued": false]
             try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys, .prettyPrinted]).write(to: URL(fileURLWithPath: output))
         }
     }

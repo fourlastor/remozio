@@ -14,9 +14,9 @@ The app shows an unconfigured state until protected metadata is available.
 With protected service metadata, the Pair a phone sheet connects the local pairing channels.
 The sheet does not provision services or complete approval UI integration.
 
-The app does not load experiment service manifests, request permissions, or start privileged background services.
-Login registration applies only to the main app.
-Privileged services still require protected installation and identity checks before integration.
+Startup does not register privileged services or load experiment manifests.
+Explicit setup actions use native administrator approval and protected installation checks.
+Login registration applies only to the main app; prepared services have separate registration and identity checks.
 
 ## Build checks
 
@@ -51,27 +51,48 @@ Compilation and bundle checks do not prove window behavior, menu accessibility, 
 
 Native surfaces use [MenuBarExtra](https://developer.apple.com/documentation/swiftui/menubarextra), [Settings](https://developer.apple.com/documentation/swiftui/settings), and [SettingsLink](https://developer.apple.com/documentation/swiftui/settingslink).
 
-## Setup file preview
+## Setup file import
 
-The main window can open an encrypted setup file in a native sheet. The file picker uses a security-scoped URL. A shared actor reads a bounded regular file and decrypts it away from the UI actor. It rejects directories, FIFOs, remote URLs, and oversized files. Reading uses one descriptor, so replacing the path does not redirect an active read.
+The native sheet reviews an encrypted file before applying it. A shared actor reads a bounded regular file and decrypts it away from the UI actor.
+It rejects directories, FIFOs, remote URLs and oversized files. One descriptor binds each read.
+The password entry clears when opening starts and when the sheet closes. Temporary password copies do not promise memory erasure.
+The sheet holds an opaque reviewed proposal; its visible preview excludes credential values. Closing releases that proposal and cancels further steps.
+Already completed changes remain retained for recovery.
 
-The password entry clears when opening starts and when the sheet closes. Derivation retains a temporary password copy until it finishes; this does not promise memory erasure. Cancellation prevents a late result from replacing the view. The UI receives only category and scope metadata, never the decrypted configuration or credentials. Closing the sheet does not change setup state.
+Import requires the installed setup service, an explicitly enrolled account and prepared service accounts.
+The sheet can enable the setup service or open account preparation without closing the review.
+The account sheet keeps target-user selection explicit and returns before preparing a default runtime.
+The imported file cannot accept local key or credential storage choices.
 
-Opening a file shows its scope without importing it.
-Provider access is unverified, and protected application and provisioning remain unfinished.
-The UI states these limits before and after opening a file.
+One explicit import attempt uses a bounded administrator session and rechecks Root before each step.
+Unknown provider writes, rejected changes and pending cleanup stop the sequence. There is no automatic creation retry.
+Refreshing reads local setup metadata. It does not resolve an unknown provider outcome.
+Completed local setup does not prove DNS propagation, provider access, service health or phone connectivity.
+Only the listed app preference keys apply after matching, authenticated local completion.
+Sparse command caller settings validate against the current destination values before any preference writes.
 
-For synthetic offscreen renders of the actual SwiftUI view:
+The UI-facing Core boundaries passed 34 focused tests on their committed source.
+The native Debug app passed the ATC build and inert bundle checks for this UI change.
+Synthetic light/dark captures cover review, active import, cleanup, unresolved provider changes, missing prerequisites and completion.
+A single review batch corrected status placement, copy and synthetic states; the confirmation build and renders passed.
+These captures use disposable data and do not validate installed setup behavior.
+Installed XPC, native administrator prompts, account setup navigation, file-picker behavior, keyboard focus and VoiceOver remain interactive gates.
+The current host runs macOS 27.0.1 and does not qualify macOS 26 runtime behavior.
+
+For synthetic offscreen renders of the actual views:
 
 ```sh
 swift run --package-path macos/app SetupPreviewSnapshots /tmp/remozio-preview-snapshots
 ```
 
-This Debug-only helper renders empty, error, and scope states in light/dark appearance. It does not open the product app, register services, select real files, or contact providers. Native controls, file-picker interaction, keyboard focus, cancellation timing, and VoiceOver still need the interactive session.
+The Debug-only helper renders empty, error, scope and import states in light and dark appearance.
+It does not open the product app, register services, select real files, use real credentials or contact providers.
 
 ## Embedded authority
 
-The `RemozioAuthority` Xcode target is embedded at `Contents/Library/LaunchServices/RemozioAuthority`. Debug and Release use separate signing identifiers. The app does not launch it, and the bundle contains no launchd registration manifests yet.
+The `RemozioAuthority` Xcode target is embedded at `Contents/Library/LaunchServices/RemozioAuthority`. Debug and Release use separate signing identifiers. The app does not launch it on startup. The bundle includes the setup daemon manifest.
+Explicit setup publishes protected configuration and per-account job declarations before registration.
+Installed service execution remains an interactive validation gate.
 
 The executable accepts `--configuration /absolute/protected/configuration.cbor` for the trust-only service. It also accepts `--presence-configuration /absolute/protected/configuration.cbor` for the [presence and wake runtime](../../docs/experiments/authority-runtime-entrypoint.md). Both modes require real and effective Root identity before reading configuration.
 

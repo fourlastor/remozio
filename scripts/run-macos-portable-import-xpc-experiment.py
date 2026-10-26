@@ -15,6 +15,13 @@ from macos_fixture_cleanup import retire_owned_tree
 ROOT = Path(__file__).resolve().parents[1]
 TEST = 'PortableSetupImportNativeTests.testLiveAnonymousImportWireRetainsAndRecoversWithoutRetry'
 ACTIVITY_TEST = 'PortableSetupImportNativeTests.testNativeCancellationKeepsUpdateExcludedUntilOwnedWorkSettles'
+REPLY_TEST = 'PortableSetupImportNativeTests.testNativeReplyBoundaryExcludesUpdateAfterWorkAndPeerInvalidation'
+REPLY_REQUIRED = ['guiSessionAvailable', 'sameProcessNativeConnection', 'testCodeHashRequirementApplied',
+    'kernelPeerCredentialsChecked', 'invocationConnectionChecked', 'committedPlanObservedBeforeReplyReturn',
+    'boundResultObservedBeforeReplyReturn', 'replyHoldExcludesUpdate', 'replyHoldPreventsOwnerClose',
+    'peerInvalidationObservedBeforeReplyReturn', 'cancelledClientDoesNotReleaseReplyActivity',
+    'returnedReplyAllowsUpdate', 'normalAndCancelledVariantsPassed', 'replyCallbackBoundaryTested',
+    'clientConfirmedBeforeCallbackReturn', 'deliveredReplyStillExcludesUpdate']
 ACTIVITY_REQUIRED = ['guiSessionAvailable', 'sameProcessNativeConnection', 'testCodeHashRequirementApplied',
     'kernelPeerCredentialsChecked', 'invocationConnectionChecked', 'idleConnectionAllowsUpdate', 'admittedWorkExcludesUpdate',
     'peerInvalidationObservedBeforeSettlement', 'cancelledClientDoesNotReleaseOwnedActivity', 'settledOwnerAllowsUpdate',
@@ -30,7 +37,9 @@ UNPROVEN = ['installedRootAccountsTested', 'developerIDPolicyTested', 'realAdmin
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', type=Path, required=True, help='Sanitized result file; the log is retained beside it')
-    parser.add_argument('--activity', action='store_true', help='Check update exclusion through native cancellation and owned settlement')
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument('--activity', action='store_true', help='Check update exclusion through native cancellation and owned settlement')
+    modes.add_argument('--reply-boundary', action='store_true', help='Hold the native reply after completed work and check update exclusion')
     args = parser.parse_args()
     if platform.system() != 'Darwin' or platform.machine() != 'arm64' or int(platform.mac_ver()[0].split('.')[0]) < 26:
         raise SystemExit('Requires Apple Silicon and macOS 26 or later.')
@@ -46,10 +55,16 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         evidence = Path(directory) / 'evidence.json'
         environment = os.environ.copy()
-        environment['REMOZIO_PORTABLE_IMPORT_ACTIVITY_XPC_EVIDENCE' if args.activity else 'REMOZIO_PORTABLE_IMPORT_XPC_EVIDENCE'] = str(evidence)
+        if args.reply_boundary:
+            variable, test, expected_experiment, required = 'REMOZIO_PORTABLE_IMPORT_REPLY_XPC_EVIDENCE', REPLY_TEST, 'portable-import-native-xpc-reply-boundary', REPLY_REQUIRED
+        elif args.activity:
+            variable, test, expected_experiment, required = 'REMOZIO_PORTABLE_IMPORT_ACTIVITY_XPC_EVIDENCE', ACTIVITY_TEST, 'portable-import-native-xpc-activity', ACTIVITY_REQUIRED
+        else:
+            variable, test, expected_experiment, required = 'REMOZIO_PORTABLE_IMPORT_XPC_EVIDENCE', TEST, 'portable-import-native-xpc', REQUIRED
+        environment[variable] = str(evidence)
         with log.open('x') as output:
             process = subprocess.Popen(['/usr/bin/xcrun', 'swift', 'test', '--package-path', str(ROOT / 'macos/core'),
-                '--triple', 'arm64-apple-macosx26.0', '--filter', ACTIVITY_TEST if args.activity else TEST], cwd=ROOT, env=environment,
+                '--triple', 'arm64-apple-macosx26.0', '--filter', test], cwd=ROOT, env=environment,
                 stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
             try:
                 result = process.wait(timeout=300)
@@ -62,9 +77,8 @@ def main():
         if result or not evidence.is_file():
             raise SystemExit(f'Native import fixture failed or lacked a GUI session. Diagnostics: {log}')
         report = json.loads(evidence.read_text())
-        expected_experiment = 'portable-import-native-xpc-activity' if args.activity else 'portable-import-native-xpc'
         if report.get('experiment') != expected_experiment or report.get('status') != 'passed' or not all(
-                report.get(key) is True for key in (ACTIVITY_REQUIRED if args.activity else REQUIRED)):
+                report.get(key) is True for key in required):
             raise SystemExit(f'Native import fixture did not prove its required checks. Diagnostics: {log}')
         if not all(report.get(key) is False for key in UNPROVEN):
             raise SystemExit('Unexpected installed-service or authorization claim in fixture evidence.')

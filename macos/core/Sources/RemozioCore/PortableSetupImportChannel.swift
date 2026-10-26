@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Security
 
-enum PortableSetupImportCall: Sendable { case hello, progress, perform(SetupPortableImportOperation, Data) }
+enum PortableSetupImportCall: Sendable { case hello, recoveryHello, progress, recovery, perform(SetupPortableImportOperation, Data) }
 protocol PortableSetupImportDriver: Sendable {
     func start(closed: @escaping @Sendable () -> Void)
     func invoke(_ call: PortableSetupImportCall, reply: @escaping @Sendable (SetupClientReply) -> Void)
@@ -20,13 +20,16 @@ private final class NativePortableSetupImportDriver: PortableSetupImportDriver, 
         connection.interruptionHandler = closed; connection.invalidationHandler = closed; connection.activate()
     }
     func invoke(_ call: PortableSetupImportCall, reply: @escaping @Sendable (SetupClientReply) -> Void) {
-        if case .hello = call {} else {
-            do { _ = try policy.verifyCredentials(connection) } catch { reply(.failed); return }
+        switch call {
+        case .hello, .recoveryHello: break
+        default: do { _ = try policy.verifyCredentials(connection) } catch { reply(.failed); return }
         }
         guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in reply(.failed) }) as? any PortableSetupImportXPCProtocol else {
             reply(.failed); return
         }
         switch call {
+        case .recoveryHello: proxy.portableImportRecoveryHello { [self] in checked(.version($0), reply: reply) }
+        case .recovery: proxy.portableImportRecovery { [self] in checked(.progress($0), reply: reply) }
         case .hello: proxy.portableImportHello { [self] in checked(.version($0), reply: reply) }
         case .progress: proxy.portableImportProgress { [self] in checked(.progress($0), reply: reply) }
         case .perform(let request, let authorization):
@@ -52,6 +55,7 @@ public actor PortableSetupImportChannel {
     private enum State { case new, opening, open, closed }
     private let driver: any PortableSetupImportDriver
     private let ownerUID: uid_t
+    private let recoveryEnabled: Bool
     private let timeout: UInt64
     private let operationTimeout: UInt64
     private let verifyAccount: @Sendable () throws -> Void
@@ -59,7 +63,7 @@ public actor PortableSetupImportChannel {
     private var state = State.new
     private var pending: (UUID, CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
-    public init(serviceName: String, rootPolicy: XPCPeerPolicy, ownerUID: uid_t,
+    public init(serviceName: String, rootPolicy: XPCPeerPolicy, ownerUID: uid_t, recoveryEnabled: Bool = false,
                 timeoutMilliseconds: UInt64 = 5000, operationTimeoutMilliseconds: UInt64 = 600_000) throws {
         guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
@@ -68,22 +72,23 @@ public actor PortableSetupImportChannel {
             throw AdministrativeSetupChannelError.invalidConfiguration
         }
         guard getuid() == ownerUID, geteuid() == ownerUID else { throw AdministrativeSetupChannelError.wrongAccount }
-        self.ownerUID = ownerUID; timeout = timeoutMilliseconds; operationTimeout = operationTimeoutMilliseconds
+        self.ownerUID = ownerUID; self.recoveryEnabled = recoveryEnabled; timeout = timeoutMilliseconds; operationTimeout = operationTimeoutMilliseconds
         driver = NativePortableSetupImportDriver(serviceName: serviceName, policy: rootPolicy)
         let processID = getpid()
         verifyAccount = { guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw AdministrativeSetupChannelError.wrongAccount } }
     }
     // Logical fixtures do not prove native XPC signing, authorization or service registration.
-    init(driver: any PortableSetupImportDriver, ownerUID: uid_t = getuid(), timeoutMilliseconds: UInt64 = 5000,
+    init(driver: any PortableSetupImportDriver, ownerUID: uid_t = getuid(), recoveryEnabled: Bool = false, timeoutMilliseconds: UInt64 = 5000,
          operationTimeoutMilliseconds: UInt64 = 600_000, verifyAccount: @escaping @Sendable () throws -> Void = {}) {
-        self.driver = driver; self.ownerUID = ownerUID; timeout = timeoutMilliseconds; operationTimeout = operationTimeoutMilliseconds
+        self.driver = driver; self.ownerUID = ownerUID; self.recoveryEnabled = recoveryEnabled; timeout = timeoutMilliseconds; operationTimeout = operationTimeoutMilliseconds
         self.verifyAccount = verifyAccount
     }
     deinit { timer?.cancel(); driver.close() }
     public func start() async throws {
         guard state == .new else { throw AdministrativeSetupChannelError.closed }; state = .opening
         do {
-            guard case .version(let version) = try await invoke(.hello), version == AdministrativeSetupInterface.portableImportVersion else {
+            let expected = recoveryEnabled ? AdministrativeSetupInterface.portableImportRecoveryVersion : AdministrativeSetupInterface.portableImportVersion
+            guard case .version(let version) = try await invoke(recoveryEnabled ? .recoveryHello : .hello), version == expected else {
                 throw AdministrativeSetupChannelError.unsupportedVersion
             }
             state = .open
@@ -99,7 +104,21 @@ public actor PortableSetupImportChannel {
         } catch AdministrativeSetupChannelError.busy { throw AdministrativeSetupChannelError.busy }
         catch { close(); throw error }
     }
+    /// Historical metadata only. This read does not request rights, contact the provider or retry a write.
+    public func recovery() async throws -> SetupPortableImportRecovery? {
+        guard recoveryEnabled else { throw AdministrativeSetupChannelError.unsupportedVersion }
+        do {
+            guard case .progress(let bytes) = try await invoke(.recovery), let bytes,
+                  bytes.count <= SetupPortableImportRecovery.maximumByteCount else { throw AdministrativeSetupChannelError.invalidMessage }
+            if bytes.isEmpty { return nil }
+            let value = try SetupPortableImportRecovery.decode(bytes)
+            guard value.progress.runtime.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
+            return value
+        } catch AdministrativeSetupChannelError.busy { throw AdministrativeSetupChannelError.busy }
+        catch { close(); throw error }
+    }
     public func perform(_ request: SetupPortableImportOperation, authorization: Data) async throws -> SetupPortableImportOperationResult {
+        guard !request.requiresRecoveryHandshake || recoveryEnabled else { throw AdministrativeSetupChannelError.unsupportedVersion }
         guard request.expected.runtime.ownerUID == ownerUID, authorization.count == MemoryLayout<AuthorizationExternalForm>.size else {
             throw AdministrativeSetupChannelError.invalidMessage
         }
@@ -117,8 +136,8 @@ public actor PortableSetupImportChannel {
         try Task.checkCancellation()
         let handshake: Bool, deadline: UInt64
         switch call {
-        case .hello: handshake = true; deadline = timeout; guard state == .opening else { throw AdministrativeSetupChannelError.closed }
-        case .progress: handshake = false; deadline = timeout; guard state == .open else { throw AdministrativeSetupChannelError.closed }
+        case .hello, .recoveryHello: handshake = true; deadline = timeout; guard state == .opening else { throw AdministrativeSetupChannelError.closed }
+        case .progress, .recovery: handshake = false; deadline = timeout; guard state == .open else { throw AdministrativeSetupChannelError.closed }
         case .perform: handshake = false; deadline = operationTimeout; guard state == .open else { throw AdministrativeSetupChannelError.closed }
         }
         guard pending == nil else { throw AdministrativeSetupChannelError.busy }
