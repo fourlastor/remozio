@@ -175,4 +175,53 @@ final class SharedSetupImportCompletionValidationTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    func testOwnerAdvancesEachCompletionMarkerAfterFileValidationAndRetainsTheFinalRevision() throws {
+        for gateway in [false, true] {
+            let h = try Harness(gateway: gateway, phase: .gatewayPrepared), before = try h.progress()
+            let complete = try h.owner.completePortableImport(callerUID: getuid(), expected: before,
+                proposal: h.proposal, operations: h.operations)
+            XCTAssertEqual(complete.phase, .rootComplete); XCTAssertNotEqual(complete.revision, before.revision)
+            XCTAssertEqual(h.foregroundReads, 3); XCTAssertEqual(h.gatewayReads, gateway ? 3 : 0)
+            XCTAssertEqual(try h.owner.completePortableImport(callerUID: getuid(), expected: complete,
+                proposal: h.proposal, operations: h.operations), complete)
+            XCTAssertEqual(h.foregroundReads, 4); XCTAssertEqual(try h.progress(), complete)
+        }
+    }
+    func testOwnerCannotAdvanceCompletionWithAMissingForegroundJobOrAnUnsupportedRelay() throws {
+        do {
+            let h = try Harness(phase: .gatewayPrepared), before = try h.progress()
+            let path = h.jobs.path + "/" + AdministrativeSetupPublication.File.accountJob(
+                accountID: h.f.core.runtime.account.accountID, role: .transport).name
+            XCTAssertEqual(unlink(path), 0)
+            XCTAssertThrowsError(try h.owner.completePortableImport(callerUID: getuid(), expected: before,
+                proposal: h.proposal, operations: h.operations))
+            XCTAssertEqual(try h.progress(), before); XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+        do {
+            let h = try Harness(phase: .gatewayPrepared, cloudflare: true), before = try h.progress()
+            XCTAssertThrowsError(try h.owner.completePortableImport(callerUID: getuid(), expected: before,
+                proposal: h.proposal, operations: h.operations)) {
+                XCTAssertEqual($0 as? SharedSetupImportCompletionValidation.Failure, .relayNotImplemented)
+            }
+            XCTAssertEqual(try h.progress(), before); XCTAssertEqual(h.foregroundReads, 0)
+        }
+    }
+    func testOwnerPreservesIntermediateRecoveryWhenALaterValidationFails() throws {
+        let h = try Harness(gateway: true, phase: .gatewayPrepared), before = try h.progress()
+        let path = h.jobs.path + "/" + AdministrativeSetupPublication.File.accountJob(
+            accountID: h.f.core.runtime.account.accountID, role: .transport).name
+        h.afterGateway = { _, _ in if h.gatewayReads == 1 { XCTAssertEqual(unlink(path), 0) } }
+        defer { h.afterGateway = nil }
+        XCTAssertThrowsError(try h.owner.completePortableImport(callerUID: getuid(), expected: before,
+            proposal: h.proposal, operations: h.operations))
+        let recoverable = try h.progress()
+        XCTAssertEqual(recoverable.phase, .relayPrepared); XCTAssertNotEqual(recoverable.revision, before.revision)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        XCTAssertThrowsError(try h.owner.completePortableImport(callerUID: getuid(), expected: before,
+            proposal: h.proposal, operations: h.operations)) {
+            XCTAssertEqual($0 as? AdministrativeSetupError, .staleProgress)
+        }
+        XCTAssertEqual(try h.progress(), recoverable)
+    }
+
 }

@@ -58,9 +58,90 @@ final class TransportSettingsConsumerHostTests: XCTestCase, @unchecked Sendable 
         func finishPoll() { value.withLock { s in let c = s.poll; s.poll = nil; return c }?.resume() }
         func finishClose() { value.withLock { s in let c = s.close; s.close = nil; return c }?.resume() }
     }
+    private final class Connector: OwnedTransportRelayConnector, Sendable {
+        struct State {
+            var polls = 0, closes = 0, closeFailures = 0
+            var holdPoll = false, holdClose = false, failPoll = false
+            var poll: CheckedContinuation<Void, Never>?, close: CheckedContinuation<Void, Never>?
+        }
+        let value = Mutex(State())
+        func poll() async throws {
+            value.withLock { $0.polls += 1 }
+            if value.withLock({ $0.holdPoll }) { await withCheckedContinuation { c in value.withLock { $0.poll = c } } }
+            if value.withLock({ $0.failPoll }) { throw Failed() }
+        }
+        func close() async throws {
+            value.withLock { $0.closes += 1 }
+            if value.withLock({ s in if s.closeFailures > 0 { s.closeFailures -= 1; return true }; return false }) { throw Failed() }
+            if value.withLock({ $0.holdClose }) { await withCheckedContinuation { c in value.withLock { $0.close = c } } }
+        }
+        func finishPoll() { value.withLock { s in s.holdPoll = false; let c = s.poll; s.poll = nil; return c }?.resume() }
+        func finishClose() { value.withLock { s in s.holdClose = false; let c = s.close; s.close = nil; return c }?.resume() }
+    }
     private func until(_ predicate: () -> Bool) async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(4))
         while !predicate() { guard ContinuousClock.now < deadline else { throw Failed() }; try await Task.sleep(for: .milliseconds(2)) }
+    }
+    func testHeldOrFailedConnectorPollingKeepsDirectForegroundAvailable() async throws {
+        let control = Control(), foreground = Foreground(), connector = Connector()
+        connector.value.withLock { $0.holdPoll = true; $0.failPoll = true }
+        let files = try ServiceReleaseActivityFixture(), lease = try files.open()
+        let host = try TransportSettingsConsumerHost(control: control, lifetime: lease.acquireShared(), connector: connector,
+            makeForeground: { foreground })
+        try await host.start(); try await host.poll()
+        try await until { connector.value.withLock { $0.poll != nil } }
+        try await host.poll(); XCTAssertEqual(foreground.value.withLock { $0.polls }, 2)
+        XCTAssertEqual(connector.value.withLock { $0.polls }, 1)
+        connector.finishPoll(); try await Task.sleep(for: .milliseconds(10)); try await host.poll()
+        XCTAssertEqual(foreground.value.withLock { $0.starts }, 1)
+        XCTAssertEqual(foreground.value.withLock { $0.polls }, 3)
+        XCTAssertFalse(foreground.value.withLock { $0.retired }); try await host.close()
+    }
+    func testCloseStartsEveryDrainAndJoinsConnectorPollBeforeReleasingActivity() async throws {
+        let control = Control(holdClose: true), foreground = Foreground(holdClose: true), connector = Connector()
+        connector.value.withLock { $0.holdPoll = true; $0.holdClose = true }
+        let files = try ServiceReleaseActivityFixture(), lease = try files.open(), updater = try files.open(update: true)
+        let host = try TransportSettingsConsumerHost(control: control, lifetime: lease.acquireShared(), connector: connector,
+            makeForeground: { foreground })
+        try await host.start(); try await host.poll(); try await until { connector.value.withLock { $0.poll != nil } }
+        let first = Task { try await host.close() }, second = Task { try await host.close() }; first.cancel()
+        defer { control.finishClose(); foreground.finishClose(); connector.finishClose(); connector.finishPoll() }
+        try await until { control.value.withLock { $0.close != nil } && foreground.value.withLock { $0.close != nil }
+            && connector.value.withLock { $0.close != nil } }
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        control.finishClose(); foreground.finishClose(); connector.finishClose()
+        try await Task.sleep(for: .milliseconds(10)); XCTAssertThrowsError(try updater.acquireExclusive())
+        connector.finishPoll(); try await first.value; try await second.value
+        XCTAssertEqual(connector.value.withLock { $0.closes }, 1)
+        let exclusive = try updater.acquireExclusive(); exclusive.close()
+    }
+    func testFailedConnectorDrainKeepsActivityAndDoesNotReopenForeground() async throws {
+        let control = Control(), foreground = Foreground(), connector = Connector(), made = Counter()
+        connector.value.withLock { $0.closeFailures = 1 }
+        let files = try ServiceReleaseActivityFixture(), lease = try files.open(), updater = try files.open(update: true)
+        let host = try TransportSettingsConsumerHost(control: control, lifetime: lease.acquireShared(), connector: connector,
+            makeForeground: { made.value.withLock { $0 += 1 }; return foreground })
+        try await host.start(); try await host.poll()
+        do { try await host.close(); XCTFail() } catch { XCTAssertTrue(error is Failed) }
+        XCTAssertThrowsError(try updater.acquireExclusive())
+        try await host.close(); XCTAssertEqual(connector.value.withLock { $0.closes }, 2)
+        XCTAssertEqual(foreground.value.withLock { $0.closes }, 1); XCTAssertEqual(made.value.withLock { $0 }, 1)
+        let exclusive = try updater.acquireExclusive(); exclusive.close()
+    }
+    func testDroppedHostClosesConnectorBeforeJoiningItsHeldPoll() async throws {
+        let control = Control(), foreground = Foreground(), connector = Connector()
+        connector.value.withLock { $0.holdPoll = true; $0.holdClose = true }
+        let files = try ServiceReleaseActivityFixture(), lease = try files.open(), updater = try files.open(update: true)
+        var host: TransportSettingsConsumerHost? = try .init(control: control, lifetime: lease.acquireShared(), connector: connector,
+            makeForeground: { foreground })
+        try await host?.start(); try await host?.poll()
+        try await until { connector.value.withLock { $0.poll != nil } }; host = nil
+        defer { connector.finishClose(); connector.finishPoll() }
+        try await until { connector.value.withLock { $0.close != nil } && control.value.withLock { $0.closes == 1 }
+            && foreground.value.withLock { $0.closes == 1 } }
+        XCTAssertThrowsError(try updater.acquireExclusive()); connector.finishClose()
+        try await Task.sleep(for: .milliseconds(10)); XCTAssertThrowsError(try updater.acquireExclusive())
+        connector.finishPoll(); try await until { (try? updater.acquireExclusive()) != nil }
     }
     func testControlStartsBeforeForegroundFactoryAndOptionalHandshakeCannotBlockDirectPolling() async throws {
         let control = Control(holdPoll: true), foreground = Foreground(), made = Counter()

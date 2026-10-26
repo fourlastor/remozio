@@ -47,7 +47,7 @@ public enum AdministrativeSetupPublication {
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
         case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
-        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence
+        case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence, transportRelayReference
         case runtimeRecord, gatewayMaterial, relayRunMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
         case accountJob(accountID: Data, role: AuthorityCodeRole)
         case gatewayJournalJob(accountID: Data, intentID: Data)
@@ -74,6 +74,7 @@ public enum AdministrativeSetupPublication {
             case .gatewayMaterial: "gateway-material.cbor"
             case .relayRunMaterial: "relay-run-material.cbor"
             case .transportTunnelToken: "transport-tunnel.token"
+            case .transportRelayReference: "transport-relay-reference.cbor"
             case .gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration.gatewayFileName
             case .gatewayConfiguration: "gateway-host.cbor"
             case .gatewayJournalSetup: "gateway-journal-setup.cbor"
@@ -99,7 +100,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewaySettingsHost, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .transportRelayReference, .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewaySettingsHost, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }

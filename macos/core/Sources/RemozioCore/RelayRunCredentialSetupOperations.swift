@@ -1,7 +1,7 @@
 import Foundation
 
 /// Protected setup inputs only. A retained reference does not assert connector health or import completion.
-struct RelayRunCredentialSetupContext: Sendable {
+struct RelayRunCredentialSetupContext: Equatable, Sendable {
     let account: AccountPreparationIntent
     let inventory: InstallationInventory
     let expected: SharedSetupImportIntent

@@ -8,7 +8,7 @@ import XCTest
 /// Owned temporary files and disposable keys. These tests do not prove native service isolation.
 final class RelayRunCredentialPublicationTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
-    private struct Fixture: Sendable {
+    struct Fixture: Sendable {
         let host: RelayProvisioningFixture
         let plan: SharedSetupImportRelayPlan
         let created: SharedSetupRelayProvisioningRecord
@@ -22,7 +22,7 @@ final class RelayRunCredentialPublicationTests: XCTestCase, @unchecked Sendable 
                 inventory: inventory, credential: credential)
         }
     }
-    private func fixture() throws -> Fixture {
+    func fixture() throws -> Fixture {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner fixture") }
         let h = try RelayProvisioningFixture(), plan = try h.prepare()
         let prepared = try h.directory { try SharedSetupRelayProvisioningStorage.begin(expected: h.intent, plan: plan,
