@@ -4,7 +4,10 @@ import PackageDescription
 // Disposable, unprivileged component integration fixture; not a host authority.
 let package = Package(
     name: "LinuxApprovalCommandFixture",
-    products: [.executable(name: "LinuxApprovalCommandFixture", targets: ["LinuxApprovalCommandFixture"])],
+    products: [
+        .executable(name: "LinuxApprovalCommandFixture", targets: ["LinuxApprovalCommandFixture"]),
+        .library(name: "LinuxApprovalFixtureCore", targets: ["LinuxApprovalFixtureCore"]),
+    ],
     dependencies: [
         .package(path: "../../host/shared-core"),
         .package(path: "../../protocol/swift"),
@@ -12,8 +15,12 @@ let package = Package(
     ],
     targets: [
         .systemLibrary(name: "FixtureSQLite", pkgConfig: "sqlite3", providers: [.apt(["libsqlite3-dev"])]),
-        .executableTarget(name: "LinuxApprovalCommandFixture", dependencies: [
+        .target(name: "LinuxApprovalFixtureCore", dependencies: [
             "FixtureSQLite", .product(name: "RemozioHostCore", package: "shared-core"),
+            .product(name: "RemozioProtocol", package: "swift"), .product(name: "Crypto", package: "swift-crypto"),
+        ]),
+        .executableTarget(name: "LinuxApprovalCommandFixture", dependencies: [
+            "LinuxApprovalFixtureCore", .product(name: "RemozioHostCore", package: "shared-core"),
             .product(name: "RemozioProtocol", package: "swift"), .product(name: "Crypto", package: "swift-crypto"),
         ]),
     ]
