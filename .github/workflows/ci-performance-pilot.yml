@@ -1,7 +1,7 @@
 name: CI performance pilot
 on:
   push:
-    branches: [codex/ci-performance-pilot-20261021]
+    branches: [codex/ci-performance-pilot-20261021, perf/native-cache-harness-20261027]
 permissions:
   contents: read
 defaults:
@@ -13,7 +13,8 @@ concurrency:
 jobs:
   xpc-hex:
     name: Native XPC hex comparison
-    if: github.repository == 'fourlastor/remozio'
+    # The completed ABBA measurement is frozen; later pilot branches rerun only the cache job.
+    if: github.repository == 'fourlastor/remozio' && github.ref_name == 'codex/ci-performance-pilot-20261021'
     runs-on: macos-26
     timeout-minutes: 60
     steps:
