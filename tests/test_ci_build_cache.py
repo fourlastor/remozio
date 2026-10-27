@@ -421,6 +421,15 @@ class BuildCacheTests(unittest.TestCase):
         self.assertEqual(path.read_text(), 'other')
         self.assertEqual(path.stat().st_mtime_ns, stamp)
 
+    @unittest.skipUnless((CACHE.ROOT / '.git').exists(), 'needs the repository checkout')
+    def test_linux_only_table_matches_tracked_files_and_modes(self):
+        # A moved or deleted entry would silently narrow the exemption; fail instead.
+        result = subprocess.run(['git', 'ls-files', '-s', '--', *CACHE.LINUX_ONLY_INPUT_MODES],
+                                cwd=CACHE.ROOT, capture_output=True, text=True, check=True)
+        tracked = {name: int(mode, 8) & 0o7777
+                   for mode, _, _, name in (line.split(None, 3) for line in result.stdout.splitlines())}
+        self.assertEqual(tracked, CACHE.LINUX_ONLY_INPUT_MODES)
+
     def test_linux_input_mutation_during_validation_prevents_save(self):
         path = self.root / 'experiments/linux-approval-command/Package.swift'
         path.parent.mkdir(parents=True)

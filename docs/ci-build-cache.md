@@ -37,17 +37,21 @@ into one of those inputs, or back, still requires a cold build. A future build t
 consumes `docs/` must revisit this policy.
 
 The second narrow exemption is the helper's explicit `LINUX_ONLY_INPUT_MODES`
-table: 24 existing files in the Linux approval-command, native-TPM/TLS, caller,
-caller-monitor, storage-lease and TPM/TLS experiments, plus their eight dedicated
-Linux coordinator/runner scripts. These exact regular files, at their recorded
+table: 45 existing files in the Linux approval-command, composed caller-command,
+OS-capture, pairing-peer, native-TPM/TLS, caller, caller-monitor, storage-lease and
+TPM/TLS experiments, plus their 11 dedicated Linux check/coordinator/runner scripts.
+A repository test requires every entry to be tracked at its recorded mode, so a move
+or deletion fails instead of silently narrowing the table. These exact regular files, at their recorded
 expected modes, are omitted only from native compatibility settings and discovery
 invalidation. There is no `linux-*` prefix or directory exemption: an unknown new
 path, even inside one of those Linux packages, stays conservative. Both old and new
 inventories are classified, so type or unexpected-mode transitions still build cold.
 
 The dependency audit finds no Mac SwiftPM/Xcode graph consuming those experiment
-files. The Linux approval fixture depends on shared protocol/core, with no reverse
-dependency. The Mac native gate invokes none of the eight Linux entry points.
+files. The Linux packages depend on shared protocol/core and on each other (the
+composed fixture uses the approval-command and OS-capture libraries), with no reverse
+dependency. Only the Linux Swift job and the Linux branch of `check-local.sh` build
+or run them; the Mac native gate invokes none of the 11 Linux entry points.
 Portable Python tests may import/test the runners or use owned temporary workers;
 those checks still execute on every cache hit and produce no cached Mac/interop
 compiler output. Shared protocol/core, `generate-linux-capture-fixtures.py`, Mac
