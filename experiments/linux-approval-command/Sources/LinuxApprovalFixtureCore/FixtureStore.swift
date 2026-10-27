@@ -5,7 +5,7 @@ import RemozioProtocol
 
 /// Disposable connection/checkpoint owner around the shared consumption, replay and audit tables.
 /// One owner, one request, disposable user-owned storage. No protected installation or power-loss claim.
-final class FixtureStore {
+public final class FixtureStore {
     private let db: OpaquePointer
     private let consumption: ConsumptionJournalTables
     private let replay: CommandSubmissionReplayTables
@@ -14,9 +14,9 @@ final class FixtureStore {
     private let authorityURL: URL
     private var writer: AuditEpochWriter?
     private var state: ContinuityState!
-    private(set) var checkpointAction = "unchanged"
+    public private(set) var checkpointAction = "unchanged"
 
-    init(directory: String, reopening: Bool) throws {
+    public init(directory: String, reopening: Bool) throws {
         checkpointURL = URL(fileURLWithPath: directory + "/checkpoint.cbor")
         authorityURL = URL(fileURLWithPath: directory + "/fixture-authority.cbor")
         let database = directory + "/fixture.sqlite"
@@ -60,7 +60,9 @@ final class FixtureStore {
 
     /// The check is repeated under the same write transaction as the unique row and audit append.
     /// This returns only a fixture token; it grants no production execution authority.
-    func consume(_ material: FixtureApprovalMaterial, command: OwnedCommand, now: () throws -> AuthorityMoment,
+    /// `validate` is the owner's fresh check of the decoded capture against its retained objects and current policy.
+    public func consume(_ material: FixtureApprovalMaterial, validate: (LinuxCommandCapture) throws -> Void,
+                        now: () throws -> AuthorityMoment,
                  leavePending: Bool = false) throws -> FixtureDispatchToken? {
         var dispatch = false
         try mutate(leavePending: leavePending) {
@@ -72,7 +74,7 @@ final class FixtureStore {
             let capture = try LinuxCommandCapture(canonicalBytes: material.request.canonicalCapture,
                 limits: FixtureProtocol.limits, expectedSchemaVersion: material.request.contract.schemaVersion)
             guard try !replay.contains(capture.submission) else { throw CommandSubmissionReplayError.alreadyReserved }
-            try command.validate(capture)
+            try validate(capture)
             _ = try replay.reserve(CommandSubmissionReservation(macID: FixtureProtocol.macID,
                 accountID: FixtureProtocol.accountID, submission: capture.submission,
                 captureDigest: digest(capture.canonicalBytes)))
@@ -89,18 +91,22 @@ final class FixtureStore {
         return dispatch ? FixtureDispatchToken() : nil
     }
 
-    func dispatched(_ token: FixtureDispatchToken) throws {
+    public func dispatched(_ token: FixtureDispatchToken) throws {
         try token.take()
         try transition(.beginDispatch)
     }
-    func succeeded() throws { try transition(.verifySuccess) }
+    public func succeeded() throws { try transition(.verifySuccess) }
+    public func failed() throws { try transition(.verifyFailure) }
+    /// Only for an authorized request whose owner proved that spawn was never entered.
+    public func provedNoDispatch() throws { try transition(.proveNoDispatch) }
+    public func lostOutcome() throws { try transition(.loseOutcome) }
 
-    func injectAuditFailure() throws {
+    public func injectAuditFailure() throws {
         try execute("CREATE TEMP TRIGGER fixture_fail_audit BEFORE INSERT ON main.audit_records_v1 BEGIN SELECT RAISE(ABORT, 'fixture failure'); END")
     }
 
     /// No retained request, software key or live dispatch token is restored on reopening.
-    func retireUncertainOutcome() throws {
+    public func retireUncertainOutcome() throws {
         let old = try snapshot()
         guard let phase = RequestPhase(rawValue: old.phase), !phase.isTerminal else { return }
         try mutate {
@@ -109,7 +115,7 @@ final class FixtureStore {
         }
     }
 
-    func snapshot() throws -> (phase: String, rows: Int, records: Int, reservations: Int) {
+    public func snapshot() throws -> (phase: String, rows: Int, records: Int, reservations: Int) {
         try transaction(write: false) {
             let rows = try scalar("SELECT count(*) FROM consumptions_v1")
             let reservations = try scalar("SELECT count(*) FROM command_submissions_v1")
@@ -130,12 +136,12 @@ final class FixtureStore {
         }
     }
 
-    func checkpointMatches() throws -> Bool {
+    public func checkpointMatches() throws -> Bool {
         try transaction(write: false) { try matches(state.committed) && state.pending == nil }
     }
 
     /// Historical replay metadata is used only to construct fresh refusal controls on reopen.
-    func reservation() throws -> CommandSubmissionReservation {
+    public func reservation() throws -> CommandSubmissionReservation {
         try transaction(write: false) {
             try statement("SELECT submission FROM command_submissions_v1", blobs: []) { row in
                 try require(sqlite3_step(row) == SQLITE_ROW, "reservationRow")
@@ -306,7 +312,7 @@ final class FixtureStore {
 }
 
 /// In-memory, one-use fixture capability; intentionally never serialized or restored.
-final class FixtureDispatchToken {
+public final class FixtureDispatchToken {
     private var used = false
     fileprivate init() {}
     fileprivate func take() throws { try require(!used, "fixtureTokenReplay"); used = true }

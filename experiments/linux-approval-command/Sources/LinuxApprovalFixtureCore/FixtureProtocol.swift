@@ -3,29 +3,29 @@ import Foundation
 import RemozioHostCore
 import RemozioProtocol
 
-enum FixtureError: Error {
+public enum FixtureError: Error {
     case failed(String)
 }
 
-func require(_ condition: Bool, _ reason: String) throws {
+public func require(_ condition: Bool, _ reason: String) throws {
     guard condition else { throw FixtureError.failed(reason) }
 }
 
-func randomBytes(_ count: Int) -> Data {
+public func randomBytes(_ count: Int) -> Data {
     var generator = SystemRandomNumberGenerator()
     return Data((0..<count).map { _ in UInt8.random(in: .min ... .max, using: &generator) })
 }
 
-func digest(_ data: Data) -> Data { Data(SHA256.hash(data: data)) }
+public func digest(_ data: Data) -> Data { Data(SHA256.hash(data: data)) }
 
-struct FixtureApprovalMaterial: Sendable {
-    let request: IssuedRequestPayload
-    let retained: RetainedApprovalRequest
-    let trust: ApprovalTrustSnapshot
-    let decisionBytes: Data
-    let signature: Data
+public struct FixtureApprovalMaterial: Sendable {
+    public let request: IssuedRequestPayload
+    public let retained: RetainedApprovalRequest
+    public let trust: ApprovalTrustSnapshot
+    public let decisionBytes: Data
+    public let signature: Data
 
-    init(request: IssuedRequestPayload, retained: RetainedApprovalRequest, trust: ApprovalTrustSnapshot,
+    public init(request: IssuedRequestPayload, retained: RetainedApprovalRequest, trust: ApprovalTrustSnapshot,
          decisionBytes: Data, signature: Data) {
         self.request = request
         self.retained = retained
@@ -34,26 +34,26 @@ struct FixtureApprovalMaterial: Sendable {
         self.signature = signature
     }
 
-    func verify(now: AuthorityMoment) throws -> VerifiedDecision {
+    public func verify(now: AuthorityMoment) throws -> VerifiedDecision {
         try require(request == retained.payload, "fixture request retention mismatch")
         return try DecisionVerifier.verify(canonicalDecision: decisionBytes, signature: signature, retained: retained,
             trust: trust, now: now, decisionLimits: FixtureProtocol.limits,
             requestLimits: FixtureProtocol.limits, signingLimits: FixtureProtocol.limits)
     }
 
-    func withDecision(_ bytes: Data, signature: Data? = nil) -> Self {
+    public func withDecision(_ bytes: Data, signature: Data? = nil) -> Self {
         Self(request: request, retained: retained, trust: trust, decisionBytes: bytes,
             signature: signature ?? self.signature)
     }
 }
 
-enum FixtureProtocol {
-    static let limits = try! CBORLimits(maxBytes: 32768, maxDepth: 32, maxItems: 4096)
-    static let macID = Data(repeating: 1, count: 16)
-    static let accountID = Data(repeating: 2, count: 16)
+public enum FixtureProtocol {
+    public static let limits = try! CBORLimits(maxBytes: 32768, maxDepth: 32, maxItems: 4096)
+    public static let macID = Data(repeating: 1, count: 16)
+    public static let accountID = Data(repeating: 2, count: 16)
 
     /// Synthetic software keys never leave this process. The fixture does not establish biometric or hardware custody.
-    static func make(capture: Data, clock: LinuxAuthorityClock, decline: Bool = false) throws -> FixtureApprovalMaterial {
+    public static func make(capture: Data, clock: LinuxAuthorityClock, decline: Bool = false) throws -> FixtureApprovalMaterial {
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 4)
         let capabilities = ContractCapabilities(contracts: [contract: []])
         let execute = CapturedAction(choice: .execute, scope: .currentRequest)
