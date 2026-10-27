@@ -53,8 +53,9 @@ class NativeCacheFollowupTests(unittest.TestCase):
         return patch.object(MODULE, 'sys', SimpleNamespace(version_info=(3, 11), executable='fixture-python'))
 
     def worker(self, args, inputs, calls, fail=None, unstable=False, restore_cold=False):
-        def command(root, output, name, argv, deadline, timeout, env=None):
+        def command(root, output, name, argv, deadline, timeout, env=None, separate_stderr=False):
             calls.append((name, argv))
+            self.assertEqual(separate_stderr, name in ('save', 'warm-key', 'warm-restore'))
             if fail == name:
                 raise RuntimeError('injected worker failure')
             log = output / f'{name}.log'
@@ -341,6 +342,58 @@ class NativeCacheFollowupTests(unittest.TestCase):
                     MODULE.command(root, root, 'large', ['fixture'], MODULE.time.monotonic() + 10, 5)
                 kill.assert_called_once_with(456, signal.SIGKILL)
                 proc.wait.assert_called_once_with(timeout=10)
+
+    def test_separate_stderr_counts_toward_output_limit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            proc = Mock(returncode=None, pid=457)
+            def started(*args, **kwargs):
+                kwargs['stdout'].write(b'1234')
+                kwargs['stdout'].flush()
+                kwargs['stderr'].write(b'56789')
+                kwargs['stderr'].flush()
+                return proc
+            with patch.object(MODULE, 'MAX_LOG_BYTES', 8), \
+                 patch.object(MODULE.subprocess, 'Popen', side_effect=started), \
+                 patch.object(MODULE.os, 'killpg') as kill:
+                with self.assertRaisesRegex(RuntimeError, 'output exceeded'):
+                    MODULE.command(root, root, 'large', ['fixture'], MODULE.time.monotonic() + 10, 5,
+                                   separate_stderr=True)
+                kill.assert_called_once_with(457, signal.SIGKILL)
+
+    def test_actual_child_stderr_without_newline_never_prefixes_its_stdout_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = {'operation': 'key', 'scope': 'mac', 'key': 'prefix-new'}
+            code = ('import json,sys; sys.stderr.write("swift-driver version: 1.148.6 "); sys.stderr.flush(); '
+                    f'print(json.dumps({report!r}), flush=True)')
+            result = MODULE.command(root, root, 'warm-key', [sys.executable, '-c', code],
+                                    MODULE.time.monotonic() + 10, 5, separate_stderr=True)
+            self.assertEqual(MODULE.helper_report(root / 'warm-key.log', 'key'), report)
+            self.assertEqual((root / 'warm-key.stderr.log').read_bytes(), b'swift-driver version: 1.148.6 ')
+            self.assertEqual((result['stderrLog'], result['stderrBytes']), ('warm-key.stderr.log', 30))
+
+    def test_helper_report_requires_exactly_one_valid_stdout_report(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'helper.log'
+            report = '{"key": "prefix-new", "operation": "key", "scope": "mac"}'
+            path.write_text(report + '\n')
+            self.assertEqual(MODULE.helper_report(path, 'key')['key'], 'prefix-new')
+            for content, message in (
+                    (b'swift-driver version: 1.148.6 ' + report.encode() + b'\n', 'malformed'),
+                    (b'', 'one cache helper report line'),
+                    (b'\n', 'malformed'),
+                    (report.encode(), 'one cache helper report line'),
+                    ((report + '\n' + report + '\n').encode(), 'one cache helper report line'),
+                    ((report + '\n\n').encode(), 'one cache helper report line'),
+                    (b'{"operation": "key"\n', 'malformed'),
+                    (b'{"operation": "save"}\n', 'unexpected'),
+                    (b'[{"operation": "key"}]\n', 'unexpected'),
+                    (b'{"operation": "key", "key": "\xff"}\n', 'UTF-8')):
+                with self.subTest(content=content):
+                    path.write_bytes(content)
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        MODULE.helper_report(path, 'key')
 
 
 if __name__ == '__main__':

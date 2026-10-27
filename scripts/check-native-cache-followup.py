@@ -7,6 +7,7 @@ The workflow must run ci-build-cache.py key BEFORE its full cold check.sh step.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass
 import hashlib
 import json
@@ -121,13 +122,19 @@ def wait_publishing_status(proc, timeout):
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
-def command(root, output, name, argv, deadline, timeout, env=None):
+def command(root, output, name, argv, deadline, timeout, env=None, separate_stderr=False):
     log = output / f'{name}.log'
+    # Helper reports are parsed from stdout alone; their diagnostics are retained separately.
+    error_log = output / f'{name}.stderr.log' if separate_stderr else None
+    logs = [log] if error_log is None else [log, error_log]
+    def logged_bytes():
+        return sum(path.stat().st_size for path in logs)
     start = time.monotonic()
     remaining = min(timeout, deadline - start)
     if remaining <= 0:
         raise RuntimeError('diagnostic total deadline exceeded')
-    with log.open('wb') as stream:
+    with log.open('wb') as stream, \
+         (contextlib.nullcontext() if error_log is None else error_log.open('wb')) as errors:
         proc = None
         try:
             # Defer Python cancellation handlers during ownership publication,
@@ -139,7 +146,8 @@ def command(root, output, name, argv, deadline, timeout, env=None):
             try:
                 handlers[signal.SIGINT] = signal.signal(signal.SIGINT, defer_cancel)
                 handlers[signal.SIGTERM] = signal.signal(signal.SIGTERM, defer_cancel)
-                proc = subprocess.Popen(argv, cwd=root, stdout=stream, stderr=subprocess.STDOUT,
+                proc = subprocess.Popen(argv, cwd=root, stdout=stream,
+                                        stderr=subprocess.STDOUT if errors is None else errors,
                                         env=env, start_new_session=True)
             finally:
                 try:
@@ -155,7 +163,7 @@ def command(root, output, name, argv, deadline, timeout, env=None):
                 elif handler != signal.SIG_IGN:
                     raise SystemExit(128 + signum)
             while True:
-                if log.stat().st_size > MAX_LOG_BYTES:
+                if logged_bytes() > MAX_LOG_BYTES:
                     raise RuntimeError('diagnostic command output exceeded bound')
                 left = remaining - (time.monotonic() - start)
                 if left <= 0:
@@ -165,7 +173,7 @@ def command(root, output, name, argv, deadline, timeout, env=None):
                     break
                 except subprocess.TimeoutExpired:
                     pass
-            if log.stat().st_size > MAX_LOG_BYTES:
+            if logged_bytes() > MAX_LOG_BYTES:
                 raise RuntimeError('diagnostic command output exceeded bound')
             if status:
                 raise RuntimeError(f'diagnostic command failed: {name}')
@@ -177,22 +185,28 @@ def command(root, output, name, argv, deadline, timeout, env=None):
                 except ProcessLookupError:
                     pass
                 wait_publishing_status(proc, timeout=10)
-    return {'seconds': round(time.monotonic() - start, 3), 'exit': status,
-            'log': log.name, 'bytes': log.stat().st_size}
+    result = {'seconds': round(time.monotonic() - start, 3), 'exit': status,
+              'log': log.name, 'bytes': log.stat().st_size}
+    if error_log is not None:
+        result.update(stderrLog=error_log.name, stderrBytes=error_log.stat().st_size)
+    return result
 
 
 def helper_report(path, operation):
-    records = []
-    for line in path.read_text().splitlines():
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict) and value.get('operation') == operation:
-            records.append(value)
-    if len(records) != 1:
-        raise RuntimeError('expected one cache helper report')
-    return records[0]
+    # Helper stdout is exactly one newline-terminated JSON line; never skip or strip other content.
+    try:
+        text = path.read_bytes().decode('utf-8')
+    except UnicodeDecodeError:
+        raise RuntimeError('cache helper report is not UTF-8') from None
+    if not text.endswith('\n') or '\n' in text[:-1]:
+        raise RuntimeError('expected one cache helper report line')
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        raise RuntimeError('malformed cache helper report') from None
+    if not isinstance(value, dict) or value.get('operation') != operation:
+        raise RuntimeError('unexpected cache helper report')
+    return value
 
 
 def copy_log(source, destination):
@@ -252,7 +266,7 @@ def run(args):
     try:
         # Reuse BEFORE-check context: regenerating it here would hide cold-gate mutations.
         timings['save'] = command(root, output, 'save', [sys.executable,
-            'scripts/ci-build-cache.py', 'save', '--scope', 'mac'], deadline, 90)
+            'scripts/ci-build-cache.py', 'save', '--scope', 'mac'], deadline, 90, separate_stderr=True)
         saved = helper_report(output / 'save.log', 'save')
         if saved.get('saved_manifest') is not True:
             raise RuntimeError('cold full check did not preserve its original tracked inputs')
@@ -274,14 +288,15 @@ def run(args):
         inputs[LINUX_INPUT].path.write_bytes(inputs[LINUX_INPUT].content + COMMENT)
         verify_inputs(inputs, changed=True)
         timings['key'] = command(root, output, 'warm-key', [sys.executable,
-            'scripts/ci-build-cache.py', 'key', '--scope', 'mac'], deadline, 90)
+            'scripts/ci-build-cache.py', 'key', '--scope', 'mac'], deadline, 90, separate_stderr=True)
         warm_key = helper_report(output / 'warm-key.log', 'key')
         current_context = json.loads(context_path.read_text())
         if current_context['identity'] != context['identity'] or warm_key['key'] == cold_key['key']:
             raise RuntimeError('Linux-only edit must preserve identity and change exact key')
         env = os.environ.copy(); env['REMOZIO_CACHE_HIT'] = 'false'
         timings['restore'] = command(root, output, 'warm-restore', [sys.executable,
-            'scripts/ci-build-cache.py', 'restore', '--scope', 'mac'], deadline, 90, env)
+            'scripts/ci-build-cache.py', 'restore', '--scope', 'mac'], deadline, 90, env,
+            separate_stderr=True)
         restored = helper_report(output / 'warm-restore.log', 'restore')
         if restored.get('result') != 'restored' or restored.get('requires_clean_build') is not False:
             raise RuntimeError('native outputs were not eligible for warm reuse')
