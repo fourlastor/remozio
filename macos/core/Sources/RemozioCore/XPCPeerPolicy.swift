@@ -10,6 +10,18 @@ public struct XPCPeerPolicy: Sendable {
     public let expectedUserID: uid_t
     public let expectedAuditSessionID: au_asid_t?
 
+    private static let hexadecimalDigits = Array("0123456789abcdef".utf8)
+
+    static func hexadecimalCodeDirectoryHash(_ value: Data) -> String {
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(value.count * 2)
+        for byte in value {
+            bytes.append(hexadecimalDigits[Int(byte >> 4)])
+            bytes.append(hexadecimalDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
     public init(teamID: String, componentIdentifier: String, approvedCodeDirectoryHashes: Set<Data>,
                 expectedUserID: uid_t, expectedAuditSessionID: au_asid_t? = nil) throws {
         let ascii = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".utf8)
@@ -20,7 +32,7 @@ public struct XPCPeerPolicy: Sendable {
             throw XPCPeerPolicyError.invalidConfiguration
         }
         let hashes = approvedCodeDirectoryHashes.map { value in
-            "cdhash H\"" + value.map { String(format: "%02x", $0) }.joined() + "\""
+            "cdhash H\"" + Self.hexadecimalCodeDirectoryHash(value) + "\""
         }.sorted().joined(separator: " or ")
         let forbidden = ["com.apple.security.get-task-allow", "com.apple.security.cs.disable-library-validation",
             "com.apple.security.cs.allow-dyld-environment-variables", "com.apple.security.cs.allow-jit", "com.apple.security.cs.allow-unsigned-executable-memory"]
