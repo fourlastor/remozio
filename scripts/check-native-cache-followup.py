@@ -25,7 +25,7 @@ import time
 LINUX_INPUT = 'scripts/run-linux-storage-lease-experiment.py'
 COMMENT = b'\n# Native cache diagnostic: unchanged Mac inputs, Linux-only comment.\n'
 MAX_LOG_BYTES = 32 * 1024 * 1024
-TOTAL_SECONDS = 2100
+TOTAL_SECONDS = 6000
 
 
 @dataclass
@@ -231,14 +231,15 @@ def test_summaries(output):
     python_counts = re.findall(r'^Ran ([1-9][0-9]*) tests? in ', python_log, re.MULTILINE)
     if not python_counts or not re.search(r'^OK(?:\s|$)', python_log, re.MULTILINE):
         raise RuntimeError('repository Python test execution was not demonstrated')
-    protocol_log = (output / 'warm-protocol.log').read_text(errors='replace')
-    protocol = re.findall(r'Executed ([1-9][0-9]*) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures',
-                          protocol_log)
-    if not protocol or int(protocol[-1][2]) != 0:
-        raise RuntimeError('protocol XCTest execution was not demonstrated')
-    return {'repositoryPythonTests': int(python_counts[-1]),
-            'protocolXCTests': int(protocol[-1][0]),
-            'protocolSkipped': int(protocol[-1][1] or 0), 'protocolFailures': 0}
+    summaries = {'repositoryPythonTests': int(python_counts[-1])}
+    for name, key in (('warm-protocol', 'protocol'), ('warm-core', 'macosCore')):
+        log = (output / f'{name}.log').read_text(errors='replace')
+        executed = re.findall(r'Executed ([1-9][0-9]*) tests?, with (?:(\d+) tests? skipped and )?(\d+) failures', log)
+        if not executed or int(executed[-1][2]) != 0:
+            raise RuntimeError(f'{key} XCTest execution was not demonstrated')
+        summaries.update({f'{key}XCTests': int(executed[-1][0]), f'{key}Skipped': int(executed[-1][1] or 0),
+                          f'{key}Failures': 0})
+    return summaries
 
 
 def run(args):
@@ -314,6 +315,9 @@ def run(args):
         timings['protocol'] = command(root, output, 'warm-protocol', ['swift', 'test',
             '--package-path', 'protocol/swift', '--triple', 'arm64-apple-macosx26.0',
             '--force-resolved-versions', '--jobs', '4'], deadline, 600)
+        # The largest cold stage; same invocation as check.sh.
+        timings['core'] = command(root, output, 'warm-core', ['swift', 'test',
+            '--package-path', 'macos/core', '--triple', 'arm64-apple-macosx26.0'], deadline, 3600)
         verify_inputs(inputs, changed=True)
         if tracked_paths(root) != names:
             raise RuntimeError('tracked file inventory changed')
@@ -332,7 +336,7 @@ def run(args):
             'testSummaries': test_summaries(output),
             'xcode': {'cold': cold_xcode, 'warm': warm_xcode},
             'limits': ['Cold full gate was executed by the preceding workflow step, not this script.',
-                'Warm checks cover repository Python, actual Debug/Release app validation and protocol Swift tests only.',
+                'Warm checks cover repository Python, actual Debug/Release app validation, protocol and macos/core Swift tests only.',
                 'No actual Actions cache archive download or full warm-suite timing is measured.',
                 'Frontend/phase log counts are observed work indicators, not proof of complete Xcode reuse.']}
     finally:

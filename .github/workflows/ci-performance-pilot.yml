@@ -91,7 +91,8 @@ jobs:
     name: Native full check and cache follow-up
     if: github.repository == 'fourlastor/remozio'
     runs-on: macos-26
-    timeout-minutes: 120
+    # Cold full check (~75 min) plus the warm follow-up including macos/core tests.
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5

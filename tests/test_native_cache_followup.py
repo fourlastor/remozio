@@ -88,6 +88,9 @@ class NativeCacheFollowupTests(unittest.TestCase):
                 self.assertEqual(argv[:3], ['swift', 'test', '--package-path'])
                 self.assertIn('--force-resolved-versions', argv)
                 log.write_text('Executed 141 tests, with 0 failures (0 unexpected) in 0.1 (0.2) seconds\n')
+            elif name == 'warm-core':
+                self.assertEqual(argv, ['swift', 'test', '--package-path', 'macos/core', '--triple', 'arm64-apple-macosx26.0'])
+                log.write_text('Executed 3777 tests, with 1 test skipped and 0 failures (0 unexpected) in 1.0 (1.1) seconds\n')
             else:
                 raise AssertionError(name)
             return {'seconds': .01, 'exit': 0, 'log': log.name, 'bytes': log.stat().st_size}
@@ -106,11 +109,13 @@ class NativeCacheFollowupTests(unittest.TestCase):
             with self.native_platform(), self.python(), patch.object(MODULE, 'tracked_paths', return_value=names), \
                  patch.object(MODULE, 'command', side_effect=self.worker(args, inputs, calls)), patch('builtins.print'):
                 result = MODULE.run(args)
-            self.assertEqual([x[0] for x in calls], ['save', 'warm-key', 'warm-restore', 'warm-python', 'warm-app', 'warm-protocol'])
+            self.assertEqual([x[0] for x in calls], ['save', 'warm-key', 'warm-restore', 'warm-python', 'warm-app',
+                                                     'warm-protocol', 'warm-core'])
             self.assertFalse(result['actualGitHubArchiveHitTested'])
             self.assertFalse(result['completeWarmGateRun'])
             self.assertEqual(result['coldFullCheckSeconds'], 4012.5)
             self.assertEqual(result['testSummaries']['protocolXCTests'], 141)
+            self.assertEqual((result['testSummaries']['macosCoreXCTests'], result['testSummaries']['macosCoreSkipped']), (3777, 1))
             self.assertEqual(result['xcode']['cold']['debug']['phaseLines']['CompileC'], 1)
             self.assertEqual(result['xcode']['warm']['debug']['phaseLines']['CompileC'], 0)
             self.assertEqual((args.output / 'cold-full-check.log').read_bytes(), args.cold_full_check_log.read_bytes())
@@ -234,6 +239,11 @@ class NativeCacheFollowupTests(unittest.TestCase):
             (output / 'warm-protocol.log').write_text('Executed 141 tests, with 1 failure\n')
             with self.assertRaisesRegex(RuntimeError, 'XCTest execution'):
                 MODULE.test_summaries(output)
+            (output / 'warm-protocol.log').write_text('Executed 141 tests, with 0 failures\n')
+            for core in ('Executed 0 tests, with 0 failures\n', 'Executed 3777 tests, with 2 failures\n', ''):
+                (output / 'warm-core.log').write_text(core)
+                with self.assertRaisesRegex(RuntimeError, 'macosCore XCTest execution'):
+                    MODULE.test_summaries(output)
 
     def test_unexpected_edit_and_symlinked_parent_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
