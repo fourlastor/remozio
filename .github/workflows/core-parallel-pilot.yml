@@ -1,0 +1,33 @@
+name: Core parallel test pilot
+on:
+  push:
+    branches: [perf/core-parallel-tests-20261027]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: core-parallel-pilot-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  compare:
+    name: Serial versus two-worker macos/core tests
+    if: github.repository == 'fourlastor/remozio'
+    runs-on: macos-26
+    timeout-minutes: 320
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Compare serial and parallel runs in SPPS order
+        run: |
+          python3 scripts/benchmark-core-parallel-tests.py \
+            --repo "$GITHUB_WORKSPACE" --order SPPS \
+            --output "$RUNNER_TEMP/core-parallel-pilot"
+      - name: Retain pilot evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-parallel-pilot-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/core-parallel-pilot
+          if-no-files-found: error
+          retention-days: 14
