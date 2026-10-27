@@ -69,9 +69,9 @@ final class RelayConnectorRuntimeTests: XCTestCase, @unchecked Sendable {
             RelayConnectorSupervisor(operations: .init(start: { try f.start("normal", event: $0) }, probe: { _ in await gate.wait(); return .connected }))
         })
         try await runtime.poll(); try await until { await gate.entered }
-        let first = Task { try await runtime.close(); done.withLock { $0 += 1 } }
+        let first = Task { @Sendable in try await runtime.close(); done.withLock { $0 += 1 } }
         try await until { await runtime.status == .closing }
-        let second = Task { try await runtime.close(); done.withLock { $0 += 1 } }; first.cancel()
+        let second = Task { @Sendable in try await runtime.close(); done.withLock { $0 += 1 } }; first.cancel()
         XCTAssertEqual(done.withLock { $0 }, 0); await gate.release()
         try await first.value; try await second.value
         let status = await runtime.status; XCTAssertEqual(status, .closed)

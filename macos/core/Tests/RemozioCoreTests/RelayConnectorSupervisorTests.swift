@@ -65,9 +65,9 @@ final class RelayConnectorSupervisorTests: XCTestCase, @unchecked Sendable {
             starts.withLock { $0 += 1 }; return try f.start("normal", event: event)
         }, probe: { _ in await gate.run() }))
         try await owner.start(); try await waitUntil { await gate.entered }
-        let one = Task { let value = await owner.close(); finished.withLock { $0 += 1 }; return value }
+        let one = Task { @Sendable in let value = await owner.close(); finished.withLock { $0 += 1 }; return value }
         try await waitUntil { await owner.status == .closing }
-        let two = Task { let value = await owner.close(); finished.withLock { $0 += 1 }; return value }
+        let two = Task { @Sendable in let value = await owner.close(); finished.withLock { $0 += 1 }; return value }
         one.cancel()
         XCTAssertEqual(finished.withLock { $0 }, 0)
         await gate.release()
