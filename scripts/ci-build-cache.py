@@ -15,7 +15,7 @@ import time
 VERSION = 1
 ROOT = Path(__file__).resolve().parents[1]
 MAC_PACKAGES = (
-    'experiments/macos', 'experiments/key-custody', 'experiments/protected-bootstrap',
+    'experiments/macos', 'experiments/key-custody', 'experiments/system-keychain', 'experiments/protected-bootstrap',
     'experiments/release-dependencies', 'experiments/release-copy', 'experiments/release-attributes',
     'experiments/sparkle-probe', 'experiments/sparkle-boundary', 'experiments/approval-flow',
     'experiments/command-frontend', 'experiments/authority-journal', 'experiments/installation-inventory',
@@ -25,6 +25,70 @@ CACHE_PATHS = {
     'mac': tuple(f'{package}/.build' for package in MAC_PACKAGES) + (
         '.build/release-signing', '.build/packaging/DerivedData', '.build/macos-app/DerivedData'),
     'interop': ('experiments/approval-flow/.build',),
+}
+
+# Exact audited Linux-only inputs, not a prefix/subtree exemption. Mac Python
+# checks still import/test these runners, but their commands build no cached Mac
+# product. Unknown new paths and unexpected file types/modes remain conservative.
+# Re-audit if a Mac build starts consuming one; workflow/build-script changes
+# continue to partition the compatibility identity.
+LINUX_ONLY_INPUT_MODES = {
+    'experiments/linux-approval-command/Package.resolved': 0o644,
+    'experiments/linux-approval-command/Package.swift': 0o644,
+    'experiments/linux-approval-command/Sources/FixtureSQLite/module.modulemap': 0o644,
+    'experiments/linux-approval-command/Sources/FixtureSQLite/shim.h': 0o644,
+    'experiments/linux-approval-command/Sources/LinuxApprovalCommandFixture/OwnedCommand.swift': 0o644,
+    'experiments/linux-approval-command/Sources/LinuxApprovalCommandFixture/main.swift': 0o644,
+    'experiments/linux-approval-command/Sources/LinuxApprovalFixtureCore/FixtureProtocol.swift': 0o644,
+    'experiments/linux-approval-command/Sources/LinuxApprovalFixtureCore/FixtureStore.swift': 0o644,
+    'experiments/linux-caller-monitor/fixture.c': 0o644,
+    'experiments/linux-caller-monitor/probe.py': 0o644,
+    'experiments/linux-caller/probe.py': 0o644,
+    'experiments/linux-composed-caller-command/Package.resolved': 0o644,
+    'experiments/linux-composed-caller-command/Package.swift': 0o644,
+    'experiments/linux-composed-caller-command/Sources/CComposedSupport/composed_support.c': 0o644,
+    'experiments/linux-composed-caller-command/Sources/CComposedSupport/include/composed_support.h': 0o644,
+    'experiments/linux-composed-caller-command/Sources/LinuxComposedCallerCommand/Channel.swift': 0o644,
+    'experiments/linux-composed-caller-command/Sources/LinuxComposedCallerCommand/Owner.swift': 0o644,
+    'experiments/linux-composed-caller-command/Sources/LinuxComposedCallerCommand/RetainedCaller.swift': 0o644,
+    'experiments/linux-composed-caller-command/Sources/LinuxComposedCallerCommand/main.swift': 0o644,
+    'experiments/linux-composed-caller-command/composed.py': 0o644,
+    'experiments/linux-composed-caller-command/frontend.c': 0o644,
+    'experiments/linux-native-tpm-tls/Package.swift': 0o644,
+    'experiments/linux-native-tpm-tls/README.md': 0o644,
+    'experiments/linux-native-tpm-tls/Sources/CNativeTPMProbe/include/NativeTPMProbe.h': 0o644,
+    'experiments/linux-native-tpm-tls/Sources/CNativeTPMProbe/native_probe.c': 0o644,
+    'experiments/linux-native-tpm-tls/Sources/COpenSSL/module.modulemap': 0o644,
+    'experiments/linux-native-tpm-tls/Sources/COpenSSL/shim.h': 0o644,
+    'experiments/linux-native-tpm-tls/Sources/NativeTPMProbe/main.swift': 0o644,
+    'experiments/linux-os-capture/Package.resolved': 0o644,
+    'experiments/linux-os-capture/Package.swift': 0o644,
+    'experiments/linux-os-capture/Sources/LinuxOSCaptureExperiment/main.swift': 0o644,
+    'experiments/linux-os-capture/Sources/LinuxOSObservation/Observation.swift': 0o644,
+    'experiments/linux-pairing-peer/Package.swift': 0o644,
+    'experiments/linux-pairing-peer/README.md': 0o644,
+    'experiments/linux-pairing-peer/Sources/COpenSSL/module.modulemap': 0o644,
+    'experiments/linux-pairing-peer/Sources/COpenSSL/shim.h': 0o644,
+    'experiments/linux-pairing-peer/Sources/CPairingTLS/include/PairingTLS.h': 0o644,
+    'experiments/linux-pairing-peer/Sources/CPairingTLS/pairing_tls.c': 0o644,
+    'experiments/linux-pairing-peer/Tests/LinuxPairingTLSTests/PairingTLSTests.swift': 0o644,
+    'experiments/linux-storage-lease/README.md': 0o644,
+    'experiments/linux-storage-lease/controls.c': 0o644,
+    'experiments/linux-storage-lease/lease.c': 0o644,
+    'experiments/linux-storage-lease/lease.h': 0o644,
+    'experiments/linux-tpm-tls/README.md': 0o644,
+    'experiments/linux-tpm-tls/check_hardware_adapter.py': 0o644,
+    'scripts/check-linux-host.sh': 0o755,
+    'scripts/check-linux-pairing-peer.sh': 0o755,
+    'scripts/check-linux-protocol.sh': 0o755,
+    'scripts/run-linux-approval-command-experiment.py': 0o644,
+    'scripts/run-linux-caller-experiment.py': 0o644,
+    'scripts/run-linux-caller-monitor-experiment.py': 0o755,
+    'scripts/run-linux-composed-caller-command-experiment.py': 0o644,
+    'scripts/run-linux-native-tpm-tls-experiment.py': 0o644,
+    'scripts/run-linux-os-capture-experiment.py': 0o755,
+    'scripts/run-linux-storage-lease-experiment.py': 0o644,
+    'scripts/run-linux-tpm-tls-experiment.py': 0o755,
 }
 
 
@@ -75,14 +139,21 @@ def content_inventory(inputs):
             for name, entry in inputs.items()}
 
 
+def linux_only_input(name, entry):
+    return (name in LINUX_ONLY_INPUT_MODES and entry['kind'] == 'file'
+            and entry['mode'] == LINUX_ONLY_INPUT_MODES[name])
+
+
 def discovery_paths(inputs):
     # Top-level documentation Markdown is not discovered by the cached native
     # builds. Keep it in the full inventory/key and every other validation; only
-    # adding/removing these ordinary files is exempt from graph invalidation.
+    # adding/removing these ordinary files and the exact audited Linux-only
+    # inputs is exempt from graph invalidation.
     # Classify old and new inventories separately so type/mode transitions stay
     # conservative. Markdown in package resources is still a build input.
     return {name for name, entry in inputs.items()
-            if not (PurePosixPath(name).parts[0] == 'docs' and name.endswith('.md')
+            if not linux_only_input(name, entry)
+            and not (PurePosixPath(name).parts[0] == 'docs' and name.endswith('.md')
                     and entry['kind'] == 'file' and entry['mode'] & 0o7111 == 0)}
 
 
@@ -123,9 +194,9 @@ def settings_inventory(inputs):
     # Changed commands, package graphs, lockfiles, Xcode settings, or cache code
     # start a new compatibility namespace, including fallback restores.
     return content_inventory({name: entry for name, entry in inputs.items()
-        if name.startswith(('scripts/', '.github/workflows/'))
+        if not linux_only_input(name, entry) and (name.startswith(('scripts/', '.github/workflows/'))
         or Path(name).name in ('Package.swift', 'Package.resolved')
-        or '.xcodeproj/' in name or '.xcworkspace/' in name or name.endswith('.xcconfig')})
+        or '.xcodeproj/' in name or '.xcworkspace/' in name or name.endswith('.xcconfig'))})
 
 
 def command(*args):
