@@ -71,6 +71,8 @@ LINUX_ONLY_INPUT_MODES = {
     'experiments/linux-pairing-peer/Sources/COpenSSL/shim.h': 0o644,
     'experiments/linux-pairing-peer/Sources/CPairingTLS/include/PairingTLS.h': 0o644,
     'experiments/linux-pairing-peer/Sources/CPairingTLS/pairing_tls.c': 0o644,
+    'experiments/linux-pairing-peer/Sources/CPairingTLSTestSupport/include/PairingTLSTestSupport.h': 0o644,
+    'experiments/linux-pairing-peer/Sources/CPairingTLSTestSupport/test_support.c': 0o644,
     'experiments/linux-pairing-peer/Tests/LinuxPairingTLSTests/PairingTLSTests.swift': 0o644,
     'experiments/linux-storage-lease/README.md': 0o644,
     'experiments/linux-storage-lease/controls.c': 0o644,

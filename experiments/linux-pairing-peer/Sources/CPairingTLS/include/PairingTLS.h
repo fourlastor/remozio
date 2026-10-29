@@ -54,7 +54,8 @@ void remozio_tls_context_free(RemozioTLSContext *context);
 /* Tickets a client context received (tests assert zero). */
 int remozio_tls_context_tickets_received(const RemozioTLSContext *context);
 
-/* Takes ownership of fd on success and on failure. cancel_fd is polled for readability (-1 = none).
+/* Takes ownership of fd on success and on failure; fd must be a stream socket (sends use MSG_NOSIGNAL, and the
+ * process's SIGPIPE disposition is never changed). cancel_fd is polled for readability (-1 = none).
  * deadline_ms is absolute (remozio_tls_now_ms scale). On success peer_point holds the peer leaf's 65-byte
  * uncompressed P-256 point. */
 RemozioTLSStatus remozio_tls_accept(RemozioTLSContext *context, int fd, int cancel_fd, int64_t deadline_ms,

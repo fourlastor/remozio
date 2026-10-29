@@ -18,13 +18,38 @@ This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for th
 - `remozio_tls_make_identity` mirrors the Mac `TransportTLSCertificate` profile (CN `Remozio transport`, critical
   `CA:FALSE`, critical `digitalSignature`, EKU `serverAuth` and `clientAuth`). It uses OpenSSL, not
   swift-certificates, so the shim has no Swift dependency; the profile is the same.
-- The shim sets `SIGPIPE` to ignored for the whole process.
+- The shim leaves the process's `SIGPIPE` disposition alone. Its socket BIO sends with `MSG_NOSIGNAL`, so a write to a
+  reset or closed peer reports `REMOZIO_TLS_CLOSED` (or `REMOZIO_TLS_IO`) instead of raising `SIGPIPE`. Descriptors
+  must be sockets.
+- A successful accept or connect means only that this side accepted its peer. TLS 1.3 completes the client before
+  the server judges the client certificate, and the client sends its last handshake message before it judges the
+  server's. A peer that rejects us closes without a TLS alert, so the rejected side first sees an accepted connection,
+  then `REMOZIO_TLS_CLOSED` on its first read or write. An integration must treat the first authenticated application
+  message, not the handshake result, as evidence that the peer accepted this identity.
 
-Run `./scripts/check-linux-pairing-peer.sh`. The tests assert the negotiated version and ALPN. They observe zero
-tickets and no reused session in two fresh handshakes. A saved-session resumption attempt and a positive control
-for the ticket counter remain pending in [issue 496](https://github.com/rock3r/remozio/issues/496).
+Run `./scripts/check-linux-pairing-peer.sh`. The tests assert the negotiated version and ALPN, and that each side
+exports exactly the other side's public point, derived independently from that side's private key. They observe
+zero tickets and no reused session in two fresh handshakes.
 
-The tests cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid client certificates, a silent
-peer, cancellation during handshake and read, a stalled write, peer close and descriptor leaks. They inspect the
-timer clock, absolute arming, handshake cap and descriptor cleanup through `/proc/self/fdinfo`. An actual host
-suspend/resume test remains pending.
+The test-only `CPairingTLSTestSupport` target supplies plain OpenSSL peers configured beyond what the adapter allows.
+It is not part of the adapter. With it, the tests show:
+
+- **Ticket counter, positive control:** the adapter client counts the two tickets a ticket-issuing server sends.
+- **Saved-session attempt:** a client resumes the ticket-issuing server with its saved session (positive control),
+  then offers that session to the adapter server. The adapter performs a full handshake, authenticates the client's
+  key, reports no reuse on either side and sends no ticket. The offered session came from another server; the
+  adapter has no ticket of its own to resume.
+- **Certificate and ALPN negatives at both endpoints:** a leaf signed by another key, with a different issuer name or
+  with its own name; an extra chain certificate after a valid leaf; and ALPN lists that add another protocol before
+  or after the pairing protocol, or repeat it. The exact single-protocol offer from the same raw client is the
+  control.
+- **Rejection after the handshake:** the status each side observes, as described above.
+- **No `SIGPIPE`:** with the default disposition restored, creating contexts leaves it unchanged, and a write to a
+  closed peer reports `REMOZIO_TLS_CLOSED`. The raw test peers use OpenSSL's ordinary socket BIO, so the test process,
+  not the adapter, ignores `SIGPIPE` for them.
+
+The tests also cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid client and server
+certificates, a silent peer, cancellation during handshake and read, a stalled write, peer close and descriptor
+leaks. They inspect the timer clock, absolute arming, handshake cap and descriptor cleanup through
+`/proc/self/fdinfo`. An actual host suspend/resume test remains pending in
+[issue 496](https://github.com/rock3r/remozio/issues/496).
