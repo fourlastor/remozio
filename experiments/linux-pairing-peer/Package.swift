@@ -9,7 +9,9 @@ let package = Package(
     targets: [
         .systemLibrary(name: "COpenSSL", pkgConfig: "openssl", providers: [.apt(["libssl-dev"])]),
         .target(name: "CPairingTLS", dependencies: ["COpenSSL"]),
-        .testTarget(name: "LinuxPairingTLSTests", dependencies: ["CPairingTLS"],
+        // Test-only OpenSSL peers (ticket server, saved-session client, extra chain certificates); not a product.
+        .target(name: "CPairingTLSTestSupport", dependencies: ["COpenSSL"]),
+        .testTarget(name: "LinuxPairingTLSTests", dependencies: ["CPairingTLS", "CPairingTLSTestSupport"],
                     swiftSettings: [.swiftLanguageMode(.v5)]),
     ]
 )

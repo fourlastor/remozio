@@ -1,5 +1,6 @@
 import Foundation
 import Glibc
+import LinuxApprovalFixtureCore
 import RemozioHostCore
 import RemozioProtocol
 
@@ -30,7 +31,7 @@ func refuseSubmissionReplay(store: FixtureStore, directory: String, clock: Linux
     let material = try FixtureProtocol.make(capture: command.capture.canonicalBytes, clock: clock)
     try command.validate(command.capture)
     _ = try material.verify(now: clock.now())
-    try expectedRefusal({ _ = try store.consume(material, command: command, now: clock.now) }) {
+    try expectedRefusal({ _ = try store.consume(material, validate: command.validate, now: clock.now) }) {
         ($0 as? CommandSubmissionReplayError) == .alreadyReserved
     }
 }
@@ -101,7 +102,7 @@ func runFixture() throws {
             decisionResult = "expired"
         case "expire-before-consume":
             try admit()
-            try expectedRefusal({ _ = try store.consume(material, command: command, now: { deadline }) }) {
+            try expectedRefusal({ _ = try store.consume(material, validate: command.validate, now: { deadline }) }) {
                 ($0 as? DecisionVerificationError) == .expired
             }
             decisionResult = "expiredBeforeConsume"
@@ -109,7 +110,7 @@ func runFixture() throws {
             try admit()
             var samples = 0
             try expectedRefusal({
-                _ = try store.consume(material, command: command, now: {
+                _ = try store.consume(material, validate: command.validate, now: {
                     samples += 1
                     return samples == 1 ? initialNow : deadline
                 })
@@ -119,13 +120,13 @@ func runFixture() throws {
         case "audit-failure":
             try admit()
             try store.injectAuditFailure()
-            try expectedRefusal({ _ = try store.consume(material, command: command, now: clock.now) }) {
+            try expectedRefusal({ _ = try store.consume(material, validate: command.validate, now: clock.now) }) {
                 if case .storage = $0 as? AuditJournalError { return true }; return false
             }
             decisionResult = "auditFailure"
         default:
             try admit()
-            let token = try store.consume(material, command: command, now: clock.now, leavePending: scenario == "crash-before-launch")
+            let token = try store.consume(material, validate: command.validate, now: clock.now, leavePending: scenario == "crash-before-launch")
             if scenario == "crash-before-launch" { _exit(86) }
             expectedRows = 1
             if scenario == "decline" {
@@ -142,7 +143,7 @@ func runFixture() throws {
                 try store.succeeded()
                 decisionResult = "accepted"; expectedPhase = "succeeded"; expectedRecords = 3; expectedExecutions = 1
                 if scenario == "replay" {
-                    try expectedRefusal({ _ = try store.consume(material, command: command, now: clock.now) }) {
+                    try expectedRefusal({ _ = try store.consume(material, validate: command.validate, now: clock.now) }) {
                         ($0 as? ConsumptionJournalError) == .alreadyConsumed
                     }
                     try expectedRefusal({ try store.dispatched(token) }) {

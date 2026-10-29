@@ -68,7 +68,7 @@ class LinuxOSCaptureReportTests(unittest.TestCase):
     def test_manifest_covers_actual_protocol_and_component_sources(self):
         inventory = MODULE.source_inventory()
         for path in ("protocol/swift/Sources/RemozioProtocol/LinuxCommandCapture.swift",
-                     "experiments/linux-os-capture/Sources/LinuxOSCaptureExperiment/Observation.swift",
+                     "experiments/linux-os-capture/Sources/LinuxOSObservation/Observation.swift",
                      "experiments/linux-os-capture/Sources/LinuxOSCaptureExperiment/main.swift",
                      "scripts/run-linux-caller-experiment.py"):
             self.assertIn(path, inventory)

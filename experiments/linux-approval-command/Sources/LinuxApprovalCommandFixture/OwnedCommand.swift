@@ -1,5 +1,6 @@
 import Foundation
 import Glibc
+import LinuxApprovalFixtureCore
 import RemozioProtocol
 
 /// Owns only a fixed, unprivileged command and its pipes. Capture claims are fixture data,
