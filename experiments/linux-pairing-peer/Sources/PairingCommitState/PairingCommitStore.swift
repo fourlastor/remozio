@@ -1,7 +1,7 @@
 #if os(Linux)
 import Glibc
 #else
-import Darwin
+#error("PairingCommitState needs Linux: it uses CLOCK_BOOTTIME and flock between threads")
 #endif
 import Foundation
 import RemozioProtocol
@@ -19,6 +19,9 @@ public enum PairingCommitError: Error, Equatable {
     /// The new state is durable, but the deadline passed or the attempt was cancelled before the caller could sign.
     /// The caller must not commit again and must not send a receipt.
     case committedLate(revision: Data)
+    /// The rename happened, but the directory `fsync` failed. The new state may or may not survive a power loss.
+    /// The caller must not commit again and must not send a receipt.
+    case committedUnconfirmed(revision: Data, errno: Int32)
     case unsafeDirectory
     case corruptState
     case storage(operation: String, errno: Int32)
@@ -41,15 +44,18 @@ public struct PairingEnrollmentSummary: Equatable, Sendable {
 /// lock on the state directory, checks the rules and replaces the file with one atomic rename. After a crash the
 /// directory holds either the old state or the complete new state.
 public final class PairingCommitStore: Sendable {
-    public static let maximumEnrollments = 256
-    public static let maximumConsumedSetupIDs = 4096
+    public static let defaultMaximumEnrollments = 256
+    public static let defaultMaximumConsumedSetupIDs = 4096
+    public static let defaultMaximumStateBytes = 8 * 1024 * 1024
     private static let stateName = "state.json"
     private static let temporaryName = "state.json.tmp"
     private static let lockName = "state.lock"
-    private static let maximumStateBytes = 8 * 1024 * 1024
 
     private let directory: URL
     private let initialRevision: Data?
+    private let maximumEnrollments: Int
+    private let maximumConsumedSetupIDs: Int
+    private let maximumStateBytes: Int
     private let clock: @Sendable () throws -> UInt64
     private let crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?
 
@@ -57,11 +63,19 @@ public final class PairingCommitStore: Sendable {
     ///   - initialTrustRevision: used only when no state exists yet; a random 16-byte revision otherwise.
     ///   - clock: milliseconds on a suspend-inclusive clock. The default reads `CLOCK_BOOTTIME`.
     ///   - crashHook: tests throw from it to model a crash before a persistence step.
+    ///   - maximumEnrollments, maximumConsumedSetupIDs, maximumStateBytes: bounds. A commit that would exceed one is
+    ///     refused before it writes, so the store can always read back what it wrote.
     public init(directory: URL, initialTrustRevision: Data? = nil,
+                maximumEnrollments: Int = PairingCommitStore.defaultMaximumEnrollments,
+                maximumConsumedSetupIDs: Int = PairingCommitStore.defaultMaximumConsumedSetupIDs,
+                maximumStateBytes: Int = PairingCommitStore.defaultMaximumStateBytes,
                 clock: @escaping @Sendable () throws -> UInt64 = PairingCommitStore.bootTimeMilliseconds,
                 crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)? = nil) {
         self.directory = directory
         self.initialRevision = initialTrustRevision
+        self.maximumEnrollments = maximumEnrollments
+        self.maximumConsumedSetupIDs = maximumConsumedSetupIDs
+        self.maximumStateBytes = maximumStateBytes
         self.clock = clock
         self.crashHook = crashHook
     }
@@ -75,7 +89,8 @@ public final class PairingCommitStore: Sendable {
         return UInt64(sample.tv_sec) * 1000 + UInt64(sample.tv_nsec) / 1_000_000
     }
 
-    /// The trust revision a new transcript must name. Creates the initial state when none exists.
+    /// The trust revision a new transcript must name. Creates the initial state when none exists. The configured
+    /// `initialTrustRevision` applies only to that first creation.
     public func trustRevision() throws -> Data {
         try withLockedDirectory(deadline: nil, isCancelled: { false }) { handle in try handle.loadOrCreate().trustRevision }
     }
@@ -90,7 +105,8 @@ public final class PairingCommitStore: Sendable {
         }
     }
 
-    /// Commits one enrollment. `deadlineMilliseconds` is on the same clock as `clock`.
+    /// Commits one enrollment. `deadlineMilliseconds` is on the same clock as `clock`. The caller derives it from the
+    /// setup limit and the transcript expiry, so the store does not read the transcript's wall-clock window.
     /// Returns the new trust revision. Never call it again after it throws `committedLate` or any other error that
     /// follows a durable write.
     public func commit(transcript: PairingTranscript, biometricProof: Data, deadlineMilliseconds: UInt64,
@@ -114,15 +130,18 @@ public final class PairingCommitStore: Sendable {
                     throw PairingCommitError.alreadyEnrolled
                 }
             }
-            guard current.enrollments.count < Self.maximumEnrollments,
-                  current.consumedSetupIDs.count < Self.maximumConsumedSetupIDs else { throw PairingCommitError.stateFull }
+            guard current.enrollments.count < maximumEnrollments,
+                  current.consumedSetupIDs.count < maximumConsumedSetupIDs else { throw PairingCommitError.stateFull }
             var next = current
             repeat { next.trustRevision = Data((0..<16).map { _ in UInt8.random(in: 0...255) }) }
                 while next.trustRevision == current.trustRevision
             next.consumedSetupIDs.append(transcript.setupID)
             next.enrollments.append(StoredEnrollment(transcript: try transcript.encode(), biometricProof: biometricProof))
             try checkLive(deadline: deadlineMilliseconds, isCancelled: isCancelled)
-            try handle.replace(with: next)
+            do { try handle.replace(with: next, maximumBytes: maximumStateBytes) }
+            catch let PairingCommitError.committedUnconfirmed(_, code) {
+                throw PairingCommitError.committedUnconfirmed(revision: next.trustRevision, errno: code)
+            }
             if (try? clock()).map({ $0 >= deadlineMilliseconds }) ?? true || isCancelled() {
                 throw PairingCommitError.committedLate(revision: next.trustRevision)
             }
@@ -139,7 +158,8 @@ public final class PairingCommitStore: Sendable {
 
     private func withLockedDirectory<T>(deadline: UInt64?, isCancelled: () -> Bool,
                                         _ body: (DirectoryHandle) throws -> T) throws -> T {
-        let handle = try DirectoryHandle.open(directory, initialRevision: initialRevision, crashHook: crashHook)
+        let handle = try DirectoryHandle.open(directory, initialRevision: initialRevision,
+                                              maximumBytes: maximumStateBytes, crashHook: crashHook)
         defer { handle.close() }
         try handle.lock(wait: { () throws in
             if isCancelled() { throw PairingCommitError.cancelled }
@@ -160,26 +180,45 @@ public final class PairingCommitStore: Sendable {
         private let directoryFD: Int32
         private var lockFD: Int32 = -1
         private let initialRevision: Data?
+        private let maximumBytes: Int
         private let crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?
 
-        private init(directoryFD: Int32, initialRevision: Data?, crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?) {
-            self.directoryFD = directoryFD; self.initialRevision = initialRevision; self.crashHook = crashHook
+        private init(directoryFD: Int32, initialRevision: Data?, maximumBytes: Int,
+                     crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?) {
+            self.directoryFD = directoryFD; self.initialRevision = initialRevision
+            self.maximumBytes = maximumBytes; self.crashHook = crashHook
         }
 
-        static func open(_ url: URL, initialRevision: Data?,
+        static func open(_ url: URL, initialRevision: Data?, maximumBytes: Int,
                          crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?) throws -> DirectoryHandle {
             if let initialRevision, initialRevision.count != 16 { throw PairingCommitError.corruptState }
             let path = url.path
-            if mkdir(path, 0o700) != 0 && errno != EEXIST { throw PairingCommitError.storage(operation: "mkdir", errno: errno) }
+            var created = false
+            if mkdir(path, 0o700) == 0 { created = true }
+            else if errno != EEXIST { throw PairingCommitError.storage(operation: "mkdir", errno: errno) }
             let fd = Glibc.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
             guard fd >= 0 else {
                 if errno == ELOOP || errno == ENOTDIR { throw PairingCommitError.unsafeDirectory }
                 throw PairingCommitError.storage(operation: "open directory", errno: errno)
             }
+            // The umask can widen the mode that mkdir gave. Make it exact before the check below.
+            if created, fchmod(fd, 0o700) != 0 {
+                let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fchmod directory", errno: code)
+            }
             var info = stat()
             guard fstat(fd, &info) == 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fstat", errno: code) }
             guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { _ = Glibc.close(fd); throw PairingCommitError.unsafeDirectory }
-            return DirectoryHandle(directoryFD: fd, initialRevision: initialRevision, crashHook: crashHook)
+            if created {
+                // A new directory entry is durable only after its parent is synced.
+                let parent = url.deletingLastPathComponent().path
+                let parentFD = Glibc.open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+                guard parentFD >= 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "open parent", errno: code) }
+                let synced = fsync(parentFD) == 0
+                let code = errno
+                _ = Glibc.close(parentFD)
+                guard synced else { _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fsync parent", errno: code) }
+            }
+            return DirectoryHandle(directoryFD: fd, initialRevision: initialRevision, maximumBytes: maximumBytes, crashHook: crashHook)
         }
 
         func close() {
@@ -192,6 +231,7 @@ public final class PairingCommitStore: Sendable {
             let fd = openat(directoryFD, PairingCommitStore.lockName, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw PairingCommitError.storage(operation: "open lock", errno: errno) }
             lockFD = fd
+            guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod lock", errno: errno) }
             while flock(fd, LOCK_EX | LOCK_NB) != 0 {
                 guard errno == EWOULDBLOCK || errno == EINTR else { throw PairingCommitError.storage(operation: "flock", errno: errno) }
                 try check()
@@ -203,7 +243,7 @@ public final class PairingCommitStore: Sendable {
             if let state = try load() { return state }
             let revision = initialRevision ?? Data((0..<16).map { _ in UInt8.random(in: 0...255) })
             let state = StoredState(format: 1, trustRevision: revision, consumedSetupIDs: [], enrollments: [])
-            try replace(with: state)
+            try replace(with: state, maximumBytes: maximumBytes)
             return state
         }
 
@@ -217,7 +257,7 @@ public final class PairingCommitStore: Sendable {
             var info = stat()
             guard fstat(fd, &info) == 0 else { throw PairingCommitError.storage(operation: "fstat state", errno: errno) }
             guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0, info.st_mode & S_IFMT == S_IFREG,
-                  info.st_size <= PairingCommitStore.maximumStateBytes else { throw PairingCommitError.corruptState }
+                  info.st_size <= maximumBytes else { throw PairingCommitError.corruptState }
             var bytes = [UInt8](repeating: 0, count: Int(info.st_size))
             var offset = 0
             while offset < bytes.count {
@@ -233,15 +273,17 @@ public final class PairingCommitStore: Sendable {
         }
 
         /// Temporary file, fsync, rename, fsync of the directory. A crash hook runs before each step.
-        func replace(with state: StoredState) throws {
+        func replace(with state: StoredState, maximumBytes: Int) throws {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
             let bytes = try encoder.encode(state)
+            guard bytes.count <= maximumBytes else { throw PairingCommitError.stateFull }
             try crashHook?(.createTemporary)
             let fd = openat(directoryFD, PairingCommitStore.temporaryName,
                             O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw PairingCommitError.storage(operation: "create temporary", errno: errno) }
             defer { _ = Glibc.close(fd) }
+            guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod temporary", errno: errno) }
             var offset = 0
             while offset < bytes.count {
                 let count = bytes.withUnsafeBytes { write(fd, $0.baseAddress! + offset, $0.count - offset) }
@@ -256,7 +298,9 @@ public final class PairingCommitStore: Sendable {
                 throw PairingCommitError.storage(operation: "rename", errno: errno)
             }
             try crashHook?(.syncDirectory)
-            guard fsync(directoryFD) == 0 else { throw PairingCommitError.storage(operation: "fsync directory", errno: errno) }
+            guard fsync(directoryFD) == 0 else {
+                throw PairingCommitError.committedUnconfirmed(revision: Data(), errno: errno)
+            }
             try crashHook?(.finished)
         }
     }

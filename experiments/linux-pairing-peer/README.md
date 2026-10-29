@@ -66,8 +66,14 @@ A commit, under an exclusive `flock` on `state.lock` that honours the deadline a
    ID or key that is already enrolled;
 2. writes the new state (consumed ID, new revision, enrollment, exact transcript) as one atomic change: temporary file,
    `fsync`, `rename`, `fsync` of the directory;
-3. checks the deadline and cancellation again. If either fired after the write, it throws `committedLate`. The caller
-   must not sign or send a receipt, and must not commit again.
+3. checks the deadline and cancellation again. If either fired after the write, it throws `committedLate`. If the
+   directory `fsync` fails after the rename, it throws `committedUnconfirmed`. In both cases the caller must not sign
+   or send a receipt, and must not commit again.
+
+The caller derives the deadline from the setup limit and the transcript expiry. The store does not read the transcript's
+wall-clock window. The store refuses a commit that would pass its bounds (256 enrollments, 4096 setup IDs, 8 MiB) before
+it writes, so it can always read back what it wrote. `trustRevision()` and `list()` create the initial state when none
+exists, and the configured initial revision applies only then. The module builds on Linux only.
 
 A crash before the rename leaves the old state. A crash after it leaves the complete new state. The tests inject a crash
 before each step. The default clock is `CLOCK_BOOTTIME`, which counts suspend. The store refuses a corrupt state file and

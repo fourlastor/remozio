@@ -35,7 +35,8 @@ final class PairingCommitStoreTests: XCTestCase {
 
     /// A transcript with fresh keys, signed by its own biometric key. Distinct `tag` values give distinct phones.
     private func candidate(tag: UInt8, setupTag: UInt8? = nil, expected: Data? = nil, replacement: PairingReplacement? = nil,
-                           sharedPhoneID: Data? = nil, sharedBiometric: P256.Signing.PrivateKey? = nil) throws -> Candidate {
+                           sharedPhoneID: Data? = nil, sharedBiometric: P256.Signing.PrivateKey? = nil,
+                           sharedDecision: P256.Signing.PrivateKey? = nil) throws -> Candidate {
         let phoneID = sharedPhoneID ?? Data(repeating: tag, count: 16)
         let scope = try ChannelScope(macID: Data(repeating: 0xA1, count: 16), accountID: Data(repeating: 0xA2, count: 16),
                                      phoneID: phoneID, enrollmentEpoch: Data(repeating: tag &+ 0x40, count: 16))
@@ -52,7 +53,7 @@ final class PairingCommitStoreTests: XCTestCase {
             phone: phone, mac: mac, minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1,
             macAuthorityKey: P256.Signing.PrivateKey().publicKey.x963Representation,
             macTransportKey: P256.Signing.PrivateKey().publicKey.x963Representation,
-            transportKey: key(1), decisionKey: key(2), biometricKey: key(3, biometricPrivate),
+            transportKey: key(1), decisionKey: key(2, sharedDecision ?? P256.Signing.PrivateKey()), biometricKey: key(3, biometricPrivate),
             enrollmentTag: Data(repeating: tag, count: 32), replacement: replacement,
             expectedTrustRevision: expected ?? revision, issuedAtUnixMillis: 1_000, expiresAtUnixMillis: 301_000)
         let proof = try biometricPrivate.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
@@ -261,46 +262,51 @@ final class PairingCommitStoreTests: XCTestCase {
         XCTAssertEqual(try self.store().list().count, 1)
     }
 
+    /// Holds the state lock inside a commit until `release` is signalled. The initial state already exists, so the
+    /// hook blocks the one write of the holder's commit.
+    private func holdLock(release: DispatchSemaphore) throws -> (held: XCTestExpectation, finished: XCTestExpectation) {
+        _ = try store().trustRevision()
+        let held = expectation(description: "lock held")
+        let finished = expectation(description: "holder finished")
+        let holderStore = store(crash: { step in
+            if step == .syncTemporary { held.fulfill(); release.wait() }
+        })
+        let one = try candidate(tag: 1)
+        Thread {
+            _ = try? self.commit(holderStore, one)
+            finished.fulfill()
+        }.start()
+        return (held, finished)
+    }
+
     func testCommitWaitingForTheLockPastItsDeadlineIsRejected() throws {
-        let clock = Clock(1_000)
-        let started = expectation(description: "lock held")
         let release = DispatchSemaphore(value: 0)
-        let holder = Thread {
-            let holderStore = self.store(clock: clock, crash: { step in
-                if step == .syncTemporary { started.fulfill(); release.wait() }
-            })
-            _ = try? self.commit(holderStore, self.candidate(tag: 1))
-        }
-        holder.start()
-        wait(for: [started], timeout: 5)
+        let (held, finished) = try holdLock(release: release)
+        wait(for: [held], timeout: 5)
         // The waiter's clock moves past its deadline while the holder keeps the lock.
         let waiterClock = Clock(1_000)
         let waiter = store(clock: waiterClock)
-        let late = try candidate(tag: 2, expected: revision)
+        let late = try candidate(tag: 2)
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { waiterClock.set(5_000) }
         XCTAssertThrowsError(try commit(waiter, late, deadline: 2_000)) {
             XCTAssertEqual($0 as? PairingCommitError, .expired)
         }
         release.signal()
+        wait(for: [finished], timeout: 5)
+        XCTAssertEqual(try store().list().count, 1, "only the holder committed")
     }
 
     func testCancelWhileWaitingForTheLockIsRejected() throws {
-        let started = expectation(description: "lock held")
         let release = DispatchSemaphore(value: 0)
-        let holder = Thread {
-            let holderStore = self.store(crash: { step in
-                if step == .syncTemporary { started.fulfill(); release.wait() }
-            })
-            _ = try? self.commit(holderStore, self.candidate(tag: 1))
-        }
-        holder.start()
-        wait(for: [started], timeout: 5)
+        let (held, finished) = try holdLock(release: release)
+        wait(for: [held], timeout: 5)
         let flag = ManagedAtomicFlag()
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { flag.set() }
         XCTAssertThrowsError(try commit(store(), candidate(tag: 2), cancelled: { flag.isSet })) {
             XCTAssertEqual($0 as? PairingCommitError, .cancelled)
         }
         release.signal()
+        wait(for: [finished], timeout: 5)
     }
 
     func testTwoConcurrentCommitsWithTheSameRevisionLetExactlyOneWin() throws {
@@ -313,6 +319,75 @@ final class PairingCommitStoreTests: XCTestCase {
         XCTAssertEqual(results.successes, 1)
         XCTAssertEqual(results.failures.filter { ($0 as? PairingCommitError) == .staleRevision }.count, transcripts.count - 1)
         XCTAssertEqual(try store().list().count, 1)
+    }
+
+    func testEnrolledDecisionKeyIsRejectedForAnotherPhone() throws {
+        let store = store()
+        let key = P256.Signing.PrivateKey()
+        let next = try commit(store, candidate(tag: 1, sharedDecision: key))
+        XCTAssertThrowsError(try commit(store, candidate(tag: 2, expected: next, sharedDecision: key))) {
+            XCTAssertEqual($0 as? PairingCommitError, .alreadyEnrolled)
+        }
+    }
+
+    // MARK: Bounds, umask, links
+
+    func testEnrollmentLimitIsEnforcedBeforeTheWrite() throws {
+        let limited = PairingCommitStore(directory: stateDirectory, initialTrustRevision: revision,
+                                         maximumEnrollments: 1, clock: { 1_000 })
+        let next = try commit(limited, candidate(tag: 1))
+        XCTAssertThrowsError(try commit(limited, candidate(tag: 2, expected: next))) {
+            XCTAssertEqual($0 as? PairingCommitError, .stateFull)
+        }
+        XCTAssertEqual(try limited.trustRevision(), next)
+        XCTAssertEqual(try limited.list().count, 1)
+    }
+
+    func testConsumedSetupIDLimitIsEnforcedBeforeTheWrite() throws {
+        let limited = PairingCommitStore(directory: stateDirectory, initialTrustRevision: revision,
+                                         maximumConsumedSetupIDs: 1, clock: { 1_000 })
+        let next = try commit(limited, candidate(tag: 1))
+        XCTAssertThrowsError(try commit(limited, candidate(tag: 2, expected: next))) {
+            XCTAssertEqual($0 as? PairingCommitError, .stateFull)
+        }
+    }
+
+    func testStateThatWouldExceedTheByteLimitIsRefusedAndStaysReadable() throws {
+        let limited = PairingCommitStore(directory: stateDirectory, initialTrustRevision: revision,
+                                         maximumStateBytes: 600, clock: { 1_000 })
+        XCTAssertEqual(try limited.trustRevision(), revision)
+        XCTAssertThrowsError(try commit(limited, candidate(tag: 1))) { XCTAssertEqual($0 as? PairingCommitError, .stateFull) }
+        XCTAssertEqual(try limited.trustRevision(), revision, "the old state still loads")
+        XCTAssertEqual(try limited.list(), [])
+    }
+
+    func testPrivateModesHoldUnderAnOpenUmask() throws {
+        let previous = umask(0)
+        defer { umask(previous) }
+        _ = try commit(store(), candidate(tag: 1))
+        for (name, expected) in [(nil, 0o700), ("state.json", 0o600), ("state.lock", 0o600)] as [(String?, Int)] {
+            let url = name.map { stateDirectory.appendingPathComponent($0) } ?? stateDirectory
+            let mode = try (FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as! NSNumber).intValue
+            XCTAssertEqual(mode, expected, name ?? "directory")
+        }
+        XCTAssertEqual(try store().list().count, 1, "the next open accepts what the commit wrote")
+    }
+
+    func testSymlinkedStateAndLockFilesAreRefused() throws {
+        _ = try store().trustRevision()
+        let target = root.appendingPathComponent("elsewhere")
+        try Data("x".utf8).write(to: target)
+        let state = stateDirectory.appendingPathComponent("state.json")
+        try FileManager.default.removeItem(at: state)
+        try FileManager.default.createSymbolicLink(at: state, withDestinationURL: target)
+        XCTAssertThrowsError(try store().trustRevision())
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "x", "the link target is untouched")
+        try FileManager.default.removeItem(at: state)
+
+        let lock = stateDirectory.appendingPathComponent("state.lock")
+        try FileManager.default.removeItem(at: lock)
+        try FileManager.default.createSymbolicLink(at: lock, withDestinationURL: target)
+        XCTAssertThrowsError(try store().trustRevision())
     }
 
     // MARK: Crash injection
