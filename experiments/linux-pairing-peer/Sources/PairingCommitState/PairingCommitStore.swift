@@ -3,6 +3,7 @@ import Glibc
 #else
 #error("PairingCommitState needs Linux: it uses CLOCK_BOOTTIME and flock between threads")
 #endif
+import CPairingFiles
 import Foundation
 import RemozioProtocol
 
@@ -205,18 +206,28 @@ public final class PairingCommitStore: Sendable {
             var created = false
             if mkdir(path, 0o700) == 0 { created = true }
             else if errno != EEXIST { throw PairingCommitError.storage(operation: "mkdir", errno: errno) }
-            let fd = Glibc.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else {
+            let pathFD = remozio_pairing_open_directory_path(path)
+            guard pathFD >= 0 else {
                 if errno == ELOOP || errno == ENOTDIR { throw PairingCommitError.unsafeDirectory }
                 throw PairingCommitError.storage(operation: "open directory", errno: errno)
             }
-            // mkdir's mode was exact, but an inherited default ACL or a setgid parent can change it. Make it exact.
-            if created, fchmod(fd, 0o700) != 0 {
-                let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fchmod directory", errno: code)
+            defer { _ = Glibc.close(pathFD) }
+            var pinned = stat()
+            guard fstat(pathFD, &pinned) == 0 else { throw PairingCommitError.storage(operation: "fstat", errno: errno) }
+            guard pinned.st_mode & S_IFMT == S_IFDIR, pinned.st_uid == geteuid(),
+                  created || pinned.st_mode & 0o077 == 0 else { throw PairingCommitError.unsafeDirectory }
+            // O_PATH does not require owner read permission. Repair only this pinned, owned directory.
+            if pinned.st_mode & 0o7777 != 0o700, remozio_pairing_chmod_directory_path(pathFD, 0o700) != 0 {
+                throw PairingCommitError.storage(operation: "fchmod directory", errno: errno)
             }
+            let fd = openat(pathFD, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw PairingCommitError.storage(operation: "open directory", errno: errno) }
             var info = stat()
             guard fstat(fd, &info) == 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fstat", errno: code) }
-            guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { _ = Glibc.close(fd); throw PairingCommitError.unsafeDirectory }
+            guard info.st_dev == pinned.st_dev, info.st_ino == pinned.st_ino,
+                  info.st_uid == geteuid(), info.st_mode & 0o7777 == 0o700 else {
+                _ = Glibc.close(fd); throw PairingCommitError.unsafeDirectory
+            }
             // Every opener syncs the parent, not only the creator. A creator whose sync failed leaves the directory in
             // place, and a concurrent opener can run before the creator finishes. No call may return success for an
             // entry that no call has confirmed.

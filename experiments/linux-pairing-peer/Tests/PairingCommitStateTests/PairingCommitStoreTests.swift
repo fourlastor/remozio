@@ -1,3 +1,4 @@
+import CPairingFiles
 import Crypto
 import Foundation
 import RemozioProtocol
@@ -444,6 +445,106 @@ final class PairingCommitStoreTests: XCTestCase {
             XCTAssertEqual(mode, expected, name ?? "directory")
         }
         XCTAssertEqual(try store().list().count, 1, "the next open accepts what the commit wrote")
+    }
+
+    func testOwnerReadRemovingUmaskAllowsCreationAndRetry() throws {
+        try runWithIsolatedUmask(test: "testOwnerReadRemovingUmaskAllowsCreationAndRetry") {
+            for mask: mode_t in [0o477, 0o777] {
+                let previous = umask(mask)
+                defer { umask(previous) }
+                let one = try candidate(tag: 1)
+                let next = try commit(store(), one)
+                XCTAssertEqual(try store().trustRevision(), next)
+                XCTAssertEqual(try store().list().count, 1)
+                XCTAssertEqual(try directoryMode(stateDirectory), 0o700)
+                for name in ["state.json", "state.lock"] {
+                    XCTAssertEqual(try directoryMode(stateDirectory.appendingPathComponent(name)), 0o600, name)
+                }
+                umask(previous)
+                XCTAssertEqual(chmod(stateDirectory.path, 0o300), 0)
+                XCTAssertEqual(try store().trustRevision(), next, "a retry preserves the existing revision")
+                XCTAssertEqual(try store().list().count, 1)
+                XCTAssertEqual(try directoryMode(stateDirectory), 0o700)
+                try FileManager.default.removeItem(at: stateDirectory)
+            }
+        }
+    }
+
+    func testPrivateUnreadableDirectoryIsRepairedBeforeTheParentSync() throws {
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        XCTAssertEqual(chmod(stateDirectory.path, 0), 0)
+        defer { _ = chmod(stateDirectory.path, 0o700) }
+        let failed = SyncProbe(failing: [1])
+        XCTAssertThrowsError(try store(probe: failed).trustRevision()) {
+            guard case .storage(operation: "fsync parent", errno: EIO)? = $0 as? PairingCommitError else { return XCTFail("\($0)") }
+        }
+        XCTAssertEqual(try directoryMode(stateDirectory), 0o700)
+        let retry = SyncProbe()
+        XCTAssertEqual(try store(probe: retry).trustRevision(), revision)
+        XCTAssertEqual(retry.count, 3, "the retry syncs the parent, state file and directory")
+    }
+
+    func testDirectoryPermissionRepairUsesThePinnedInodeAfterARename() throws {
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        let fd = remozio_pairing_open_directory_path(stateDirectory.path)
+        guard fd >= 0 else { return XCTFail("open failed: \(errno)") }
+        defer { _ = close(fd) }
+        let moved = root.appendingPathComponent("moved")
+        try FileManager.default.moveItem(at: stateDirectory, to: moved)
+        XCTAssertEqual(chmod(moved.path, 0o300), 0)
+        defer { _ = chmod(moved.path, 0o700) }
+        try FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o755])
+        XCTAssertEqual(remozio_pairing_chmod_directory_path(fd, 0o700), 0)
+        XCTAssertEqual(try directoryMode(moved), 0o700)
+        XCTAssertEqual(try directoryMode(stateDirectory), 0o755, "the replacement is unchanged")
+        XCTAssertThrowsError(try store().trustRevision()) { XCTAssertEqual($0 as? PairingCommitError, .unsafeDirectory) }
+        XCTAssertEqual(try directoryMode(stateDirectory), 0o755)
+    }
+
+    func testSymlinkedUnreadableDirectoryIsRefusedWithoutChangingItsTarget() throws {
+        let target = root.appendingPathComponent("target")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        XCTAssertEqual(chmod(target.path, 0), 0)
+        defer { _ = chmod(target.path, 0o700) }
+        try FileManager.default.createSymbolicLink(at: stateDirectory, withDestinationURL: target)
+        XCTAssertThrowsError(try store().trustRevision()) { XCTAssertEqual($0 as? PairingCommitError, .unsafeDirectory) }
+        XCTAssertEqual(try directoryMode(target), 0)
+    }
+
+    private func directoryMode(_ url: URL) throws -> Int {
+        try (FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as! NSNumber).intValue
+    }
+
+    private func runWithIsolatedUmask(test: String, body: () throws -> Void) throws {
+        guard geteuid() != 0 else { throw XCTSkip("Run this permission test as a non-root user.") }
+        if ProcessInfo.processInfo.environment["REMOZIO_PAIRING_UMASK_TEST"] == test {
+            try body()
+            return
+        }
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        child.arguments = ["PairingCommitStateTests.PairingCommitStoreTests/" + test]
+        var environment = ProcessInfo.processInfo.environment
+        environment["REMOZIO_PAIRING_UMASK_TEST"] = test
+        child.environment = environment
+        let output = root.appendingPathComponent("umask-child.log")
+        XCTAssertTrue(FileManager.default.createFile(atPath: output.path, contents: nil,
+                                                     attributes: [.posixPermissions: 0o600]))
+        let handle = try FileHandle(forWritingTo: output)
+        defer { try? handle.close() }
+        child.standardOutput = handle
+        child.standardError = handle
+        try child.run()
+        child.waitUntilExit()
+        let captured = try Data(contentsOf: output)
+        XCTAssertEqual(child.terminationReason, .exit)
+        XCTAssertEqual(child.terminationStatus, 0, String(decoding: captured.prefix(8192), as: UTF8.self))
+        XCTAssertTrue(String(decoding: captured, as: UTF8.self).contains("Executed 1 test"),
+                      "the child must select and execute the permission test")
     }
 
     func testSymlinkedStateAndLockFilesAreRefused() throws {

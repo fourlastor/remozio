@@ -19,9 +19,10 @@ let package = Package(
         // Test-only OpenSSL peers (ticket server, saved-session client, extra chain certificates); not a product.
         .target(name: "CPairingTLSTestSupport", dependencies: ["COpenSSL"]),
         // Durable commit state machine. No network and no TLS: it takes a decoded transcript and a proof.
-        .target(name: "PairingCommitState", dependencies: [.product(name: "RemozioProtocol", package: "swift")]),
+        .target(name: "CPairingFiles"),
+        .target(name: "PairingCommitState", dependencies: ["CPairingFiles", .product(name: "RemozioProtocol", package: "swift")]),
         .testTarget(name: "PairingCommitStateTests", dependencies: [
-            "PairingCommitState",
+            "PairingCommitState", "CPairingFiles",
             .product(name: "RemozioProtocol", package: "swift"),
             .product(name: "Crypto", package: "swift-crypto"),
         ], swiftSettings: [.swiftLanguageMode(.v5)]),

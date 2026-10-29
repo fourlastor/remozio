@@ -75,6 +75,11 @@ wall-clock window. The store refuses a commit that would pass its bounds (256 en
 it writes, so it can always read back what it wrote. `trustRevision()` and `list()` create the initial state when none
 exists, and the configured initial revision applies only then. The module builds on Linux only.
 
+Directory opening uses a no-follow `O_PATH` descriptor before it requires read permission. The store checks ownership
+and refuses an existing directory with group or other permissions. It restores mode 0700 through the pinned descriptor
+and then opens the same inode for reading. Permission repair requires `/proc/self/fd`; a missing procfs mount causes a
+storage error. A restrictive umask test runs in a separate process as a non-root user. Root runs skip that test.
+
 A crash before the rename leaves the old state. A crash after it leaves the complete new state. The tests inject a crash
 before each step. The default clock is `CLOCK_BOOTTIME`, which counts suspend. The store refuses a corrupt state file and
 never resets it.
