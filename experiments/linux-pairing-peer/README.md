@@ -60,7 +60,7 @@ leaks. They inspect the timer clock, absolute arming, handshake cap and descript
 (`state.json`) inside a private directory (0700, files 0600). It has no network or TLS code. It takes a decoded
 `PairingTranscript`, the phone's biometric proof, a deadline on a suspend-inclusive clock and a cancellation check.
 
-A commit, under an exclusive `flock` on `state.lock` that honours the deadline and cancellation:
+Every open syncs the parent directory first, so no call returns success for a state directory entry that nothing confirmed. A commit then runs under an exclusive `flock` on `state.lock` that honours the deadline and cancellation:
 
 1. rejects a replacement (version 1 has none), an invalid proof, a stale trust revision, a used setup ID, and a phone
    ID or key that is already enrolled;

@@ -60,11 +60,13 @@ public final class PairingCommitStore: Sendable {
     private let maximumConsumedSetupIDs: Int
     private let maximumStateBytes: Int
     private let clock: @Sendable () throws -> UInt64
+    private let sync: @Sendable (Int32) -> Int32
     private let crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?
 
     /// - Parameters:
     ///   - initialTrustRevision: used only when no state exists yet; a random 16-byte revision otherwise.
     ///   - clock: milliseconds on a suspend-inclusive clock. The default reads `CLOCK_BOOTTIME`.
+    ///   - syncFile: `fsync` of a descriptor, returning 0 or -1 with `errno` set. Tests replace it to fail a sync.
     ///   - crashHook: tests throw from it to model a crash before a persistence step.
     ///   - maximumEnrollments, maximumConsumedSetupIDs, maximumStateBytes: bounds. A commit that would exceed one is
     ///     refused before it writes, so the store can always read back what it wrote.
@@ -73,6 +75,7 @@ public final class PairingCommitStore: Sendable {
                 maximumConsumedSetupIDs: Int = PairingCommitStore.defaultMaximumConsumedSetupIDs,
                 maximumStateBytes: Int = PairingCommitStore.defaultMaximumStateBytes,
                 clock: @escaping @Sendable () throws -> UInt64 = PairingCommitStore.bootTimeMilliseconds,
+                syncFile: @escaping @Sendable (Int32) -> Int32 = { fsync($0) },
                 crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)? = nil) {
         self.directory = directory
         self.initialRevision = initialTrustRevision
@@ -80,6 +83,7 @@ public final class PairingCommitStore: Sendable {
         self.maximumConsumedSetupIDs = maximumConsumedSetupIDs
         self.maximumStateBytes = maximumStateBytes
         self.clock = clock
+        self.sync = syncFile
         self.crashHook = crashHook
     }
 
@@ -163,7 +167,7 @@ public final class PairingCommitStore: Sendable {
     private func withLockedDirectory<T>(deadline: UInt64?, isCancelled: () -> Bool,
                                         _ body: (DirectoryHandle) throws -> T) throws -> T {
         let handle = try DirectoryHandle.open(directory, initialRevision: initialRevision,
-                                              maximumBytes: maximumStateBytes, crashHook: crashHook)
+                                              maximumBytes: maximumStateBytes, sync: sync, crashHook: crashHook)
         defer { handle.close() }
         try handle.lock(wait: { () throws in
             if isCancelled() { throw PairingCommitError.cancelled }
@@ -185,15 +189,16 @@ public final class PairingCommitStore: Sendable {
         private var lockFD: Int32 = -1
         private let initialRevision: Data?
         private let maximumBytes: Int
+        private let sync: @Sendable (Int32) -> Int32
         private let crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?
 
-        private init(directoryFD: Int32, initialRevision: Data?, maximumBytes: Int,
+        private init(directoryFD: Int32, initialRevision: Data?, maximumBytes: Int, sync: @escaping @Sendable (Int32) -> Int32,
                      crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?) {
             self.directoryFD = directoryFD; self.initialRevision = initialRevision
-            self.maximumBytes = maximumBytes; self.crashHook = crashHook
+            self.maximumBytes = maximumBytes; self.sync = sync; self.crashHook = crashHook
         }
 
-        static func open(_ url: URL, initialRevision: Data?, maximumBytes: Int,
+        static func open(_ url: URL, initialRevision: Data?, maximumBytes: Int, sync: @escaping @Sendable (Int32) -> Int32,
                          crashHook: (@Sendable (PairingPersistenceStep) throws -> Void)?) throws -> DirectoryHandle {
             if let initialRevision, initialRevision.count != 16 { throw PairingCommitError.corruptState }
             let path = url.path
@@ -212,17 +217,17 @@ public final class PairingCommitStore: Sendable {
             var info = stat()
             guard fstat(fd, &info) == 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fstat", errno: code) }
             guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0 else { _ = Glibc.close(fd); throw PairingCommitError.unsafeDirectory }
-            if created {
-                // A new directory entry is durable only after its parent is synced.
-                let parent = url.deletingLastPathComponent().path
-                let parentFD = Glibc.open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-                guard parentFD >= 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "open parent", errno: code) }
-                let synced = fsync(parentFD) == 0
-                let code = errno
-                _ = Glibc.close(parentFD)
-                guard synced else { _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fsync parent", errno: code) }
-            }
-            return DirectoryHandle(directoryFD: fd, initialRevision: initialRevision, maximumBytes: maximumBytes, crashHook: crashHook)
+            // Every opener syncs the parent, not only the creator. A creator whose sync failed leaves the directory in
+            // place, and a concurrent opener can run before the creator finishes. No call may return success for an
+            // entry that no call has confirmed.
+            let parent = url.deletingLastPathComponent().path
+            let parentFD = Glibc.open(parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+            guard parentFD >= 0 else { let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "open parent", errno: code) }
+            let synced = sync(parentFD) == 0
+            let code = errno
+            _ = Glibc.close(parentFD)
+            guard synced else { _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fsync parent", errno: code) }
+            return DirectoryHandle(directoryFD: fd, initialRevision: initialRevision, maximumBytes: maximumBytes, sync: sync, crashHook: crashHook)
         }
 
         func close() {
@@ -313,13 +318,13 @@ public final class PairingCommitStore: Sendable {
                 offset += count
             }
             try crashHook?(.syncTemporary)
-            guard fsync(fd) == 0 else { throw PairingCommitError.storage(operation: "fsync temporary", errno: errno) }
+            guard sync(fd) == 0 else { throw PairingCommitError.storage(operation: "fsync temporary", errno: errno) }
             try crashHook?(.rename)
             guard renameat(directoryFD, PairingCommitStore.temporaryName, directoryFD, PairingCommitStore.stateName) == 0 else {
                 throw PairingCommitError.storage(operation: "rename", errno: errno)
             }
             try crashHook?(.syncDirectory)
-            guard fsync(directoryFD) == 0 else { throw DirectorySyncFailed(code: errno) }
+            guard sync(directoryFD) == 0 else { throw DirectorySyncFailed(code: errno) }
             try crashHook?(.finished)
         }
     }

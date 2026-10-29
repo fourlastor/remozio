@@ -330,6 +330,79 @@ final class PairingCommitStoreTests: XCTestCase {
         }
     }
 
+    // MARK: Sync failures
+
+    /// Counts `fsync` calls and fails the listed call numbers (1-based) with EIO.
+    private final class SyncProbe: @unchecked Sendable {
+        private let lock = NSLock()
+        private var calls = 0
+        private let failing: Set<Int>
+        init(failing: Set<Int> = []) { self.failing = failing }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return calls }
+        func sync(_ fd: Int32) -> Int32 {
+            lock.lock(); calls += 1; let number = calls; lock.unlock()
+            if failing.contains(number) { errno = EIO; return -1 }
+            return fsync(fd)
+        }
+    }
+
+    private func store(probe: SyncProbe) -> PairingCommitStore {
+        PairingCommitStore(directory: stateDirectory, initialTrustRevision: revision, clock: { 1_000 },
+                           syncFile: { probe.sync($0) })
+    }
+
+    func testEveryOpenSyncsTheParentSoARetryAfterAFailedSyncCannotSkipIt() throws {
+        let failing = SyncProbe(failing: [1])
+        XCTAssertThrowsError(try store(probe: failing).trustRevision()) {
+            guard case .storage(operation: "fsync parent", errno: EIO)? = $0 as? PairingCommitError else { return XCTFail("\($0)") }
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateDirectory.path), "the directory is present after the failure")
+        let retry = SyncProbe()
+        let one = try candidate(tag: 1)
+        _ = try commit(store(probe: retry), one)
+        XCTAssertGreaterThanOrEqual(retry.count, 3, "parent, temporary file and directory are all synced for the retry")
+        let open = SyncProbe()
+        XCTAssertNoThrow(try store(probe: open).list())
+        XCTAssertEqual(open.count, 1, "a read-only open still syncs the parent once")
+    }
+
+    func testAFailedParentSyncStopsACommitBeforeItWrites() throws {
+        _ = try store().trustRevision()
+        let probe = SyncProbe(failing: [1])
+        XCTAssertThrowsError(try commit(store(probe: probe), candidate(tag: 1)))
+        XCTAssertEqual(try store().list(), [])
+        XCTAssertEqual(try store().trustRevision(), revision)
+    }
+
+    func testConcurrentOpenersEachSyncTheParent() throws {
+        let probe = SyncProbe()
+        DispatchQueue.concurrentPerform(iterations: 6) { _ in _ = try? self.store(probe: probe).trustRevision() }
+        XCTAssertGreaterThanOrEqual(probe.count, 6)
+    }
+
+    func testDirectorySyncFailureAfterTheRenameReportsCommittedUnconfirmed() throws {
+        _ = try store().trustRevision()
+        let one = try candidate(tag: 1)
+        // Calls in a commit on an existing state: 1 parent, 2 temporary file, 3 directory.
+        let probe = SyncProbe(failing: [3])
+        XCTAssertThrowsError(try commit(store(probe: probe), one)) { error in
+            guard case let .committedUnconfirmed(next, code)? = error as? PairingCommitError else { return XCTFail("\(error)") }
+            XCTAssertEqual(code, EIO)
+            XCTAssertEqual(next.count, 16)
+            XCTAssertNotEqual(next, self.revision)
+            XCTAssertEqual(try? self.store().trustRevision(), next, "the reported revision is the stored one")
+        }
+        XCTAssertEqual(try store().list().count, 1)
+        XCTAssertThrowsError(try commit(store(), one)) { XCTAssertEqual($0 as? PairingCommitError, .staleRevision) }
+    }
+
+    func testDirectorySyncFailureWhileCreatingTheInitialStateIsAStorageError() throws {
+        let probe = SyncProbe(failing: [3])
+        XCTAssertThrowsError(try store(probe: probe).trustRevision()) {
+            guard case .storage(operation: "fsync directory", errno: EIO)? = $0 as? PairingCommitError else { return XCTFail("\($0)") }
+        }
+    }
+
     // MARK: Bounds, umask, links
 
     func testEnrollmentLimitIsEnforcedBeforeTheWrite() throws {
