@@ -380,14 +380,55 @@ final class PairingCommitStoreTests: XCTestCase {
         let state = stateDirectory.appendingPathComponent("state.json")
         try FileManager.default.removeItem(at: state)
         try FileManager.default.createSymbolicLink(at: state, withDestinationURL: target)
-        XCTAssertThrowsError(try store().trustRevision())
+        XCTAssertThrowsError(try store().trustRevision()) { XCTAssertEqual($0 as? PairingCommitError, .unsafeDirectory) }
         XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "x", "the link target is untouched")
         try FileManager.default.removeItem(at: state)
 
         let lock = stateDirectory.appendingPathComponent("state.lock")
         try FileManager.default.removeItem(at: lock)
         try FileManager.default.createSymbolicLink(at: lock, withDestinationURL: target)
-        XCTAssertThrowsError(try store().trustRevision())
+        XCTAssertThrowsError(try store().trustRevision()) { XCTAssertEqual($0 as? PairingCommitError, .unsafeDirectory) }
+    }
+
+    func testPlantedFifoAsTheLockFileIsRefusedWithoutBlocking() throws {
+        _ = try store().trustRevision()
+        let lock = stateDirectory.appendingPathComponent("state.lock")
+        try FileManager.default.removeItem(at: lock)
+        XCTAssertEqual(mkfifo(lock.path, 0o600), 0)
+        XCTAssertThrowsError(try store().trustRevision()) { XCTAssertEqual($0 as? PairingCommitError, .unsafeDirectory) }
+    }
+
+    func testHardLinkedTemporaryFileIsNotTruncated() throws {
+        _ = try store().trustRevision()
+        let outside = root.appendingPathComponent("outside")
+        try Data("keep".utf8).write(to: outside)
+        let temporary = stateDirectory.appendingPathComponent("state.json.tmp")
+        XCTAssertEqual(link(outside.path, temporary.path), 0)
+        _ = try commit(store(), candidate(tag: 1))
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "keep")
+    }
+
+    func testUndecodableStoredTranscriptIsCorruptState() throws {
+        let one = try candidate(tag: 1)
+        _ = try commit(store(), one)
+        let url = stateDirectory.appendingPathComponent("state.json")
+        var state = try JSONDecoder().decode(PairingCommitStore.StoredState.self, from: Data(contentsOf: url))
+        state.enrollments[0].transcript = Data([1, 2, 3])
+        try JSONEncoder().encode(state).write(to: url)
+        XCTAssertThrowsError(try store().list()) { XCTAssertEqual($0 as? PairingCommitError, .corruptState) }
+        XCTAssertThrowsError(try commit(store(), candidate(tag: 2, expected: state.trustRevision))) {
+            XCTAssertEqual($0 as? PairingCommitError, .corruptState)
+        }
+    }
+
+    func testProofSignedByAnotherKeyIsRejected() throws {
+        let one = try candidate(tag: 1)
+        let other = P256.Signing.PrivateKey()
+        let forged = try other.signature(for: one.transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        XCTAssertThrowsError(try store().commit(transcript: one.transcript, biometricProof: forged,
+                                                deadlineMilliseconds: 10_000, isCancelled: { false })) {
+            XCTAssertEqual($0 as? PairingCommitError, .invalidProof)
+        }
     }
 
     // MARK: Crash injection

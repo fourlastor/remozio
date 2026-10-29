@@ -27,6 +27,9 @@ public enum PairingCommitError: Error, Equatable {
     case storage(operation: String, errno: Int32)
 }
 
+/// Internal: the rename happened and the directory sync failed. Callers map it by what the write was for.
+private struct DirectorySyncFailed: Error { let code: Int32 }
+
 /// A step of the atomic state replacement. A crash hook runs before each step.
 public enum PairingPersistenceStep: CaseIterable, Sendable {
     case createTemporary, syncTemporary, rename, syncDirectory, finished
@@ -41,7 +44,7 @@ public struct PairingEnrollmentSummary: Equatable, Sendable {
 /// Software-key experiment state for one Linux development peer. Not the protected host journal.
 ///
 /// One state file holds the trust revision, the consumed setup IDs and the enrollments. A commit takes an exclusive
-/// lock on the state directory, checks the rules and replaces the file with one atomic rename. After a crash the
+/// lock on `state.lock` in the state directory, checks the rules and replaces the file with one atomic rename. After a crash the
 /// directory holds either the old state or the complete new state.
 public final class PairingCommitStore: Sendable {
     public static let defaultMaximumEnrollments = 256
@@ -98,7 +101,7 @@ public final class PairingCommitStore: Sendable {
     public func list() throws -> [PairingEnrollmentSummary] {
         try withLockedDirectory(deadline: nil, isCancelled: { false }) { handle in
             try handle.loadOrCreate().enrollments.map { stored in
-                let transcript = try PairingTranscript.decode(stored.transcript)
+                guard let transcript = try? PairingTranscript.decode(stored.transcript) else { throw PairingCommitError.corruptState }
                 return PairingEnrollmentSummary(phoneID: transcript.phone.scope.phoneID,
                     epoch: transcript.phone.scope.enrollmentEpoch, setupID: transcript.setupID)
             }
@@ -124,7 +127,7 @@ public final class PairingCommitStore: Sendable {
             let scope = transcript.phone.scope
             let newKeys = [transcript.transportKey, transcript.decisionKey, transcript.biometricKey].map(\.publicKey)
             for stored in current.enrollments {
-                let other = try PairingTranscript.decode(stored.transcript)
+                guard let other = try? PairingTranscript.decode(stored.transcript) else { throw PairingCommitError.corruptState }
                 let otherKeys = [other.transportKey, other.decisionKey, other.biometricKey].map(\.publicKey)
                 guard other.phone.scope.phoneID != scope.phoneID, Set(otherKeys).isDisjoint(with: newKeys) else {
                     throw PairingCommitError.alreadyEnrolled
@@ -139,10 +142,11 @@ public final class PairingCommitStore: Sendable {
             next.enrollments.append(StoredEnrollment(transcript: try transcript.encode(), biometricProof: biometricProof))
             try checkLive(deadline: deadlineMilliseconds, isCancelled: isCancelled)
             do { try handle.replace(with: next, maximumBytes: maximumStateBytes) }
-            catch let PairingCommitError.committedUnconfirmed(_, code) {
-                throw PairingCommitError.committedUnconfirmed(revision: next.trustRevision, errno: code)
+            catch let failure as DirectorySyncFailed {
+                throw PairingCommitError.committedUnconfirmed(revision: next.trustRevision, errno: failure.code)
             }
-            if (try? clock()).map({ $0 >= deadlineMilliseconds }) ?? true || isCancelled() {
+            let deadlinePassed = (try? clock()).map { $0 >= deadlineMilliseconds } ?? true
+            if deadlinePassed || isCancelled() {
                 throw PairingCommitError.committedLate(revision: next.trustRevision)
             }
             return next.trustRevision
@@ -201,7 +205,7 @@ public final class PairingCommitStore: Sendable {
                 if errno == ELOOP || errno == ENOTDIR { throw PairingCommitError.unsafeDirectory }
                 throw PairingCommitError.storage(operation: "open directory", errno: errno)
             }
-            // The umask can widen the mode that mkdir gave. Make it exact before the check below.
+            // mkdir's mode was exact, but an inherited default ACL or a setgid parent can change it. Make it exact.
             if created, fchmod(fd, 0o700) != 0 {
                 let code = errno; _ = Glibc.close(fd); throw PairingCommitError.storage(operation: "fchmod directory", errno: code)
             }
@@ -228,9 +232,17 @@ public final class PairingCommitStore: Sendable {
 
         /// Polls a non-blocking exclusive lock so the caller's deadline and cancellation stay in force.
         func lock(wait check: () throws -> Void) throws {
-            let fd = openat(directoryFD, PairingCommitStore.lockName, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else { throw PairingCommitError.storage(operation: "open lock", errno: errno) }
+            // O_NONBLOCK keeps a planted FIFO from blocking this open past the deadline.
+            let fd = openat(directoryFD, PairingCommitStore.lockName, O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+            guard fd >= 0 else {
+                if errno == ELOOP { throw PairingCommitError.unsafeDirectory }
+                throw PairingCommitError.storage(operation: "open lock", errno: errno)
+            }
             lockFD = fd
+            var info = stat()
+            guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == geteuid() else {
+                throw PairingCommitError.unsafeDirectory
+            }
             guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod lock", errno: errno) }
             while flock(fd, LOCK_EX | LOCK_NB) != 0 {
                 guard errno == EWOULDBLOCK || errno == EINTR else { throw PairingCommitError.storage(operation: "flock", errno: errno) }
@@ -243,14 +255,19 @@ public final class PairingCommitStore: Sendable {
             if let state = try load() { return state }
             let revision = initialRevision ?? Data((0..<16).map { _ in UInt8.random(in: 0...255) })
             let state = StoredState(format: 1, trustRevision: revision, consumedSetupIDs: [], enrollments: [])
-            try replace(with: state, maximumBytes: maximumBytes)
+            do { try replace(with: state, maximumBytes: maximumBytes) }
+            catch let failure as DirectorySyncFailed {
+                // Only the empty initial state was at stake; no enrollment exists to confirm.
+                throw PairingCommitError.storage(operation: "fsync directory", errno: failure.code)
+            }
             return state
         }
 
         private func load() throws -> StoredState? {
-            let fd = openat(directoryFD, PairingCommitStore.stateName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            let fd = openat(directoryFD, PairingCommitStore.stateName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
             if fd < 0 {
                 if errno == ENOENT { return nil }
+                if errno == ELOOP { throw PairingCommitError.unsafeDirectory }
                 throw PairingCommitError.storage(operation: "open state", errno: errno)
             }
             defer { _ = Glibc.close(fd) }
@@ -279,8 +296,12 @@ public final class PairingCommitStore: Sendable {
             let bytes = try encoder.encode(state)
             guard bytes.count <= maximumBytes else { throw PairingCommitError.stateFull }
             try crashHook?(.createTemporary)
+            // Drop any leftover (a hard link would be truncated in place), then create the file fresh.
+            if unlinkat(directoryFD, PairingCommitStore.temporaryName, 0) != 0, errno != ENOENT {
+                throw PairingCommitError.storage(operation: "remove old temporary", errno: errno)
+            }
             let fd = openat(directoryFD, PairingCommitStore.temporaryName,
-                            O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw PairingCommitError.storage(operation: "create temporary", errno: errno) }
             defer { _ = Glibc.close(fd) }
             guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod temporary", errno: errno) }
@@ -298,9 +319,7 @@ public final class PairingCommitStore: Sendable {
                 throw PairingCommitError.storage(operation: "rename", errno: errno)
             }
             try crashHook?(.syncDirectory)
-            guard fsync(directoryFD) == 0 else {
-                throw PairingCommitError.committedUnconfirmed(revision: Data(), errno: errno)
-            }
+            guard fsync(directoryFD) == 0 else { throw DirectorySyncFailed(code: errno) }
             try crashHook?(.finished)
         }
     }
