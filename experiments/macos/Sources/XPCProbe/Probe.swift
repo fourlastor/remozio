@@ -7,6 +7,11 @@ import RemozioCore
 
 final class ProbeService: NSObject, ProbeProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+    func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
+    func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
+    func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     // Synthetic bytes only. Native identifier admission is separate from this real connection/UID invocation guard.
     func prepare(_ intentDigest: Data, challenge: Data, reply: @escaping @Sendable (Data?) -> Void) {
         let mode = String(decoding: intentDigest.prefix { $0 != 0 }, as: UTF8.self)

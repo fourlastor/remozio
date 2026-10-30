@@ -31,6 +31,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | UI adapters | Needs interactive session | Authorized dialog fixtures |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |
 | Android ADB bridge | [Pixel discovery and loopback observations](evidence/2026-10-03-pixel-platform.md) | Wi-Fi-off fallback, listener exposure, foreground lifetime, reconnect and Stop |
+| Portable import XPC | [Native selectors, retained plan and lost reply](macos-portable-import-xpc.md) | Installed Root peer, real administrator authorization and macOS 26 runtime |
 | Setup exports and APK updates | Pending | Independent import, signature checks and retained pairing |
 
 ## PR sequence
