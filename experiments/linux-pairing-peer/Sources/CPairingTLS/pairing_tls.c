@@ -10,9 +10,10 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <signal.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -150,9 +151,71 @@ static int count_ticket(SSL *ssl, SSL_SESSION *session) {
 
 int remozio_tls_context_tickets_received(const RemozioTLSContext *context) { return context ? context->tickets_received : -1; }
 
+/* Socket BIO that sends with MSG_NOSIGNAL: a peer reset surfaces as EPIPE without changing the process's
+ * SIGPIPE disposition. It never closes the descriptor; the connection owns it. */
+typedef struct { int fd; int eof; } SocketState;
+
+static int socket_write(BIO *bio, const char *data, int length) {
+    SocketState *state = BIO_get_data(bio);
+    BIO_clear_retry_flags(bio);
+    ssize_t sent = send(state->fd, data, (size_t)length, MSG_NOSIGNAL);
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) BIO_set_retry_write(bio);
+    return (int)sent;
+}
+
+static int socket_read(BIO *bio, char *data, int length) {
+    SocketState *state = BIO_get_data(bio);
+    BIO_clear_retry_flags(bio);
+    ssize_t received = recv(state->fd, data, (size_t)length, 0);
+    if (received == 0) state->eof = 1;
+    if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) BIO_set_retry_read(bio);
+    return (int)received;
+}
+
+static long socket_ctrl(BIO *bio, int command, long number, void *pointer) {
+    (void)number;
+    SocketState *state = BIO_get_data(bio);
+    switch (command) {
+    case BIO_CTRL_FLUSH: return 1;
+    case BIO_CTRL_EOF: return state->eof; /* lets OpenSSL report an unexpected EOF as such */
+    case BIO_C_GET_FD:
+        if (pointer) *(int *)pointer = state->fd;
+        return state->fd;
+    default: return 0;
+    }
+}
+
+static int socket_destroy(BIO *bio) {
+    free(BIO_get_data(bio));
+    BIO_set_data(bio, NULL);
+    return 1;
+}
+
+static BIO_METHOD *socket_method;
+static void socket_method_init(void) {
+    BIO_METHOD *method = BIO_meth_new(BIO_get_new_index() | BIO_TYPE_SOURCE_SINK | BIO_TYPE_DESCRIPTOR, "remozio socket");
+    if (method && BIO_meth_set_write(method, socket_write) && BIO_meth_set_read(method, socket_read) &&
+        BIO_meth_set_ctrl(method, socket_ctrl) && BIO_meth_set_destroy(method, socket_destroy)) {
+        socket_method = method;
+    } else {
+        BIO_meth_free(method);
+    }
+}
+
+static BIO *socket_bio_new(int fd) {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, socket_method_init);
+    SocketState *state = calloc(1, sizeof(*state));
+    BIO *bio = socket_method && state ? BIO_new(socket_method) : NULL;
+    if (!bio) { free(state); return NULL; }
+    state->fd = fd;
+    BIO_set_data(bio, state);
+    BIO_set_init(bio, 1);
+    return bio;
+}
+
 static RemozioTLSContext *context_new(int is_server, int min_version, int max_version, const uint8_t *cert_der,
                                       size_t cert_length, const uint8_t *key_der, size_t key_length) {
-    signal(SIGPIPE, SIG_IGN); /* Process-wide: a peer reset must surface as an error, not kill the peer. */
     RemozioTLSContext *context = calloc(1, sizeof(*context));
     if (!context) return NULL;
     context->is_server = is_server;
@@ -269,7 +332,10 @@ static RemozioTLSStatus handshake(RemozioTLSContext *context, int fd, int cancel
         status = REMOZIO_TLS_INVALID_ARGUMENT;
         goto fail;
     }
-    if (!(ssl = SSL_new(context->ctx)) || !SSL_set_fd(ssl, fd)) goto fail; /* status stays INTERNAL */
+    if (!(ssl = SSL_new(context->ctx))) goto fail; /* status stays INTERNAL */
+    BIO *bio = socket_bio_new(fd);
+    if (!bio) goto fail;
+    SSL_set_bio(ssl, bio, bio); /* one reference for both directions */
     status = drive(ssl, fd, cancel_fd, deadline_ms, context->is_server ? do_accept : do_connect, NULL, NULL);
     if (status != REMOZIO_TLS_OK) goto fail;
     if (SSL_version(ssl) != TLS1_3_VERSION) { status = REMOZIO_TLS_HANDSHAKE_FAILED; goto fail; }

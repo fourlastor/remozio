@@ -87,6 +87,14 @@ suite in `check-linux-host.sh`, on both the local Linux gate and Linux Swift CI 
 Synthetic software keys and requester claims, a private fixture ledger and one fixed command
 do not establish production authority, physical-phone approval or protected caller admission.
 
+The opt-in [composed caller/command experiment](experiments/linux-composed-caller-command.md)
+joins the monitor's stopped frontend, its actual transferred pipes, independent
+remote observation, current grants, shared consumption and the fixed command in
+one owner. It refuses faults injected at named barriers. A loss after the last
+check is recorded as an unknown outcome, never counted as strict admission, so
+contract line 67 remains unproven. Like the monitor experiment, its live matrix
+is run explicitly; its report validation runs in the repository Python tests.
+
 ## Local gate and CI coverage
 
 The [storage lease experiment](../experiments/linux-storage-lease/README.md) also

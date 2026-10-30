@@ -3,42 +3,42 @@ import Foundation
 import Glibc
 import RemozioProtocol
 
-enum ObservationError: String, Error {
+public enum ObservationError: String, Error {
     case unavailable, malformedCredentials, unsupportedCredentials, invalidPath, unsupportedObject
     case changedObject, changedCredentials, invalidDescriptor, unsupportedFlags, changedStream, captureMismatch, retired
 }
 
-func requireObservation(_ condition: Bool, _ error: ObservationError) throws {
+public func requireObservation(_ condition: Bool, _ error: ObservationError) throws {
     guard condition else { throw error }
 }
 
 // Paths are bytes throughout: no lossy UTF-8 conversion or URL normalization.
-func withPath<T>(_ path: Data, _ body: (UnsafePointer<CChar>) throws -> T) throws -> T {
+public func withPath<T>(_ path: Data, _ body: (UnsafePointer<CChar>) throws -> T) throws -> T {
     try requireObservation(path.first == 47 && path.count <= 4096 && !path.contains(0), .invalidPath)
     return try (Array(path) + [0]).withUnsafeBytes { try body($0.bindMemory(to: CChar.self).baseAddress!) }
 }
 
-final class OwnedFD {
-    let value: Int32
-    init(_ value: Int32) throws {
+public final class OwnedFD {
+    public let value: Int32
+    public init(_ value: Int32) throws {
         try requireObservation(value >= 0, .invalidDescriptor)
         self.value = value
     }
     deinit { _ = close(value) }
 }
 
-struct FileObservation: Equatable {
-    let identity: CapturedFileIdentity
-    let mode: mode_t
-    let uid: uid_t
-    let gid: gid_t
-    let size: off_t
-    let modifiedSeconds: Int
-    let modifiedNanoseconds: Int
-    let changedSeconds: Int
-    let changedNanoseconds: Int
+public struct FileObservation: Equatable {
+    public let identity: CapturedFileIdentity
+    public let mode: mode_t
+    public let uid: uid_t
+    public let gid: gid_t
+    public let size: off_t
+    public let modifiedSeconds: Int
+    public let modifiedNanoseconds: Int
+    public let changedSeconds: Int
+    public let changedNanoseconds: Int
 
-    init(_ fd: Int32) throws {
+    public init(_ fd: Int32) throws {
         var info = stat()
         try requireObservation(fstat(fd, &info) == 0, .unavailable)
         identity = .init(device: UInt64(info.st_dev), inode: UInt64(info.st_ino))
@@ -48,12 +48,12 @@ struct FileObservation: Equatable {
     }
 
     // Directory contents can change; this comparison retains object identity and access metadata.
-    func sameDirectory(_ other: Self) -> Bool {
+    public func sameDirectory(_ other: Self) -> Bool {
         identity == other.identity && mode == other.mode && uid == other.uid && gid == other.gid
     }
 }
 
-func hashFile(_ fd: Int32) throws -> Data {
+public func hashFile(_ fd: Int32) throws -> Data {
     let before = try FileObservation(fd)
     try requireObservation(before.mode & S_IFMT == S_IFREG && before.size >= 0 && before.size <= 67_108_864,
                            .unsupportedObject)
@@ -70,12 +70,12 @@ func hashFile(_ fd: Int32) throws -> Data {
     return Data(hash.finalize())
 }
 
-final class RetainedExecutable {
-    let descriptor: OwnedFD
-    let observation: FileObservation
-    let capture: CapturedExecutable
+public final class RetainedExecutable {
+    public let descriptor: OwnedFD
+    public let observation: FileObservation
+    public let capture: CapturedExecutable
 
-    init(path: Data, retainedDescriptor: OwnedFD? = nil) throws {
+    public init(path: Data, retainedDescriptor: OwnedFD? = nil) throws {
         descriptor = try retainedDescriptor ?? OwnedFD(withPath(path) { open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) })
         observation = try FileObservation(descriptor.value)
         try requireObservation(observation.mode & S_IFMT == S_IFREG && observation.mode & 0o111 != 0, .unsupportedObject)
@@ -84,7 +84,7 @@ final class RetainedExecutable {
         try checkNamedObject()
     }
 
-    func recheck(afterNamedHashForTesting: (() throws -> Void)? = nil) throws {
+    public func recheck(afterNamedHashForTesting: (() throws -> Void)? = nil) throws {
         try requireObservation(try FileObservation(descriptor.value) == observation && hashFile(descriptor.value) == capture.sha256,
                                .changedObject)
         let current = try RetainedExecutable(path: capture.path)
@@ -101,27 +101,27 @@ final class RetainedExecutable {
     }
 }
 
-final class RetainedDirectory {
-    let descriptor: OwnedFD
-    let observation: FileObservation
-    let capture: CapturedDirectory
-    init(path: Data) throws {
+public final class RetainedDirectory {
+    public let descriptor: OwnedFD
+    public let observation: FileObservation
+    public let capture: CapturedDirectory
+    public init(path: Data) throws {
         descriptor = try OwnedFD(withPath(path) { open($0, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW) })
         observation = try FileObservation(descriptor.value)
         capture = .init(path: path, identity: observation.identity)
     }
-    func recheck() throws {
+    public func recheck() throws {
         try requireObservation(try observation.sameDirectory(FileObservation(descriptor.value)), .changedObject)
         let current = try RetainedDirectory(path: capture.path)
         try requireObservation(observation.sameDirectory(current.observation), .changedObject)
     }
 }
 
-struct CredentialObservation: Equatable {
-    let credentials: CapturedLinuxCredentials
-    let observedSupplementaryGroups: [UInt32]
+public struct CredentialObservation: Equatable {
+    public let credentials: CapturedLinuxCredentials
+    public let observedSupplementaryGroups: [UInt32]
 
-    static func parse(_ bytes: Data) throws -> Self {
+    public static func parse(_ bytes: Data) throws -> Self {
         try requireObservation(bytes.count <= 65536, .malformedCredentials)
         // The kernel task name can contain arbitrary bytes. Only these ASCII numeric rows are parsed.
         var fields = [Data: [UInt32]]()
@@ -143,7 +143,7 @@ struct CredentialObservation: Equatable {
             observedSupplementaryGroups: groups)
     }
 
-    static func current() throws -> Self {
+    public static func current() throws -> Self {
         let fd = try OwnedFD(open("/proc/thread-self/status", O_RDONLY | O_CLOEXEC | O_NOFOLLOW))
         var data = Data(), chunk = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -164,7 +164,7 @@ struct CredentialObservation: Equatable {
         return result
     }
 
-    func requireOrdinaryAccount() throws {
+    public func requireOrdinaryAccount() throws {
         let c = credentials
         try requireObservation(c.realUID != 0 && c.realUID == c.effectiveUID && c.realUID == c.savedUID &&
             c.realUID == c.filesystemUID && c.realGID == c.effectiveGID && c.realGID == c.savedGID &&
@@ -172,14 +172,14 @@ struct CredentialObservation: Equatable {
     }
 }
 
-struct StreamObservation: Equatable {
-    let identity: CapturedFileIdentity
-    let kind: CommandInputKind
-    let access: CommandStreamAccess
-    let flags: CommandStreamFlags
-    let rawFlags: Int32
+public struct StreamObservation: Equatable {
+    public let identity: CapturedFileIdentity
+    public let kind: CommandInputKind
+    public let access: CommandStreamAccess
+    public let flags: CommandStreamFlags
+    public let rawFlags: Int32
 
-    init(_ fd: Int32) throws {
+    public init(_ fd: Int32) throws {
         let info = try FileObservation(fd), raw = fcntl(fd, F_GETFL)
         try requireObservation(raw >= 0, .invalidDescriptor)
         switch info.mode & S_IFMT {
@@ -206,44 +206,45 @@ struct StreamObservation: Equatable {
     }
 }
 
-final class RetainedStream {
-    let descriptor: OwnedFD
-    let observation: StreamObservation
-    let capture: CapturedCommandStream
-    init(_ fd: Int32, fixtureBinding: Data) throws {
+public final class RetainedStream {
+    public let descriptor: OwnedFD
+    public let observation: StreamObservation
+    public let capture: CapturedCommandStream
+    public init(_ fd: Int32, fixtureBinding: Data) throws {
         descriptor = try OwnedFD(fcntl(fd, F_DUPFD_CLOEXEC, 3))
         observation = try StreamObservation(descriptor.value)
         capture = .init(source: .init(kind: observation.kind, streamBinding: fixtureBinding, observedPath: nil,
             identity: observation.identity), access: observation.access, flags: observation.flags)
     }
-    func recheck() throws {
+    public func recheck() throws {
         try requireObservation(try StreamObservation(descriptor.value) == observation &&
             fcntl(descriptor.value, F_GETFD) == FD_CLOEXEC, .changedStream)
     }
 }
 
 /// All protected-caller fields are injected fixture data, never inferred from OS observations.
-struct SyntheticBindings {
-    let process = Data(repeating: 1, count: 16)
-    let monitor = Data(repeating: 2, count: 16)
-    let policy = Data(SHA256.hash(data: Data("synthetic fixture policy; not trusted code".utf8)))
-    let submission = CapturedSubmission(id: Data(repeating: 3, count: 16), nonce: Data(repeating: 4, count: 32),
+public struct SyntheticBindings {
+    public let process = Data(repeating: 1, count: 16)
+    public let monitor = Data(repeating: 2, count: 16)
+    public let policy = Data(SHA256.hash(data: Data("synthetic fixture policy; not trusted code".utf8)))
+    public let submission = CapturedSubmission(id: Data(repeating: 3, count: 16), nonce: Data(repeating: 4, count: 32),
                                        callerBinding: Data(repeating: 5, count: 16))
+    public init() {}
 }
 
 /// Self-observation component only. No IPC peer, ptrace stop, trusted caller, grants or execution authority.
-final class RetainedOSCapture {
-    static let limits = try! CBORLimits(maxBytes: 32768, maxDepth: 32, maxItems: 4096)
-    let executable: RetainedExecutable
-    let requesterExecutable: RetainedExecutable
-    let directory: RetainedDirectory
-    let streams: [RetainedStream]
-    let credentials: CredentialObservation
-    let session: pid_t
-    let capture: LinuxCommandCapture
+public final class RetainedOSCapture {
+    public static let limits = try! CBORLimits(maxBytes: 32768, maxDepth: 32, maxItems: 4096)
+    public let executable: RetainedExecutable
+    public let requesterExecutable: RetainedExecutable
+    public let directory: RetainedDirectory
+    public let streams: [RetainedStream]
+    public let credentials: CredentialObservation
+    public let session: pid_t
+    public let capture: LinuxCommandCapture
     private var retired = false
 
-    init(executablePath: Data, directoryPath: Data, descriptors: [Int32], bindings: SyntheticBindings) throws {
+    public init(executablePath: Data, directoryPath: Data, descriptors: [Int32], bindings: SyntheticBindings) throws {
         try requireObservation(descriptors.count == 3, .invalidDescriptor)
         credentials = try .current()
         try credentials.requireOrdinaryAccount()
@@ -274,7 +275,7 @@ final class RetainedOSCapture {
     }
 
     /// A synchronous fixture callback follows rechecks. This is not the stopped-monitor/executor handshake.
-    func withRecheckedFixtureHandoff<T>(_ decoded: LinuxCommandCapture, _ body: () throws -> T) throws -> T {
+    public func withRecheckedFixtureHandoff<T>(_ decoded: LinuxCommandCapture, _ body: () throws -> T) throws -> T {
         try requireObservation(!retired, .retired)
         do {
             try requireObservation(decoded == capture, .captureMismatch)

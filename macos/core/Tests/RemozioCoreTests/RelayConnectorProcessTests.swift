@@ -125,19 +125,30 @@ final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
             let actual = SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: vendor))).map { String(format: "%02x", $0) }.joined()
             guard actual == expected else { XCTFail("Disposable vendor hash changed"); throw RelayConnectorProcess.Failure.invalidConfiguration }
         }
-        let f = try Fixture(), discovered = expectation(description: "vendor metrics")
+        let f = try Fixture(), observed = expectation(description: "vendor metrics or completion")
         let observation = Mutex<RelayConnectorDiscovery?>(nil)
+        let options = try RelayConnectorProcess.Options(startupMilliseconds: 60_000)
         let arguments = ["-p", "(version 1)(allow default)(deny network-outbound)", vendor,
             "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:7844",
             "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
         let process = try RelayConnectorProcess.startForFixture(executable: "/usr/bin/sandbox-exec", arguments: arguments,
-            token: f.token, activity: f.service.acquireShared()) { event in
-                if case .discovered(let value) = event { observation.withLock { $0 = value }; discovered.fulfill() }
+            token: f.token, activity: f.service.acquireShared(), options: options) { event in
+                switch event {
+                case .discovered(let value):
+                    observation.withLock { $0 = value }; observed.fulfill()
+                case .completed(let value):
+                    if value.discovery == nil { observed.fulfill() }
+                }
             }
-        await fulfillment(of: [discovered], timeout: 5)
+        await fulfillment(of: [observed], timeout: 65)
+        guard let value = observation.withLock({ $0 }) else {
+            let completion = await process.stopAndWait()
+            try f.assertUpdateAvailable()
+            XCTFail("The vendor exited before metrics discovery: \(completion.termination), \(String(describing: completion.stopCause)).")
+            return
+        }
         let result: Result<RelayConnectorReadiness.State, any Error>
         do {
-            let value = try XCTUnwrap(observation.withLock { $0 })
             result = .success(try await RelayConnectorReadiness().probe(value))
         } catch { result = .failure(error) }
         let completion = await process.stopAndWait()
