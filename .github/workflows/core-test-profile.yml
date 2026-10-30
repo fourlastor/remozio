@@ -1,0 +1,47 @@
+name: Core test profile
+on:
+  push:
+    branches: [perf/core-test-profile-20261030]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  profile:
+    name: Profile slow macos/core tests
+    if: github.repository == 'fourlastor/remozio'
+    runs-on: macos-26
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build debug tests
+        run: swift build --package-path macos/core --triple arm64-apple-macosx26.0 --build-tests
+      - name: Profile debug baseline
+        run: |
+          python3 scripts/profile-core-tests.py --deep --variant debug --tests scripts/core-profile-tests.txt \
+            --bundle "$(ls -d macos/core/.build/debug/RemozioCore*Tests.xctest)" --output "$RUNNER_TEMP/profile"
+      - name: Debug without fullfsync
+        continue-on-error: true
+        timeout-minutes: 30
+        run: |
+          grep -rl 'fullfsync' macos/core/Sources | xargs sed -i '' -e 's/PRAGMA fullfsync=ON/PRAGMA fullfsync=OFF/' -e 's/"PRAGMA fullfsync") == 1/"PRAGMA fullfsync") == 0/'
+          swift build --package-path macos/core --triple arm64-apple-macosx26.0 --build-tests
+          python3 scripts/profile-core-tests.py --variant debug-nofullfsync --tests scripts/core-profile-tests.txt \
+            --bundle "$(ls -d macos/core/.build/debug/RemozioCore*Tests.xctest)" --output "$RUNNER_TEMP/profile"
+          git checkout -- macos/core/Sources
+      - name: Optimized tests
+        continue-on-error: true
+        timeout-minutes: 50
+        run: |
+          swift build --package-path macos/core --triple arm64-apple-macosx26.0 --build-tests -c release -Xswiftc -enable-testing
+          python3 scripts/profile-core-tests.py --variant release --tests scripts/core-profile-tests.txt \
+            --bundle "$(ls -d macos/core/.build/release/RemozioCore*Tests.xctest)" --output "$RUNNER_TEMP/profile"
+      - name: Retain profile evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-test-profile-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/profile
+          if-no-files-found: error
+          retention-days: 14
