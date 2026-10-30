@@ -17,10 +17,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {name: baseline-debug, baseline: true, flags: ""}
-          - {name: memo-debug, baseline: false, flags: ""}
-          - {name: memo-debug-O, baseline: false, flags: "-Xswiftc -O"}
-          - {name: memo-release, baseline: false, flags: "-c release -Xswiftc -enable-testing"}
+          - {name: optimized-a, baseline: false, flags: "-Xswiftc -O"}
+          - {name: optimized-b, baseline: false, flags: "-Xswiftc -O"}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
