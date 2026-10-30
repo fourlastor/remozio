@@ -34,10 +34,11 @@ final class RelayConnectorProcess: @unchecked Sendable, CustomStringConvertible,
     var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
 
     static func startNative(scope: GatewaySettingsConsumerNativeScope, reference: RelayRunCredentialReference,
-                            options: Options = .standard, event: @escaping @Sendable (Event) -> Void) throws -> RelayConnectorProcess {
+                            options: Options = .standard, verifyCurrent: @Sendable () throws -> Void = {},
+                            event: @escaping @Sendable (Event) -> Void) throws -> RelayConnectorProcess {
         let host = scope.configuration
         guard host.role == .transport, reference.runtime == host.runtime else { throw RuntimePreparationError.changedScope }
-        try scope.validate()
+        try scope.validate(); try verifyCurrent()
         let activity = try scope.acquireChildActivity()
         do {
             let app = host.codePolicy.entries.first { $0.role == .app && $0.active }!
@@ -62,7 +63,7 @@ final class RelayConnectorProcess: @unchecked Sendable, CustomStringConvertible,
             let arguments = ["--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel",
                 "--grace-period", "\(options.gracefulStopMilliseconds)ms", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
             return try spawn(executable: bundle.appendingPathComponent(relative).path, arguments: arguments,
-                token: file, activity: activity, options: options, verify: { try scope.validate(); try Task.checkCancellation() }, event: event)
+                token: file, activity: activity, options: options, verify: { try scope.validate(); try verifyCurrent(); try Task.checkCancellation() }, event: event)
         } catch { activity.close(); throw error }
     }
 

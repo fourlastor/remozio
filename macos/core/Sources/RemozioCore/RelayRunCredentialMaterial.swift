@@ -54,6 +54,26 @@ struct RelayRunCredentialReference: Equatable, Sendable, CustomStringConvertible
         guard try value.encoded == bytes else { throw RuntimePreparationError.conflictingMaterial }
         return value
     }
+    /// Reads public metadata for an admitted Transport runtime. Protected publication must establish its origin first.
+    /// This reader cannot validate the Root-private import journal or grant provider or approval authority.
+    static func decodeForTransport(_ bytes: Data, runtime: RuntimeMaterialReference,
+                                   relayPort: UInt16) throws -> Self {
+        guard case let .map(f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...10),
+              f[0] == .unsigned(1), f[1] == .text("remozio-relay-run-reference"),
+              case let .bytes(id) = f[2], case let .bytes(plan) = f[3], case let .bytes(tunnelDigest) = f[4],
+              case let .bytes(runtimeBytes) = f[5], case let .text(accountID) = f[6],
+              case let .text(tunnelID) = f[7], case let .text(name) = f[8],
+              case let .bytes(credentialDigest) = f[9], case let .bytes(materialDigest) = f[10],
+              let uuid = UUID(uuidString: tunnelID), uuid.uuidString.lowercased() == tunnelID else {
+            throw RuntimePreparationError.invalidRecord
+        }
+        guard try RuntimeMaterialReference.decode(runtimeBytes) == runtime else { throw RuntimePreparationError.changedScope }
+        let tunnel = CloudflareTunnelObservation(accountID: accountID, tunnelID: tunnelID, name: name)
+        try SharedSetupImportRelayPlan.validateForTransport(plan, runtime: runtime, relayPort: relayPort, tunnel: tunnel)
+        let result = try Self(materialID: id, planBytes: plan, tunnelRecordDigest: tunnelDigest,
+            runtime: runtime, tunnel: tunnel, credentialDigest: credentialDigest, materialDigest: materialDigest)
+        guard try result.encoded == bytes else { throw RuntimePreparationError.invalidRecord }; return result
+    }
     private static var limits: CBORLimits { get throws { try .init(maxBytes: 16_384, maxDepth: 1, maxItems: 24) } }
 }
 

@@ -58,6 +58,9 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             if imports.records.contains(where: { $0.runCredential != nil }) {
                 try include(.setupController, RelayRunCredentialReference.formatName, [1], [1])
             }
+            if imports.records.contains(where: { $0.runCredential?.reference.runtime.serviceActivity != nil }) {
+                try include(.transport, RelayRunCredentialReference.formatName, [1], [])
+            }
             if imports.records.contains(where: { $0.dnsRecord != nil }) {
                 try include(.setupController, SharedSetupDNSRecord.formatName, [1], [1])
             }
