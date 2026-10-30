@@ -60,3 +60,33 @@ No service installation, native credential access or physical device operation b
 The source contract was compared with the official [zone API](https://developers.cloudflare.com/api/resources/zones/methods/get/)
 and [tunnel creation API](https://developers.cloudflare.com/api/resources/zero_trust/subresources/tunnels/subresources/cloudflared/methods/create/).
 Native provider behavior still needs an explicitly authorized integration session.
+
+
+## Explicit preparation after a refused attempt
+
+The Root owner can prepare a new tunnel attempt after a confirmed provider refusal.
+The caller must obtain fresh administrator authorization and supply the digest of the exact rejected record.
+The owner pins that record and its file identity before reading the provider.
+It requires fresh scoped absence and rechecks the original record and import scope before replacing local state.
+
+```mermaid
+flowchart TD
+    A["Exact rejected record"] --> B["Fresh provider absence read"]
+    B --> C["Recheck record identity and import scope"]
+    C --> D["Retain a new prepared attempt"]
+    D --> E["Later explicit creation request"]
+    E --> F["Run the full creation preflight again"]
+    F --> G["Dispatch one creation request"]
+    U["Dispatched or unknown attempt"] --> S["Keep existing state and stop"]
+```
+
+Preparation increments the attempt number and creates a new attempt ID.
+It preserves the record identity and request digest. It sends no creation request.
+The absence observation is not a reusable dispatch permit.
+An unavailable read, observed tunnel, cancellation or changed scope leaves the rejected record intact.
+A repeated request with the former digest cannot prepare another attempt.
+
+The focused validation covered 35 distinct cases across the owner and provisioning suites.
+Fixtures use owned files and injected provider observations. They do not contact Cloudflare or authorize a real administrator.
+The native request format, administrator admission and app recovery action remain separate integration work.
+This owner operation is not connected to automatic import retries or to unknown-outcome resource adoption.

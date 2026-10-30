@@ -22,6 +22,22 @@ public final class ReviewedSetupFile: @unchecked Sendable, CustomStringConvertib
         }
     }
 
+    /// Use only authenticated recovery metadata and an explicit local recovery action.
+    /// This prepares a refused attempt; it does not authorize adoption or a provider creation.
+    public func refusalRetryOperation(resource: SetupPortableImportRecovery.Resource, recovery: SetupPortableImportRecovery) throws -> SetupPortableImportOperation {
+        try lock.withLock {
+            guard let proposal else { throw AdministrativeSetupChannelError.closed }
+            guard let record = recovery.rejectedRecord(for: resource) else { throw AdministrativeSetupChannelError.invalidMessage }
+            let action: SetupPortableImportOperation.Action
+            switch resource {
+            case .tunnel: action = .prepareRefusedTunnelRetry
+            case .accessApplication: action = .prepareRefusedAccessRetry
+            case .dnsRecord: action = .prepareRefusedDNSRetry
+            }
+            return try .init(action: action, expected: recovery.progress, proposal: proposal, expectedRejectedRecordDigest: record.recordDigest)
+        }
+    }
+
     public func custodyRequirements(expected: SetupPortableImportProgress) throws -> Set<SetupPortableImportCustodyRequirement> {
         requirements(for: try plannedActions(expected: expected))
     }

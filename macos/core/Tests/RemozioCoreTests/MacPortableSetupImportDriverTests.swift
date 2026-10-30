@@ -130,6 +130,8 @@ final class MacPortableSetupImportDriverTests: XCTestCase, @unchecked Sendable {
                     guard ContinuousClock.now < deadline else { throw Failure.expected }
                     try await Task.sleep(for: .milliseconds(2))
                 }
+                do { _ = try await driver.snapshot(); XCTFail("Overlapping snapshot opened another connection") }
+                catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
                 do { _ = try await driver.progress(); XCTFail("Overlapping read opened another connection") }
                 catch { XCTAssertEqual(error as? AdministrativeSetupChannelError, .busy) }
                 do { _ = try await driver.perform(request); XCTFail("Overlapping step obtained another admission") }
