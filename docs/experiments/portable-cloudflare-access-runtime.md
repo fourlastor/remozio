@@ -57,3 +57,6 @@ They test current import binding, empty and overlapping inventories, typed failu
 Live provider defaults, hostname precedence, Access authentication and credential custody remain integration gates.
 No native credential access, real provider mutation, service installation or device operation belongs to fixture validation.
 The app import action, DNS publication, phone credential lifecycle and final import completion remain separate work.
+
+The Root owner now has separate [explicit refusal preparation](portable-provider-refusal-retry.md).
+It does not automatically retry creation or adopt an unknown resource. Native and app dispatch remain unconnected.

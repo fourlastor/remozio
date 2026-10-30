@@ -96,3 +96,39 @@ The fixture now waits up to five seconds for that reference to settle before it 
 The [activity repeat](evidence/2026-10-21-portable-import-xpc-idle-settlement.json) passed with this bounded initial observation on macOS 27.0.1.
 It does not relax either exclusion check while owned work remains active.
 This repeat has a later test source hash than the original paired wire and activity records above.
+
+
+## Native reply completion
+
+The [reply completion result](evidence/2026-10-21-portable-import-xpc-reply-delivery-boundary.json) qualifies the callback boundary with an owned native wrapper.
+It delegates invocation and work to the production endpoint. It adds no production authorization hook.
+The wrapper holds the endpoint's reply callback after the plan commits and its bound result exists.
+The normal variant sends the actual native reply first, then holds the callback before returning to the endpoint.
+The client confirms that result while an independent update descriptor still reports busy.
+The cancelled variant holds before delivery and observes native peer invalidation while the reply remains held.
+
+| Observed state | Update admission |
+| --- | --- |
+| Authenticated idle connection | Allowed |
+| Plan committed and endpoint reply held | Refused |
+| Client confirmed the native reply, with the server callback still held | Refused |
+| Cancelled peer invalidation handler entered, with the callback still held | Refused |
+| Callback returned and owner settled | Allowed |
+
+Both variants passed on Apple Silicon with macOS 27.0.1. Ten existing native and endpoint regression cases also passed without skips.
+The [initial pre-delivery hold](evidence/2026-10-21-portable-import-xpc-reply-boundary.json) remains intact with its original test source hash.
+The new callback wrapper runs only in the test listener. Production endpoint, peer policy and rights checks are unchanged.
+The invalidation entry marker precedes endpoint closure because that closure must wait for the held endpoint lock.
+The older settlement test still waits for its original post-close marker.
+
+Run this mode with unused output paths:
+
+```sh
+python3 scripts/run-macos-portable-import-xpc-experiment.py --reply-boundary --evidence /tmp/remozio-import-reply.json
+```
+
+The runner rejects mixed modes and requires both normal and cancelled evidence.
+It retains the test log, test source hash and the exact host/runtime qualification.
+This remains a same-process, ordinary-user fixture with synthetic credentials and a placeholder authorization form.
+It does not qualify installed Root accounts, Developer ID policy, a real administrator prompt or the macOS 26 runtime.
+No provider request, service installation, physical phone test or product update was performed.
