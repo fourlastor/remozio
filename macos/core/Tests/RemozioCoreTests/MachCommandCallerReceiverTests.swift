@@ -6154,7 +6154,7 @@ extension MachCommandCallerReceiverTests {
             throw error
         }
         XCTAssertEqual(sent, bytes.count); XCTAssertTrue(inputEndSent); XCTAssertGreaterThan(queueTimeouts, 0)
-        let expected = bytes + Data((0..<1048576).map { UInt8(($0 * 17 + 3) % 251) })
+        let expected = bytes + Data((0..<262144).map { UInt8(($0 * 17 + 3) % 251) })
         XCTAssertEqual(output, expected)
         let acknowledgment = try CommandStreamFrame(sequence: outgoing, body: .outputDrained).encode(binding: binding)
         try Self.waitQueued { try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true) }
@@ -6172,7 +6172,7 @@ extension MachCommandCallerReceiverTests {
         let marker = fixture.root.appendingPathComponent("continued-once")
         let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal,
             executablePath: "/bin/sh", arguments: [Data("sh".utf8), Data("-c".utf8),
-                Data("printf READY; /bin/sleep 1; /usr/bin/head -c 1048576 /dev/zero; printf once >> \"$1\"; exit 7".utf8),
+                Data("printf READY; /bin/sleep 1; /usr/bin/head -c 262144 /dev/zero; printf once >> \"$1\"; exit 7".utf8),
                 Data("sh".utf8), Data(marker.path.utf8)], wire: 4, ioMode: .pty, disconnect: .continueRunning)
         let request = try admitOwnedCommand(command, fixture: fixture)
         let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)

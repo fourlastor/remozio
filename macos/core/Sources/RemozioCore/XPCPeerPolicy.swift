@@ -11,6 +11,7 @@ public struct XPCPeerPolicy: Sendable {
     public let expectedAuditSessionID: au_asid_t?
 
     private static let hexadecimalDigits = Array("0123456789abcdef".utf8)
+    private static let compiledRequirements = AcceptedInputMemo<String>()
 
     static func hexadecimalCodeDirectoryHash(_ value: Data) -> String {
         var bytes: [UInt8] = []
@@ -37,13 +38,16 @@ public struct XPCPeerPolicy: Sendable {
         let forbidden = ["com.apple.security.get-task-allow", "com.apple.security.cs.disable-library-validation",
             "com.apple.security.cs.allow-dyld-environment-variables", "com.apple.security.cs.allow-jit", "com.apple.security.cs.allow-unsigned-executable-memory"]
             .map { "!(entitlement[\"\($0)\"] exists)" }.joined(separator: " and ")
-        requirement = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
+        let requirement = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
             + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
             + "and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(componentIdentifier)\" "
             + "and (\(hashes)) and \(forbidden)"
-        var compiled: SecRequirement?
-        guard SecRequirementCreateWithString(requirement as CFString, [], &compiled) == errSecSuccess,
-              compiled != nil else { throw XPCPeerPolicyError.invalidRequirement }
+        try Self.compiledRequirements.check(requirement) {
+            var compiled: SecRequirement?
+            guard SecRequirementCreateWithString(requirement as CFString, [], &compiled) == errSecSuccess,
+                  compiled != nil else { throw XPCPeerPolicyError.invalidRequirement }
+        }
+        self.requirement = requirement
         self.expectedUserID = expectedUserID; self.expectedAuditSessionID = expectedAuditSessionID
     }
 

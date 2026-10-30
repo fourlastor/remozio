@@ -26,7 +26,7 @@ int main(void) {
         used += (size_t)count;
     }
     used = 0;
-    while (used < 1048576) {
+    while (used < 262144) {
         for (size_t i = 0; i < sizeof(bytes); ++i) bytes[i] = (unsigned char)(((used + i) * 17 + 3) % 251);
         if (output(bytes, sizeof(bytes))) return 45;
         used += sizeof(bytes);

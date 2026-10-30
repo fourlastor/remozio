@@ -71,9 +71,15 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
             previous = entry.name
         }
         do {
-            try Self.validateProtocolBudgets(environment: environment, callerUID: presence.presence.ownerUID,
-                submissionLimits: submissionLimits, captureLimits: captureLimits,
-                maximumRequestBodyBytes: service.maximumRequestBodyBytes)
+            let budgets = BudgetInputs(environment: environment.map { [$0.name, $0.value, Data([UInt8($0.source.rawValue)])] },
+                callerUID: presence.presence.ownerUID, limits: [submissionLimits, captureLimits].flatMap {
+                    [$0.maxBytes, $0.maxDepth, $0.maxItems]
+                }, maximumRequestBodyBytes: service.maximumRequestBodyBytes)
+            try Self.acceptedBudgets.check(budgets) {
+                try Self.validateProtocolBudgets(environment: environment, callerUID: presence.presence.ownerUID,
+                    submissionLimits: submissionLimits, captureLimits: captureLimits,
+                    maximumRequestBodyBytes: service.maximumRequestBodyBytes)
+            }
         } catch { throw AuthorityCommandStartupError.invalidConfiguration }
         self.presence = presence; self.serviceName = serviceName; self.policyPath = policyPath; self.environment = environment
         self.submissionLimits = submissionLimits; self.captureLimits = captureLimits; self.maximumSessions = maximumSessions
@@ -138,6 +144,10 @@ public struct AuthorityCommandStartupConfiguration: Sendable, CustomStringConver
             approvalLifetimeMilliseconds: number(11), execution: execution)
         guard result.canonicalBytes == bytes else { throw AuthorityCommandStartupError.invalidConfiguration }; return result
     }
+    private struct BudgetInputs: Hashable, Sendable {
+        let environment: [[Data]], callerUID: UInt32, limits: [Int], maximumRequestBodyBytes: Int
+    }
+    private static let acceptedBudgets = AcceptedInputMemo<BudgetInputs>()
     /// Size checks use the real codecs for both advertised profiles, including the configured environment.
     /// These records are sizing examples only. They carry no OS provenance or execution authority.
     private static func validateProtocolBudgets(environment: [CapturedEnvironmentEntry], callerUID: UInt32,
