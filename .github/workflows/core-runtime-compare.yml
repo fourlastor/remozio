@@ -1,0 +1,53 @@
+name: Core runtime comparison
+on:
+  push:
+    branches: [perf/core-test-runtime-compare]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  compare:
+    name: ${{ matrix.name }}
+    if: github.repository == 'fourlastor/remozio'
+    runs-on: macos-26
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: baseline-debug, baseline: true, flags: ""}
+          - {name: memo-debug, baseline: false, flags: ""}
+          - {name: memo-debug-O, baseline: false, flags: "-Xswiftc -O"}
+          - {name: memo-release, baseline: false, flags: "-c release -Xswiftc -enable-testing"}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
+      - name: Restore unmemoized sources for the baseline
+        if: matrix.baseline
+        run: |
+          git checkout HEAD~2 -- macos/core/Sources macos/core/Tests
+          git rm -f --quiet --ignore-unmatch macos/core/Sources/RemozioCore/AcceptedInputMemo.swift macos/core/Tests/RemozioCoreTests/AcceptedInputMemoTests.swift
+      - name: Build tests
+        run: |
+          started=$SECONDS
+          swift build --package-path macos/core --triple arm64-apple-macosx26.0 --build-tests ${{ matrix.flags }}
+          echo "build seconds $((SECONDS - started))"
+      - name: Run the whole suite
+        run: |
+          started=$SECONDS
+          status=0
+          swift test --package-path macos/core --triple arm64-apple-macosx26.0 --skip-build --xunit-output "$RUNNER_TEMP/xunit.xml" ${{ matrix.flags }} > "$RUNNER_TEMP/test.log" 2>&1 || status=$?
+          echo "test seconds $((SECONDS - started)) status $status"
+          tail -5 "$RUNNER_TEMP/test.log"
+          grep -E "error:|: failed" "$RUNNER_TEMP/test.log" | head -30 || true
+          exit "$status"
+      - name: Retain evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-runtime-${{ matrix.name }}
+          path: ${{ runner.temp }}/*.log
+          retention-days: 14
