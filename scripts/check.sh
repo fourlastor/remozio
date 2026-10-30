@@ -57,7 +57,12 @@ if [ "$(uname -s)" = Darwin ]; then
     run_stage run-installation-inventory-experiment python3 scripts/run-installation-inventory-experiment.py
     run_stage 'Swift test: protocol/swift' swift test --package-path protocol/swift --triple arm64-apple-macosx26.0 --force-resolved-versions
     run_stage 'Swift test: host/shared-core' swift test --package-path host/shared-core --triple arm64-apple-macosx26.0 --force-resolved-versions --jobs 4
-    run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0
+    # CI spends most of this stage in CPU-bound validation. Optimizing halves it; local runs keep faster rebuilds.
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O
+    else
+        run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0
+    fi
     run_stage run-macos-job-control-experiment python3 scripts/run-macos-job-control-experiment.py
     run_stage run-macos-nested-shell-experiment python3 scripts/run-macos-nested-shell-experiment.py
     run_stage check-command-transfer python3 scripts/check-command-transfer.py

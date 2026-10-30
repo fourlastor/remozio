@@ -112,7 +112,8 @@ final class CommandFrontendRelayTests: XCTestCase {
         channel.events = [.opened]
         var relay: CommandFrontendRelay? = try CommandFrontendRelay(channel: channel, terminal: terminal)
         _ = try relay!.advance(); _ = try relay!.advance()
-        terminal.restoreError = CommandFrontendTerminalError.native(EAGAIN)
+        // Optimized builds may otherwise destroy the relay right after its last use, before the injected failure.
+        withExtendedLifetime(relay) { terminal.restoreError = CommandFrontendTerminalError.native(EAGAIN) }
         relay = nil
         XCTAssertEqual(channel.closeCalls, 1); XCTAssertTrue(terminal.needsRestore)
         XCTAssertEqual(terminal.restorationFailures, [EAGAIN])
