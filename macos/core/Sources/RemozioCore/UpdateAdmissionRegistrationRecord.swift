@@ -61,4 +61,3 @@ struct UpdateAdmissionRegistrationRecord: Codable, Equatable, Sendable, CustomSt
         }
     } }
 }
-
