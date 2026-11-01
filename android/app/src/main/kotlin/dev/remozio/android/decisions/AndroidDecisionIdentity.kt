@@ -5,6 +5,7 @@ import android.security.keystore.KeyProperties
 import androidx.annotation.WorkerThread
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.transport.PhoneRoutingChallenge
+import dev.remozio.phone.updates.PhoneUpdateSchedulingChallenge
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.phone.requests.CommandRequestSession
 import dev.remozio.phone.requests.RequestLimits
@@ -116,6 +117,22 @@ class AndroidDecisionIdentity internal constructor(
         try {
             val signingKey = key ?: throw DecisionIdentityUnavailable()
             return challenge.sign(enrollment) { input ->
+                P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+                    initSign(signingKey); update(input); sign()
+                })
+            }
+        } catch (_: Exception) { throw DecisionIdentityUnavailable() }
+    }
+
+    /** Signs the selected update control with the existing decision key. The challenge retains its original lifetime. */
+    @WorkerThread
+    @Synchronized
+    fun signUpdateScheduling(challenge: PhoneUpdateSchedulingChallenge, current: StoredPhoneEnrollment): ByteArray {
+        try {
+            val signingKey = key ?: throw DecisionIdentityUnavailable()
+            require(current.phase == EnrollmentPhase.ACTIVE && current.sameConnectionAs(
+                StoredPhoneEnrollment(enrollment, current.phase, current.pairing)))
+            return challenge.sign(current) { input ->
                 P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
                     initSign(signingKey); update(input); sign()
                 })

@@ -2,6 +2,7 @@ package dev.remozio.android.decisions
 
 import dev.remozio.phone.enrollment.*
 import dev.remozio.phone.requests.RequestLimits
+import dev.remozio.phone.updates.PhoneUpdateSchedulingQuery
 import dev.remozio.protocol.*
 import java.io.File
 import java.security.KeyPairGenerator
@@ -110,6 +111,73 @@ class AndroidDecisionIdentityTest {
     @Test fun inactiveRecordsCannotLoadKeys() {
         for (phase in listOf(EnrollmentPhase.PREPARED, EnrollmentPhase.REMOVED)) {
             assertFailsWith<DecisionIdentityUnavailable> { AndroidDecisionIdentities.load(StoredPhoneEnrollment(enrollment, phase)) }
+        }
+    }
+
+    private val updateControlLimits = CborLimits(1024, 2, 32)
+    private val updateResponseLimits = CborLimits(2048, 2, 32)
+    private val updateSigningLimits = CborLimits(4096, 2, 32)
+    private fun updateControl(action: UpdateSchedulingAction) = UpdateSchedulingControl(id(2), id(3), id(4), id(5),
+        id(20), id(21, 32), enrollment.decisionKey.keyID.copyBytes(), id(22, 32), 7u, 8u, 1000u, 31000u, action)
+        .encode(updateControlLimits)
+    private fun updateChallenge(action: UpdateSchedulingAction = UpdateSchedulingAction.INSTALL_WHEN_CURRENT_WORK_FINISHES,
+                                now: () -> Long = { 1_000_000L }): dev.remozio.phone.updates.PhoneUpdateSchedulingChallenge {
+        val record = StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE)
+        val query = PhoneUpdateSchedulingQuery.begin(record, id(22, 32), 7u, 8u, action, now)
+        val body = RootUpdateSchedulingChallenge(query.queryNonce, updateControl(action), updateControlLimits).encode(updateResponseLimits)
+        val signature = P256SignatureEncoding.fromDer(Signature.getInstance("SHA256withECDSA").run {
+            initSign(authority.private)
+            update(RootUpdateSchedulingChallengeSigningInput.make(1u, body, updateResponseLimits, updateSigningLimits))
+            sign()
+        })
+        return query.use { it.verify(record, body, signature) }
+    }
+
+    @Test fun schedulingUsesTheExistingDecisionKeyForEachVerifiedExplicitChoice() {
+        identity().use { signer ->
+            for (action in UpdateSchedulingAction.entries) {
+                val challenge = updateChallenge(action)
+                val signature = signer.signUpdateScheduling(challenge, StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE))
+                assertTrue(UpdateSchedulingSignature.verify(signature, enrollment.decisionKey.publicKey.copyBytes(),
+                    1u, updateControl(action), updateControlLimits, updateSigningLimits))
+                assertFalse(UpdateSchedulingSignature.verify(signature, enrollment.biometricKey.publicKey.copyBytes(),
+                    1u, updateControl(action), updateControlLimits, updateSigningLimits))
+                assertFailsWith<DecisionIdentityUnavailable> {
+                    signer.signUpdateScheduling(challenge, StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE))
+                }
+            }
+        }
+    }
+
+    @Test fun schedulingRejectsClosedAndWrongPrivateKeyHandles() {
+        val signer = identity(); signer.close()
+        assertFailsWith<DecisionIdentityUnavailable> {
+            signer.signUpdateScheduling(updateChallenge(), StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE))
+        }
+        AndroidDecisionIdentity(enrollment, pair().private, DecisionKeySecurity.TRUSTED_ENVIRONMENT).use { wrong ->
+            assertFailsWith<DecisionIdentityUnavailable> {
+                wrong.signUpdateScheduling(updateChallenge(), StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE))
+            }
+        }
+    }
+
+    @Test fun schedulingRejectsAnInactiveEnrollmentWithoutUsingBiometrics() {
+        identity().use { signer ->
+            for (phase in listOf(EnrollmentPhase.PREPARED, EnrollmentPhase.REMOVED)) {
+                assertEquals("Decision identity unavailable", assertFailsWith<DecisionIdentityUnavailable> {
+                    signer.signUpdateScheduling(updateChallenge(), StoredPhoneEnrollment(enrollment, phase))
+                }.message)
+            }
+        }
+    }
+
+    @Test fun schedulingCannotSignAfterSleepExhaustsTheOriginalLifetime() {
+        var nanos = 1_000_000L
+        val challenge = updateChallenge(now = { nanos }); nanos += 30_000_000_000L
+        identity().use { signer ->
+            assertFailsWith<DecisionIdentityUnavailable> {
+                signer.signUpdateScheduling(challenge, StoredPhoneEnrollment(enrollment, EnrollmentPhase.ACTIVE))
+            }
         }
     }
 

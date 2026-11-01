@@ -20,6 +20,13 @@ import dev.remozio.android.enrollment.StoredMacReader
 import dev.remozio.android.enrollment.PairingReceiptRecovery
 import dev.remozio.android.enrollment.androidPairingReceiptWire
 import dev.remozio.android.updates.androidUpdateHost
+import dev.remozio.android.updates.MacUpdateProgressConnection
+import dev.remozio.android.updates.MacUpdateSchedulingConnection
+import dev.remozio.android.updates.androidMacUpdateProgressConnections
+import dev.remozio.android.updates.androidMacUpdateSchedulingConnections
+import dev.remozio.android.updates.applicationMacUpdateScheduling
+import dev.remozio.phone.transport.PhoneUpdateSchedulingStatus
+import dev.remozio.protocol.UpdateSchedulingAction
 import dev.remozio.android.requests.CommandRequestNotifications
 import dev.remozio.android.requests.RequestElapsedClock
 import dev.remozio.android.requests.ForegroundCommandConnections
@@ -129,19 +136,47 @@ class RemozioApplication : Application() {
     internal fun refreshRouting(connection: MacRoutingConnection): kotlinx.coroutines.Deferred<Boolean> =
         scope.async(Dispatchers.IO) { connection.refresh() }
 
+    internal val macUpdateScheduling by lazy {
+        androidMacUpdateSchedulingConnections(this, enrollmentAccess,
+            freshnessMillis = { routingWorkSettings.read().freshnessSeconds * 1000L },
+            timeoutMillis = { routingWorkSettings.read().operationSeconds * 1000L })
+    }
+
+    internal val macUpdateProgress by lazy {
+        androidMacUpdateProgressConnections(this, enrollmentAccess,
+            freshnessMillis = { routingWorkSettings.read().freshnessSeconds * 1000L },
+            timeoutMillis = { routingWorkSettings.read().operationSeconds * 1000L })
+    }
+
+    internal fun refreshMacUpdateProgress(connection: MacUpdateProgressConnection): kotlinx.coroutines.Deferred<Boolean> =
+        scope.async(Dispatchers.IO) { connection.refresh() }
+
+    internal fun scheduleMacUpdate(connection: MacUpdateSchedulingConnection, expected: PhoneUpdateSchedulingStatus,
+        action: UpdateSchedulingAction): kotlinx.coroutines.Deferred<Boolean> =
+        applicationMacUpdateScheduling(scope, connection, expected, action)
+
+    internal fun refreshMacUpdateScheduling(connection: MacUpdateSchedulingConnection): kotlinx.coroutines.Deferred<Boolean> =
+        scope.async(Dispatchers.IO) { connection.refresh() }
+
     internal val pairing by lazy {
         StoredPairingHost(
             { AndroidEnrollmentStore.open(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             { AndroidEnrollmentStore.openExisting(this, maximumRecords = 1024, maximumPlaintextBytes = 16_777_216) },
             enrollmentAccess, { ids ->
-                try { routing.invalidateRecordsLocked(ids) }
+                try { macUpdateProgress.invalidateRecordsLocked(ids) }
                 finally {
-                    try { commands.invalidateRecordsLocked(ids) }
+                    try { macUpdateScheduling.invalidateRecordsLocked(ids) }
                     finally {
-                        try { wakeFetches.invalidateRecordsLocked(ids) }
+                        try { routing.invalidateRecordsLocked(ids) }
                         finally {
-                            try { wakeNotifications.invalidateRecordsLocked(ids) }
-                            finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                            try { commands.invalidateRecordsLocked(ids) }
+                            finally {
+                                try { wakeFetches.invalidateRecordsLocked(ids) }
+                                finally {
+                                    try { wakeNotifications.invalidateRecordsLocked(ids) }
+                                    finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                                }
+                            }
                         }
                     }
                 }

@@ -77,7 +77,10 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                         if (mac.setupIncomplete) {
                             Text(stringResource(R.string.macs_setup_incomplete), style = MaterialTheme.typography.titleMedium)
                             Text(stringResource(R.string.macs_setup_incomplete_description))
-                        } else dev.remozio.android.routing.MacRoutingStatusContent(mac.recordID)
+                        } else {
+                            dev.remozio.android.routing.MacRoutingStatusContent(mac.recordID)
+                            dev.remozio.android.updates.MacUpdateStatusContent(mac.recordID)
+                        }
                         if (mac.setupIncomplete) PairingReceiptControl(mac,
                             status = remember(receiptStates, mac.recordID) {
                                 receiptStates.getOrPut(mac.recordID) { mutableStateOf(ReceiptCheckState.IDLE) }
