@@ -88,10 +88,10 @@ def declarations(role):
     if role in (4, 8):
         values.append(format_declaration('transport.gateway-settings-control', [1]))
     if role in (2, 4, 6, 8):
-        values.append({0: 'runtime.material-reference', 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.material-reference', 1: [1, 2, 3], 2: [1, 2, 3] if role == 8 else [], 3: {}})
         values.append({0: 'runtime.service-release-activity-reference', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     if role in (2, 8):
-        values.append({0: 'runtime.preparation-material', 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.preparation-material', 1: [1, 2, 3], 2: [1, 2, 3] if role == 8 else [], 3: {}})
     host_formats = {
         2: [('runtime.activation-plan', [1, 2], []),
             ('runtime.gateway-settings-consumer-host', [1], []),

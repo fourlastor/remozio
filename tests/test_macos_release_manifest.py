@@ -22,7 +22,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
 
     def test_capacity_keeps_current_debug_and_release_manifest_bytes(self):
-        expected = {'Debug': '5e1ec5a9ded1775ca8018459ce2240c7709b91b59b096112c17e1962920f73d3', 'Release': 'aa9f23c718c38330bb0a076b188a32a4cbce37974b926bce030c3f74b454f7ea'}
+        expected = {'Debug': 'bb98b7342fcf4bf362539d5642305ed0eefd2f0f14d3fd78e65988e79cd3dacd', 'Release': '070ed2cf0c713916b2e1375d924154a4d61507d894916db3d41a783dc635de41'}
         with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
             for configuration, digest in expected.items():
                 info = MANIFEST.generate(self.environment(configuration))
@@ -269,13 +269,13 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         activity = 'runtime.service-release-activity-reference'
         material = 'runtime.preparation-material'
         for role, declarations in by_role.items():
-            for name, versions in ((reference, [1, 2]), (activity, [1])):
+            for name, versions in ((reference, [1, 2, 3]), (activity, [1])):
                 if role in (2, 4, 6, 8):
                     self.assertEqual(declarations[name], {0: name, 1: versions, 2: versions if role == 8 else [], 3: {}})
                 else:
                     self.assertNotIn(name, declarations)
             if role in (2, 8):
-                self.assertEqual(declarations[material], {0: material, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[material], {0: material, 1: [1, 2, 3], 2: [1, 2, 3] if role == 8 else [], 3: {}})
             else:
                 self.assertNotIn(material, declarations)
 

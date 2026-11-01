@@ -89,7 +89,8 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         for runtime in inputs.runtimes {
             let plan = try runtime.activationRecord.map(RuntimeActivationPlan.decode)
-            let materialVersion: UInt64 = runtime.reference.serviceActivity == nil ? 1 : 2
+            let materialVersion = runtime.reference.formatVersion
+            let transportVersion: UInt64 = runtime.reference.serviceActivity == nil ? 1 : 2
             for role in [AuthorityCodeRole.authority, .setupController] {
                 try include(role, RuntimePreparationMaterial.formatName, [materialVersion], role == .setupController ? [materialVersion] : [])
                 if let plan {
@@ -102,7 +103,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             }
             if runtime.configurationPublished || plan != nil {
                 for role in [AuthorityCodeRole.transport, .setupController] {
-                    try include(role, "transport.pairing-config", [materialVersion], role == .setupController ? [materialVersion] : [])
+                    try include(role, "transport.pairing-config", [transportVersion], role == .setupController ? [transportVersion] : [])
                 }
             }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
