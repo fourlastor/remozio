@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum PreparationRecordError: Error, Equatable { case invalidRecord, corruptRecord }
-enum PreparationRecordPhase: UInt64, Codable { case intent = 1, copyRecorded = 2, abandoned = 3 }
+enum PreparationRecordPhase: UInt64, Codable, Sendable { case intent = 1, copyRecorded = 2, abandoned = 3 }
 
 struct PreparationFileIdentity: Codable, Equatable, Sendable {
     let device: UInt32
@@ -10,7 +10,7 @@ struct PreparationFileIdentity: Codable, Equatable, Sendable {
 }
 
 /// Persisted bookkeeping. Decoding this value grants no signature or activation authority.
-struct PreparationIntentRecord: Codable, Equatable {
+struct PreparationIntentRecord: Codable, Equatable, Sendable {
     let id: UUID
     let revision: UUID
     let parent: String
