@@ -197,6 +197,37 @@ class MacUpdateDisplayTest {
         assertEquals(UpdateSchedulingProgressPhase.COMPLETED, model.current?.phase)
         assertTrue(model.tooLate); assertNoActions(model)
     }
+    @Test fun equalRevisionProgressAdvancesBeyondAnEarlierTooLateWithoutAcknowledgingTheControl() = runTest {
+        for (phase in listOf(UpdateSchedulingProgressPhase.CHECKING_RESTART,
+            UpdateSchedulingProgressPhase.FINISHING, UpdateSchedulingProgressPhase.COMPLETED)) {
+            val f = Fixture(); val late = f.late(); val attempt = f.attempt(MacUpdateSchedulingOutcome.UNCERTAIN)
+            f.nanos += 10_000_000
+            val progress = f.progress(phase = phase, actions = 0u, revision = 1u,
+                action = UpdateSchedulingAction.INSTALL_WHEN_CURRENT_WORK_FINISHES)
+            val model = f.display(progress, f.status(revision = 1u,
+                action = UpdateSchedulingAction.INSTALL_WHEN_CURRENT_WORK_FINISHES), attempt = attempt, late = late)
+            assertSame(progress.response, model.current)
+            assertTrue(model.tooLate); assertSame(attempt, model.attempt); assertNoActions(model)
+        }
+    }
+    @Test fun equalRevisionProgressWinsWhenTheLocalObservationAgesTie() = runTest {
+        val f = Fixture(); val late = f.late(); val attempt = f.attempt(MacUpdateSchedulingOutcome.UNCERTAIN)
+        val progress = f.progress(phase = UpdateSchedulingProgressPhase.COMPLETED, actions = 0u, revision = 1u,
+            action = UpdateSchedulingAction.INSTALL_WHEN_CURRENT_WORK_FINISHES)
+        val model = f.display(progress, attempt = attempt, late = late)
+        assertSame(progress.response, model.current)
+        assertTrue(model.tooLate); assertSame(attempt, model.attempt); assertNoActions(model)
+    }
+    @Test fun aFresherTooLateKeepsTheCurrentRootObservationAtTheSameRevision() = runTest {
+        val f = Fixture()
+        val progress = f.progress(phase = UpdateSchedulingProgressPhase.COMPLETED, actions = 0u, revision = 1u,
+            action = UpdateSchedulingAction.INSTALL_WHEN_CURRENT_WORK_FINISHES)
+        f.nanos += 10_000_000
+        val late = f.late(); val attempt = f.attempt(MacUpdateSchedulingOutcome.UNCERTAIN)
+        val model = f.display(progress, attempt = attempt, late = late)
+        assertSame(late.response.progress, model.current)
+        assertTrue(model.tooLate); assertSame(attempt, model.attempt); assertNoActions(model)
+    }
     @Test fun expiredTooLateRemainsLastKnownAndCannotAcknowledgeTheEarlierRequest() = runTest {
         val f = Fixture(); val late = f.late(); val attempt = f.attempt(MacUpdateSchedulingOutcome.UNCERTAIN)
         f.nanos += 1_000_000_000

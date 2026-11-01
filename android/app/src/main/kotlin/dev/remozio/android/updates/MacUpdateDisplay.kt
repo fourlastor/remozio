@@ -54,7 +54,12 @@ internal fun macUpdateDisplay(
         directFrame == null -> true
         lateFresh && !directFresh -> true
         directFresh && !lateFresh -> false
-        sameUpdate -> !directFrame.phase.irreversible || lateFrame.status.revision >= directFrame.status.revision
+        sameUpdate -> when {
+            !directFrame.phase.irreversible -> true
+            lateFrame.status.revision != directFrame.status.revision ->
+                lateFrame.status.revision > directFrame.status.revision
+            else -> lateAge != null && (directAge == null || lateAge < directAge)
+        }
         directFresh -> false
         else -> lateAge != null && (directAge == null || lateAge < directAge)
     }
