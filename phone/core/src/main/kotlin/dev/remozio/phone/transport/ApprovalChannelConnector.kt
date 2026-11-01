@@ -18,6 +18,9 @@ enum class EnrolledChannelPurpose(val applicationProtocol: String) {
     PUSH_REGISTRATION(PhonePushRegistrationFrame.APPLICATION_PROTOCOL),
     PUSH_RECOVERY(PhonePushRecoveryFrame.APPLICATION_PROTOCOL),
     ROUTING(PhoneRoutingFrame.APPLICATION_PROTOCOL),
+    UPDATE_SCHEDULING(dev.remozio.protocol.PhoneUpdateSchedulingFrame.APPLICATION_PROTOCOL),
+    UPDATE_SCHEDULING_V2(dev.remozio.protocol.PhoneUpdateSchedulingFrameV2.APPLICATION_PROTOCOL),
+    UPDATE_PROGRESS(dev.remozio.protocol.PhoneUpdateProgressFrame.APPLICATION_PROTOCOL),
 }
 
 /** Supplies ciphertext only. All routes use the same enrolled identity and peer pin. */
