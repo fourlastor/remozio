@@ -222,8 +222,18 @@ static int supervise(int slave) {
     if ((setpgid(child, child) && errno != EACCES) || tcsetpgrp(slave, child) || !byte(command[1], 'F')) error = 35;
     for (unsigned i = 0; !error && i < 8; i++) {
         const char expected[] = {'C', 'D', 'H', 'Q', 'J', 'O', 'E', 'W'};
-        pid_t observed;
-        if (!receive(report[0], expected[i]) || (observed = waitpid(child, &status, WNOHANG | WUNTRACED)) != 0 || !byte(command[1], 'S')) error = 45;
+        bool received = receive(report[0], expected[i]), sent = false;
+        pid_t observed = 0; int wait_error = 0;
+        if (received) {
+            observed = waitpid(child, &status, WNOHANG | WUNTRACED);
+            if (observed < 0) wait_error = errno;
+            if (!observed) sent = byte(command[1], 'S');
+        }
+        if (!received || observed != 0 || !sent) {
+            fprintf(stderr, "frontend suspension handshake phase=%u expected=%c received=%d observed=%ld status=%d waitError=%d sent=%d\n",
+                i, expected[i], received, (long)observed, status, wait_error, sent);
+            error = 45;
+        }
     }
     if (!error && (wait_for(child, &status, WUNTRACED) != child || !WIFSTOPPED(status) || WSTOPSIG(status) != SIGTSTP)) error = 65;
     if (!error && (tcgetattr(slave, &seen) || !same(&original, &seen) || tcsetpgrp(slave, getpgrp()) || kill(child, SIGCONT))) error = 66;
@@ -243,6 +253,9 @@ static int supervise(int slave) {
         kill(child, SIGKILL);
         pid_t result; do { result = waitpid(child, &status, 0); } while (result < 0 && errno == EINTR);
         if (result != child && errno != ECHILD) error = 43;
+        if (error) fprintf(stderr, "frontend suspension cleanup observed=%ld status=%d exited=%d exit=%d signaled=%d signal=%d\n",
+            (long)result, status, WIFEXITED(status), WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+            WIFSIGNALED(status), WIFSIGNALED(status) ? WTERMSIG(status) : 0);
     }
     close(command[1]); close(report[0]); close(slave); return error;
 }
