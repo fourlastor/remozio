@@ -17,7 +17,7 @@ SPEC.loader.exec_module(CHECKS)
 
 
 class CheckStageTimingTests(unittest.TestCase):
-    def run_checks(self, system="Linux", github=False, fail_argument=""):
+    def run_checks(self, system="Linux", github=False, fail_argument="", fail_command=""):
         with tempfile.TemporaryDirectory(prefix="timed checks ") as temporary:
             directory = Path(temporary)
             (directory / "repo/scripts").mkdir(parents=True)
@@ -29,6 +29,7 @@ printf '%s %s\\n' "${0##*/}" "$*" >> "$CHECK_TIMING_LOG"
 printf '%s\\n' 'child stdout'
 printf '%s\\n' 'child stderr' >&2
 if [ -n "${FAIL_ARGUMENT:-}" ] && [ "${1:-}" = "$FAIL_ARGUMENT" ]; then exit 23; fi
+if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 23; fi
 '''
             for name in ("python3", "swift", "git"):
                 path = binary / name
@@ -40,7 +41,7 @@ if [ -n "${FAIL_ARGUMENT:-}" ] && [ "${1:-}" = "$FAIL_ARGUMENT" ]; then exit 23;
             log = directory / "calls"
             env = os.environ | {"PATH": str(binary) + os.pathsep + os.environ["PATH"],
                                 "CHECK_SYSTEM": system, "CHECK_TIMING_LOG": str(log),
-                                "GITHUB_ACTIONS": "true" if github else "false", "FAIL_ARGUMENT": fail_argument}
+                                "GITHUB_ACTIONS": "true" if github else "false", "FAIL_ARGUMENT": fail_argument, "FAIL_COMMAND": fail_command}
             result = subprocess.run(["/bin/sh", str(directory / "repo/scripts/check.sh")], cwd=directory,
                                     env=env, capture_output=True, text=True, timeout=10)
             return result, log.read_text().splitlines()
@@ -67,6 +68,16 @@ if [ -n "${FAIL_ARGUMENT:-}" ] && [ "${1:-}" = "$FAIL_ARGUMENT" ]; then exit 23;
         self.assertEqual(result.stderr.count("::endgroup::"), len(calls))
         self.assertRegex(result.stderr, r"Stage timing: check-macos-app: [0-9]+s \(exit 23\)")
         self.assertEqual(result.stdout, "child stdout\n" * len(calls))
+
+    def test_ui_adapter_suite_is_required_and_its_failure_stops_the_mac_gate(self):
+        command = ("swift test --package-path macos/ui-adapters --triple arm64-apple-macosx26.0 "
+                   "--disable-keychain --disable-netrc")
+        result, calls = self.run_checks("Darwin", fail_command=command)
+        self.assertEqual(result.returncode, 23)
+        self.assertEqual(calls[-1], command)
+        self.assertFalse(any("run-macos-job-control-experiment.py" in call for call in calls))
+        self.assertFalse(any(call.startswith("git ") for call in calls))
+        self.assertRegex(result.stderr, r"Stage timing: Swift test: macos/ui-adapters: [0-9]+s \(exit 23\)")
 
 
 class CapturedBuildTimingTests(unittest.TestCase):

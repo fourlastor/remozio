@@ -63,6 +63,7 @@ if [ "$(uname -s)" = Darwin ]; then
     else
         run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0
     fi
+    run_stage 'Swift test: macos/ui-adapters' swift test --package-path macos/ui-adapters --triple arm64-apple-macosx26.0 --disable-keychain --disable-netrc
     run_stage run-macos-job-control-experiment python3 scripts/run-macos-job-control-experiment.py
     run_stage run-macos-nested-shell-experiment python3 scripts/run-macos-nested-shell-experiment.py
     run_stage check-command-transfer python3 scripts/check-command-transfer.py
