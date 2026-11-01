@@ -12,6 +12,16 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
             revision: 1, firstObservedAt: .init(epoch: UUID(), milliseconds: 100), deadlineMilliseconds: 200))
     }
 
+    func testOrdinaryReadinessRequiresStartedAndRevokesBeforeCleanup() async throws {
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail() }, rejectUnowned: { _ in XCTFail() })
+        XCTAssertThrowsError(try worker.requireOrdinaryReadiness())
+        try worker.start(); try worker.requireOrdinaryReadiness()
+        worker.requestStop()
+        XCTAssertThrowsError(try worker.requireOrdinaryReadiness())
+        await worker.close()
+        XCTAssertThrowsError(try worker.requireOrdinaryReadiness())
+    }
+
     @MainActor func testPendingDuplicateDoesNotStartAnotherAttempt() async throws {
         let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
         let calls = Mutex(0)
@@ -67,7 +77,7 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
         XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
         XCTAssertEqual(worker.enqueue(notice(4)), .capacity)
         XCTAssertTrue(worker.isRetired)
-        let retired = await events.next()
+        let retired: Void? = await events.next()
         XCTAssertNotNil(retired)
         XCTAssertEqual(worker.enqueue(notice(5)), .closed)
         resume.signal(); await worker.close()

@@ -116,6 +116,14 @@ final class ServiceReleaseActivityBarrier: @unchecked Sendable {
         guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
         try lock.withLock { guard holders.contains(id) else { throw JournalLeaseError.invalidated }; try validateLocked() }
     }
+    fileprivate func validateExclusive(_ id: UUID) throws {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        try lock.withLock {
+            guard holders.contains(id) else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            guard exclusive else { throw ReleaseActivityError.busy }
+        }
+    }
     fileprivate func release(_ id: UUID) {
         guard getpid() == processID else { return }
         lock.withLock {
@@ -162,6 +170,7 @@ final class ServiceReleaseActivityToken: OwnedReleaseActivity {
     private let id: UUID
     fileprivate init(barrier: ServiceReleaseActivityBarrier, id: UUID) { self.barrier = barrier; self.id = id }
     func validate() throws { try barrier.validate(id) }
+    func validateExclusive() throws { try barrier.validateExclusive(id) }
     func withSharedDescriptorForSpawn<Value>(_ body: (Int32) throws -> Value) throws -> Value {
         try barrier.withSharedDescriptorForSpawn(id, body)
     }

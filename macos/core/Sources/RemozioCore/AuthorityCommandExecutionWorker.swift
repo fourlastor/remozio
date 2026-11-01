@@ -102,6 +102,11 @@ public final class AuthorityCommandExecutionWorker: Sendable {
         return .queued
     }
 
+    func requireOrdinaryReadiness() throws {
+        try ownership.state.withLock {
+            guard $0.started, !$0.stopping, !$0.failed else { throw AuthorityCommandExecutionWorkerError.closed }
+        }
+    }
     public func requestStop() { ownership.requestStop() }
 
     /// Prevent new attempts and await every queued turn. Only the journal may dispose native owners.
