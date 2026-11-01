@@ -70,6 +70,34 @@ final class ReleaseActivityBarrierTests: XCTestCase {
         XCTAssertEqual(flock(observer, LOCK_EX | LOCK_NB), -1); XCTAssertEqual(errno, EWOULDBLOCK)
         token.close(); XCTAssertEqual(flock(observer, LOCK_EX | LOCK_NB), 0)
     }
+    func testSpawnCopyKeepsTheSharedLockAfterTheOriginalTokenCloses() throws {
+        let fixture = try ReleaseActivityFixture(), authority = try fixture.open(), installer = try fixture.open()
+        let token = try authority.acquireShared()
+        try token.withSharedDescriptorForSpawn { descriptor in
+            XCTAssertNotEqual(fcntl(descriptor, F_GETFD) & FD_CLOEXEC, 0)
+            token.close()
+            XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        }
+        let update = try installer.acquireExclusive(); update.close()
+        XCTAssertThrowsError(try token.withSharedDescriptorForSpawn { _ in XCTFail("Closed token lent a descriptor") })
+    }
+    func testFailedSpawnCallbackClosesTheCopyAndExclusiveTokensCannotLend() throws {
+        enum Stop: Error { case expected }
+        let fixture = try ReleaseActivityFixture(), authority = try fixture.open(), installer = try fixture.open()
+        let shared = try authority.acquireShared()
+        XCTAssertThrowsError(try shared.withSharedDescriptorForSpawn { _ in shared.close(); throw Stop.expected })
+        let exclusive = try installer.acquireExclusive(); defer { exclusive.close() }
+        XCTAssertThrowsError(try exclusive.withSharedDescriptorForSpawn { _ in XCTFail("Exclusive token lent a descriptor") })
+    }
+    func testOnlyTheLiveExclusiveTokenCanValidateForServiceRemoval() throws {
+        let fixture = try ReleaseActivityFixture(), barrier = try fixture.open()
+        let shared = try barrier.acquireShared()
+        XCTAssertThrowsError(try shared.validateExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        shared.close()
+        let exclusive = try barrier.acquireExclusive(); try exclusive.validateExclusive()
+        exclusive.close()
+        XCTAssertThrowsError(try exclusive.validateExclusive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+    }
     func testMissingUnsafeAndNonemptyFilesAreNeverRepaired() throws {
         for mutation in 0..<4 {
             let fixture = try ReleaseActivityFixture(), path = fixture.directory.appendingPathComponent("activity.lock").path
@@ -88,4 +116,57 @@ final class ReleaseActivityBarrierTests: XCTestCase {
         for token in tokens { token.close() }
         let update = try installer.acquireExclusive(); update.close()
     }
+
+    func testIndependentBorrowCannotUnlockTheOriginalSharedDescription() throws {
+        let fixture = try ReleaseActivityFixture(), authority = try fixture.open(), installer = try fixture.open()
+        let token = try authority.acquireShared(); defer { token.close() }
+        try token.withIndependentSharedDescriptor { descriptor in
+            XCTAssertNotEqual(fcntl(descriptor, F_GETFD) & FD_CLOEXEC, 0)
+            XCTAssertEqual(fcntl(descriptor, F_GETFL) & O_ACCMODE, O_RDONLY)
+            XCTAssertEqual(flock(descriptor, LOCK_UN), 0)
+            XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+            try token.validate()
+        }
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        try token.withIndependentSharedDescriptor { _ in
+            token.close()
+            XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        }
+        let update = try installer.acquireExclusive(); update.close()
+    }
+    func testIndependentBorrowFailureKeepsTheOwnerAndRejectsClosedOrExclusiveTokens() throws {
+        enum Stop: Error { case expected }
+        let fixture = try ReleaseActivityFixture(), authority = try fixture.open(), installer = try fixture.open()
+        let token = try authority.acquireShared()
+        XCTAssertThrowsError(try token.withIndependentSharedDescriptor { _ in throw Stop.expected }) {
+            XCTAssertTrue($0 is Stop)
+        }
+        try token.validate()
+        XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        token.close()
+        XCTAssertThrowsError(try token.withIndependentSharedDescriptor { _ in XCTFail("Closed token lent a descriptor") }) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+        let update = try installer.acquireExclusive(); defer { update.close() }
+        XCTAssertThrowsError(try update.withIndependentSharedDescriptor { _ in XCTFail("Exclusive token lent a descriptor") }) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+    }
+    func testModeAndDirectoryValidationCannotAcceptAnotherMachineScope() throws {
+        let fixture = try ReleaseActivityFixture(), other = try ReleaseActivityFixture(), barrier = try fixture.open()
+        let same = try ReleaseDestinationLease(anchor: fixture.root.path, relativeDirectory: "Machine", owner: getuid())
+        let foreign = try ReleaseDestinationLease(anchor: other.root.path, relativeDirectory: "Machine", owner: getuid())
+        let exclusive = try barrier.acquireExclusive()
+        try exclusive.validateExclusive(in: same)
+        XCTAssertThrowsError(try exclusive.validateShared(in: same)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        XCTAssertThrowsError(try exclusive.validateExclusive(in: foreign)) { XCTAssertEqual($0 as? JournalLeaseError, .identityChanged) }
+        try exclusive.validateExclusive(in: same); exclusive.close()
+        XCTAssertThrowsError(try exclusive.validateExclusive(in: same)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        let shared = try barrier.acquireShared(); defer { shared.close() }
+        try shared.validateShared(in: same)
+        XCTAssertThrowsError(try shared.validateExclusive(in: same)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        XCTAssertThrowsError(try shared.validateShared(in: foreign)) { XCTAssertEqual($0 as? JournalLeaseError, .identityChanged) }
+        try shared.validateShared(in: same)
+    }
+
 }

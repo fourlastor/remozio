@@ -36,6 +36,15 @@ final class ServiceReleaseActivityFixture {
 
 final class ServiceReleaseActivityBarrierTests: XCTestCase, @unchecked Sendable {
     private struct Rejected: Error {}
+    func testExclusiveValidationCannotMistakeSharedOrClosedTokensForUpdateAuthority() throws {
+        let f = try ServiceReleaseActivityFixture(), service = try f.open(), updater = try f.open(update: true)
+        let shared = try service.acquireShared(); try shared.validate()
+        XCTAssertThrowsError(try shared.validateExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+        try shared.validate(); shared.close()
+        let exclusive = try updater.acquireExclusive(); try exclusive.validateExclusive()
+        exclusive.close()
+        XCTAssertThrowsError(try exclusive.validateExclusive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+    }
     func testReadOnlySharedDescriptionsExcludeAnUpdateUntilEveryReferenceCloses() throws {
         let f = try ServiceReleaseActivityFixture(), first = try f.open(), second = try f.open(), updater = try f.open(update: true)
         let one = try first.acquireShared(), two = try first.acquireShared(), three = try second.acquireShared()

@@ -79,11 +79,85 @@ public final class ReleaseActivityBarrier: @unchecked Sendable {
         }
     }
 
+    // Keep an independently closed copy until synchronous spawning has transferred the shared description.
+    fileprivate func withSharedDescriptorForSpawn<Value>(_ id: UUID, _ body: (Int32) throws -> Value) throws -> Value {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        let copied = try lock.withLock {
+            guard holders.contains(id), mode == .shared, active >= 0 else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            let descriptor = fcntl(active, F_DUPFD_CLOEXEC, 32)
+            guard descriptor >= 0 else { throw JournalLeaseError.system(errno) }; return descriptor
+        }
+        defer { _ = Darwin.close(copied) }
+        return try body(copied)
+    }
+
+    /// Lends a separate read-only lock description. Its recipient cannot unlock the Root owner's description.
+    fileprivate func withIndependentSharedDescriptor<Value>(_ id: UUID, _ body: (Int32) throws -> Value) throws -> Value {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        let borrowed = try lock.withLock {
+            guard holders.contains(id), mode == .shared, active >= 0 else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            var opened: Int32 = -1
+            do {
+                return try directory.withDirectory { parent in
+                    let fd = openat(parent, Self.fileName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                    guard fd >= 0 else { throw JournalLeaseError.system(errno) }
+                    opened = fd
+                    try Self.inspect(fd, parent: parent, owner: owner, matching: active)
+                    guard flock(fd, LOCK_SH | LOCK_NB) == 0 else {
+                        if errno == EWOULDBLOCK { throw ReleaseActivityError.busy }
+                        throw JournalLeaseError.system(errno)
+                    }
+                    try Self.inspect(fd, parent: parent, owner: owner, matching: active)
+                    return fd
+                }
+            } catch {
+                if opened >= 0 { _ = Darwin.close(opened) }
+                throw error
+            }
+        }
+        defer { _ = Darwin.close(borrowed) }
+        return try body(borrowed)
+    }
     fileprivate func validate(_ id: UUID) throws {
         guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
         try lock.withLock {
             guard holders.contains(id) else { throw JournalLeaseError.invalidated }
             try validateLocked()
+        }
+    }
+    fileprivate func validateExclusive(_ id: UUID) throws {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        try lock.withLock {
+            guard holders.contains(id) else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            guard mode == .exclusive else { throw ReleaseActivityError.busy }
+        }
+    }
+    fileprivate func validateExclusive(_ id: UUID, in target: ReleaseDestinationLease) throws {
+        try validate(id, in: target, expectedMode: .exclusive)
+    }
+    fileprivate func validateShared(_ id: UUID, in target: ReleaseDestinationLease) throws {
+        try validate(id, in: target, expectedMode: .shared)
+    }
+    private func validate(_ id: UUID, in target: ReleaseDestinationLease, expectedMode: Mode) throws {
+        guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+        try lock.withLock {
+            guard holders.contains(id), mode == expectedMode else { throw JournalLeaseError.invalidated }
+            try validateLocked()
+            try directory.withDirectory { heldDirectory in
+                try target.withDirectory { targetDirectory in
+                    var held = stat(), named = stat()
+                    guard fstat(heldDirectory, &held) == 0, fstat(targetDirectory, &named) == 0 else {
+                        throw JournalLeaseError.system(errno)
+                    }
+                    guard held.st_dev == named.st_dev, held.st_ino == named.st_ino else {
+                        throw JournalLeaseError.identityChanged
+                    }
+                    try Self.inspect(baseline, parent: targetDirectory, owner: owner, matching: active)
+                }
+            }
         }
     }
     fileprivate func release(_ id: UUID) {
@@ -132,6 +206,15 @@ final class ReleaseActivityToken: Sendable {
     private let id: UUID
     fileprivate init(barrier: ReleaseActivityBarrier, id: UUID) { self.barrier = barrier; self.id = id }
     func validate() throws { try barrier.validate(id) }
+    func withSharedDescriptorForSpawn<Value>(_ body: (Int32) throws -> Value) throws -> Value {
+        try barrier.withSharedDescriptorForSpawn(id, body)
+    }
+    func withIndependentSharedDescriptor<Value>(_ body: (Int32) throws -> Value) throws -> Value {
+        try barrier.withIndependentSharedDescriptor(id, body)
+    }
+    func validateExclusive() throws { try barrier.validateExclusive(id) }
+    func validateExclusive(in directory: ReleaseDestinationLease) throws { try barrier.validateExclusive(id, in: directory) }
+    func validateShared(in directory: ReleaseDestinationLease) throws { try barrier.validateShared(id, in: directory) }
     func close() { barrier.release(id) }
     deinit { close() }
 }
