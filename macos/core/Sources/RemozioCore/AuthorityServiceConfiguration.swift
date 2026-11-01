@@ -6,6 +6,7 @@ public enum AuthorityServiceConfigurationError: Error { case invalidConfiguratio
 
 /// Protected launch inputs. They contain no key material and grant no request approval authority.
 public struct AuthorityServiceConfiguration: Sendable {
+    public static let defaultMaximumPayloadBytes = 262_144
     public let macID: Data
     public let accountID: Data
     public let continuityDirectory: String?
@@ -27,7 +28,7 @@ public struct AuthorityServiceConfiguration: Sendable {
 
     public init(macID: Data, accountID: Data, journalDirectory: String, serviceName: String,
                 teamID: String, transportIdentifier: String, transportHashes: Set<Data>, transportUID: UInt32,
-                maximumPayloadBytes: Int = 262_144, minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [],
+                maximumPayloadBytes: Int = AuthorityServiceConfiguration.defaultMaximumPayloadBytes, minimumEnvelopeVersion: UInt64 = 1, auditVersions: Set<UInt64> = [],
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000, maximumOperations: Int = 8,
                 continuityDirectory: String? = nil) throws {
         let components = journalDirectory.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
