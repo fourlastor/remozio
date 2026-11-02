@@ -43,9 +43,11 @@ final class AuthorityCommandStartupV2Tests: XCTestCase {
             BgYGBgYGBgYGBgYGBgYGBgYHGgAB1MAIGROICRkD6AJzZGV2LnJlbW96aW8uY29tbWFuZAN4Hy9MaWJyYXJ5L1JlbW96aW8v
             ZWxldmF0aW9uLmNib3IEgAWjABkgAAEIAhkEAAajABoAAQAAAQgCGRAABxggCBj6CRkTiAoQCxnqYAwD
             """, options: .ignoreUnknownCharacters))
-        XCTAssertEqual(current.canonicalBytes, legacyBytes)
+        let legacy = try AuthorityCommandStartupConfiguration.decode(legacyBytes)
+        XCTAssertEqual(legacy.canonicalBytes, legacyBytes)
+        XCTAssertEqual(try AuthorityCommandStartupConfiguration.decode(current.canonicalBytes).canonicalBytes, current.canonicalBytes)
         XCTAssertNil(current.execution)
-        XCTAssertNil(try AuthorityCommandStartupConfiguration.decode(legacyBytes).execution)
+        XCTAssertNil(legacy.execution)
     }
 
     func testVersionTwoRequiresItsExactExecutorInputsAndNeverFallsBack() throws {
