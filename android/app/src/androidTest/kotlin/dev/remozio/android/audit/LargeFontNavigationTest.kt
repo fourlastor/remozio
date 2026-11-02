@@ -22,14 +22,16 @@ class LargeFontNavigationTest {
             val layout = layouts.single()
             val bounds = label.fetchSemanticsNode().boundsInRoot
             val target = ui.onNode(hasText(text) and isSelectable()).fetchSemanticsNode().boundsInRoot
-            val widthOverflow = layout.multiParagraph.width - layout.size.width
-            val heightOverflow = layout.multiParagraph.height - layout.size.height
-            val geometry = "$text: paragraphWidth=${layout.multiParagraph.width}, textWidth=${layout.size.width}, " +
+            val lineLeft = (0 until layout.lineCount).minOf(layout::getLineLeft)
+            val lineRight = (0 until layout.lineCount).maxOf(layout::getLineRight)
+            val widthOverflow = lineRight - layout.size.width
+            val heightOverflow = layout.getLineBottom(layout.lineCount - 1) - layout.size.height
+            val geometry = "$text: lineLeft=$lineLeft, lineRight=$lineRight, textWidth=${layout.size.width}, " +
                 "widthOverflow=$widthOverflow, heightOverflow=$heightOverflow, " +
                 "constraints=${layout.layoutInput.constraints}, lines=${layout.lineCount}, " +
                 "bounds=$bounds, target=$target, fontScale=${label.fetchSemanticsNode().layoutInfo.density.fontScale}"
             android.util.Log.i("RemozioNavGeometry", geometry)
-            if (widthOverflow > 1f || heightOverflow > 1f || bounds.height + 1 < layout.size.height ||
+            if (lineLeft < -1f || widthOverflow > 1f || heightOverflow > 1f || bounds.height + 1 < layout.size.height ||
                 bounds.left < target.left - 1 || bounds.top < target.top - 1 ||
                 bounds.right > target.right + 1 || bounds.bottom > target.bottom + 1) {
                 failures += geometry
