@@ -21,6 +21,9 @@ public actor AuthorityTrustFeed {
     private let lease = AuthorityTrustLease()
     private weak var host: DirectApprovalTransportHost?
     private var channel: AuthorityXPCChannel?
+    private var auditLink: (id: UUID, channel: AuthorityXPCChannel)?
+    private var auditAdvertised = false
+    private var emptyTrustSnapshot = false
     private var recoveryLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var registrationLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var timer: Task<Void, Never>?
@@ -54,7 +57,7 @@ public actor AuthorityTrustFeed {
         self.maximumWaiting = maximumWaiting; self.factory = factory
     }
     deinit {
-        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort()
+        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort(); auditLink?.channel.abort()
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -282,13 +285,63 @@ public actor AuthorityTrustFeed {
         value?.abort()
     }
 
+    /// Empty trust requires an isolated Root probe before listener admission. Nonempty legacy trust skips that probe.
+    public func requirePhoneAuditSupport() async throws {
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire(); defer { release() }
+        guard auditAdvertised || emptyTrustSnapshot else { throw AuthorityXPCError.unsupportedPhoneAudit }
+        let link = try await openAuditLink()
+        do {
+            try await link.channel.requirePhoneAuditSupport()
+            try requireActive()
+            guard auditLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+        } catch AuthorityXPCError.unsupportedPhoneAudit {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhoneAudit
+        } catch { retireAuditLink(link.id); try requireActive(); throw error }
+    }
+    public func phoneAudit(_ peer: DirectApprovalPeer, revision: UUID, frame: PhoneAuditFrame) async throws -> PhoneAuditFrame {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        guard peer.auditVersions.contains(1) else { throw AuthorityXPCError.unsupportedPhoneAudit }
+        let binding = AuthorityPeerBinding(peer: peer, revision: revision)
+        try AuthorityPhoneAuditExchange.request(frame)
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire(); defer { release() }
+        guard auditAdvertised else { throw AuthorityXPCError.unsupportedPhoneAudit }
+        let link = try await openAuditLink()
+        do {
+            let response = try await link.channel.phoneAudit(binding: binding, frame: frame)
+            try requireActive()
+            guard auditLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+            return response
+        } catch AuthorityXPCError.unsupportedPhoneAudit {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhoneAudit
+        } catch { retireAuditLink(link.id); try requireActive(); throw error }
+    }
+    private func openAuditLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
+        try requireActive()
+        if let auditLink { return auditLink }
+        let id = UUID()
+        let value = try factory { [weak self] in Task { await self?.retireAuditLink(id) } }
+        auditLink = (id, value)
+        do {
+            try await value.start(); try requireActive()
+            guard auditLink?.id == id, value.lifetimeActive else { throw AuthorityXPCError.closed }
+            return (id, value)
+        } catch { retireAuditLink(id); throw error }
+    }
+    private func retireAuditLink(_ id: UUID) {
+        guard auditLink?.id == id else { return }
+        let value = auditLink?.channel; auditLink = nil; value?.abort()
+    }
+
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate()
             retiredTimer = timer; timer?.cancel(); timer = nil; refreshWork.cancelAll()
-            channel?.abort(); channel = nil; lastSnapshot = nil
+            channel?.abort(); channel = nil; lastSnapshot = nil; auditAdvertised = false; emptyTrustSnapshot = false
             if let id = registrationLink?.id { retireRegistrationLink(id) }
             if let id = recoveryLink?.id { retireRecoveryLink(id) }
+            if let id = auditLink?.id { retireAuditLink(id) }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }
@@ -318,7 +371,8 @@ public actor AuthorityTrustFeed {
         guard bytes != lastSnapshot else { return }
         guard let host else { throw AuthorityXPCError.closed }
         try await host.replaceTrust(trust, authority: lease)
-        try requireActive(); lastSnapshot = bytes
+        try requireActive(); lastSnapshot = bytes; auditAdvertised = trust.peers.contains { $0.auditVersions.contains(1) }
+        emptyTrustSnapshot = trust.peers.isEmpty
     }
     private func requireActive() throws {
         try Task.checkCancellation()

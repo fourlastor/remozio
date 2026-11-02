@@ -72,6 +72,31 @@ final class RuntimePreparationMaterialTests: XCTestCase {
         }
     }
 
+    func testLostReplyRetainsExplicitAuditSelectionAndRejectsADowngradedReferenceWithoutRekeying() throws {
+        try fixture { _, account, services, directory in
+            let now = Date(), activity = try ServiceReleaseActivityReference(services: services,
+                identities: [.transport: .init(device: 1, inode: 10), .gateway: .init(device: 1, inode: 11)])
+            let selected = try RuntimePreparationMaterial.create(services: services, notValidBefore: now.addingTimeInterval(-60),
+                notValidAfter: now.addingTimeInterval(600), serviceActivity: activity, auditDeliveryVersion: 1)
+            var creations = 0
+            XCTAssertThrowsError(try restore(directory, account, services, make: { creations += 1; return selected },
+                stage: { if case .published = $0 { throw Refused() } })) { XCTAssertTrue($0 is Refused) }
+            let bytes = try Data(contentsOf: URL(fileURLWithPath: path(directory))), expected = try selected.reference
+            let recovered = try restore(directory, account, services, expected: expected,
+                make: { XCTFail("An established selection cannot recreate material"); throw Refused() })
+            XCTAssertEqual(recovered.auditDeliveryVersion, 1); XCTAssertEqual(creations, 1)
+            XCTAssertEqual(try recovered.reference, expected)
+            let downgraded = try RuntimeMaterialReference(materialID: expected.materialID, services: services,
+                materialDigest: expected.materialDigest, transportPublicKeyInfo: expected.transportPublicKeyInfo,
+                gateway: expected.gateway, serviceActivity: activity)
+            XCTAssertThrowsError(try restore(directory, account, services, expected: downgraded,
+                make: { XCTFail("A different reference cannot replace retained material"); throw Refused() })) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .conflictingMaterial)
+            }
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path(directory))), bytes)
+        }
+    }
+
     func testMissingEstablishedMaterialNeverInvokesTheFactory() throws {
         try fixture { _, account, services, directory in
             let first = try restore(directory, account, services, make: { try self.material(services) })

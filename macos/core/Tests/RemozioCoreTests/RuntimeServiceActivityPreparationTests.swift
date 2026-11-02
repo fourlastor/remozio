@@ -15,16 +15,20 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
         let services: ServiceAccountPlan
         let privateDirectory: ProtectedSetupDirectory
         let shared: ProtectedSetupDirectory
+        let auditRelease: SignedReleaseEvidence?
+        var lastAuditVersions: Set<UInt64>?
+        var auditSelectionOverride: ((RuntimeMaterialReference?) throws -> UInt64?)?
         var serviceValid = true
         var directServiceCheck: (() throws -> Void)?
         var materialCreations = 0, publications = 0, activityChecks = 0
-        init() throws {
+        init(audited: Bool = false) throws {
             let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .setupController, .commandFrontend, .commandMonitor, .commandChild]
             let policy = try AuthorityCodePolicy(entries: roles.map {
                 try .init(role: $0, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.role-\($0.rawValue)", installedGeneration: 1,
                     minimumGeneration: 1, codeDirectoryHash: Data(repeating: UInt8($0.rawValue), count: 20), active: true)
             })
-            f = try .init(policy: policy)
+            auditRelease = audited ? try NativeHostReleaseFixture.make(policy: policy, phoneAudit: true, auditDelivery: true) : nil
+            f = try .init(policy: policy, releaseDigest: auditRelease.map { try InstallationInventory.digest($0) })
             // Only this new fixture parent is public. Its machine and runtime directories stay private.
             guard chmod(f.root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
             machine = try f.open(initialize: true)
@@ -51,16 +55,21 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
             activityChecks += 1; try reference.validate(services: services); try verifyServices(services)
             _ = try provision(expected: reference.identities)
         }
+        func auditSelection(_ reference: RuntimeMaterialReference?) throws -> UInt64? {
+            if let auditSelectionOverride { return try auditSelectionOverride(reference) }
+            guard let auditRelease else { return nil }
+            return try RuntimeAuditDeliverySupport.selectedVersion(reference: reference, release: auditRelease, policy: account.initialAuthority.codePolicy)
+        }
         func restore(_ reference: RuntimeMaterialReference?, _ verify: () throws -> Void) throws -> RuntimePreparationMaterial {
             try RuntimeMaterialPreparation.restoreOrCreate(directory: privateDirectory, owner: getuid(), account: account,
-                services: services, expected: reference, verifyCurrent: verify, verifyMaterial: { material in
+                services: services, expected: reference, selectAuditDelivery: auditSelection, verifyCurrent: verify, verifyMaterial: { material in
                     guard let activity = material.serviceActivity else { throw RuntimePreparationError.conflictingMaterial }
                     try self.validate(activity)
-                }, make: {
+                }, make: { auditDeliveryVersion in
                     let files = try self.provision(), activity = try ServiceReleaseActivityReference(services: self.services, identities: files.identities)
                     let now = Date(); self.materialCreations += 1
                     return try .create(services: self.services, notValidBefore: now.addingTimeInterval(-60),
-                        notValidAfter: now.addingTimeInterval(600), serviceActivity: activity)
+                        notValidAfter: now.addingTimeInterval(600), serviceActivity: activity, auditDeliveryVersion: auditDeliveryVersion)
                 })
         }
         func prepare(stage: (RuntimePublicationController.Stage) throws -> Void = { _ in }) throws -> RuntimePreparationState {
@@ -69,8 +78,14 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
                     try self.directServiceCheck?(); try self.verifyServices(services)
                 }, verifyAuthority: { XCTAssertEqual($0.authorityPublicKey, self.account.authorityPublicKey) },
                 restoreMaterial: { try self.restore($1, $2) }, verifyActivity: validate,
-                publish: { _, material, verify in
-                    try verify(); try self.validate(XCTUnwrap(material.serviceActivity)); self.publications += 1
+                publish: { bundle, material, verify in
+                    try verify(); try self.validate(XCTUnwrap(material.serviceActivity))
+                    if self.auditRelease != nil {
+                        _ = try AdministrativeSetupPublication.publish(bundle.command.canonicalBytes, file: .commandConfiguration,
+                            directory: self.privateDirectory, owner: getuid(), verify: verify)
+                    }
+                    self.lastAuditVersions = bundle.command.presence.wake.request.service.auditVersions
+                    self.publications += 1
                 }, didStage: stage)
         }
         func reader(_ role: ServiceAccountRole, reference: ServiceReleaseActivityReference) throws -> ServiceReleaseActivityToken {
@@ -85,9 +100,67 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
             guard fchown(replacement, getuid(), getgid()) == 0, fchmod(replacement, 0o440) == 0 else { throw JournalLeaseError.system(errno) }
         }
     }
-    private func fixture() throws -> Fixture {
+    private func fixture(audited: Bool = false) throws -> Fixture {
         guard getuid() > 0, getuid() == geteuid(), getgid() > 0, getgid() != 80 else { throw XCTSkip("Ordinary-owned service file fixture") }
-        return try .init()
+        return try .init(audited: audited)
+    }
+    func testAuditedPublicationAndEachInterruptedStageKeepOneMaterialAndThePublishedConfiguration() throws {
+        for stop in [RuntimePublicationController.Stage.materialRestored, .referenceRetained, .filesPublished, .completed] {
+            let f = try fixture(audited: true)
+            XCTAssertThrowsError(try f.prepare { if $0 == stop { throw Interrupted() } }) { XCTAssertTrue($0 is Interrupted) }
+            let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath))
+            let result = try f.prepare()
+            XCTAssertTrue(result.configurationPublished); XCTAssertEqual(result.reference?.auditDeliveryVersion, 1)
+            XCTAssertEqual(f.materialCreations, 1); XCTAssertEqual(f.lastAuditVersions, [1])
+            XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+            let bytes = try Data(contentsOf: URL(fileURLWithPath: f.privateDirectory.path + "/" + AdministrativeSetupPublication.File.commandConfiguration.name))
+            XCTAssertEqual(try AuthorityCommandStartupConfiguration.decode(bytes).presence.wake.request.service.auditVersions, [1])
+            XCTAssertTrue(try XCTUnwrap(f.machine.inventory()).accounts.isEmpty)
+        }
+    }
+    func testUnreferencedLegacyNativeMaterialDoesNotBecomeAuditedDuringRecovery() throws {
+        let f = try fixture(audited: true), now = Date()
+        let activity = try ServiceReleaseActivityReference(services: f.services, identities: f.provision().identities)
+        let legacy = try RuntimePreparationMaterial.create(services: f.services, notValidBefore: now.addingTimeInterval(-60),
+            notValidAfter: now.addingTimeInterval(600), serviceActivity: activity)
+        _ = try RuntimeMaterialPreparation.restoreOrCreate(directory: f.privateDirectory, owner: getuid(), account: f.account,
+            services: f.services, expected: nil, verifyCurrent: {}, make: { legacy })
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath)); XCTAssertNil(try f.state.reference)
+        let result = try f.prepare()
+        XCTAssertTrue(result.configurationPublished); XCTAssertNil(result.reference?.auditDeliveryVersion)
+        XCTAssertEqual(result.reference?.formatVersion, 2); XCTAssertEqual(f.lastAuditVersions, [])
+        XCTAssertEqual(f.materialCreations, 0); XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+    }
+    func testUnreferencedAuditedMaterialRecoversWithoutASecondFreshSelectionOrKey() throws {
+        let f = try fixture(audited: true), original = try f.restore(nil, {})
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath)); XCTAssertNil(try f.state.reference)
+        f.auditSelectionOverride = { [weak f] reference in
+            let f = try XCTUnwrap(f)
+            let reference = try XCTUnwrap(reference, "Recovery must not select fresh material")
+            return try RuntimeAuditDeliverySupport.selectedVersion(reference: reference, release: XCTUnwrap(f.auditRelease),
+                policy: f.account.initialAuthority.codePolicy)
+        }
+        let result = try f.prepare()
+        XCTAssertEqual(result.reference, try original.reference); XCTAssertEqual(result.reference?.auditDeliveryVersion, 1)
+        XCTAssertEqual(f.materialCreations, 1); XCTAssertEqual(f.lastAuditVersions, [1])
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+    }
+    func testAuditSelectionRefusalCreatesNoMaterialOrRoleFilesAndDoesNotRetainAReference() throws {
+        let f = try fixture(audited: true)
+        f.auditSelectionOverride = { _ in throw Interrupted() }
+        XCTAssertThrowsError(try f.prepare()) { XCTAssertTrue($0 is Interrupted) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.privatePath))
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: f.shared.path).isEmpty)
+        XCTAssertEqual(f.materialCreations, 0); XCTAssertEqual(f.publications, 0); XCTAssertNil(try f.state.reference)
+    }
+    func testRefusedRetainedAuditSelectionPreservesTheExistingPrivateMaterialAndKeys() throws {
+        let f = try fixture(audited: true), original = try f.restore(nil, {})
+        let before = try Data(contentsOf: URL(fileURLWithPath: f.privatePath))
+        f.auditSelectionOverride = { _ in throw Interrupted() }
+        XCTAssertThrowsError(try f.prepare()) { XCTAssertTrue($0 is Interrupted) }
+        XCTAssertEqual(f.materialCreations, 1); XCTAssertEqual(f.publications, 0)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: f.privatePath)), before)
+        XCTAssertEqual(try RuntimePreparationMaterial.decode(before).reference, try original.reference)
     }
     func testEveryRetentionStageRecoversTheSameActualFilesKeysAndDatabaseReference() throws {
         for stop in [RuntimePublicationController.Stage.materialRestored, .referenceRetained, .filesPublished, .completed] {
@@ -197,11 +270,13 @@ final class RuntimeServiceActivityPreparationTests: XCTestCase {
         let f = try fixture(), activity = try ServiceReleaseActivityReference(services: f.services, identities: f.provision().identities)
         XCTAssertThrowsError(try RuntimeMaterialPreparation.prepareFileIdentity(account: f.account, services: f.services,
             expected: nil, fileCustodyAccepted: true, serviceActivityEnabled: true,
+            selectAuditDelivery: { _ in XCTFail("Root admission must precede audit selection"); return 1 },
             verifyCurrent: { XCTFail("The Root guard must precede scope access") })) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
         XCTAssertThrowsError(try RuntimeMaterialPreparation.validateServiceActivity(account: f.account, activity: activity,
             verifyCurrent: { XCTFail("The Root guard must precede scope access") })) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
         XCTAssertThrowsError(try RuntimePublicationController.prepare(machine: f.machine, account: f.account, expected: f.state,
             fileCustodyAccepted: true, serviceActivityEnabled: true,
+            selectAuditDelivery: { _ in XCTFail("Root admission must precede audit selection"); return 1 },
             verifyCurrent: { XCTFail("The Root guard must precede scope access") })) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
     }
 }

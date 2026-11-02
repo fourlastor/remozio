@@ -161,6 +161,11 @@ public final class AuthorityService: @unchecked Sendable {
             if let selectedExchange {
                 exchangeHandler = { owner, binding, id, decision in try selectedExchange(owner, binding, id, decision, frameClock) }
             } else { exchangeHandler = nil }
+            let auditHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
+                                        @Sendable (JournalTransaction) throws -> Void) throws -> PhoneAuditFrame)?
+            if let selectedAudit = requestProviders?.phoneAudit {
+                auditHandler = { owner, binding, frame, validate in try selectedAudit(owner, binding, frame, frameClock, validate) }
+            } else { auditHandler = nil }
             let hintHandler: (@Sendable () throws -> AuthorityWakeHints)?
             guard wakeHintFeed == nil || wakeHints == nil else { throw AuthorityServiceConfigurationError.invalidConfiguration }
             if let wakeHints { hintHandler = wakeHints }
@@ -176,7 +181,7 @@ public final class AuthorityService: @unchecked Sendable {
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
-                phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery,
+                phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: auditHandler,
                 wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)

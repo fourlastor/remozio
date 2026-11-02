@@ -6,19 +6,23 @@ import XCTest
 
 /// Synthetic signed evidence checks declarations only. It does not prove native signature or service admission.
 enum NativeHostReleaseFixture {
-    static func make(policy: AuthorityCodePolicy, edit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws -> SignedReleaseEvidence {
+    static func make(policy: AuthorityCodePolicy, phoneRouting: Bool = false, phoneAudit: Bool = false,
+                     auditDelivery: Bool = false,
+                     edit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws -> SignedReleaseEvidence {
         let entries = policy.entries.filter(\.active)
         let components = try entries.map { code in
             var formats: [ReleaseFormat] = []
+            let planVersions: Set<UInt64> = phoneAudit ? [1, 2, 3, 4] : phoneRouting ? [1, 2, 3] : [1, 2]
+            let materialVersions: Set<UInt64> = auditDelivery ? [1, 2, 3] : [1, 2]
             if [.authority, .setupController].contains(code.role) {
-                formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
-                formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
+                formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: planVersions, writers: code.role == .setupController ? planVersions : []))
+                formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))
                 formats.append(try .init(name: "authority.installation-preparation", readers: Set(UInt64(1)...11), writers: Set(UInt64(1)...11)))
                 formats.append(try .init(name: "authority.command-host-config", readers: [1, 2, 3], writers: [1, 2, 3]))
                 formats.append(try .init(name: GatewaySettingsControlReleaseValidation.formatName, readers: [1], writers: [1]))
             }
             if [.authority, .transport, .notificationGateway, .setupController].contains(code.role) {
-                formats.append(try .init(name: RuntimeMaterialReference.formatName, readers: [1, 2], writers: code.role == .setupController ? [1, 2] : []))
+                formats.append(try .init(name: RuntimeMaterialReference.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))
                 formats.append(try .init(name: ServiceReleaseActivityReference.formatName, readers: [1], writers: code.role == .setupController ? [1] : []))
                 formats.append(try .init(name: GatewaySettingsConsumerHostConfiguration.formatName, readers: [1],
                     writers: code.role == .setupController ? [1] : []))
@@ -36,6 +40,16 @@ enum NativeHostReleaseFixture {
             for record in try GatewayRuntimeRecordFormats.requirements(commitVersions: GatewayRuntimeCommit.supportedVersions,
                                                                        settingsRetained: true) where record.role == code.role {
                 formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
+            }
+            if phoneRouting {
+                for record in try PhoneRoutingReleaseContract.requirements where record.role == code.role && record.name != RuntimeActivationPlan.formatName {
+                    formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
+                }
+            }
+            if phoneAudit {
+                for record in try PhoneAuditReleaseContract.requirements where record.role == code.role && record.name != RuntimeActivationPlan.formatName {
+                    formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
+                }
             }
             let path: String
             switch code.role {

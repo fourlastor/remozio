@@ -114,6 +114,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             journalDirectory: (initialization.journalPath as NSString).deletingLastPathComponent,
             serviceName: paths.authorityService, teamID: transportCode.teamID, transportIdentifier: transportCode.identifier,
             transportHashes: [transportCode.codeDirectoryHash], transportUID: transportClaim.number,
+            auditVersions: Set(reference.auditDeliveryVersion.map { [$0] } ?? []),
             continuityDirectory: (initialization.continuityPath as NSString).deletingLastPathComponent)
         let request = try AuthorityRequestStartupConfiguration(service: service,
             keyRecordPath: paths.authorityDirectory + "/Key/" + AuthorityKeyProvisioning.recordFileName,

@@ -45,6 +45,21 @@ public struct AuditReplyLimits: Sendable {
     }
 }
 
+extension AuditReplyLimits {
+    /// Bound the complete carrier without requiring the channel to accept the maximum protocol page size.
+    static func phoneFrame(maximumBytes: Int) throws -> AuditReplyLimits {
+        guard maximumBytes > PhoneAuditFrame.overheadBytes, maximumBytes <= PhoneAuditFrame.maximumBytes else {
+            throw AuditReplyError.invalidBounds
+        }
+        let body = maximumBytes - PhoneAuditFrame.overheadBytes
+        return try .init(batch: .init(maxBytes: body, maxDepth: 8, maxItems: 131_072),
+            record: .init(maxBytes: 4096, maxDepth: 4, maxItems: 64),
+            history: .init(maxBytes: min(body, 16_384), maxDepth: 8, maxItems: 256),
+            descriptor: .init(maxBytes: 4096, maxDepth: 4, maxItems: 64),
+            signing: .init(maxBytes: body + 2048, maxDepth: 8, maxItems: 32), maximumRecords: 2048)
+    }
+}
+
 public enum AuditReplyKind: Equatable, Sendable { case page, history }
 public struct SignedAuditReply: Sendable {
     public let kind: AuditReplyKind
@@ -88,12 +103,18 @@ public struct AuditReplyBuilder {
 
     /// Read a bounded page, then sign after the transaction closes. No storage failure becomes an empty success.
     public func page(_ query: AuditPageRequest, journal: JournalDatabase) throws -> SignedAuditReply {
-        let read = try journal.read { transaction in
-            guard let epoch = try transaction.epoch(query.epoch) else { throw AuditJournalError.unavailableEpoch }
-            try checkPageQuery(query, epoch: epoch)
-            return try transaction.page(epoch: query.epoch, after: query.after,
-                maximumRecords: min(limits.maximumRecords, Int(Int32.max)), maximumBytes: limits.batch.maxBytes)
-        }
+        try page(query, read: journal.read { try readPage(query, transaction: $0) })
+    }
+
+    // The serialized owner uses its continuity-checked transaction before signing outside the read.
+    func readPage(_ query: AuditPageRequest, transaction: JournalTransaction) throws -> AuditJournalPage {
+        guard let epoch = try transaction.epoch(query.epoch) else { throw AuditJournalError.unavailableEpoch }
+        try checkPageQuery(query, epoch: epoch)
+        return try transaction.page(epoch: query.epoch, after: query.after,
+            maximumRecords: min(limits.maximumRecords, Int(Int32.max)), maximumBytes: limits.batch.maxBytes)
+    }
+
+    func page(_ query: AuditPageRequest, read: AuditJournalPage) throws -> SignedAuditReply {
         if read.canonicalRecords.isEmpty { return try page(query, epoch: read.epoch, canonicalRecords: []) }
         // Find a nonempty prefix that fits the complete body and signing envelope, including CBOR framing.
         var lower = 1, upper = read.canonicalRecords.count

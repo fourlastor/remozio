@@ -33,6 +33,7 @@ public struct DirectApprovalPeer: Sendable {
     func channelMaximumPayloadBytes(for purpose: EnrolledChannelPurpose) -> Int {
         if case .pushRegistration = purpose { return PhonePushRegistrationFrame.maximumBytes }
         if case .pushRecovery = purpose { return PhonePushRecoveryFrame.maximumBytes }
+        if case .audit = purpose { return min(maximumPayloadBytes, PhoneAuditFrame.maximumBytes) }
         guard case .pendingSnapshot = purpose else { return maximumPayloadBytes }
         let signedFrames = min(maximumPayloadBytes, PendingRequestSnapshotFrame.maximumFrameBytes) +
             (PendingRequestSnapshotFrame.maximumBytes - PendingRequestSnapshotFrame.maximumFrameBytes)
@@ -124,17 +125,22 @@ public final class DirectApprovalListener: @unchecked Sendable {
     private var closed = false
     private var ready = false
 
+    /// Audit is offered only after the owning service verifies the Root IPC path.
+    static func purposes(enablePhoneAudit: Bool = false) -> [EnrolledChannelPurpose] {
+        let base: [EnrolledChannelPurpose] = [.approvals, .pairingReceipt, .pendingSnapshot, .pushRegistration, .pushRecovery]
+        return base + (enablePhoneAudit ? [.audit] : [])
+    }
     /// Loopback mode never advertises. Local-network mode publishes the Android discovery hint on an ephemeral port.
     public convenience init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
-                maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000,
+                maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000, enablePhoneAudit: Bool = false,
                 event: @escaping @Sendable (DirectListenerEvent) -> Void,
                 handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void) throws {
         try self.init(identity: identity, peers: peers, binding: binding, maximumConnections: maximumConnections,
-            timeoutMilliseconds: timeoutMilliseconds, event: event, handler: handler,
+            timeoutMilliseconds: timeoutMilliseconds, enablePhoneAudit: enablePhoneAudit, event: event, handler: handler,
             sharedWorkBudget: AuthorityXPCWorkBudget(maximum: maximumConnections))
     }
     init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
-         maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000,
+         maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000, enablePhoneAudit: Bool = false,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void,
          sharedWorkBudget: AuthorityXPCWorkBudget) throws {
@@ -153,7 +159,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        for purpose: EnrolledChannelPurpose in [.approvals, .pairingReceipt, .pendingSnapshot, .pushRegistration, .pushRecovery] {
+        for purpose in Self.purposes(enablePhoneAudit: enablePhoneAudit) {
             sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
         }
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
@@ -229,9 +235,10 @@ public final class DirectApprovalListener: @unchecked Sendable {
                 guard let peer = snapshot.peer(connection: connection), let purpose = snapshot.purpose(connection: connection) else {
                     throw DirectListenerError.invalidIdentity
                 }
+                if purpose == .audit, !peer.auditVersions.contains(1) { throw DirectListenerError.invalidConfiguration }
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
-                    requests: (purpose == .pushRegistration || purpose == .pushRecovery) ? [] : peer.requests,
-                    auditVersions: (purpose == .pushRegistration || purpose == .pushRecovery) ? [] : peer.auditVersions,
+                    requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .audit) ? [] : peer.requests,
+                    auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery) ? [] : peer.auditVersions),
                     maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose),
                     trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
                 do { try Task.checkCancellation(); try await handler(peer, framed) }

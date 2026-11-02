@@ -157,6 +157,7 @@ enum RuntimeMaterialPreparation {
     static func prepareFileIdentity(account: AccountPreparationIntent, services: ServiceAccountPlan,
                                     expected: RuntimeMaterialReference?, fileCustodyAccepted: Bool,
                                     serviceActivityEnabled: Bool = false,
+                                    selectAuditDelivery: (RuntimeMaterialReference?) throws -> UInt64? = { _ in nil },
                                     verifyCurrent: () throws -> Void) throws -> RuntimePreparationMaterial {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
@@ -166,12 +167,12 @@ enum RuntimeMaterialPreparation {
         let directory = try ProtectedSetupDirectory.createOrOpen(path: (authority as NSString).deletingLastPathComponent + "/Runtime")
         defer { directory.close() }
         return try restoreOrCreate(directory: directory, owner: 0, account: account, services: services,
-            expected: expected, verifyCurrent: verify, verifyMaterial: { material in
+            expected: expected, selectAuditDelivery: selectAuditDelivery, verifyCurrent: verify, verifyMaterial: { material in
                 guard (material.serviceActivity != nil) == serviceActivityEnabled else { throw RuntimePreparationError.conflictingMaterial }
                 if let activity = material.serviceActivity {
                     try validateServiceActivity(account: account, activity: activity, verifyCurrent: verify)
                 }
-            }, make: {
+            }, make: { auditDeliveryVersion in
                 let activity: ServiceReleaseActivityReference?
                 if serviceActivityEnabled {
                     let paths = try RuntimePreparationPaths(accountID: account.accountID)
@@ -187,7 +188,7 @@ enum RuntimeMaterialPreparation {
                 } else { activity = nil }
                 let now = Date()
                 return try .create(services: services, notValidBefore: now.addingTimeInterval(-60),
-                    notValidAfter: now.addingTimeInterval(365 * 86_400), serviceActivity: activity)
+                    notValidAfter: now.addingTimeInterval(365 * 86_400), serviceActivity: activity, auditDeliveryVersion: auditDeliveryVersion)
             })
         }
     }
@@ -199,6 +200,28 @@ enum RuntimeMaterialPreparation {
             _ = try ServiceReleaseActivityFileProvisioning.prepare(account: account, services: activity.services,
                 mode: .requireExisting, expected: activity.identities, verifyCurrent: verify)
         }
+    }
+    /// Read retained material before selecting a fresh format; an absent database reference is not creation authority.
+    static func restoreOrCreate(directory: ProtectedSetupDirectory, owner: uid_t, account: AccountPreparationIntent,
+                                services: ServiceAccountPlan, expected: RuntimeMaterialReference?,
+                                selectAuditDelivery: (RuntimeMaterialReference?) throws -> UInt64?,
+                                verifyCurrent: () throws -> Void,
+                                verifyMaterial: (RuntimePreparationMaterial) throws -> Void = { _ in },
+                                make: (UInt64?) throws -> RuntimePreparationMaterial,
+                                didStage: (AdministrativeSetupPublication.Stage) throws -> Void = { _ in }) throws -> RuntimePreparationMaterial {
+        try restoreOrCreate(directory: directory, owner: owner, account: account, services: services, expected: expected,
+            verifyCurrent: verifyCurrent, verifyMaterial: { material in
+                let selected = try selectAuditDelivery(material.reference)
+                guard selected == material.auditDeliveryVersion else { throw RuntimePreparationError.conflictingMaterial }
+                try verifyMaterial(material)
+            }, make: {
+                try verifyCurrent()
+                let selected = try selectAuditDelivery(nil)
+                try verifyCurrent()
+                let created = try make(selected)
+                guard created.auditDeliveryVersion == selected else { throw RuntimePreparationError.conflictingMaterial }
+                return created
+            }, didStage: didStage)
     }
     // Same-owner fixtures cannot prove Root isolation, service ownership transfer, or administrator authorization.
     static func restoreOrCreate(directory: ProtectedSetupDirectory, owner: uid_t, account: AccountPreparationIntent,

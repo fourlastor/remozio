@@ -12,6 +12,12 @@ public typealias AuthorityPhoneRoutingProvider = @Sendable (
     ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneRoutingFrame, @Sendable () throws -> AuthorityMoment
 ) throws -> PhoneRoutingFrame
 
+/// The transaction validator binds both audit reads to the current transport policy.
+public typealias AuthorityPhoneAuditProvider = @Sendable (
+    ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame, @Sendable () throws -> AuthorityMoment,
+    @Sendable (JournalTransaction) throws -> Void
+) throws -> PhoneAuditFrame
+
 /// A single configured signer, clock contract, and payload budget for all root request operations.
 public struct AuthorityRequestProviders: Sendable {
     let configurationBytes: Data
@@ -20,6 +26,7 @@ public struct AuthorityRequestProviders: Sendable {
     let exchangeRequest: AuthorityRequestExchangeProvider
     let pairingReceipt: AuthorityPairingReceiptProvider
     let phoneRouting: AuthorityPhoneRoutingProvider?
+    let phoneAudit: AuthorityPhoneAuditProvider?
     let receiptTime: @Sendable () -> UInt64?
 
     /// Production requires a restored device-bound key. Callbacks must not reenter the service, journal, or request owner.
@@ -95,6 +102,14 @@ public struct AuthorityRequestProviders: Sendable {
                     wallTime: routingWallTime, routing: { try presence.routing(owner: $0, now: $1) }, signer: signing)
             }
         } else { phoneRouting = nil }
+        if configuration.auditVersions.contains(1), configuration.maximumPayloadBytes > PhoneAuditFrame.overheadBytes {
+            let maximum = min(configuration.maximumPayloadBytes, PhoneAuditFrame.maximumBytes)
+            phoneAudit = { owner, binding, frame, clock, validateTransport in
+                try Self.requireScope(binding, configuration: configuration)
+                return try owner.phoneAudit(frame, binding: binding, authorityPublicKey: publicKey,
+                    maximumFrameBytes: maximum, now: clock, validateTransport: validateTransport, signer: signing)
+            }
+        } else { phoneAudit = nil }
         pairingReceipt = { owner, binding, setupID, validateTransport in
             try Self.requireScope(binding, configuration: configuration)
             guard setupID.count == 16 else { throw AuthorityXPCError.invalidMessage }

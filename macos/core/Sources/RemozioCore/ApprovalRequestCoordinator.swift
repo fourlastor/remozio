@@ -624,6 +624,49 @@ public final class ApprovalRequestCoordinator {
         }
     }
 
+    /// Read audit history for one current enrolled phone. The host serializes this call with all authority changes.
+    /// Signing occurs outside the read transaction. Callbacks must not await, reenter or mutate this owner.
+    public func phoneAudit(_ frame: PhoneAuditFrame, binding: AuthorityPeerBinding, authorityPublicKey: Data,
+                           maximumFrameBytes: Int, now: () throws -> AuthorityMoment,
+                           validateTransport: (JournalTransaction) throws -> Void = { _ in },
+                           signer: @escaping (Data) throws -> Data) throws -> PhoneAuditFrame {
+        guard frame.isQuery, try frame.encode().count <= PhoneAuditFrame.maximumQueryBytes else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        guard binding.scope.macID == mac, binding.scope.accountID == account else {
+            throw DecisionVerificationError.invalidTrustedState
+        }
+        let limits = try AuditReplyLimits.phoneFrame(maximumBytes: maximumFrameBytes)
+        let builder = try AuditReplyBuilder(macID: mac, accountID: account, authorityPublicKey: authorityPublicKey,
+            limits: limits, signer: signer)
+        try checkClock(now())
+        let reply: PhoneAuditFrame
+        switch frame {
+        case .historyQuery(let nonce, let epoch, let after):
+            let query = try AuditHistoryRequest(nonce: nonce, epoch: epoch, after: after)
+            let reads = try read { tx in
+                try validateTransport(tx); try tx.requireDirectApprovalBinding(binding)
+                guard let current = try tx.epoch(writer.epoch) else { throw AuditJournalError.unavailableEpoch }
+                return (current, try epoch.flatMap { try tx.epoch($0) })
+            }
+            let signed = try builder.history(query, current: reads.0, queried: reads.1)
+            reply = .historyResponse(queryNonce: nonce, canonicalPayload: signed.canonicalBody, signature: signed.signature)
+        case .pageQuery(let nonce, let epoch, let generation, let after):
+            let query = try AuditPageRequest(nonce: nonce, epoch: epoch, generation: generation, after: after)
+            let page = try read { tx in
+                _ = try head(tx); try validateTransport(tx); try tx.requireDirectApprovalBinding(binding)
+                return try builder.readPage(query, transaction: tx)
+            }
+            let signed = try builder.page(query, read: page)
+            reply = .pageResponse(queryNonce: nonce, canonicalPayload: signed.canonicalBody, signature: signed.signature)
+        default: throw AuthorityXPCError.invalidMessage
+        }
+        try checkClock(now())
+        try read { tx in _ = try head(tx); try validateTransport(tx); try tx.requireDirectApprovalBinding(binding) }
+        guard try reply.encode().count <= maximumFrameBytes else { throw AuditReplyError.invalidBounds }
+        return reply
+    }
+
     /// Prepare bounded wake registrations and withdrawals from current retained requests and journal trust.
     /// The host serializes this operation with authority changes. No asynchronous work or gateway call belongs in this method.
     public func reconcileWakePublications(routing: PresenceRouting, now: AuthorityMoment,

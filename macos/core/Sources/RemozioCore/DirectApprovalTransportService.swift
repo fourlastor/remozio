@@ -68,10 +68,20 @@ public actor DirectApprovalTransportService {
                         try await self.runPhonePushRegistration(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .pushRecovery:
                         try await self.runPhonePushRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .audit:
+                        try await self.runPhoneAudit(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
                 }
             }
             try await feed.start(host: host)
+            if useDefaultDelivery {
+                let auditSupported: Bool
+                do { try await feed.requirePhoneAuditSupport(); auditSupported = true }
+                catch is CancellationError { throw CancellationError() }
+                catch { auditSupported = false }
+                try Task.checkCancellation()
+                try await host.configurePhoneAuditSupport(auditSupported)
+            }
             guard !closed else { throw DirectHostError.stopped }
             try Task.checkCancellation()
             try await host.start()
@@ -312,6 +322,16 @@ public actor DirectApprovalTransportService {
             if !Task.isCancelled, ContinuousClock.now >= deadline { throw ApprovalChannelError.timedOut }
             throw error
         }
+    }
+
+    /// Audit responses grant no action authority. The phone retains only independently verified evidence.
+    public func phoneAudit(for session: DirectApprovalSession, frame: PhoneAuditFrame) async throws -> PhoneAuditFrame {
+        try await validate(session)
+        let response: PhoneAuditFrame
+        do { response = try await feed.phoneAudit(session.peer, revision: session.revision, frame: frame) }
+        catch AuthorityXPCError.unsupportedPhoneAudit { response = .failure(queryNonce: frame.queryNonce, reason: .incompatible) }
+        try await validate(session)
+        return response
     }
 
     public func close() async {
