@@ -186,4 +186,39 @@ final class RuntimeAuditUpgradeConfigurationTests: XCTestCase {
         XCTAssertNil(f.plan.reference.auditDeliveryVersion)
         XCTAssertEqual(f.plan.host.command.presence.wake.request.service.auditVersions, [])
     }
+
+    func testMissingPreparationCapabilitiesRefuseValuePreparation() throws {
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            for missing in 0..<(role == .setupController ? 4 : 3) {
+                let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true,
+                    auditDelivery: true, materialAuditDelivery: false, releaseEdit: { component in
+                        guard component.role == role else { return component }
+                        let formats: [ReleaseFormat]
+                        if missing == 2 {
+                            formats = component.formats.filter { $0.name != RuntimeAuditUpgradeRecord.formatName }
+                        } else {
+                            let name = missing == 3 ? RuntimeAuditUpgradeRecord.formatName : "authority.installation-preparation"
+                            let version: UInt64 = missing == 3 ? 1 : 12
+                            formats = try component.formats.map { value in
+                                guard value.name == name else { return value }
+                                return try .init(name: value.name,
+                                    readers: missing == 0 ? value.readers.subtracting([version]) : value.readers,
+                                    writers: missing == 0 ? value.writers : value.writers.subtracting([version]))
+                            }
+                        }
+                        return try .init(role: component.role, identifier: component.identifier,
+                            generation: component.generation, relativePath: component.relativePath,
+                            codeDirectoryHash: component.codeDirectoryHash, build: component.build,
+                            teamID: component.teamID, formats: formats, requests: component.requests)
+                    })
+                let before = try f.plan.encoded
+                XCTAssertThrowsError(try prepare(f.plan, f)) { error in
+                    XCTAssertTrue(error is ReleaseCompatibilityError)
+                }
+                XCTAssertEqual(try f.plan.encoded, before)
+                XCTAssertEqual(f.plan.host.command.presence.wake.request.service.auditVersions, [])
+            }
+        }
+    }
+
 }
