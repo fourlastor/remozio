@@ -36,7 +36,8 @@ class AuditWorkSettingsInteractionTest {
         saveButton().performScrollTo().assertIsNotEnabled()
         assertEquals(AuditWorkPolicy(), AuditWorkSettings(ui.activity).read())
 
-        field(R.string.audit_settings_responses).performScrollTo().performTextReplacement("1").performClick().assertIsFocused()
+        field(R.string.audit_settings_responses).performScrollTo().performTextReplacement("1")
+        field(R.string.audit_settings_responses).performClick().assertIsFocused()
         field(R.string.audit_settings_responses).performKeyInput { pressKey(Key.Tab) }
         field(R.string.audit_settings_seconds).assertIsFocused().performTextReplacement("1")
         Espresso.closeSoftKeyboard()
