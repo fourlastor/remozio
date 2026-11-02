@@ -30,8 +30,11 @@ internal class ForegroundAuditPeer(val record: StoredPhoneEnrollment) {
     /** One explicit round at a time. Busy clicks never queue behind an active round. */
     fun request(resume: Boolean): Boolean = synchronized(monitor) {
         if (!accepting || mutableWorking.value) return@synchronized false
-        if (!requests.trySend(resume).isSuccess) return@synchronized false
         mutableWorking.value = true
+        if (!requests.trySend(resume).isSuccess) {
+            mutableWorking.value = false
+            return@synchronized false
+        }
         true
     }
     internal fun enableRequests() = synchronized(monitor) { accepting = true; mutableWorking.value = false }
