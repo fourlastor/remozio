@@ -31,13 +31,14 @@ abstract class AuditDetailsInteractionChecks<A : ComponentActivity>(activityClas
         val close = ui.activity.getString(R.string.audit_close)
         fun card() = ui.onAllNodes(hasText(details) and hasClickAction()).onFirst()
         ui.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(details))
+        ui.onRoot().performKeyInput { pressKey(Key.Tab) }
         card().performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
         card().assertIsFocused().performKeyInput { pressKey(Key.Enter) }
         ui.onNodeWithText(title).assertIsDisplayed()
         val opened = NativeAccessibilityFrames.capture(ui.activity, "details-open")
         assertTrue(opened.any { title in it.labels && it.heading })
-        assertTrue(opened.any { close in it.labels && it.clickable && it.enabled })
-        assertTrue(opened.indexOfFirst { title in it.labels } < opened.indexOfFirst { close in it.labels && it.clickable })
+        assertTrue(opened.any { it.ownsLabel(close, opened) && it.clickable && it.enabled })
+        assertTrue(opened.indexOfFirst { title in it.labels } < opened.indexOfFirst { it.ownsLabel(close, opened) && it.clickable })
 
         ui.onNodeWithText(close).performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
         ui.onNodeWithText(close).performKeyInput { pressKey(Key.Enter) }
@@ -57,9 +58,13 @@ abstract class AuditDetailsInteractionChecks<A : ComponentActivity>(activityClas
 }
 
 internal data class NativeAccessibilityNode(
-    val labels: List<String>, val editable: Boolean, val enabled: Boolean,
+    val path: String, val role: String, val labels: List<String>, val editable: Boolean, val enabled: Boolean,
     val clickable: Boolean, val heading: Boolean, val error: String?,
-)
+) {
+    fun ownsLabel(label: String, nodes: List<NativeAccessibilityNode>) = nodes.any {
+        label in it.labels && (it.path == path || it.path.startsWith("$path/"))
+    }
+}
 
 internal object NativeAccessibilityFrames {
     fun capture(activity: Activity, scene: String): List<NativeAccessibilityNode> {
@@ -82,7 +87,8 @@ internal object NativeAccessibilityFrames {
             val (node, path) = pending.removeFirst()
             val labels = listOfNotNull(node.text?.toString(), node.contentDescription?.toString(), node.hintText?.toString())
                 .filter(String::isNotBlank).distinct()
-            nodes += NativeAccessibilityNode(labels, node.isEditable, node.isEnabled, node.isClickable, node.isHeading, node.error?.toString())
+            nodes += NativeAccessibilityNode(path, node.className.toString(), labels, node.isEditable, node.isEnabled,
+                node.isClickable, node.isHeading, node.error?.toString())
             val bounds = Rect().also(node::getBoundsInScreen)
             Log.i("RemozioAuditA11y", JSONObject().put("schema", 1).put("frame", frame).put("kind", "node")
                 .put("path", path).put("class", node.className).put("labels", JSONArray(labels.map { it.take(256) }))
