@@ -143,6 +143,8 @@ class PrerequisiteAndInventoryTests(unittest.TestCase):
                                        "tests/test_linux_storage_lease_experiment.py",
                                        "experiments/linux-storage-lease/lease.c",
                                        "experiments/linux-storage-lease/lease.h",
+                                       "experiments/linux-storage-lease/descriptor-walk.c",
+                                       "experiments/linux-storage-lease/descriptor-walk.h",
                                        "experiments/linux-storage-lease/controls.c",
                                        "experiments/linux-storage-lease/README.md"})
         for name, digest in sources.items():
@@ -177,7 +179,8 @@ class CoordinatorTests(unittest.TestCase):
         arguments, timeout = calls[0]
         self.assertEqual(timeout, 30)
         self.assertEqual(arguments[:6], ["/fixture/cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2"])
-        self.assertEqual(arguments[6:12], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "controls.c"),
+        self.assertEqual(arguments[6:13], [str(EXPERIMENT.SOURCE / "lease.c"), str(EXPERIMENT.SOURCE / "descriptor-walk.c"),
+                                           str(EXPERIMENT.SOURCE / "controls.c"),
                                            "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-Wl,--wrap=fstatat"])
         self.assertEqual(len(calls), len(EXPERIMENT.CASES) + 1)
         self.assertNotIn("/fixture", json.dumps(value))
@@ -244,7 +247,8 @@ class LiveTests(unittest.TestCase):
                     compiler = EXPERIMENT.shutil.which("cc")
                     self.assertIsNotNone(compiler)
                     arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
-                                 "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "controls.c"),
+                                 "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "descriptor-walk.c"),
+                                 str(EXPERIMENT.SOURCE / "controls.c"),
                                  "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat",
                                  "-Wl,--wrap=fstatat", "-o", str(binary)]
                     _raw, status, error, clean = EXPERIMENT.run_owned(arguments, 30)
@@ -274,7 +278,8 @@ class LiveTests(unittest.TestCase):
             compiler = EXPERIMENT.shutil.which("cc")
             self.assertIsNotNone(compiler)
             arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
-                         "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "controls.c"),
+                         "-I", str(EXPERIMENT.SOURCE), str(mutant), str(EXPERIMENT.SOURCE / "descriptor-walk.c"),
+                                 str(EXPERIMENT.SOURCE / "controls.c"),
                          "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-Wl,--wrap=fstatat", "-o", str(binary)]
             _raw, status, error, clean = EXPERIMENT.run_owned(arguments, 30)
             self.assertEqual((status, error, clean), (0, None, True))

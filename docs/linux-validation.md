@@ -109,6 +109,14 @@ and Python must be 3.11 or later; unsupported semantics fail rather than skip. T
 mechanics, not a protected service identity, durable journal or production storage
 policy. Advisory locking does not exclude a malicious same-account writer.
 
+The [placement validator experiment](../experiments/linux-placement-validator/README.md)
+also runs in `check-linux-host.sh`. It shares the lease's descriptor walk and checks
+existing objects against caller-supplied expectations, covering aliases, extra links,
+inode replacement, ownership, write permissions and ACL grants. Its 46 controls include
+39 live ordinary-user filesystem controls and seven explicitly injected error controls.
+It is component evidence: it observes no root-owned or foreign-owned object and no real
+mount, and it selects no production path, identity or filesystem policy.
+
 The [OS-capture experiment](experiments/linux-os-capture.md) also runs in
 `check-linux-host.sh`. It observes its own current Linux task and retained objects,
 round-trips raw paths and real UID/GID roles through schema 4, and refuses changed
