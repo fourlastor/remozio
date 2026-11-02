@@ -72,7 +72,10 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    // Keep the debug runtime aligned with the instrumented tests.
+    //noinspection GradleDependency
     debugImplementation("androidx.concurrent:concurrent-futures-ktx:1.2.0")
+    //noinspection NewerVersionAvailable
     debugImplementation("com.google.errorprone:error_prone_annotations:2.30.0")
 }
 
