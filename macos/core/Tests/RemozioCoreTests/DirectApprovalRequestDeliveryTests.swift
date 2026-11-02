@@ -74,6 +74,42 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                 reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .expired).encode()))
             } catch { reply(.failed) }
         }
+        var routingVersionValue: UInt64? = 0
+        private var routingCalls = 0
+        private var routingHeld: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var routingResult: Data?
+        private var holdRoutingReply = false
+        private let routingKey = P256.Signing.PrivateKey()
+        let routingRequested = XCTestExpectation(description: "routing requested")
+        var routingCount: Int { lock.withLock { routingCalls } }
+        var routingPublicKey: Data { routingKey.publicKey.x963Representation }
+        func holdRouting() { lock.withLock { holdRoutingReply = true } }
+        func finishRouting() {
+            let result = lock.withLock { () -> ((@Sendable (AuthorityXPCReply) -> Void)?, Data?) in
+                let old = (routingHeld, routingResult); routingHeld = nil; routingResult = nil; return old
+            }
+            if let reply = result.0, let bytes = result.1 { reply(.routing(bytes)) }
+        }
+        func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let routingVersionValue { reply(.routingVersion(routingVersionValue)) } else { reply(.failed) }
+        }
+        func routing(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { routingCalls += 1 }
+            do {
+                let request = try PhoneRoutingFrame.decode(frame)
+                let payload = try RoutingStatusResponse(scope: trust.peers[0].scope, queryNonce: request.queryNonce, outcome: .status,
+                    clockEpoch: Data(repeating: 30, count: 16), sampledAtMilliseconds: 100,
+                    state: .init(mode: .present, revision: 3, destination: .localMac, reason: .manualPresent, detectionLimited: false)).encode()
+                let input = try RoutingStatusSigningInput.make(wireVersion: 1, canonicalPayload: payload,
+                    inputLimits: .init(maxBytes: 3200, maxDepth: 2, maxItems: 16))
+                let result = try PhoneRoutingFrame.response(queryNonce: request.queryNonce, canonicalPayload: payload,
+                    signature: routingKey.signature(for: input).rawRepresentation).encode()
+                let held = lock.withLock {
+                    if holdRoutingReply { routingHeld = reply; routingResult = result; return true }; return false
+                }
+                if held { routingRequested.fulfill() } else { reply(.routing(result)) }
+            } catch { reply(.failed) }
+        }
         var auditVersionValue: UInt64? = 0
         private let auditKey = P256.Signing.PrivateKey()
         var auditPublicKey: Data { auditKey.publicKey.x963Representation }
@@ -314,14 +350,14 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func setup(ids: [Data], frames: [Data: Data], maximum: Int = 4096, features: Set<UInt64> = [],
                        automatic: Bool = true, exchangeSupported: Bool = false, statuses: [Data: Data] = [:],
-                       decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000, recoveryVersion: UInt64? = 0,
+                       decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000, recoveryVersion: UInt64? = 0, routingVersion: UInt64? = 0, routingOnly: Bool = false,
                        auditVersion: UInt64? = 0, auditOnly: Bool = false,
                        handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void = { _, _ in }) async throws -> (DirectApprovalTransportService, DirectApprovalTransportHost, Driver, Factory, DirectApprovalPeer) {
         let peer = try DirectApprovalPeer(scope: Self.scope(), transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation,
-            requests: auditOnly ? [] : [Self.capability(features: features)], auditVersions: auditOnly ? [1] : [], maximumPayloadBytes: maximum)
+            requests: (routingOnly || auditOnly) ? [] : [Self.capability(features: features)], auditVersions: auditOnly ? [1] : [], maximumPayloadBytes: maximum)
         let trust = DirectApprovalTrust(macID: Self.id(1), accountID: Self.id(2), revision: UUID(), peers: [peer])
         let driver = Driver(trust: trust, ids: ids, frames: frames, exchangeSupported: exchangeSupported, statuses: statuses, decisions: decisions), factory = Factory()
-        driver.recoveryVersionValue = recoveryVersion; driver.auditVersionValue = auditVersion
+        driver.recoveryVersionValue = recoveryVersion; driver.routingVersionValue = routingVersion; driver.auditVersionValue = auditVersion
         let feed = AuthorityTrustFeed(macID: Self.id(1), accountID: Self.id(2), factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
         let host = DirectApprovalTransportHost(macID: Self.id(1), accountID: Self.id(2),
             factory: { generation, _, _, handler in factory.make(generation, handler) },
@@ -332,7 +368,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
                          purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
-        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: (purpose == .pushRecovery || purpose == .audit) ? [] : peer.requests, auditVersions: purpose == .audit ? [1] : [],
+        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: (purpose == .pushRecovery || purpose == .routing || purpose == .audit) ? [] : peer.requests, auditVersions: purpose == .audit ? [1] : [],
             maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose), purpose: purpose)
     }
     private func recoveryResume(_ id: Data = DirectApprovalRequestDeliveryTests.id(32)) throws -> PhonePushRecoveryFrame {
@@ -1096,6 +1132,92 @@ extension DirectApprovalRequestDeliveryTests {
             try await phone.submit(auditQuery().encode())
             do { try await service.runPhoneAudit(for: session, over: channel, timeoutMilliseconds: 100); XCTFail("Failed write accepted") } catch {}
             XCTAssertEqual(driver.auditCount, 1); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+}
+
+
+
+extension DirectApprovalRequestDeliveryTests {
+    func testRoutingDefaultHandlerCarriesSignedStatusWithoutCommandCapabilities() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], routingVersion: 1, routingOnly: true)
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+        let channel = try await connect(phone, peer, purpose: .routing)
+        let query = PhoneRoutingFrame.status(queryNonce: Data(repeating: 21, count: 32))
+        try await phone.submit(query.encode())
+        try await factory.run(peer, channel)
+        let payloads = await phone.payloads; XCTAssertEqual(payloads.count, 1)
+        guard case .response(let nonce, let body, let signature) = try PhoneRoutingFrame.decode(XCTUnwrap(payloads.first)) else {
+            await service.close(); return XCTFail("Missing signed routing status")
+        }
+        XCTAssertEqual(nonce, query.queryNonce)
+        XCTAssertTrue(try RoutingStatusSignature.verify(signature: signature, publicKey: driver.routingPublicKey,
+            wireVersion: 1, canonicalPayload: body, inputLimits: .init(maxBytes: 3200, maxDepth: 2, maxItems: 16)))
+        let status = try RoutingStatusResponse.decode(body)
+        XCTAssertEqual(status.state.mode, .present); XCTAssertEqual(status.state.revision, 3)
+        XCTAssertTrue(driver.exchangeQueries.isEmpty); XCTAssertEqual(driver.discoveryCount, 0); XCTAssertEqual(driver.routingCount, 1)
+        let closed = await phone.closed; XCTAssertTrue(closed)
+        await service.close()
+    }
+    func testRoutingUnsupportedRootReturnsOnlyIncompatibleWithoutApprovalWork() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false)
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+        let channel = try await connect(phone, peer, purpose: .routing), session = try await host.admit(peer, generation: factory.generation)
+        let query = PhoneRoutingFrame.status(queryNonce: Data(repeating: 21, count: 32)); try await phone.submit(query.encode())
+        try await service.runPhoneRouting(for: session, over: channel)
+        let payloads = await phone.payloads
+        guard case .failure(let nonce, .incompatible) = try PhoneRoutingFrame.decode(XCTUnwrap(payloads.first)) else {
+            await service.close(); return XCTFail("Unsupported routing became status")
+        }
+        XCTAssertEqual(nonce, query.queryNonce); XCTAssertEqual(driver.routingCount, 0); XCTAssertEqual(driver.discoveryCount, 0)
+        await service.close()
+    }
+    func testRoutingRejectsWrongPurposeScopeAndApprovalCapabilitiesBeforeRootWork() async throws {
+        for mismatch in 0..<3 {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, routingVersion: 1)
+            let scope = try mismatch == 1 ? Self.scope(phone: 5) : peer.scope
+            let requests = mismatch == 2 ? peer.requests : []
+            let phone = try Phone(scope: scope, requests: requests, persistent: true)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: requests,
+                auditVersions: [], maximumPayloadBytes: 4096, purpose: mismatch == 0 ? .approvals : .routing)
+            let session = try await host.admit(peer, generation: factory.generation)
+            do { try await service.runPhoneRouting(for: session, over: channel); XCTFail("Unbound routing accepted") } catch {}
+            XCTAssertEqual(driver.routingCount, 0); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+    func testRoutingRejectsMalformedAndResponseRoleBeforeRootWork() async throws {
+        let bad = [Data([1]), try PhoneRoutingFrame.failure(queryNonce: Data(repeating: 21, count: 32), reason: .unavailable).encode()]
+        for bytes in bad {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], routingVersion: 1)
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true), channel = try await connect(phone, peer, purpose: .routing)
+            try await phone.submit(bytes)
+            do { try await factory.run(peer, channel); XCTFail("Invalid routing accepted") } catch {}
+            XCTAssertEqual(driver.routingCount, 0); let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty)
+            await service.close()
+        }
+    }
+    func testRoutingTrustRetirementWithholdsLateRootStatusWithoutReplay() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], routingVersion: 1)
+        driver.holdRouting()
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true), channel = try await connect(phone, peer, purpose: .routing)
+        try await phone.submit(PhoneRoutingFrame.status(queryNonce: Data(repeating: 21, count: 32)).encode())
+        let operation = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.routingRequested], timeout: 2)
+        try await host.replaceTrust(driver.trust); driver.finishRouting()
+        do { try await operation.value; XCTFail("Retired routing status published") } catch {}
+        let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty); XCTAssertEqual(driver.routingCount, 1)
+        await service.close()
+    }
+    func testRoutingBlockedOrFailedWriteDoesNotReplayRootOperation() async throws {
+        for blocked in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, routingVersion: 1)
+            let phone = try Phone(scope: peer.scope, requests: [], failWrite: !blocked, holdWrite: blocked, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .routing), session = try await host.admit(peer, generation: factory.generation)
+            try await phone.submit(PhoneRoutingFrame.status(queryNonce: Data(repeating: 21, count: 32)).encode())
+            do { try await service.runPhoneRouting(for: session, over: channel, timeoutMilliseconds: 100); XCTFail("Failed write accepted") } catch {}
+            XCTAssertEqual(driver.routingCount, 1); let closed = await phone.closed; XCTAssertTrue(closed)
             await service.close()
         }
     }

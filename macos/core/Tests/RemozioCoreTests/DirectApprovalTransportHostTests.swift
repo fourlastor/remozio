@@ -68,6 +68,17 @@ final class DirectApprovalTransportHostTests: XCTestCase {
             validatePeer: { peer, revision in try await validator.validate(peer, revision) })
     }
 
+    func testRoutingAdvertisementRequiresExplicitSupportAndIsSealedBeforeAdmission() async throws {
+        XCTAssertFalse(DirectApprovalListener.purposes(enablePhoneRouting: false).contains(.routing))
+        XCTAssertTrue(DirectApprovalListener.purposes(enablePhoneRouting: true).contains(.routing))
+        XCTAssertEqual(EnrolledChannelPurpose(applicationProtocol: "remozio-routing/1"), .routing)
+        let factory = Factory(), validator = Validator(), host = host(factory, validator)
+        try await host.configurePhoneRoutingSupport(true)
+        try await host.replaceTrust(trust()); try await host.start()
+        do { try await host.configurePhoneRoutingSupport(false); XCTFail("Changed support after admission") } catch {}
+        await host.close()
+    }
+
     func testAuditAdvertisementRequiresSupportAndIsSealedBeforeAdmission() async throws {
         XCTAssertFalse(DirectApprovalListener.purposes(enablePhoneAudit: false).contains(.audit))
         XCTAssertTrue(DirectApprovalListener.purposes(enablePhoneAudit: true).contains(.audit))

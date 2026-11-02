@@ -125,6 +125,14 @@ final class AuthorityTransportAccess: Sendable {
         })
     }
 
+    func phoneRouting(binding: AuthorityPeerBinding, frame: PhoneRoutingFrame,
+                      handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame) throws -> PhoneRoutingFrame {
+        try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { try handler($0, binding, frame) })
+    }
+
     func phoneAudit(binding: AuthorityPeerBinding, frame: PhoneAuditFrame,
                     handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
                                         @Sendable (JournalTransaction) throws -> Void) throws -> PhoneAuditFrame) throws -> PhoneAuditFrame {
