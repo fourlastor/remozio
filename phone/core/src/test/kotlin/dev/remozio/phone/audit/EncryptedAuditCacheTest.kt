@@ -43,8 +43,9 @@ class EncryptedAuditCacheTest {
         val binding = AuditCacheBinding(id(1), id(2), publicKey)
         val secret = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
         val cipher = AuditArchiveCipher(secret, bound.maxBytes)
-        fun open(storage: Storage, limits: CborLimits = bound) = EncryptedAuditCache.open(storage,
-            AuditArchiveCipher(secret, limits.maxBytes), binding, protocol, capacity, limits)
+        fun open(storage: Storage, limits: CborLimits = bound, localStorage: Storage? = null, clock: () -> Long = { 12345 }) =
+            EncryptedAuditCache.open(storage, AuditArchiveCipher(secret, limits.maxBytes), binding, protocol, capacity, limits,
+                localSync = { verified -> localStorage?.let { AuditLocalSyncArchive.open(it, secret, binding, verified, clock) } })
         fun receipt(reason: AuditReason = AuditReason.NONE): ReceivedAuditPage {
             val record = AuditEventMetadata(id(5), id(1), id(2), id(3), 1u, null, null, null,
                 AuditEventKind.REQUEST_CREATED, AuditCategory.COMMAND, null, null, AuditAuthentication.SYSTEM,
@@ -162,4 +163,70 @@ class EncryptedAuditCacheTest {
             assertNull(disk.bytes); assertEquals(0, storage.writes)
         }
     }
+
+    @Test fun localMetadataIsEncryptedBoundAndSeparatedFromProofCiphertextEvenWithTheSameKey() {
+        val f = Fixture(); val cipher = AuditArchiveCipher.localSync(f.secret)
+        val plain = "disposable local sync metadata".encodeToByteArray()
+        val one = cipher.encrypt(plain, f.binding); val two = cipher.encrypt(plain, f.binding)
+        assertFalse(one.contentEquals(two)); assertContentEquals(plain, cipher.decrypt(one, f.binding))
+        for (binding in listOf(AuditCacheBinding(id(9), id(2), f.publicKey), AuditCacheBinding(id(1), id(9), f.publicKey),
+            AuditCacheBinding(id(1), id(2), Fixture().publicKey))) {
+            assertFailsWith<GeneralSecurityException> { cipher.decrypt(one, binding) }
+        }
+        assertFailsWith<GeneralSecurityException> { AuditArchiveCipher.localSync(Fixture().secret).decrypt(one, f.binding) }
+        assertFailsWith<GeneralSecurityException> { f.cipher.decrypt(one.copyOf().also {
+            "RMZAUD01".encodeToByteArray().copyInto(it)
+        }, f.binding) }
+        val proofCiphertext = f.cipher.encrypt(plain, f.binding)
+        assertFailsWith<GeneralSecurityException> { cipher.decrypt(proofCiphertext.copyOf().also {
+            "RMZAS001".encodeToByteArray().copyInto(it)
+        }, f.binding) }
+        assertFails { cipher.encrypt(ByteArray(1025), f.binding) }
+        assertFails { cipher.decrypt(ByteArray(1061), f.binding) }
+    }
+
+    @Test fun localMetadataRequiresRetainedProofsAndDamagedMetadataNeverRewritesTheEvidenceArchive() {
+        val f = Fixture(); val disk = Disk(); val local = Disk(); val receipt = f.receipt()
+        f.open(Storage(disk), localStorage = Storage(local)).use { cache ->
+            cache.append(receipt)
+            assertNull(cache.localSyncTimes()) // An offline import must not become a fresh receipt.
+            cache.recordLocalSync(AuditEvidenceKind.PAGE, receipt.canonicalBody, completed = true)
+            assertEquals(12345L, assertNotNull(cache.localSyncTimes()).lastCompleted?.unixMilliseconds)
+        }
+        val proofArchive = checkNotNull(disk.bytes).copyOf(); val localArchive = checkNotNull(local.bytes).copyOf()
+        local.bytes = localArchive.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+        val damaged = local.bytes?.copyOf(); val localOwner = Storage(local)
+        f.open(Storage(disk), localStorage = localOwner).use { cache ->
+            assertEquals(1, cache.snapshot().proofs.size); assertNull(cache.localSyncTimes())
+        }
+        assertEquals(0, localOwner.writes); assertContentEquals(damaged, local.bytes); assertContentEquals(proofArchive, disk.bytes)
+        local.bytes = localArchive
+        f.open(Storage(Disk()), localStorage = Storage(local)).use { cache ->
+            assertTrue(cache.snapshot().proofs.isEmpty()); assertNull(cache.localSyncTimes())
+        }
+        assertContentEquals(localArchive, local.bytes)
+    }
+
+    @Test fun unknownOrMalformedLocalMetadataCannotHideValidHistoryOrRunThePhoneClockOnLoad() {
+        val f = Fixture(); val disk = Disk(); val local = Disk(); val receipt = f.receipt()
+        f.open(Storage(disk)).use { it.append(receipt) }
+        val savedProofs = checkNotNull(disk.bytes).copyOf()
+        val badValues = listOf(
+            CborValue.Fields(mapOf(0uL to CborValue.Unsigned(2u), 1uL to CborValue.Null, 2uL to CborValue.Null)),
+            CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u), 1uL to CborValue.Null, 2uL to CborValue.Null)),
+            CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u), 1uL to CborValue.ArrayValue(listOf(
+                CborValue.Unsigned(ULong.MAX_VALUE), CborValue.Bytes(ByteArray(32)))), 2uL to CborValue.Null)),
+            CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u), 1uL to CborValue.ArrayValue(listOf(
+                CborValue.Unsigned(123u), CborValue.Bytes(ByteArray(31)))), 2uL to CborValue.Null)),
+        )
+        for (bad in badValues) {
+            local.bytes = AuditArchiveCipher.localSync(f.secret).encrypt(DeterministicCbor.encode(bad, bound), f.binding)
+            val savedLocal = local.bytes?.copyOf()
+            f.open(Storage(disk), localStorage = Storage(local), clock = { error("Import cannot record a local time") }).use {
+                assertEquals(1, it.snapshot().proofs.size); assertNull(it.localSyncTimes())
+            }
+            assertContentEquals(savedProofs, disk.bytes); assertContentEquals(savedLocal, local.bytes)
+        }
+    }
+
 }

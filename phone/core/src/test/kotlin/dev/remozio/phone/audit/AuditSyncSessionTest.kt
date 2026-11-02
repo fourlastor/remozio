@@ -33,7 +33,7 @@ class AuditSyncSessionTest {
     }
     private data class Epoch(val id: Int, var head: Int, val previous: Int? = null,
                              val cause: AuditEpochCause = AuditEpochCause.RESTART, var retained: Int = 0)
-    private inner class Fixture(val budget: Int = 20, head: Int = 4) {
+    private inner class Fixture(val budget: Int = 20, head: Int = 4, val withLocalTimes: Boolean = false) {
         private val keys = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         val publicKey: ByteArray get() = (keys.public as ECPublicKey).w.let { point ->
             fun scalar(value: java.math.BigInteger) = value.toByteArray().takeLast(32).toByteArray().let { ByteArray(32 - it.size) + it }
@@ -42,7 +42,14 @@ class AuditSyncSessionTest {
         val binding = AuditCacheBinding(id(1), id(2), publicKey)
         private val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
         val disk = Disk(); val storage = Storage(disk)
-        fun cache(storage: Storage) = EncryptedAuditCache.open(storage, AuditArchiveCipher(key, bound.maxBytes), binding, limits, capacity, bound)
+        val localDisk = Disk(); val localStorage = Storage(localDisk)
+        var phoneNow = 50_000L
+        var clockReads = 0
+        fun cache(storage: Storage, metadata: Storage = localStorage) = EncryptedAuditCache.open(storage,
+            AuditArchiveCipher(key, bound.maxBytes), binding, limits, capacity, bound,
+            localSync = { verified -> if (withLocalTimes) AuditLocalSyncArchive.open(metadata, key, binding, verified) {
+                clockReads++; phoneNow
+            } else null })
         val cache = cache(storage)
         var now = 100uL
         val session by lazy { AuditSyncSession(cache, budget, 1000u) { ElapsedInstant(1, now) } }
@@ -118,6 +125,34 @@ class AuditSyncSessionTest {
                 8uL to CborValue.Bytes(query.queryNonce), 9uL to CborValue.ArrayValue(records),
             )), bound)
         }
+    }
+
+    @Test fun newBudgetAndQueryLifetimeApplyAtExplicitBoundariesWithoutResettingEvidence() {
+        val f = Fixture(head = 4)
+        f.session.start(responseBudget = 1, queryLifetimeMs = 10u)
+        val original = f.next(); f.respond(original); val retained = f.session.state.value.history.proofs.single()
+        assertEquals(AuditSyncPhase.PAUSED, f.session.state.value.phase)
+        f.session.resume(responseBudget = 2, queryLifetimeMs = 2000u)
+        val page = assertIs<AuditPageQuery>(f.next()); assertEquals(0uL, page.requestedAfter)
+        original.close(); f.now += 1001u; f.respond(page)
+        assertEquals(AuditSyncPhase.SYNCING, f.session.state.value.phase)
+        assertEquals(retained.canonicalBody, f.session.state.value.history.proofs.first().canonicalBody)
+        assertEquals(retained.signature, f.session.state.value.history.proofs.first().signature)
+        f.respond(); assertEquals(AuditSyncPhase.COMPLETE, f.session.state.value.phase)
+        assertEquals(listOf(1uL, 2uL, 3uL, 4uL), f.session.state.value.history.epochs.single().records.map { it.sequence })
+        assertFalse(f.storage.closed); f.session.close()
+    }
+
+    @Test fun activeQueryCannotBeExtendedByStartingOrResumingWithDifferentLimits() {
+        val f = Fixture(head = 1); f.session.start(responseBudget = 1, queryLifetimeMs = 10u)
+        val query = f.next()
+        assertFailsWith<IllegalStateException> { f.session.start(responseBudget = 100, queryLifetimeMs = 60_000u) }
+        assertFailsWith<IllegalStateException> { f.session.resume(responseBudget = 100, queryLifetimeMs = 60_000u) }
+        f.now += 11u
+        assertFailsWith<AuditPageException> { f.respond(query) }
+        assertEquals(AuditSyncFailure.INVALID_RESPONSE, f.session.state.value.failure)
+        assertEquals(0, f.storage.writes); assertNull(f.session.state.value.lastCompletedAt)
+        f.session.close()
     }
 
     @Test fun persistsBeforeAdvancingAndResumesWithoutChasingAnExpandingHead() {
@@ -280,4 +315,98 @@ class AuditSyncSessionTest {
             assertEquals(AuditSyncPhase.COMPLETE, f.session.state.value.phase)
         } finally { pool.shutdownNow(); f.session.close() }
     }
+
+    @Test fun savedSyncTimesSurviveReopeningWithoutRestoringALiveRoundOrElapsedAuthority() {
+        val f = Fixture(budget = 1, withLocalTimes = true)
+        assertNull(f.session.state.value.localTimes)
+        f.session.start(); f.respond()
+        assertEquals(AuditSyncPhase.PAUSED, f.session.state.value.phase)
+        val partial = assertNotNull(f.session.state.value.localTimes)
+        assertEquals(50_000L, partial.lastResponse.unixMilliseconds); assertNull(partial.lastCompleted)
+        f.phoneNow = 40_000 // A phone-clock regression changes the observation; it does not reorder by timestamp.
+        f.session.resume(10); f.drain()
+        val completed = assertNotNull(f.session.state.value.localTimes)
+        assertEquals(completed.lastResponse, completed.lastCompleted)
+        assertEquals(40_000L, completed.lastResponse.unixMilliseconds)
+        val reads = f.clockReads
+        f.session.close(); assertTrue(f.localStorage.closed)
+        f.cache(Storage(f.disk), Storage(f.localDisk)).use { cache ->
+            val restarted = AuditSyncSession(cache, 5, 1000u) { ElapsedInstant(88, 1u) }
+            assertEquals(AuditSyncPhase.IDLE, restarted.state.value.phase)
+            assertEquals(completed, restarted.state.value.localTimes)
+            assertNull(restarted.state.value.lastCompletedAt); assertNull(restarted.state.value.lastResponseAt)
+            assertEquals(reads, f.clockReads)
+            restarted.close()
+        }
+    }
+
+    @Test fun invalidExpiredOrUnpersistedRepliesCannotAdvanceSavedSyncTimes() {
+        val f = Fixture(withLocalTimes = true); f.session.start()
+        var q = f.next(); var body = f.history(q as AuditHistoryQuery)
+        assertFails { f.session.accept(q, body, ByteArray(64)) }
+        assertNull(f.localDisk.bytes); assertEquals(0, f.clockReads)
+        f.session.start(); q = f.next(); body = f.history(q as AuditHistoryQuery)
+        f.now += 1001u
+        assertFails { f.session.accept(q, body, f.sign(body, q)) }
+        assertNull(f.localDisk.bytes); assertEquals(0, f.clockReads)
+        f.session.start(); f.respond()
+        val known = f.session.state.value.localTimes; val saved = f.localDisk.bytes?.copyOf(); val reads = f.clockReads
+        q = f.next(); body = f.page(q as AuditPageQuery); f.storage.failAfterWrite = true
+        assertFailsWith<IOException> { f.session.accept(q, body, f.sign(body, q)) }
+        assertEquals(known, f.session.state.value.localTimes); assertContentEquals(saved, f.localDisk.bytes)
+        assertEquals(reads, f.clockReads); assertEquals(AuditSyncFailure.STORAGE, f.session.state.value.failure)
+        f.session.close()
+    }
+
+    @Test fun anAmbiguousMetadataWriteCannotFailACompletedSyncOrInventVisibleFreshness() {
+        val f = Fixture(head = 0, withLocalTimes = true); f.localStorage.failAfterWrite = true
+        f.session.start(); f.respond()
+        assertEquals(AuditSyncPhase.COMPLETE, f.session.state.value.phase)
+        assertEquals(1, f.session.state.value.history.proofs.size); assertNull(f.session.state.value.localTimes)
+        val proofs = f.disk.bytes?.copyOf(); val reads = f.clockReads
+        f.session.close()
+        f.cache(Storage(f.disk), Storage(f.localDisk)).use {
+            // Readback may recover the committed metadata only after its referenced proof verifies.
+            assertNotNull(it.localSyncTimes()?.lastCompleted); assertEquals(reads, f.clockReads)
+            assertEquals(1, it.snapshot().proofs.size)
+        }
+        assertContentEquals(proofs, f.disk.bytes)
+    }
+
+    @Test fun aConflictRecordsOnlyAResponseAndInvalidPhoneTimeDoesNotDamageSignedHistory() {
+        val f = Fixture(head = 1, withLocalTimes = true); f.session.start(); f.drain()
+        val completed = assertNotNull(f.session.state.value.localTimes).lastCompleted
+        f.epochs.getValue(3).head = 2; f.duplicateEventID = true
+        f.session.start(); f.respond()
+        val partial = assertNotNull(f.session.state.value.localTimes)
+        assertFailsWith<AuditSyncException> { f.respond() }
+        assertEquals(AuditSyncFailure.CONFLICT, f.session.state.value.failure)
+        val failed = assertNotNull(f.session.state.value.localTimes)
+        assertEquals(completed, failed.lastCompleted); assertTrue(failed.lastResponse.proofID != partial.lastResponse.proofID)
+        f.session.close()
+        val other = Fixture(head = 0, withLocalTimes = true); other.phoneNow = -1
+        other.session.start(); other.respond()
+        assertEquals(AuditSyncPhase.COMPLETE, other.session.state.value.phase)
+        assertEquals(1, other.session.state.value.history.proofs.size); assertNull(other.session.state.value.localTimes)
+        assertNull(other.localDisk.bytes); other.session.close()
+    }
+
+
+    @Test fun aLaterMetadataFailureKeepsThePreviousConfirmedTimeAndAllNewSignedEvidence() {
+        val f = Fixture(head = 0, withLocalTimes = true)
+        f.session.start(); f.respond()
+        val known = assertNotNull(f.session.state.value.localTimes)
+        f.phoneNow = 60_000; f.epochs.getValue(3).head = 1; f.localStorage.failAfterWrite = true
+        f.session.start(); f.respond(); f.respond()
+        assertEquals(AuditSyncPhase.COMPLETE, f.session.state.value.phase)
+        assertEquals(3, f.session.state.value.history.proofs.size)
+        assertEquals(known, f.session.state.value.localTimes)
+        f.localStorage.failAfterWrite = false; f.phoneNow = 70_000
+        f.session.start(); f.respond()
+        assertEquals(AuditSyncPhase.COMPLETE, f.session.state.value.phase)
+        assertEquals(70_000L, f.session.state.value.localTimes?.lastCompleted?.unixMilliseconds)
+        assertEquals(4, f.session.state.value.history.proofs.size)
+        f.session.close()
+    }
+
 }

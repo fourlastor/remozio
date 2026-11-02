@@ -20,6 +20,7 @@ class AuditSyncSnapshot internal constructor(
     val lastCompletedAt: ElapsedInstant?,
     val lastResponseAt: ElapsedInstant?,
     val currentObservation: AuditEpochObservation?,
+    val localTimes: AuditLocalSyncTimes?,
 )
 
 /**
@@ -30,12 +31,14 @@ class AuditSyncSnapshot internal constructor(
 class AuditSyncSession(
     private val cache: EncryptedAuditCache,
     private val responseBudget: Int,
-    queryLifetimeMs: ULong,
-    clock: () -> ElapsedInstant,
+    private val queryLifetimeMs: ULong,
+    private val clock: () -> ElapsedInstant,
 ) : AutoCloseable {
     init { require(responseBudget > 0) }
-    private val receiver = AuditPageReceiver(cache.binding.macID, cache.binding.accountID,
-        cache.binding.authorityPublicKey, cache.protocolLimits, 1, queryLifetimeMs, clock)
+    internal val binding: AuditCacheBinding get() = cache.binding
+    private fun receiver(lifetime: ULong) = AuditPageReceiver(cache.binding.macID, cache.binding.accountID,
+        cache.binding.authorityPublicKey, cache.protocolLimits, 1, lifetime, clock)
+    private var receiver = receiver(queryLifetimeMs)
     private sealed interface Work {
         class History(val epoch: CborValue.Bytes?, val after: ULong?) : Work
         class Page(val epoch: CborValue.Bytes, val generation: ULong, val after: ULong, val targetHead: ULong) : Work
@@ -46,14 +49,17 @@ class AuditSyncSession(
     private var pending: AuditQuery? = null
     private var remaining = 0
     private var storageFailed = false
-    private val mutableState = MutableStateFlow(AuditSyncSnapshot(AuditSyncPhase.IDLE, cache.snapshot(), null, null, null, null))
+    private val mutableState = MutableStateFlow(AuditSyncSnapshot(AuditSyncPhase.IDLE, cache.snapshot(), null, null, null, null, cache.localSyncTimes()))
     val state: StateFlow<AuditSyncSnapshot> = mutableState.asStateFlow()
 
     /** Starts fresh discovery. A paused round may be abandoned explicitly with cancel first. */
     @Synchronized
-    fun start() {
+    fun start(responseBudget: Int = this.responseBudget, queryLifetimeMs: ULong = this.queryLifetimeMs) {
         check(state.value.phase !in setOf(AuditSyncPhase.CLOSED, AuditSyncPhase.SYNCING, AuditSyncPhase.PAUSED))
         check(!storageFailed) { "Reopen the audit cache before syncing" }
+        require(responseBudget > 0 && queryLifetimeMs > 0u)
+        val nextReceiver = receiver(queryLifetimeMs)
+        receiver.close(); receiver = nextReceiver
         queue.clear(); plannedEpochs.clear(); scheduledChecks.clear(); remaining = responseBudget
         queue.addLast(Work.History(null, null))
         publish(AuditSyncPhase.SYNCING)
@@ -61,8 +67,11 @@ class AuditSyncSession(
 
     /** Continues the same bounded plan. It does not chase a head that grows during this round. */
     @Synchronized
-    fun resume() {
+    fun resume(responseBudget: Int = this.responseBudget, queryLifetimeMs: ULong = this.queryLifetimeMs) {
         check(state.value.phase == AuditSyncPhase.PAUSED)
+        require(responseBudget > 0 && queryLifetimeMs > 0u)
+        val nextReceiver = receiver(queryLifetimeMs)
+        receiver.close(); receiver = nextReceiver
         remaining = responseBudget
         publish(AuditSyncPhase.SYNCING)
     }
@@ -121,38 +130,50 @@ class AuditSyncSession(
             is ReceivedAuditPage -> receipt.receivedAt
             else -> error("Unsupported audit receipt")
         }
-        publish(AuditSyncPhase.SYNCING, history = cache.snapshot(), response = receivedAt)
-        if (acceptance == AuditEvidenceAcceptance.CONFLICT) {
-            fail(AuditSyncFailure.CONFLICT)
-            throw AuditSyncException(AuditSyncFailure.CONFLICT)
-        }
-        when (receipt) {
-            is ReceivedAuditHistory -> {
-                val status = receipt.status
-                publish(AuditSyncPhase.SYNCING, current = AuditEpochObservation(status.current, receivedAt))
-                plan(status.current, status.currentRetainedAfter, status.currentHead, first = true)
-                status.queried?.let { plan(it, checkNotNull(status.queriedRetainedAfter), checkNotNull(status.queriedHead)) }
-                val currentEpoch = CborValue.Bytes(status.current.epoch)
-                val knownCurrent = state.value.history.epochs.single { it.epoch == currentEpoch }
-                if (knownCurrent.highestObservedHead > status.currentHead) checkCursor(knownCurrent)
-                if ((work as Work.History).epoch == null) {
-                    for (epoch in state.value.history.epochs) {
-                        if (epoch.epoch !in plannedEpochs) checkCursor(epoch)
+        try {
+            publish(AuditSyncPhase.SYNCING, history = cache.snapshot(), response = receivedAt)
+            if (acceptance == AuditEvidenceAcceptance.CONFLICT) {
+                fail(AuditSyncFailure.CONFLICT)
+                throw AuditSyncException(AuditSyncFailure.CONFLICT)
+            }
+            when (receipt) {
+                is ReceivedAuditHistory -> {
+                    val status = receipt.status
+                    publish(AuditSyncPhase.SYNCING, current = AuditEpochObservation(status.current, receivedAt))
+                    plan(status.current, status.currentRetainedAfter, status.currentHead, first = true)
+                    status.queried?.let { plan(it, checkNotNull(status.queriedRetainedAfter), checkNotNull(status.queriedHead)) }
+                    val currentEpoch = CborValue.Bytes(status.current.epoch)
+                    val knownCurrent = state.value.history.epochs.single { it.epoch == currentEpoch }
+                    if (knownCurrent.highestObservedHead > status.currentHead) checkCursor(knownCurrent)
+                    if ((work as Work.History).epoch == null) {
+                        for (epoch in state.value.history.epochs) {
+                            if (epoch.epoch !in plannedEpochs) checkCursor(epoch)
+                        }
                     }
                 }
-            }
-            is ReceivedAuditPage -> {
-                val batch = receipt.batch
-                val page = work as Work.Page
-                if (batch.head < page.targetHead) {
-                    fail(AuditSyncFailure.HISTORY_CHANGED)
-                    throw AuditSyncException(AuditSyncFailure.HISTORY_CHANGED)
+                is ReceivedAuditPage -> {
+                    val batch = receipt.batch
+                    val page = work as Work.Page
+                    if (batch.head < page.targetHead) {
+                        fail(AuditSyncFailure.HISTORY_CHANGED)
+                        throw AuditSyncException(AuditSyncFailure.HISTORY_CHANGED)
+                    }
+                    enqueuePage(page.epoch, page.generation, batch.retainedAfter, page.targetHead, first = true)
                 }
-                enqueuePage(page.epoch, page.generation, batch.retainedAfter, page.targetHead, first = true)
             }
+            if (queue.isEmpty()) publish(AuditSyncPhase.COMPLETE, completed = receivedAt)
+            else if (remaining == 0) publish(AuditSyncPhase.PAUSED)
+        } finally {
+            val kind = if (receipt is ReceivedAuditPage) AuditEvidenceKind.PAGE else AuditEvidenceKind.HISTORY_STATUS
+            val body = when (receipt) {
+                is ReceivedAuditPage -> receipt.canonicalBody
+                is ReceivedAuditHistory -> receipt.canonicalBody
+                else -> error("Unsupported audit receipt")
+            }
+            val old = state.value.localTimes
+            cache.recordLocalSync(kind, body, state.value.phase == AuditSyncPhase.COMPLETE)
+            if (cache.localSyncTimes() != old) publish(state.value.phase, failure = state.value.failure)
         }
-        if (queue.isEmpty()) publish(AuditSyncPhase.COMPLETE, completed = receivedAt)
-        else if (remaining == 0) publish(AuditSyncPhase.PAUSED)
     }
 
     /** A late transport error cannot cancel a newer query or a completed round. */
@@ -205,6 +226,6 @@ class AuditSyncSession(
                         completed: ElapsedInstant? = state.value.lastCompletedAt,
                         response: ElapsedInstant? = state.value.lastResponseAt,
                         current: AuditEpochObservation? = state.value.currentObservation) {
-        mutableState.value = AuditSyncSnapshot(phase, history, failure, completed, response, current)
+        mutableState.value = AuditSyncSnapshot(phase, history, failure, completed, response, current, if (phase == AuditSyncPhase.CLOSED) state.value.localTimes else cache.localSyncTimes())
     }
 }

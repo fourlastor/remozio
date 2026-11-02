@@ -32,5 +32,62 @@
         <activity android:name=".routing.RoutingSettingsLargeFontEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".routing.RoutingExpandedActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".routing.RoutingExpandedDarkActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditPreviousPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditPreviousDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditPreviousLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditUnavailablePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditMissingPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditDetailsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditDetailsLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditDetailsExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditDetailsExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditFocusPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditFocusDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+            <activity android:name=".audit.AuditSyncPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncFocusPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncDarkPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncLargeFontPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncPausedPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncPausedDarkPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncPausedLargeFontPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncRunningPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncFailedPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncUnavailablePreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncExpandedPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncExpandedDarkPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditSyncPreviousPreviewActivity" android:exported="true" />
+        <activity android:name=".audit.AuditWorkSettingsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsCollapsedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsLargeFontEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsExpandedEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsExpandedDarkEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsInvalidPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsSavingPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsFailedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsSavedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSettingsDefaultsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedTimesPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedTimesFocusPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedTimesDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedTimesLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedTimesLargeFontEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedPartialPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedPreviousPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedUnavailablePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedRunningPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedLiveCompletePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedExpandedPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedExpandedDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditSavedCacheOnlyPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".audit.AuditUnknownLocalTimePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
     </application>
 </manifest>

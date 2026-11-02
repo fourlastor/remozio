@@ -6,7 +6,7 @@ import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.StoredPhoneEnrollment
 import dev.remozio.protocol.*
 import java.util.Collections
-import javax.crypto.AEADBadTagException
+import java.security.MessageDigest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -23,12 +23,23 @@ internal class AuditMacOption(val macID: CborValue.Bytes, val label: String) {
 internal sealed interface CachedAuditContent {
     data object Missing : CachedAuditContent
     data object Unavailable : CachedAuditContent
-    class Loaded(val snapshot: AuditEvidenceSnapshot, val history: AuditHistoryGroup) : CachedAuditContent {
+    class Loaded(val snapshot: AuditEvidenceSnapshot, val history: AuditHistoryGroup,
+                 val localTimes: AuditLocalSyncTimes? = null) : CachedAuditContent {
         override fun toString() = "CachedAuditContent.Loaded(redacted)"
     }
 }
 
-internal class CachedAuditScope(val scope: AuditHistoryScope, val label: String, val content: CachedAuditContent) {
+/** One trusted Root binding. A request identifier never joins timelines across this boundary. */
+internal class CachedAuditArchive(val authorityPublicKey: CborValue.Bytes, val retired: Boolean,
+                                 val content: CachedAuditContent) {
+    val fingerprint: String = MessageDigest.getInstance("SHA-256").digest(authorityPublicKey.copyBytes())
+        .joinToString("") { "%02x".format(it) }
+    val shortFingerprint: String get() = fingerprint.take(12) + "…" + fingerprint.takeLast(8)
+    override fun toString() = "CachedAuditArchive(redacted)"
+}
+
+internal class CachedAuditScope(val scope: AuditHistoryScope, val label: String, archives: List<CachedAuditArchive>) {
+    val archives: List<CachedAuditArchive> = Collections.unmodifiableList(archives.toList())
     override fun toString() = "CachedAuditScope(redacted)"
 }
 
@@ -54,6 +65,8 @@ internal class StoredAuditReader(
     private val budget: AuditReadBudget = AuditReadBudget(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val enrollmentAccess: Mutex = Mutex(),
+    private val ownedSnapshot: suspend (AuditCacheBinding) -> AuditEvidenceSnapshot? = { null },
+    private val readSnapshot: AuditSnapshotRead = { binding, fallback -> ownedSnapshot(binding)?.let { AuditRetainedSnapshot(it, null) } ?: fallback() },
 ) {
     private val mutex = Mutex()
 
@@ -73,13 +86,20 @@ internal class StoredAuditReader(
                 var remaining = budget.totalBytes
                 val scopes = groups.filter { macID == null || it.first.macID == macID }.map { (scope, entries) ->
                     currentCoroutineContext().ensureActive()
-                    val content = if (remaining <= 0) CachedAuditContent.Unavailable else {
-                        val limit = minOf(remaining, budget.perArchiveBytes)
-                        readScope(entries, limit, category, outcome).also {
-                            if (it is CachedAuditContent.Loaded) remaining -= it.snapshot.storedBytes.toInt()
+                    val archives = entries.asReversed().groupBy { it.enrollment.authorityPublicKey }.toList()
+                        .sortedBy { (_, records) -> records.none { it.phase == EnrollmentPhase.ACTIVE } }
+                        .map { (authority, records) ->
+                            currentCoroutineContext().ensureActive()
+                            val binding = AuditCacheBinding(scope.macID.copyBytes(), scope.accountID.copyBytes(), authority.copyBytes())
+                            val content = if (remaining <= 0) CachedAuditContent.Unavailable else {
+                                val limit = minOf(remaining, budget.perArchiveBytes)
+                                readArchive(binding, limit, category, outcome).also {
+                                    if (it is CachedAuditContent.Loaded) remaining -= it.snapshot.storedBytes.toInt()
+                                }
+                            }
+                            CachedAuditArchive(authority, records.none { it.phase == EnrollmentPhase.ACTIVE }, content)
                         }
-                    }
-                    CachedAuditScope(scope, label(entries), content)
+                    CachedAuditScope(scope, label(entries), archives)
                 }
                 StoredAuditState.Ready(options, scopes)
             }
@@ -90,32 +110,21 @@ internal class StoredAuditReader(
         }
     }
 
-    private suspend fun readScope(entries: List<StoredPhoneEnrollment>, maximumBytes: Int,
-                                  category: AuditCategory?, outcome: AuditOutcome?): CachedAuditContent {
-        val bindings = entries.asReversed().sortedBy { it.phase != EnrollmentPhase.ACTIVE }
-            .map { it.enrollment }.distinctBy { it.authorityPublicKey }
+    private suspend fun readArchive(binding: AuditCacheBinding, maximumBytes: Int,
+                                    category: AuditCategory?, outcome: AuditOutcome?): CachedAuditContent {
         try {
-            for (entry in bindings) {
-                currentCoroutineContext().ensureActive()
-                val binding = AuditCacheBinding(entry.macID.copyBytes(), entry.accountID.copyBytes(), entry.authorityPublicKey.copyBytes())
-                try {
-                    val snapshot = openCache(binding, maximumBytes)?.use { it.snapshot() } ?: return CachedAuditContent.Missing
-                    check(snapshot.scope == AuditHistoryScope(entry.macID, entry.accountID))
-                    check(snapshot.storedBytes <= maximumBytes)
-                    val history = AuditHistory.list(listOf(snapshot), AuditHistoryFilter(
-                        categories = category?.let { setOf(it) }, outcomes = outcome?.let { setOf(it) },
-                    )).single()
-                    return CachedAuditContent.Loaded(snapshot, history)
-                } catch (_: AEADBadTagException) {
-                    // A retained archive can belong to a former authority key for this same Mac/account.
-                }
-            }
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            return CachedAuditContent.Unavailable
-        }
-        return CachedAuditContent.Unavailable
+            currentCoroutineContext().ensureActive()
+            val retained = readSnapshot(binding) { openCache(binding, maximumBytes)?.use { AuditRetainedSnapshot(it.snapshot(), it.localSyncTimes()) } }
+                ?: return CachedAuditContent.Missing
+            val snapshot = retained.history
+            check(snapshot.scope == AuditHistoryScope(CborValue.Bytes(binding.macID), CborValue.Bytes(binding.accountID)))
+            check(snapshot.storedBytes <= maximumBytes)
+            val history = AuditHistory.list(listOf(snapshot), AuditHistoryFilter(
+                categories = category?.let { setOf(it) }, outcomes = outcome?.let { setOf(it) },
+            )).single()
+            return CachedAuditContent.Loaded(snapshot, history, retained.localTimes)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { return CachedAuditContent.Unavailable }
     }
 
     private fun label(entries: List<StoredPhoneEnrollment>) =

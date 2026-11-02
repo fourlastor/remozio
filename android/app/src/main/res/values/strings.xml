@@ -306,11 +306,11 @@
     <string name="nav_macs">Macs</string>
     <string name="nav_audit">Audit log</string>
     <string name="audit_title">Audit log</string>
-    <string name="audit_cached_notice">Saved history only. The latest sync and current Mac status are unknown.</string>
+    <string name="audit_cached_notice">Saved history only. Saved sync times use the phone clock. Current Mac status is unknown.</string>
     <string name="audit_order_notice">Events follow each Mac’s journal order. Clocks on different Macs do not establish a shared order.</string>
     <string name="audit_loading">Reading saved history…</string>
     <string name="audit_unavailable_description">The saved setup or history could not be read. Nothing has been reset.</string>
-    <string name="audit_scope_unavailable">This history could not be read within the reader limits. Try selecting this Mac alone. Nothing has been deleted.</string>
+    <string name="audit_scope_unavailable">Saved history for this key could not be read. It may exceed the read limits. Nothing has been deleted.</string>
     <string name="audit_missing">No cached history is available. This does not mean the Mac has no events.</string>
     <string name="audit_no_macs">No retained Mac setup is available for history.</string>
     <string name="audit_all_macs">All Macs</string>
@@ -535,4 +535,56 @@
     <string name="commands_opening_notification">Checking this request with its paired host…</string>
     <string name="commands_keep_browsing">Keep browsing</string>
     <string name="commands_notification_unavailable">This request is not available here. It may have expired, finished, or belonged to a pairing that changed.</string>
+    <string name="audit_archive_current">Current enrollment archive</string>
+    <string name="audit_archive_previous">Previous enrollment archive</string>
+    <string name="audit_archive_key">Mac key fingerprint</string>
+    <string name="audit_archive_separation">Histories from different Mac keys stay separate.</string>
+    <string name="audit_preview_notice">Disposable audit preview. No saved history or live connection.</string>
+    <string name="audit_sync_notice">Saved history stays available when a Mac is offline. A completed sync does not mean the Mac is still online.</string>
+    <string name="audit_sync_retired">Saved archive from a previous enrollment. This archive does not fetch new history.</string>
+    <string name="audit_sync_opening">Opening history sync…</string>
+    <string name="audit_sync_unavailable">History sync could not start. Saved evidence remains available.</string>
+    <string name="audit_sync_idle">No history sync is running.</string>
+    <string name="audit_sync_running">Syncing history…</string>
+    <string name="audit_sync_paused">Sync paused at the response limit. Continue to fetch the next bounded set.</string>
+    <string name="audit_sync_complete">History sync completed. Retention gaps may still exist.</string>
+    <string name="audit_sync_stopped">History sync stopped. Saved evidence remains available.</string>
+    <string name="audit_sync_invalid">The history response could not be verified. Saved evidence remains available.</string>
+    <string name="audit_sync_storage">History could not be saved. Previously retained evidence remains available.</string>
+    <string name="audit_sync_conflict">Conflicting history evidence was retained. Review the visible gaps and conflicts.</string>
+    <string name="audit_sync_changed">The Mac’s history changed during sync. Saved evidence remains available.</string>
+    <string name="audit_sync_transport">History sync failed. The Mac may be unreachable or may not support history sync.</string>
+    <string name="audit_sync_no_active">No active enrollment is available for this archive.</string>
+    <string name="audit_sync_last_complete">Last completed sync</string>
+    <string name="audit_sync_last_response">Last verified response</string>
+    <string name="audit_sync_age_unknown">Sync time unavailable</string>
+    <string name="audit_sync_refresh">Refresh history</string>
+    <string name="audit_sync_continue">Continue sync</string>
+    <plurals name="audit_sync_seconds"><item quantity="one">%d second ago</item><item quantity="other">%d seconds ago</item></plurals>
+    <plurals name="audit_sync_minutes"><item quantity="one">%d minute ago</item><item quantity="other">%d minutes ago</item></plurals>
+    <plurals name="audit_sync_hours"><item quantity="one">%d hour ago</item><item quantity="other">%d hours ago</item></plurals>
+    <plurals name="audit_sync_days"><item quantity="one">%d day ago</item><item quantity="other">%d days ago</item></plurals>
+    <string name="audit_settings_title">Audit sync limits</string>
+    <string name="audit_settings_reason">Limit the work in each history sync round. These limits never delete saved history.</string>
+    <string name="audit_settings_saved_values">Saved: %1$s · %2$s</string>
+    <plurals name="audit_settings_saved_responses">
+        <item quantity="one">%d response</item>
+        <item quantity="other">%d responses</item>
+    </plurals>
+    <plurals name="audit_settings_saved_seconds">
+        <item quantity="one">%d second</item>
+        <item quantity="other">%d seconds</item>
+    </plurals>
+    <string name="audit_settings_boundary">Saved limits apply when a round starts or you choose Continue. A running round keeps its original limits.</string>
+    <string name="audit_settings_show">Edit sync limits</string>
+    <string name="audit_settings_hide">Hide sync limits</string>
+    <string name="audit_settings_responses">Responses per round</string>
+    <string name="audit_settings_seconds">Round timeout (seconds)</string>
+    <string name="audit_settings_save">Save sync limits</string>
+    <string name="audit_settings_saving">Saving sync limits…</string>
+    <string name="audit_settings_defaults_hint">Use defaults only changes this draft. Save to apply it to future rounds.</string>
+    <string name="audit_settings_saved">Sync limits saved. Saving does not start a sync.</string>
+    <string name="audit_settings_failed">Could not save sync limits. The saved values above still apply. Try Save again.</string>
+    <string name="audit_settings_preview_notice">Disposable settings preview. No settings are saved and no sync runs.</string>
+    <string name="audit_sync_saved_phone_time">%1$s (phone clock)</string>
 </resources>

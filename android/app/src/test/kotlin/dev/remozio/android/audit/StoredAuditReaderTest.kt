@@ -43,19 +43,20 @@ class StoredAuditReaderTest {
         val enrollment = EncryptedEnrollmentStore.create(disk, cipher, 10)
         var revision = 0uL
         val archives = mutableMapOf<CborValue.Bytes, Archive>()
-        fun add(n: Int, active: Boolean = true, removed: Boolean = false, mac: Int = n): Archive {
-            val authority = keys()
+        fun add(n: Int, active: Boolean = true, removed: Boolean = false, mac: Int = n, authority: KeyPair = keys()): Archive {
             val record = record(n, authority, mac)
             enrollment.prepare(record, revision++)
             if (active) enrollment.activateSyntheticEnrollment(record.recordID.copyBytes(), revision++)
             if (removed) enrollment.remove(record.recordID.copyBytes(), revision++)
-            return Archive(record, authority).also { archives[record.macID] = it }
+            return Archive(record, authority).also { archives[record.recordID] = it }
         }
         fun openEnrollment() = EncryptedEnrollmentStore.open(disk, cipher, 10)
         fun reader(open: ((AuditCacheBinding, Int) -> EncryptedAuditCache?)? = null,
                    budget: AuditReadBudget = AuditReadBudget()) = StoredAuditReader(
             { openEnrollment() },
-            open ?: { binding, limit -> archives[CborValue.Bytes(binding.macID)]?.open(binding, limit) }, budget,
+            open ?: { binding, limit -> archives.values.lastOrNull { it.record.macID == CborValue.Bytes(binding.macID) &&
+                it.record.accountID == CborValue.Bytes(binding.accountID) &&
+                it.record.authorityPublicKey == CborValue.Bytes(binding.authorityPublicKey) }?.open(binding, limit) }, budget,
         )
     }
 
@@ -65,7 +66,7 @@ class StoredAuditReaderTest {
         var opens = 0
         var closes = 0
         var writes = 0
-        fun populate(conflict: Boolean = false) {
+        fun populate(conflict: Boolean = false, baseReason: AuditReason = AuditReason.NONE) {
             fun proof(reason: AuditReason): CborValue.Fields {
                 val events = (1..2).map { sequence ->
                     AuditEventMetadata(id(sequence + 30), record.macID.copyBytes(), record.accountID.copyBytes(), id(50),
@@ -85,7 +86,7 @@ class StoredAuditReaderTest {
                 return CborValue.Fields(mapOf(0uL to CborValue.Unsigned(1u),
                     1uL to CborValue.Bytes(body), 2uL to CborValue.Bytes(signature)))
             }
-            val proofs = listOf(proof(AuditReason.NONE)) + if (conflict) listOf(proof(AuditReason.UNKNOWN)) else emptyList()
+            val proofs = listOf(proof(baseReason)) + if (conflict) listOf(proof(AuditReason.UNKNOWN)) else emptyList()
             val plaintext = DeterministicCbor.encode(CborValue.Fields(mapOf(
                 0uL to CborValue.Unsigned(1u), 1uL to CborValue.ArrayValue(proofs),
             )), bound)
@@ -122,7 +123,7 @@ class StoredAuditReaderTest {
         assertEquals(0, incomplete.opens)
         assertEquals(before, f.disk.writes)
         assertEquals(0, f.archives.values.sumOf { it.writes })
-        assertTrue(result.scopes.all { it.content is CachedAuditContent.Loaded })
+        assertTrue(result.scopes.all { it.archives.single().content is CachedAuditContent.Loaded })
         assertFailsWith<UnsupportedOperationException> { (result.scopes as MutableList).clear() }
         assertFalse(result.toString().contains("Same display name"))
         f.enrollment.close()
@@ -131,14 +132,14 @@ class StoredAuditReaderTest {
     @Test fun filtersPreserveGapsAndConflictsAndTimelineUsesSequenceInsteadOfClock() = runBlocking {
         val f = Fixture(); val archive = f.add(1).also { it.populate(conflict = true) }
         val reader = f.reader()
-        val loaded = assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().content)
+        val loaded = assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().archives.single().content)
         val epoch = loaded.history.chains.single().epochs.single()
         assertEquals(listOf(2uL, 1uL), epoch.records.map { it.sequence })
         assertEquals(1, loaded.history.conflictingProofCount)
         assertEquals(2uL, epoch.gaps.single().after)
         assertEquals(4uL, epoch.gaps.single().through)
         val filtered = assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(
-            reader.read(archive.record.macID, outcome = AuditOutcome.UNKNOWN)).scopes.single().content)
+            reader.read(archive.record.macID, outcome = AuditOutcome.UNKNOWN)).scopes.single().archives.single().content)
         assertTrue(filtered.history.chains.single().epochs.single().records.isEmpty())
         assertEquals(1, filtered.history.conflictingProofCount)
         assertEquals(1, filtered.history.chains.single().epochs.single().gaps.size)
@@ -152,47 +153,90 @@ class StoredAuditReaderTest {
         f.add(2).bytes = byteArrayOf(1, 2, 3)
         f.add(3).populate()
         val result = assertIs<StoredAuditState.Ready>(f.reader().read())
-        assertSame(CachedAuditContent.Missing, result.scopes[0].content)
-        assertSame(CachedAuditContent.Unavailable, result.scopes[1].content)
-        assertIs<CachedAuditContent.Loaded>(result.scopes[2].content)
+        assertSame(CachedAuditContent.Missing, result.scopes[0].archives.single().content)
+        assertSame(CachedAuditContent.Unavailable, result.scopes[1].archives.single().content)
+        assertIs<CachedAuditContent.Loaded>(result.scopes[2].archives.single().content)
         assertSame(StoredAuditState.Unavailable, StoredAuditReader({ error("synthetic-secret") }, { _, _ -> null }).read())
         assertTrue(assertIs<StoredAuditState.Ready>(StoredAuditReader({ null }, { _, _ -> error("unexpected") }).read()).scopes.isEmpty())
         assertEquals(0, f.archives.values.sumOf { it.writes })
         f.enrollment.close()
     }
 
-    @Test fun retainedAuthorityBindingsRetryOnlyAuthenticationMismatch() = runBlocking {
+    @Test fun currentAndFormerAuthorityArchivesRemainVisibleWithoutCrossKeyConflictsOrTimelines() = runBlocking<Unit> {
         val f = Fixture()
-        val former = f.add(1, removed = true).also { it.populate() }
+        val former = f.add(1, removed = true).also { it.populate(baseReason = AuditReason.UNKNOWN) }
         val current = f.add(2, mac = 1).also { it.populate() }
-        val reader = f.reader()
-        val result = assertIs<StoredAuditState.Ready>(reader.read())
-        assertEquals(1, result.scopes.size)
-        assertIs<CachedAuditContent.Loaded>(result.scopes.single().content)
-        assertEquals(1, current.opens)
-        assertEquals(1, current.closes)
-        f.archives[current.record.macID] = former
-        assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().content)
-        assertEquals(2, former.opens)
-        assertEquals(2, former.closes)
-        former.bytes = byteArrayOf(1, 2, 3)
-        assertSame(CachedAuditContent.Unavailable, assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().content)
-        assertEquals(3, former.opens)
-        assertEquals(3, former.closes)
-        assertEquals(0, former.writes + current.writes)
-        f.enrollment.close()
+        val result = assertIs<StoredAuditState.Ready>(f.reader().read())
+        val scope = result.scopes.single()
+        assertEquals(2, scope.archives.size)
+        assertEquals(listOf(current.record.authorityPublicKey, former.record.authorityPublicKey), scope.archives.map { it.authorityPublicKey })
+        assertEquals(listOf(false, true), scope.archives.map { it.retired })
+        val currentContent = assertIs<CachedAuditContent.Loaded>(scope.archives[0].content)
+        val formerContent = assertIs<CachedAuditContent.Loaded>(scope.archives[1].content)
+        assertEquals(0, currentContent.history.conflictingProofCount); assertEquals(0, formerContent.history.conflictingProofCount)
+        // Both keys signed the same Mac/account, request, event IDs, epoch and sequences. Their timelines stay independent.
+        assertTrue(AuditHistory.timeline(currentContent.snapshot, id(60)).chains.single().epochs.single().records.all { it.reason == AuditReason.NONE })
+        assertTrue(AuditHistory.timeline(formerContent.snapshot, id(60)).chains.single().epochs.single().records.all { it.reason == AuditReason.UNKNOWN })
+        assertNotEquals(scope.archives[0].fingerprint, scope.archives[1].fingerprint)
+        assertEquals(64, scope.archives[0].fingerprint.length)
+        assertFalse(scope.toString().contains(scope.archives[0].fingerprint))
+        assertFailsWith<UnsupportedOperationException> { (scope.archives as MutableList).clear() }
+        assertEquals(0, former.writes + current.writes); f.enrollment.close()
+    }
+
+    @Test fun aLegacyArchiveWithAnotherRootDoesNotHideOrPretendToPopulateTheCurrentArchive() = runBlocking<Unit> {
+        val f = Fixture(); val former = f.add(1, removed = true).also { it.populate() }
+        val current = f.add(2, mac = 1)
+        val reader = f.reader(open = { binding, limit -> former.open(binding, limit) })
+        val archives = assertIs<StoredAuditState.Ready>(reader.read()).scopes.single().archives
+        assertEquals(current.record.authorityPublicKey, archives[0].authorityPublicKey)
+        assertSame(CachedAuditContent.Unavailable, archives[0].content)
+        assertIs<CachedAuditContent.Loaded>(archives[1].content)
+        assertEquals(2, former.opens); assertEquals(2, former.closes)
+        assertEquals(0, former.writes); f.enrollment.close()
+    }
+
+    @Test fun reEnrollmentWithTheSameRootProducesOneArchiveAndPreservesItsActiveLabel() = runBlocking<Unit> {
+        val f = Fixture(); val former = f.add(1, removed = true)
+        val current = f.add(2, mac = 1, authority = former.authority).also { it.populate() }
+        val archive = assertIs<StoredAuditState.Ready>(f.reader().read()).scopes.single().archives.single()
+        assertEquals(current.record.authorityPublicKey, archive.authorityPublicKey)
+        assertFalse(archive.retired); assertIs<CachedAuditContent.Loaded>(archive.content)
+        assertEquals(1, current.opens); assertEquals(0, former.opens); f.enrollment.close()
+    }
+
+    @Test fun aCorruptFormerArchiveDoesNotHideTheGoodCurrentArchive() = runBlocking<Unit> {
+        val f = Fixture(); val former = f.add(1, removed = true).also { it.bytes = byteArrayOf(1, 2, 3) }
+        val current = f.add(2, mac = 1).also { it.populate() }
+        val archives = assertIs<StoredAuditState.Ready>(f.reader().read()).scopes.single().archives
+        assertIs<CachedAuditContent.Loaded>(archives[0].content)
+        assertSame(CachedAuditContent.Unavailable, archives[1].content)
+        assertContentEquals(byteArrayOf(1, 2, 3), former.bytes)
+        assertEquals(0, former.writes + current.writes); f.enrollment.close()
+    }
+
+    @Test fun totalBudgetAppliesAcrossRootsWithoutEvictingTheFormerArchive() = runBlocking<Unit> {
+        val f = Fixture(); val former = f.add(1, removed = true).also { it.populate() }
+        val current = f.add(2, mac = 1).also { it.populate() }
+        val before = checkNotNull(former.bytes).copyOf()
+        val first = assertIs<StoredAuditState.Ready>(f.reader().read()).scopes.single().archives
+        val size = assertIs<CachedAuditContent.Loaded>(first[0].content).snapshot.storedBytes.toInt()
+        val archives = assertIs<StoredAuditState.Ready>(f.reader(budget = AuditReadBudget(size + 128, size + 128)).read()).scopes.single().archives
+        assertIs<CachedAuditContent.Loaded>(archives[0].content)
+        assertSame(CachedAuditContent.Unavailable, archives[1].content)
+        assertContentEquals(before, former.bytes); assertEquals(0, former.writes + current.writes); f.enrollment.close()
     }
 
     @Test fun readBudgetRejectsOversizedEvidenceWithoutDeletingItAndMacSelectionStillWorks() = runBlocking {
         val f = Fixture(); val first = f.add(1).also { it.populate() }; val second = f.add(2).also { it.populate() }
         val initial = assertIs<StoredAuditState.Ready>(f.reader().read())
-        val size = assertIs<CachedAuditContent.Loaded>(initial.scopes[0].content).snapshot.storedBytes.toInt()
+        val size = assertIs<CachedAuditContent.Loaded>(initial.scopes[0].archives.single().content).snapshot.storedBytes.toInt()
         val bytes = checkNotNull(second.bytes).copyOf()
         val reader = f.reader(budget = AuditReadBudget(size + 128, size + 128))
         val limited = assertIs<StoredAuditState.Ready>(reader.read())
-        assertIs<CachedAuditContent.Loaded>(limited.scopes[0].content)
-        assertSame(CachedAuditContent.Unavailable, limited.scopes[1].content)
-        assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read(second.record.macID)).scopes.single().content)
+        assertIs<CachedAuditContent.Loaded>(limited.scopes[0].archives.single().content)
+        assertSame(CachedAuditContent.Unavailable, limited.scopes[1].archives.single().content)
+        assertIs<CachedAuditContent.Loaded>(assertIs<StoredAuditState.Ready>(reader.read(second.record.macID)).scopes.single().archives.single().content)
         assertContentEquals(bytes, second.bytes)
         assertEquals(0, first.writes + second.writes)
         f.enrollment.close()
@@ -303,4 +347,32 @@ class StoredAuditReaderTest {
             key(EnrollmentKeyRole.TRANSPORT), key(EnrollmentKeyRole.DECISION), key(EnrollmentKeyRole.BIOMETRIC),
             ByteArray(32) { n.toByte() }, RelayAccessCredential(RelayEndpoint("synthetic.example"), "synthetic-id", "synthetic-secret"))
     }
+
+    @Test fun retainedLocalDatesStayWithTheirRootArchiveThroughFilteringWithoutReadsOrTrustClaims() = runBlocking<Unit> {
+        val f = Fixture(); val former = f.add(1, removed = true).also { it.populate(baseReason = AuditReason.UNKNOWN) }
+        val current = f.add(2, mac = 1).also { it.populate() }
+        val snapshots = listOf(former, current).associate { archive ->
+            val record = archive.record
+            val binding = AuditCacheBinding(record.macID.copyBytes(), record.accountID.copyBytes(), record.authorityPublicKey.copyBytes())
+            record.authorityPublicKey to checkNotNull(archive.open(binding, bound.maxBytes)).use { it.snapshot() }
+        }
+        // Synthetic local display metadata; cipher and fresh-receiver qualification live in phone-core tests.
+        val dates = listOf(former, current).mapIndexed { index, archive -> archive.record.authorityPublicKey to
+            AuditLocalSyncTime(1_790_000_000_000L + index * 1000, CborValue.Bytes(ByteArray(32) { index.toByte() })) }.toMap()
+        val reader = StoredAuditReader(f::openEnrollment, { _, _ -> error("Owned snapshots cannot reopen files") },
+            readSnapshot = { binding, _ ->
+                val root = CborValue.Bytes(binding.authorityPublicKey)
+                AuditRetainedSnapshot(snapshots.getValue(root), AuditLocalSyncTimes(dates.getValue(root), dates.getValue(root)))
+            })
+        val loaded = assertIs<StoredAuditState.Ready>(reader.read(outcome = AuditOutcome.ACCEPTED)).scopes.single().archives
+        assertEquals(listOf(current.record.authorityPublicKey, former.record.authorityPublicKey), loaded.map { it.authorityPublicKey })
+        loaded.forEach { archive ->
+            val content = assertIs<CachedAuditContent.Loaded>(archive.content)
+            assertSame(snapshots.getValue(archive.authorityPublicKey), content.snapshot)
+            assertEquals(dates.getValue(archive.authorityPublicKey), content.localTimes?.lastCompleted)
+            assertTrue(content.history.chains.flatMap { it.epochs }.all { it.records.isEmpty() })
+        }
+        assertEquals(0, former.writes + current.writes); f.enrollment.close()
+    }
+
 }

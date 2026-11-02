@@ -1,6 +1,15 @@
 package dev.remozio.phone.crypto
 
 import dev.remozio.protocol.*
+import dev.remozio.phone.audit.*
+import dev.remozio.phone.transport.PhoneAuditChannel
+import dev.remozio.phone.transport.PhoneAuditResult
+import javax.crypto.KeyGenerator
+import dev.remozio.phone.enrollment.*
+import dev.remozio.phone.transport.PhoneRoutingChannel
+import dev.remozio.phone.transport.PhoneRoutingChallenge
+import dev.remozio.phone.transport.PhoneRoutingResult
+import kotlinx.serialization.json.JsonObject
 import dev.remozio.phone.requests.*
 import java.io.File
 import java.security.KeyPairGenerator
@@ -762,6 +771,129 @@ class TLSInteropTest {
         }
     }
 
+    private fun routingRecord(f: Fixture, wrongRoot: Boolean = false): StoredPhoneEnrollment {
+        fun id(n: Int) = ByteArray(16) { n.toByte() }
+        fun local(role: EnrollmentKeyRole, public: ByteArray, keyID: Int) = EnrollmentKeyReference(role, id(keyID),
+            "remozio.${role.aliasPart}.v1.${"%032x".format(keyID)}", public)
+        val decision = requireNotNull(f.routingDecision); val biometric = requireNotNull(f.routingBiometric)
+        val authority = if (wrongRoot) KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }
+            .generateKeyPair().public.encoded.takeLast(65).toByteArray() else requireNotNull(f.routingAuthorityPublicKey)
+        return StoredPhoneEnrollment(PhoneEnrollment(id(9), id(1), id(2), id(3), id(4), "Synthetic routing host", authority,
+            f.mac.certificate.publicKey.encoded, local(EnrollmentKeyRole.TRANSPORT, f.phone.certificate.publicKey.encoded, 10),
+            local(EnrollmentKeyRole.DECISION, decision.public.encoded.takeLast(65).toByteArray(), 6),
+            local(EnrollmentKeyRole.BIOMETRIC, biometric.public.encoded.takeLast(65).toByteArray(), 7), ByteArray(32) { 5 }, null), EnrollmentPhase.ACTIVE)
+    }
+    private suspend fun routingChannel(f: Fixture, parent: kotlinx.coroutines.CoroutineScope, record: StoredPhoneEnrollment,
+                                       relay: WebSocketTLSRelay? = null): PhoneRoutingChannel {
+        val e = record.enrollment
+        val connector = ApprovalChannelConnector(f.phone.keyManagers, f.mac.certificate.publicKey.encoded,
+            ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
+            emptyList(), emptySet(), PhoneRoutingFrame.MAXIMUM_BYTES, purpose = EnrolledChannelPurpose.ROUTING)
+        val carrier = connector.connect(parent, if (relay != null) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+            DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", f.port))
+        }), relay?.let { selected -> ApprovalCarrierRoute { owner -> selected.connector.connect(owner, selected.endpoint,
+            RelayAccessCredential(selected.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311) } })
+        return PhoneRoutingChannel.bind(record, carrier, f::routingElapsedNanos, 5000)
+    }
+    private fun routingSignature(f: Fixture, record: StoredPhoneEnrollment, challenge: PhoneRoutingChallenge): ByteArray =
+        challenge.sign(record.enrollment) { input -> Signature.getInstance("SHA256withECDSAinP1363Format").run {
+            initSign(requireNotNull(f.routingDecision).private); update(input); sign()
+        } }
+
+    @Test fun routingStatusUsesNativeTlsRootSignaturesAndAnOpaqueRelay(): Unit = Fixture(routing = true).use { f ->
+        val record = routingRecord(f)
+        for (useRelay in listOf(false, true)) WebSocketTLSRelay(f.port, bridgeClient = false, connectorMode = true).use { relay ->
+            runBlocking { withTimeout(15_000) {
+                val channel = routingChannel(f, this, record, if (useRelay) relay else null)
+                try {
+                    val result = channel.status() as PhoneRoutingResult.Verified
+                    assertEquals(RoutingStatusMode.PRESENT, result.response.state.mode); assertEquals(1uL, result.response.state.revision)
+                    assertEquals(RoutingStatusReason.MANUAL_PRESENT, result.response.state.reason); assertTrue(result.isFresh(5000))
+                } finally { channel.closeAndJoin() }
+            } }
+            if (useRelay) {
+                val request = relay.connectorRequest()
+                assertEquals("synthetic-id", request.headers["CF-Access-Client-Id"])
+                assertEquals("synthetic-secret", request.headers["CF-Access-Client-Secret"])
+                assertEquals(dev.remozio.phone.transport.WebSocketUpgrade.PROTOCOL, request.headers["Sec-WebSocket-Protocol"])
+                assertTrue(relay.capture().isNotEmpty())
+                assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("dev.remozio.phone.routing"))
+            }
+        }
+        assertEquals(1, f.routingControl("snapshot").getValue("routingEvents").jsonPrimitive.int)
+    }
+    @Test fun routingAwayAndHistoricalReceiptUseTheDurableRootJournal(): Unit = Fixture(routing = true).use { f ->
+        val record = routingRecord(f)
+        runBlocking { withTimeout(20_000) {
+            val preparedChannel = routingChannel(f, this, record)
+            val prepared = try { preparedChannel.challenge(1u) as PhoneRoutingResult.Verified } finally { preparedChannel.closeAndJoin() }
+            val challenge = requireNotNull(prepared.challenge); val signature = routingSignature(f, record, challenge)
+            val apply = routingChannel(f, this, record)
+            val applied = try { apply.apply(challenge, signature) as PhoneRoutingResult.Verified } finally { apply.closeAndJoin() }
+            assertEquals(RoutingStatusMode.AWAY, applied.response.state.mode); assertEquals(2uL, applied.response.appliedRevision)
+            val present = f.routingControl("present"); assertEquals(3, present.getValue("revision").jsonPrimitive.int)
+            // Explicit duplicate probes the retained receipt. Neither channel nor owner retries an application operation.
+            val duplicate = routingChannel(f, this, record)
+            val historical = try { duplicate.apply(challenge, signature) as PhoneRoutingResult.Verified } finally { duplicate.closeAndJoin() }
+            assertEquals(RoutingStatusMode.PRESENT, historical.response.state.mode); assertEquals(3uL, historical.response.state.revision)
+            assertEquals(2uL, historical.response.appliedRevision)
+            val after = f.routingControl("snapshot")
+            assertEquals(present.getValue("head"), after.getValue("head")); assertEquals(3, after.getValue("routingEvents").jsonPrimitive.int)
+        } }
+    }
+    @Test fun routingStaleControlReturnsSignedConflictWithoutAnotherAuditWrite(): Unit = Fixture(routing = true).use { f ->
+        val record = routingRecord(f)
+        runBlocking { withTimeout(20_000) {
+            val challenges = (0..1).map {
+                val wire = routingChannel(f, this, record)
+                try { requireNotNull((wire.challenge(1u) as PhoneRoutingResult.Verified).challenge) } finally { wire.closeAndJoin() }
+            }
+            val signatures = challenges.map { routingSignature(f, record, it) }
+            for (index in 0..1) {
+                val wire = routingChannel(f, this, record)
+                val result = try { wire.apply(challenges[index], signatures[index]) as PhoneRoutingResult.Verified } finally { wire.closeAndJoin() }
+                assertEquals(if (index == 0) RoutingStatusOutcome.APPLIED else RoutingStatusOutcome.CONFLICT, result.response.outcome)
+                assertEquals(RoutingStatusMode.AWAY, result.response.state.mode); assertEquals(2uL, result.response.state.revision)
+            }
+            assertEquals(2, f.routingControl("snapshot").getValue("routingEvents").jsonPrimitive.int)
+        } }
+    }
+    @Test fun routingExpiredRootChallengeCannotChangeMode(): Unit = Fixture(routing = true).use { f ->
+        val record = routingRecord(f)
+        runBlocking { withTimeout(15_000) {
+            val prepare = routingChannel(f, this, record)
+            val challenge = try { requireNotNull((prepare.challenge(1u) as PhoneRoutingResult.Verified).challenge) } finally { prepare.closeAndJoin() }
+            val signature = routingSignature(f, record, challenge); f.routingControl("expire")
+            val apply = routingChannel(f, this, record)
+            try { apply.apply(challenge, signature); fail("Expired control changed routing") } catch (_: IOException) {} finally { apply.closeAndJoin() }
+            val state = f.routingControl("snapshot"); assertEquals(1, state.getValue("revision").jsonPrimitive.int)
+            assertEquals(1, state.getValue("routingEvents").jsonPrimitive.int)
+        } }
+    }
+    @Test fun routingRequiresBothRootSupportAndTheEnrolledAuthorityPin(): Unit = Unit.also {
+        for (unsupported in listOf(false, true)) Fixture(routing = true, routingSupported = !unsupported).use { f ->
+            val record = routingRecord(f, wrongRoot = !unsupported)
+            runBlocking { withTimeout(15_000) {
+                var channel: PhoneRoutingChannel? = null
+                try {
+                    channel = routingChannel(f, this, record); channel.status(); fail("Unsupported or untrusted Root established routing")
+                } catch (_: IOException) {} finally { channel?.closeAndJoin() }
+            } }
+            assertEquals(1, f.routingControl("snapshot").getValue("routingEvents").jsonPrimitive.int)
+        }
+    }
+    @Test fun routingControllerClosureJoinsTheNativeTransportWithoutAnApplicationReply(): Unit = Fixture(routing = true).use { f ->
+        val record = routingRecord(f)
+        runBlocking { withTimeout(10_000) {
+            val channel = routingChannel(f, this, record)
+            try {
+                f.closeControllerPipe(); assertTrue(withContext(Dispatchers.IO) { f.waitForPeerExit() })
+                assertEquals(0, f.peerExitCode)
+                try { channel.status(); fail("Closed fixture returned routing") } catch (_: IOException) {}
+            } finally { channel.closeAndJoin() }
+        } }
+    }
+
     private fun exchange(socket: SSLSocket, payload: ByteArray): ByteArray {
         DataOutputStream(socket.outputStream).apply { writeInt(payload.size); write(payload); flush() }
         val input = DataInputStream(socket.inputStream)
@@ -781,13 +913,167 @@ class TLSInteropTest {
         }.keyManagers
     }
 
-    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536) : AutoCloseable {
+    private class AuditStorage : AuditCiphertextStorage {
+        var ciphertext: ByteArray? = null
+        var writes = 0
+        override fun read(maximumBytes: Int) = ciphertext?.copyOf()?.also { require(it.size <= maximumBytes) }
+        override fun replace(ciphertext: ByteArray) { this.ciphertext = ciphertext.copyOf(); writes++ }
+        override fun close() = Unit
+    }
+    private inner class AuditClient(val fixture: Fixture, val record: StoredPhoneEnrollment = routingRecord(fixture)) : AutoCloseable {
+        val storage = AuditStorage()
+        var advanced = 0uL
+        fun now() = ElapsedInstant(1, fixture.routingElapsedNanos().toULong() / 1_000_000uL + advanced)
+        private val limits = CborLimits(1_048_576, 8, 131_072)
+        val cache = EncryptedAuditCache.open(storage,
+            AuditArchiveCipher(KeyGenerator.getInstance("AES").apply { init(256) }.generateKey(), limits.maxBytes),
+            AuditCacheBinding(record.enrollment.macID.copyBytes(), record.enrollment.accountID.copyBytes(), record.enrollment.authorityPublicKey.copyBytes()),
+            AuditPageLimits(limits, CborLimits(4096, 4, 64), CborLimits(1_050_624, 8, 32), 2048,
+                CborLimits(16_384, 8, 256), CborLimits(4096, 4, 64)), AuditEvidenceLimits(128, 4_194_304, 512, 16), limits)
+        val session = AuditSyncSession(cache, 2, 5000u, ::now).also { it.start() }
+        suspend fun open(parent: kotlinx.coroutines.CoroutineScope, relay: WebSocketTLSRelay? = null): PhoneAuditChannel {
+            val e = record.enrollment
+            val connector = ApprovalChannelConnector(fixture.phone.keyManagers, fixture.mac.certificate.publicKey.encoded,
+                ChannelScope(e.macID.copyBytes(), e.accountID.copyBytes(), e.phoneID.copyBytes(), e.epoch.copyBytes()),
+                emptyList(), setOf(1u), PhoneAuditFrame.MAXIMUM_BYTES, purpose = EnrolledChannelPurpose.AUDIT)
+            val carrier = connector.connect(parent, if (relay != null) emptyFlow() else flowOf(ApprovalCarrierRoute { owner ->
+                DirectTCPConnector().connect(owner, InetSocketAddress("127.0.0.1", fixture.port))
+            }), relay?.let { selected -> ApprovalCarrierRoute { owner -> selected.connector.connect(owner, selected.endpoint,
+                RelayAccessCredential(selected.endpoint, "synthetic-id", "synthetic-secret"), maximumMessageBytes = 311) } })
+            return PhoneAuditChannel.bind(record, carrier, ::now)
+        }
+        suspend fun exchange(parent: kotlinx.coroutines.CoroutineScope, query: AuditQuery, relay: WebSocketTLSRelay? = null): PhoneAuditResult.Unverified {
+            val wire = open(parent, relay)
+            return try { wire.exchange(query) as PhoneAuditResult.Unverified } finally { wire.closeAndJoin() }
+        }
+        suspend fun drain(parent: kotlinx.coroutines.CoroutineScope, useRelay: Boolean = false,
+                          inspectRelay: (WebSocketTLSRelay) -> Unit = {}) {
+            repeat(32) {
+                when (session.state.value.phase) {
+                    AuditSyncPhase.COMPLETE -> return
+                    AuditSyncPhase.PAUSED -> session.resume()
+                    AuditSyncPhase.SYNCING -> session.next()?.let { query ->
+                        if (useRelay) WebSocketTLSRelay(fixture.port, bridgeClient = false, connectorMode = true).use { relay ->
+                            exchange(parent, query, relay).acceptInto(session, record)
+                            inspectRelay(relay)
+                        } else { exchange(parent, query).acceptInto(session, record) }
+                    }
+                    else -> error("Native audit sync failed: " + session.state.value.phase)
+                }
+            }
+            error("Native audit sync exceeded its response bound")
+        }
+        override fun close() = session.close()
+    }
+    @Test fun auditNativeJournalSyncsBoundedPagesDirectlyAndThroughAnOpaqueRelay(): Unit = Fixture(audit = true, maximumPayloadBytes = 1024).use { f ->
+        val before = f.routingControl("audit-seed")
+        val head = before.getValue("head").jsonPrimitive.int
+        assertTrue(head > 8)
+        for (useRelay in listOf(false, true)) AuditClient(f).use { client ->
+            var relayExchanges = 0
+            runBlocking { withTimeout(20_000) { client.drain(this, useRelay) { relay ->
+                val request = relay.connectorRequest()
+                assertEquals("synthetic-id", request.headers["CF-Access-Client-Id"])
+                assertEquals("synthetic-secret", request.headers["CF-Access-Client-Secret"])
+                assertEquals(dev.remozio.phone.transport.WebSocketUpgrade.PROTOCOL, request.headers["Sec-WebSocket-Protocol"])
+                assertTrue(relay.capture().isNotEmpty())
+                assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("dev.remozio.phone.audit"))
+                assertFalse(String(relay.capture(), Charsets.ISO_8859_1).contains("dev.remozio.audit"))
+                relayExchanges++
+            } } }
+            val state = client.session.state.value
+            assertEquals(AuditSyncPhase.COMPLETE, state.phase); assertNotNull(state.lastCompletedAt)
+            val epoch = state.history.epochs.single()
+            assertEquals((1..head).map(Int::toULong), epoch.records.map { it.sequence }); assertTrue(epoch.gaps.isEmpty())
+            assertTrue(client.storage.writes > 2); assertNotNull(client.storage.ciphertext)
+            assertEquals(if (useRelay) client.storage.writes else 0, relayExchanges)
+        }
+        val after = f.routingControl("snapshot")
+        assertEquals(before.getValue("head"), after.getValue("head"))
+        assertEquals(before.getValue("revision"), after.getValue("revision"))
+    }
+    @Test fun auditFullyPrunedNativeJournalPreservesItsExplicitRetentionGap(): Unit = Fixture(audit = true).use { f ->
+        val seeded = f.routingControl("audit-seed"); f.routingControl("audit-prune")
+        AuditClient(f).use { client ->
+            runBlocking { withTimeout(15_000) { client.drain(this) } }
+            val epoch = client.session.state.value.history.epochs.single()
+            assertEquals(AuditSyncPhase.COMPLETE, client.session.state.value.phase)
+            assertTrue(epoch.records.isEmpty())
+            assertEquals(listOf(AuditHistoryGap(0u, seeded.getValue("head").jsonPrimitive.int.toULong(), true)), epoch.gaps)
+        }
+    }
+    @Test fun auditWrongEnrolledRootCannotWriteEvidenceFromAValidNativeTlsPeer(): Unit = Fixture(audit = true).use { f ->
+        AuditClient(f, routingRecord(f, wrongRoot = true)).use { client ->
+            runBlocking { withTimeout(15_000) {
+                val query = requireNotNull(client.session.next()); val reply = client.exchange(this, query)
+                try { reply.acceptInto(client.session, client.record); fail("Wrong Root key wrote history") } catch (_: IllegalArgumentException) {}
+            } }
+            assertEquals(0, client.storage.writes); assertTrue(client.cache.snapshot().proofs.isEmpty())
+            assertNull(client.session.state.value.lastCompletedAt)
+        }
+    }
+    @Test fun auditUnsupportedRootCannotCompleteOrReplaceEvidence(): Unit = Fixture(audit = true, auditSupported = false).use { f ->
+        AuditClient(f).use { client ->
+            runBlocking { withTimeout(15_000) {
+                val query = requireNotNull(client.session.next())
+                try { client.exchange(this, query); fail("Unsupported Root served audit") } catch (_: IOException) {}
+                client.session.transportFailed(query)
+            } }
+            assertEquals(0, client.storage.writes); assertNull(client.session.state.value.lastCompletedAt)
+        }
+    }
+    @Test fun auditRevokedEnrollmentCannotFetchTheNextPageOrEraseEarlierEvidence(): Unit = Fixture(audit = true).use { f ->
+        AuditClient(f).use { client ->
+            runBlocking { withTimeout(15_000) {
+                val discovery = requireNotNull(client.session.next())
+                client.exchange(this, discovery).acceptInto(client.session, client.record)
+                val before = client.cache.snapshot().proofs.size; assertEquals(1, before)
+                f.routingControl("audit-revoke")
+                val query = requireNotNull(client.session.next())
+                try { client.exchange(this, query); fail("Revoked phone fetched a page") } catch (_: IOException) {}
+                client.session.transportFailed(query)
+                assertEquals(before, client.cache.snapshot().proofs.size); assertEquals(1, client.storage.writes)
+            } }
+            assertNull(client.session.state.value.lastCompletedAt)
+        }
+    }
+    @Test fun auditQueryExpiryAfterNativeReplyCannotAdvanceTheCache(): Unit = Fixture(audit = true).use { f ->
+        AuditClient(f).use { client ->
+            runBlocking { withTimeout(15_000) {
+                val query = requireNotNull(client.session.next()); val reply = client.exchange(this, query)
+                client.advanced += 5000u
+                try { reply.acceptInto(client.session, client.record); fail("Expired query wrote history") } catch (_: IllegalArgumentException) {}
+            } }
+            assertEquals(0, client.storage.writes); assertNull(client.session.state.value.lastCompletedAt)
+        }
+    }
+    @Test fun auditControllerClosureJoinsTheNativeTransportWithoutAHistoryReply(): Unit = Fixture(audit = true).use { f ->
+        AuditClient(f).use { client ->
+            runBlocking { withTimeout(15_000) {
+                val query = requireNotNull(client.session.next()); val wire = client.open(this)
+                f.closeControllerPipe(); assertTrue(f.waitForPeerExit()); assertEquals(0, f.peerExitCode)
+                try { wire.exchange(query); fail("Closed fixture returned audit") } catch (_: IOException) {}
+                finally { wire.closeAndJoin() }
+            } }
+            assertEquals(0, client.storage.writes); assertNull(client.session.state.value.lastCompletedAt)
+        }
+    }
+
+    private class Fixture(private val phoneStartDate: String? = null, private val negotiate: Boolean = false, private val commandMessages: Boolean = false, private val twoPhones: Boolean = false, private val maximumConnections: Int = 8, private val receiptRecovery: Boolean = false, private val pushRegistration: Boolean = false, private val pushRecovery: Boolean = false, private val recoverySupported: Boolean = true, private val maximumPayloadBytes: Int = 65_536, private val routing: Boolean = false, private val routingSupported: Boolean = true, private val audit: Boolean = false, private val auditSupported: Boolean = true) : AutoCloseable {
         private val directory = Files.createTempDirectory("remozio-tls-", PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")))
         val mac: Identity
         val phone: Identity
         val secondPhone: Identity?
         private val process: Process
         val port: Int
+        val routingAuthorityPublicKey: ByteArray?
+        val routingDecision = if (routing || audit) routingKey() else null
+        val routingBiometric = if (routing || audit) routingKey() else null
+        private val routingStarted = System.nanoTime()
+        fun routingElapsedNanos(): Long = System.nanoTime() - routingStarted
+        private lateinit var controllerReader: java.io.BufferedReader
+        private lateinit var controllerWriter: java.io.BufferedWriter
+        private fun routingKey() = KeyPairGenerator.getInstance("EC").apply { initialize(ECGenParameterSpec("secp256r1")) }.generateKeyPair()
         init {
             var child: Process? = null
             try {
@@ -797,19 +1083,27 @@ class TLSInteropTest {
                 val peer = requireNotNull(System.getProperty("remozio.test.tlsPeer")) { "Build the native TLS peer first" }
                 child = ProcessBuilder(peer, mac.path.toString()).redirectError(directory.resolve("peer.log").toFile()).start()
                 process = child
-                process.outputStream.bufferedWriter().also {
+                controllerWriter = process.outputStream.bufferedWriter()
+                controllerReader = process.inputStream.bufferedReader()
+                controllerWriter.also {
                     val second = secondPhone?.let { identity -> ",\"secondPeerPublicKey\":\"" + Base64.getEncoder().encodeToString(identity.certificate.publicKey.encoded) + "\"" } ?: ""
-                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + "}\n")
+                    val routingFields = if (routing || audit) ",\"routing\":" + routing + ",\"routingSupported\":" + routingSupported + ",\"decisionPublicKey\":\"" +
+                        Base64.getEncoder().encodeToString(requireNotNull(routingDecision).public.encoded.takeLast(65).toByteArray()) +
+                        "\",\"biometricPublicKey\":\"" + Base64.getEncoder().encodeToString(requireNotNull(routingBiometric).public.encoded.takeLast(65).toByteArray()) + "\"" else ""
+                    it.write("{\"peerPublicKey\":\"" + Base64.getEncoder().encodeToString(phone.certificate.publicKey.encoded) + "\",\"negotiate\":" + negotiate + ",\"commandMessages\":" + commandMessages + ",\"maximumConnections\":" + maximumConnections + ",\"receiptRecovery\":" + receiptRecovery + ",\"pushRegistration\":" + pushRegistration + ",\"pushRecovery\":" + pushRecovery + ",\"recoverySupported\":" + recoverySupported + ",\"maximumPayloadBytes\":" + maximumPayloadBytes + second + routingFields + ",\"audit\":" + audit + ",\"auditSupported\":" + auditSupported + "}\n")
                     it.flush()
                 }
                 val reader = Executors.newSingleThreadExecutor()
                 try {
-                    val line = reader.submit<String?> { process.inputStream.bufferedReader().readLine() }.get(10, TimeUnit.SECONDS)
-                    port = Json.parseToJsonElement(requireNotNull(line) { "TLS peer did not start" }).jsonObject.getValue("port").jsonPrimitive.int
+                    val line = reader.submit<String?> { controllerReader.readLine() }.get(10, TimeUnit.SECONDS)
+                    val ready = Json.parseToJsonElement(requireNotNull(line) { "TLS peer did not start" }).jsonObject
+                    port = ready.getValue("port").jsonPrimitive.int
+                    routingAuthorityPublicKey = ready["authorityPublicKey"]?.jsonPrimitive?.content?.let { Base64.getDecoder().decode(it) }
                     require(port in 1..65_535)
                 } finally { reader.shutdownNow() }
             } catch (failure: Throwable) {
                 child?.destroyForcibly()?.waitFor(3, TimeUnit.SECONDS)
+                retainRoutingEvidence()
                 clean()
                 throw failure
             }
@@ -848,9 +1142,18 @@ class TLSInteropTest {
                 sslParameters = sslParameters.apply { applicationProtocols = arrayOf(if (negotiate) "remozio/1" else "remozio-experiment/1") }
             }
         }
+        fun routingControl(command: String): JsonObject {
+            controllerWriter.write("{\"command\":\"" + command + "\"}\n"); controllerWriter.flush()
+            val reader = Executors.newSingleThreadExecutor()
+            return try {
+                val line = reader.submit<String?> { controllerReader.readLine() }.get(10, TimeUnit.SECONDS)
+                Json.parseToJsonElement(requireNotNull(line)).jsonObject
+            } finally { reader.shutdownNow() }
+        }
         fun stopNativeListener() { process.outputStream.write(115); process.outputStream.flush() }
         fun closeControllerPipe() { process.outputStream.close() }
         fun waitForPeerExit(): Boolean = process.waitFor(3, TimeUnit.SECONDS)
+        val peerExitCode: Int get() = process.exitValue()
         override fun close() {
             mac.clientManager.close()
             phone.clientManager.close()
@@ -858,7 +1161,16 @@ class TLSInteropTest {
             process.outputStream.close()
             process.destroy()
             if (!process.waitFor(3, TimeUnit.SECONDS)) { process.destroyForcibly(); process.waitFor(3, TimeUnit.SECONDS) }
+            retainRoutingEvidence()
             clean()
+        }
+        private fun retainRoutingEvidence() {
+            if (!routing && !audit) return
+            val property = if (audit) "remozio.test.auditTransportEvidence" else "remozio.test.routingEvidence"
+            val destination = System.getProperty(property)?.let(Path::of) ?: return
+            Files.createDirectories(destination)
+            val log = directory.resolve("peer.log")
+            if (Files.exists(log) && Files.size(log) <= 1_048_576) Files.copy(log, destination.resolve(directory.fileName.toString() + ".log"))
         }
         private fun clean() { Files.walk(directory).use { paths -> paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) } } }
     }
