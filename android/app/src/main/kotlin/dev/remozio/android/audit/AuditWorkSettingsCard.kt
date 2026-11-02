@@ -7,6 +7,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.*
 import androidx.compose.ui.text.input.KeyboardType
@@ -68,7 +69,9 @@ internal fun AuditWorkSettingsContent(
             Text(stringResource(R.string.audit_settings_title), style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.semantics { heading() })
             Text(stringResource(R.string.audit_settings_reason))
-            Text(stringResource(R.string.audit_settings_saved_values, saved.responseBudget, saved.operationSeconds),
+            Text(stringResource(R.string.audit_settings_saved_values,
+                pluralStringResource(R.plurals.audit_settings_saved_responses, saved.responseBudget, saved.responseBudget),
+                pluralStringResource(R.plurals.audit_settings_saved_seconds, saved.operationSeconds, saved.operationSeconds)),
                 style = MaterialTheme.typography.titleMedium)
             Text(stringResource(R.string.audit_settings_boundary))
             TextButton(enabled = !busy, onClick = onExpanded) {

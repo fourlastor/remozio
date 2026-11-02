@@ -566,7 +566,15 @@
     <plurals name="audit_sync_days"><item quantity="one">%d day ago</item><item quantity="other">%d days ago</item></plurals>
     <string name="audit_settings_title">Audit sync limits</string>
     <string name="audit_settings_reason">Limit the work in each history sync round. These limits never delete saved history.</string>
-    <string name="audit_settings_saved_values">Saved: %1$d responses · %2$d seconds</string>
+    <string name="audit_settings_saved_values">Saved: %1$s · %2$s</string>
+    <plurals name="audit_settings_saved_responses">
+        <item quantity="one">%d response</item>
+        <item quantity="other">%d responses</item>
+    </plurals>
+    <plurals name="audit_settings_saved_seconds">
+        <item quantity="one">%d second</item>
+        <item quantity="other">%d seconds</item>
+    </plurals>
     <string name="audit_settings_boundary">Saved limits apply when a round starts or you choose Continue. A running round keeps its original limits.</string>
     <string name="audit_settings_show">Edit sync limits</string>
     <string name="audit_settings_hide">Hide sync limits</string>

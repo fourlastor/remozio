@@ -16,6 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
@@ -26,6 +27,7 @@ import dev.remozio.android.RemozioTheme
 import dev.remozio.phone.audit.*
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.protocol.*
+import kotlinx.coroutines.flow.collect
 import java.security.KeyPairGenerator
 import java.security.Signature
 import java.security.spec.ECGenParameterSpec
@@ -68,9 +70,11 @@ open class AuditPreviewActivity : ComponentActivity() {
             CompositionLocalProvider(LocalDensity provides Density(density.density, if (largeFont) 2f else density.fontScale)) {
                 RemozioTheme(darkTheme = dark) {
                     val list = rememberLazyListState()
-                    LaunchedEffect(list.layoutInfo.totalItemsCount) {
-                        if (list.layoutInfo.totalItemsCount > 11 && previous) list.scrollToItem(11)
-                        else if (archiveFocus && list.layoutInfo.totalItemsCount > archiveFocusIndex) list.scrollToItem(archiveFocusIndex, if (savedTimeFocusEnd) 600 else 0)
+                    LaunchedEffect(list) {
+                        snapshotFlow { list.layoutInfo.totalItemsCount }.collect { count ->
+                            if (count > 11 && previous) list.scrollToItem(11)
+                            else if (archiveFocus && count > archiveFocusIndex) list.scrollToItem(archiveFocusIndex, if (savedTimeFocusEnd) 600 else 0)
+                        }
                     }
                     RemozioNavigation(2, {}) {
                         Column(Modifier.fillMaxSize()) {
