@@ -292,5 +292,7 @@ milestones ([validation guide](linux-validation.md#human-testing-boundary)).
 
 It installs, starts or provisions nothing and contains no service code. It does not
 prove protected launch, trusted frontend code, TPM role isolation, crash consistency,
-reboot reconciliation or any phone interaction. A small unprivileged validator for
-the placement and ownership checks is a separate later change.
+reboot reconciliation or any phone interaction. The separate
+[placement validator](../experiments/linux-placement-validator/README.md) checks
+placement and ownership against caller-supplied expectations on ordinary-user fixtures.
+It is component evidence only and decides nothing listed here.

@@ -36,5 +36,7 @@ python3 scripts/run-linux-approval-command-experiment.py \
 
 python3 scripts/run-linux-storage-lease-experiment.py
 
+python3 scripts/run-linux-placement-validator-experiment.py
+
 python3 scripts/run-linux-os-capture-experiment.py \
     --work-dir "$work_root/os-capture"

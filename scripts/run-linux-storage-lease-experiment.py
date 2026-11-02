@@ -134,7 +134,8 @@ def run_owned(arguments, timeout):
 def source_hashes():
     paths = [Path(__file__).resolve(), CLEANUP_SOURCE,
              ROOT / "tests/test_linux_storage_lease_experiment.py"]
-    paths += [SOURCE / name for name in ("lease.c", "lease.h", "controls.c", "README.md")]
+    paths += [SOURCE / name for name in ("lease.c", "lease.h", "descriptor-walk.c", "descriptor-walk.h",
+                                         "controls.c", "README.md")]
     return {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
 
 
@@ -167,7 +168,7 @@ def measure(timeout=15):
         os.chmod(directory, 0o700)
         binary = directory / "lease-controls"
         arguments = [compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2",
-                     str(SOURCE / "lease.c"), str(SOURCE / "controls.c"),
+                     str(SOURCE / "lease.c"), str(SOURCE / "descriptor-walk.c"), str(SOURCE / "controls.c"),
                      "-Wl,--wrap=fgetxattr", "-Wl,--wrap=fstatfs", "-Wl,--wrap=fstat", "-Wl,--wrap=fstatat", "-o", str(binary)]
         _output, status, error, clean = run_owned(arguments, 30)
         if status != 0 or error or not clean or not binary.is_file() or not os.access(binary, os.X_OK):
