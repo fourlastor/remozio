@@ -76,7 +76,7 @@ class AuditWorkSettingsInteractionTest {
     private fun save(policy: AuditWorkPolicy) {
         val button = saveButton().performScrollTo().assertIsEnabled()
         with(button.getUnclippedBoundsInRoot()) {
-            check(width.value >= 48f && height.value >= 48f)
+            check((right - left).value >= 48f && (bottom - top).value >= 48f)
         }
         button.performClick()
         ui.waitUntil(5_000) { settings.read() == policy }
