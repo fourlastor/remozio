@@ -39,10 +39,10 @@ final class SignedExecutableValidationTests: XCTestCase {
             try FileManager.default.createDirectory(atPath: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             do {
                 try Data("int main(void) { return 0; }".utf8).write(to: URL(fileURLWithPath: root + "/probe.c"))
-                let plist: [String: String] = ["CFBundleIdentifier": "dev.remozio.test.validation", "RemozioSecurityGeneration": "4"]
+                let plist: [String: String] = ["CFBundleIdentifier": "dev.sebastiano.remozio.macos.tests.validation", "RemozioSecurityGeneration": "4"]
                 try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: URL(fileURLWithPath: root + "/Info.plist"))
                 try Self.run("/usr/bin/xcrun", ["clang", "-arch", "arm64", "-Wl,-sectcreate,__TEXT,__info_plist," + root + "/Info.plist", root + "/probe.c", "-o", executable])
-                var arguments = ["--force", "--sign", "-", "--identifier", "dev.remozio.test.validation"]
+                var arguments = ["--force", "--sign", "-", "--identifier", "dev.sebastiano.remozio.macos.tests.validation"]
                 if runtime { arguments += ["--options", "runtime"] }
                 try Self.run("/usr/bin/codesign", arguments + [executable])
             } catch { try? FileManager.default.removeItem(atPath: root); throw error }
@@ -60,23 +60,23 @@ final class SignedExecutableValidationTests: XCTestCase {
     }
     func testSignedFixtureBindsGenerationAndRejectsWrongIdentity() throws {
         let fixture = try Fixture(), path = try fixture.path()
-        let evidence = try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.remozio.test.validation\"",
+        let evidence = try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.sebastiano.remozio.macos.tests.validation\"",
             committedFloor: 3, installedGeneration: 4)
         XCTAssertEqual(evidence.generation, 4); XCTAssertEqual(evidence.codeDirectoryHash.count, 20)
-        XCTAssertEqual(evidence.identifier, "dev.remozio.test.validation")
+        XCTAssertEqual(evidence.identifier, "dev.sebastiano.remozio.macos.tests.validation")
         XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.remozio.wrong\"", committedFloor: 1, installedGeneration: 0))
         XCTAssertThrowsError(try path.validate())
     }
     func testAdHocFixtureCannotPassProductionPolicy() throws {
         let fixture = try Fixture(), path = try fixture.path()
-        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.test.validation",
+        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.tests.validation",
             approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 0)
         XCTAssertThrowsError(try SignedExecutableValidation.validate(path, policy: policy, committedFloor: 1, installedGeneration: 0))
         XCTAssertThrowsError(try path.validate())
     }
     func testSignedFixtureWithoutRuntimeIsRejected() throws {
         let fixture = try Fixture(runtime: false), path = try fixture.path()
-        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.remozio.test.validation\"", committedFloor: 1, installedGeneration: 0)) {
+        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.sebastiano.remozio.macos.tests.validation\"", committedFloor: 1, installedGeneration: 0)) {
             XCTAssertEqual($0 as? SignedExecutableValidationError, .unsafeRuntime)
         }
     }
@@ -89,14 +89,14 @@ final class SignedExecutableValidationTests: XCTestCase {
         bytes.replaceSubrange(range, with: Data("<string>5</string>".utf8))
         try bytes.write(to: URL(fileURLWithPath: fixture.executable))
         let path = try fixture.path()
-        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.remozio.test.validation\"", committedFloor: 1, installedGeneration: 0)) {
+        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.sebastiano.remozio.macos.tests.validation\"", committedFloor: 1, installedGeneration: 0)) {
             guard case SignedExecutableValidationError.security = $0 else { return XCTFail("Expected signature failure, got \($0)") }
         }
         XCTAssertThrowsError(try path.validate())
     }
     func testValidSignatureDoesNotPermitRollback() throws {
         let fixture = try Fixture(), path = try fixture.path()
-        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.remozio.test.validation\"", committedFloor: 5, installedGeneration: 4)) {
+        XCTAssertThrowsError(try SignedExecutableValidation.validate(path, requirement: "identifier \"dev.sebastiano.remozio.macos.tests.validation\"", committedFloor: 5, installedGeneration: 4)) {
             XCTAssertEqual($0 as? SignedExecutableValidationError, .rollback)
         }
         XCTAssertThrowsError(try path.validate())

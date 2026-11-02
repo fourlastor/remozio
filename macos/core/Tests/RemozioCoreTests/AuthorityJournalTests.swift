@@ -82,9 +82,9 @@ final class AuthorityJournalTests: XCTestCase {
     func testListenerRejectsWrongJournalScopeBeforeActivation() throws {
         let fixture = try Fixture(), journal = try owner(fixture)
         _ = try configure(journal)
-        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
             approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 501)
-        XCTAssertThrowsError(try AuthorityXPCListener(serviceName: "dev.remozio.authority", peerPolicy: policy,
+        XCTAssertThrowsError(try AuthorityXPCListener(serviceName: "dev.sebastiano.remozio.macos.authority", peerPolicy: policy,
             macID: Data(repeating: 9, count: 16), accountID: Data(repeating: 2, count: 16), journal: journal,
             maximumPayloadBytes: 1024)) { XCTAssertEqual($0 as? AuthorityXPCEndpointError, .invalidConfiguration) }
         try journal.close()
@@ -141,7 +141,7 @@ final class AuthorityJournalTests: XCTestCase {
         XCTAssertThrowsError(try transportAccess(journal, peer: transportPeer(hash: 9))) {
             XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch)
         }
-        let broad = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+        let broad = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
             approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20), Data(repeating: 9, count: 20)], expectedUserID: 501)
         XCTAssertThrowsError(try transportAccess(journal, peer: broad)) {
             XCTAssertEqual($0 as? AuthorityTransportAccessError, .policyMismatch)
@@ -261,7 +261,7 @@ final class AuthorityJournalTests: XCTestCase {
     }
 
     private func transportEntry(installed: UInt64 = 2, minimum: UInt64 = 1, hash: UInt8 = 3, active: Bool = true) throws -> AuthorityCodeEntry {
-        try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: installed, minimumGeneration: minimum, codeDirectoryHash: Data(repeating: hash, count: 20), active: active)
     }
     private func install(_ entry: AuthorityCodeEntry, journal: AuthorityJournal, revision: UUID? = nil) throws -> AuthorityCodePolicySnapshot {
@@ -269,7 +269,7 @@ final class AuthorityJournalTests: XCTestCase {
         return try journal.write { try $0.installCodePolicy(policy, expectedRevision: revision) }
     }
     private func transportPeer(hash: UInt8 = 3) throws -> XPCPeerPolicy {
-        try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+        try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
             approvedCodeDirectoryHashes: [Data(repeating: hash, count: 20)], expectedUserID: 501)
     }
     private func transportAccess(_ journal: AuthorityJournal, peer: XPCPeerPolicy) throws -> AuthorityTransportAccess {

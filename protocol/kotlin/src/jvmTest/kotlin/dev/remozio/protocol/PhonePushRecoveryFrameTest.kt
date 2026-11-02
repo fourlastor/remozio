@@ -74,7 +74,7 @@ class PhonePushRecoveryFrameTest {
         val bytes = PhonePushRecoveryFrame.State(id, state).encode()
         assertFalse(bytes.toList().windowed(32).any { it.all { b -> b == 170.toByte() } })
         assertEquals("PhonePushRecoveryState(redacted)", state.toString())
-        val source = id.copyOf(); val offer = PhonePushTokenOffer("private-provider-token", "project", "123", "dev.remozio.android")
+        val source = id.copyOf(); val offer = PhonePushTokenOffer("private-provider-token", "project", "123", "dev.sebastiano.remozio.android")
         val frame = PhonePushRecoveryFrame.Resume(source, offer); val before = frame.encode(); source.fill(0)
         assertContentEquals(before, frame.encode()); assertFalse(frame.toString().contains(offer.token))
     }

@@ -84,9 +84,15 @@ class SDKFixtureGuards(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='remozio-sparkle-boundary-') as temporary:
             root=Path(temporary).resolve();boundary=SimpleNamespace(bundle=Mock(),command=Mock())
             signer=fixture.SDKFixtureSigner(boundary,fixture.SigningConfig('0'*40,'ABCDEFGHIJ'))
-            for directory,identity in [('ExistingApplication','dev.remozio.experiment.sparkleboundary.'+'a'*32),('Host','dev.remozio.app')]:
+            for directory,identity in [('ExistingApplication','dev.sebastiano.remozio.macos.experiments.sparkleboundary.'+'a'*32),('Host','dev.sebastiano.remozio.macos'),('Host','dev.remozio.experiment.sparkleboundary.'+'a'*32)]:
                 with self.assertRaises(ValueError):signer.bundle(root,directory,root,identity,1,'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',1)
             boundary.bundle.assert_not_called();boundary.command.assert_not_called()
+            boundary.bundle.side_effect = RuntimeError('Stop before copying or signing')
+            with self.assertRaisesRegex(RuntimeError, 'Stop before copying or signing'):
+                signer.bundle(root, 'Host', root, 'dev.sebastiano.remozio.macos.experiments.sparkleboundary.'+'a'*32,
+                              1, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=', 1)
+            boundary.bundle.assert_called_once()
+            boundary.command.assert_not_called()
 
 class SignatureGuards(unittest.TestCase):
     def test_requirement_is_inline_and_signature_metadata_still_matches(self):

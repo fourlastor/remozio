@@ -21,9 +21,9 @@ final class MachineBootstrapTests: XCTestCase {
             guard chmod(root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
             directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: "Shared", owner: getuid(), visibility: .sharedMetadata)
             let policy = try AuthorityCodePolicy(entries: [
-                .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.mac", installedGeneration: 1,
+                .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos", installedGeneration: 1,
                     minimumGeneration: 1, codeDirectoryHash: Data(repeating: 1, count: 20), active: true),
-                .init(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.setup-controller", installedGeneration: 1,
+                .init(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.setup-controller", installedGeneration: 1,
                     minimumGeneration: 1, codeDirectoryHash: Data(repeating: 2, count: 20), active: true)])
             let config = try AdministrativeSetupConfiguration(machineDirectory: directory.path + "/Machine",
                 macID: Data(repeating: 1, count: 16), installationID: Data(repeating: 2, count: 16),
@@ -210,7 +210,7 @@ final class MachineBootstrapTests: XCTestCase {
             let store = try f.store(), previous = try XCTUnwrap(store.inventory())
             let account = try InstallationAccount(accountID: Data(repeating: 8, count: 16), ownerUID: getuid())
             let authority = try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-                label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: account.accountID)
+                label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account.accountID)
             let value = try InstallationInventory(macID: previous.macID, installationID: previous.installationID,
                 revision: previous.revision, bundlePath: previous.bundlePath, releaseDigest: previous.releaseDigest,
                 accounts: [account], services: previous.services + [authority], formatVersion: 2)

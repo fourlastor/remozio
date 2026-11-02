@@ -86,7 +86,7 @@ func experimentManifest(_ root: URL, teamID: String, appIdentifier: String, decl
 do {
     let args = CommandLine.arguments
     guard args.count == 5, ["prepare", "prepare-features", "prepare-legacy-contract", "inspect", "inspect-features", "inspect-missing-feature", "bad-hash", "bad-alias", "bad-kind", "bad-build", "bad-identifier", "bad-team"].contains(args[1]),
-          args[4].hasPrefix("dev.remozio.experiment.sparkleboundary.") else { throw ReleaseManifestError.invalidDeclaration }
+          args[4].hasPrefix("dev.sebastiano.remozio.macos.experiments.sparkleboundary.") else { throw ReleaseManifestError.invalidDeclaration }
     let root = try ownedFixture(args[2])
     if args[1].hasPrefix("prepare") {
         let value = try experimentManifest(root, teamID: args[3], appIdentifier: args[4],

@@ -16,8 +16,8 @@ struct TransportPairingFixture {
     init(timeout: UInt64 = 5000) throws {
         configuration = try .init(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             ownerUID: 501, transportUID: 20002, serviceName: "dev.remozio.fixture.pairing", teamID: "ABCDE12345",
-            appIdentifier: "dev.remozio.mac", appHashes: [Data(repeating: 1, count: 20)],
-            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 2, count: 20)], timeoutMilliseconds: timeout)
+            appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [Data(repeating: 1, count: 20)],
+            transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 2, count: 20)], timeoutMilliseconds: timeout)
         let scope = try ChannelScope(macID: configuration.macID, accountID: configuration.accountID,
             phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16))
         let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 5, count: 32), envelopeVersions: [1], requests: [], auditVersions: [])
@@ -38,7 +38,7 @@ struct TransportPairingFixture {
     func transportConfiguration() throws -> ApprovalTransportConfiguration {
         try .init(macID: configuration.macID, accountID: configuration.accountID, ownerUID: configuration.ownerUID,
             serviceUID: configuration.transportUID, authorityServiceName: "dev.remozio.fixture.authority", teamID: "ABCDE12345",
-            authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 3, count: 20)],
+            authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 3, count: 20)],
             identityReference: Data([1]), identityPublicKeyInfo: macTransport.publicKey.derRepresentation)
     }
 }

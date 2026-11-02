@@ -25,8 +25,8 @@ final class ProtectedServiceConfigurationTests: XCTestCase {
     }
     private func configuration(continuity: String? = nil) throws -> AuthorityServiceConfiguration {
         try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.remozio.authority",
-            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [Data(repeating: 3, count: 20), Data(repeating: 4, count: 20)], transportUID: 501,
             maximumPayloadBytes: 4096, minimumEnvelopeVersion: 2, auditVersions: [1, 2],
             maximumConnections: 4, handshakeTimeoutMilliseconds: 1234, maximumOperations: 3, continuityDirectory: continuity)

@@ -42,7 +42,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(parsed.candidateID, candidate.candidate.binding.candidateID)
         XCTAssertEqual(parsed.challenge, candidate.candidate.binding.challenge)
         XCTAssertEqual(parsed.enrollmentTag, candidate.candidate.binding.enrollmentTag)
-        XCTAssertEqual(message["android"] as? [String: String], ["ttl": "60s", "priority": "NORMAL", "restricted_package_name": "dev.remozio.android"])
+        XCTAssertEqual(message["android"] as? [String: String], ["ttl": "60s", "priority": "NORMAL", "restricted_package_name": "dev.sebastiano.remozio.android"])
         XCTAssertEqual(String(reflecting: probe), "FCMTokenProbe(redacted)")
     }
 
@@ -79,7 +79,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
     }
 
     private func sender(_ project: String = "fixture-success") throws -> FCMWakeSender {
-        try FCMWakeSender(project: project, packageName: "dev.remozio.android",
+        try FCMWakeSender(project: project, packageName: "dev.sebastiano.remozio.android",
             transport: FCMHTTPTransport(timeoutSeconds: 5, protocolClasses: [FCMFixtureProtocol.self]))
     }
     private func wake(ttl: UInt32 = 300, priority: FCMPriority = .high) throws -> FCMWake {
@@ -107,7 +107,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(Set(message.keys), ["token", "data", "android"])
         XCTAssertEqual(message["token"] as? String, "synthetic-registration")
         XCTAssertEqual(message["data"] as? [String: String], ["wake_v1": Data(repeating: 7, count: 32).base64EncodedString(), "enrollment_v1": Data(repeating: 9, count: 32).base64EncodedString()])
-        XCTAssertEqual(message["android"] as? [String: String], ["ttl": "300s", "priority": "HIGH", "restricted_package_name": "dev.remozio.android"])
+        XCTAssertEqual(message["android"] as? [String: String], ["ttl": "300s", "priority": "HIGH", "restricted_package_name": "dev.sebastiano.remozio.android"])
         let normal = try body(sender().request(wake(ttl: 0, priority: .normal), accessToken: token(), validateOnly: true))
         XCTAssertEqual(normal["validate_only"] as? Bool, true)
         let android = (normal["message"] as? [String: Any])?["android"] as? [String: String]
@@ -135,7 +135,7 @@ final class FCMWakeSenderTests: XCTestCase, @unchecked Sendable {
             XCTAssertThrowsError(try sender(project))
         }
         for timeout in [0.0, -1, .infinity, .nan, 121] {
-            XCTAssertThrowsError(try FCMWakeSender(project: "fixture", packageName: "dev.remozio.android", timeoutSeconds: timeout))
+            XCTAssertThrowsError(try FCMWakeSender(project: "fixture", packageName: "dev.sebastiano.remozio.android", timeoutSeconds: timeout))
         }
         XCTAssertThrowsError(try FCMWakeSender(project: "fixture", packageName: "bad\npackage"))
         for text in ["", "token\r\nInjected: x", "space token", String(repeating: "x", count: 16385)] {

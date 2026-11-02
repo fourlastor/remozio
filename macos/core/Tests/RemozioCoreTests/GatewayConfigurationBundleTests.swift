@@ -77,7 +77,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
             foreground = try plan(foreground, host: controlled, transport: foreground.transport)
         }
         let material = try GatewayPreparationMaterial.create(runtime: runtime.reference, provider: provider(), senderID: "123",
-            packageName: "dev.remozio.android", fileWakeCustodyAccepted: true, maximumControls: maximumControls)
+            packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true, maximumControls: maximumControls)
         try body(foreground, material, foreground.enrolledInventory(inventory))
     }
     private func bundle(_ foreground: RuntimeActivationPlan, _ material: GatewayPreparationMaterial,
@@ -153,7 +153,7 @@ final class GatewayConfigurationBundleTests: XCTestCase {
             XCTAssertEqual(first.commandHost.canonicalBytes, repeated.commandHost.canonicalBytes)
             XCTAssertEqual(first.transport.canonicalBytes, repeated.transport.canonicalBytes)
             let replacement = try GatewayPreparationMaterial.create(runtime: material.runtime, provider: provider(), senderID: "123",
-                packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+                packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
             XCTAssertThrowsError(try bundle(adopted, replacement, inventory))
         }
     }

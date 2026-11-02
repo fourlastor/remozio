@@ -21,7 +21,7 @@ final class AccountPreparationFixture {
         root = URL(fileURLWithPath: "/private/tmp/remozio-account-preparation-" + UUID().uuidString)
         if let suppliedPolicy { policy = suppliedPolicy }
         else {
-            policy = try .init(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+            policy = try .init(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                 installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
         }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)

@@ -123,7 +123,7 @@ Keep real provider credentials, enrollment keys and approval payloads outside th
 
    ```sh
    # Authorized Root operator session only. The exact job must already be verified.
-   TASK_ENCLAVE_JOB='system/dev.remozio.experiments.lifecycle.enclave'
+   TASK_ENCLAVE_JOB='system/dev.sebastiano.remozio.macos.experiments.lifecycle.enclave'
    /bin/launchctl print "$TASK_ENCLAVE_JOB"
    /bin/launchctl kickstart -p "$TASK_ENCLAVE_JOB"
    ```
@@ -156,7 +156,7 @@ Retrieve service evidence promptly in the operator session:
 
 ```sh
 /usr/bin/log show --style json --last 1h \
-  --predicate 'subsystem == "dev.remozio.experiments.lifecycle" AND category == "enclave-lifecycle"'
+  --predicate 'subsystem == "dev.sebastiano.remozio.macos.experiments.lifecycle" AND category == "enclave-lifecycle"'
 ```
 
 The `Enclave lifecycle evidence:` message contains the complete sanitized JSON.

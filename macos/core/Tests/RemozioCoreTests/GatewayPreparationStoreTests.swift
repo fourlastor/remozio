@@ -30,7 +30,7 @@ final class GatewayPreparationStoreTests: XCTestCase {
     }
     private func material(_ f: RuntimeActivationFixture) throws -> GatewayPreparationMaterial {
         try .create(runtime: f.material.reference, provider: provider(), senderID: "123",
-            packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+            packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
     }
     private func prepare(_ f: RuntimeActivationFixture, directory: ProtectedSetupDirectory, creations: Creations,
                          expected: GatewayPreparationState? = nil, verify: @escaping () throws -> Void = {},
@@ -39,7 +39,7 @@ final class GatewayPreparationStoreTests: XCTestCase {
         return try GatewayMaterialPreparationController.prepare(machine: f.machine, account: f.account, expected: state,
             verifyCurrent: verify, verifyServices: { XCTAssertEqual($0, f.services) }, restoreMaterial: { runtime, reference, verify in
                 try GatewayMaterialPreparation.restoreOrCreate(directory: directory, owner: getuid(), runtime: runtime, expected: reference,
-                    provider: provider, senderID: "123", packageName: "dev.remozio.android", verifyCurrent: verify,
+                    provider: provider, senderID: "123", packageName: "dev.sebastiano.remozio.android", verifyCurrent: verify,
                     make: { creations.count += 1; return try self.material(f) })
             }, didStage: stage)
     }
@@ -161,7 +161,7 @@ final class GatewayPreparationStoreTests: XCTestCase {
     func testNativeControllerRefusesOrdinaryIdentityBeforeProtectedOperations() throws {
         let f = try fixture()
         XCTAssertThrowsError(try GatewayMaterialPreparationController.prepare(machine: f.machine, account: f.account,
-            expected: .init(reference: nil), provider: provider(), senderID: "123", packageName: "dev.remozio.android",
+            expected: .init(reference: nil), provider: provider(), senderID: "123", packageName: "dev.sebastiano.remozio.android",
             fileWakeCustodyAccepted: true, verifyCurrent: { XCTFail("No native access") })) {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }

@@ -10,16 +10,16 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
     private func presence(pairing: AuthorityPairingSetupConfiguration? = nil) throws -> AuthorityPresenceStartupConfiguration {
         let key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/Library/Remozio/journal",
-            serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.sebastiano.remozio.macos.authority", teamID: "TEAMID1234", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [id(3, 20)], transportUID: 401, maximumPayloadBytes: 262_144, continuityDirectory: "/Library/Remozio/continuity")
         let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/key.cbor", authorityPublicKey: key)
         let registration = try GatewayRegistrationIdentity(ownerID: id(3), macID: id(1), accountID: id(2), gatewayID: id(4),
             lifecycleEpoch: id(5), rootPublicKey: key)
         let wake = try AuthorityWakeStartupConfiguration(request: request, registration: registration,
             gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402, teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)])
-        return try .init(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence", teamID: "TEAMID1234",
-            appIdentifier: "dev.remozio.mac", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000), pairing: pairing)
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [id(4, 20)])
+        return try .init(wake: wake, ownerUID: 501, appServiceName: "dev.sebastiano.remozio.macos.presence", teamID: "TEAMID1234",
+            appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000), pairing: pairing)
     }
     private func config(service: String = "dev.remozio.command", path: String = "/Library/Remozio/elevation.cbor",
                         environment: [CapturedEnvironmentEntry] = [], captureBytes: Int = 65_536,
@@ -110,7 +110,7 @@ final class AuthorityCommandStartupConfigurationTests: XCTestCase {
         }
     }
     func testDistinctServiceAndPolicyPathsAreRequired() throws {
-        for service in ["dev.remozio.authority", "dev.remozio.presence", "dev.remozio.gateway.root", "dev.remozio." + String(repeating: "x", count: 255)] {
+        for service in ["dev.sebastiano.remozio.macos.authority", "dev.sebastiano.remozio.macos.presence", "dev.remozio.gateway.root", "dev.remozio." + String(repeating: "x", count: 255)] {
             XCTAssertThrowsError(try config(service: service))
         }
         for path in ["", "/", "/Library//elevation.cbor", "/Library/../elevation.cbor", "/Library/Remozio/./elevation.cbor",

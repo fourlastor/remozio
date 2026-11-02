@@ -1,4 +1,4 @@
-package dev.remozio.android.push
+package dev.sebastiano.remozio.android.push
 
 import android.content.Context
 import android.util.Log
@@ -55,8 +55,8 @@ class AndroidWakeWorkProbeTest {
         journal = AndroidWakeDemand.open(context)
         settings = WakeWorkSettings(context); assertTrue(settings.save(WakeWorkPolicy()))
         var config = StoredPushConfiguration(UUID.randomUUID(),
-            FCMClientConfiguration("dev.remozio.android.wakeprobe", "synthetic-project", "12345", "1:12345:android:abcdef", "A" + "x".repeat(38)), true)
-        client = PushClientOwner("dev.remozio.android.wakeprobe", object : PushConfigurationStorage {
+            FCMClientConfiguration("dev.sebastiano.remozio.android.wakeprobe", "synthetic-project", "12345", "1:12345:android:abcdef", "A" + "x".repeat(38)), true)
+        client = PushClientOwner("dev.sebastiano.remozio.android.wakeprobe", object : PushConfigurationStorage {
             override fun read() = config
             override fun replace(configuration: StoredPushConfiguration) { config = configuration }
         }, object : PushClientDriver {

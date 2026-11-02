@@ -64,7 +64,7 @@ final class GatewayWakeSubmissionTests: XCTestCase {
     func testWrongKeyDomainDeliveryAndMalformedSignatureCannotAuthenticate() throws {
         let (value, registration, credential, key) = try fixture()
         let limits = try CBORLimits(maxBytes: 1024, maxDepth: 1, maxItems: 12)
-        let wrongDomain = try DeterministicCBOR.encode(.map([0: .text("dev.remozio.gateway"), 1: .unsigned(1),
+        let wrongDomain = try DeterministicCBOR.encode(.map([0: .text("dev.sebastiano.remozio.macos.gateway"), 1: .unsigned(1),
             2: .unsigned(1), 3: .bytes(value.encode())]), limits: limits)
         for signature in [try P256.Signing.PrivateKey().signature(for: value.signingInput()).rawRepresentation,
                           try key.signature(for: wrongDomain).rawRepresentation, Data(repeating: 0, count: 64), Data(repeating: 0, count: 63)] {

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / 'experiments/sparkle-boundary'
 if sys.flags.optimize:
     raise RuntimeError('Run the fixture with Python safety assertions enabled')
-PREFIX = 'dev.remozio.experiment.sparkleboundary.'
+PREFIX = 'dev.sebastiano.remozio.macos.experiments.sparkleboundary.'
 
 
 def command(*args, timeout=20):

@@ -7,11 +7,11 @@ enum JournalLeaseError: Error { case system(Int32), unsafeMetadata }
 enum ServiceProbeError: Error { case arguments, account, placement, signature, manifest, notarization }
 
 enum ServiceProbeContract {
-    static let appID = "dev.remozio.experiments.lifecycle"
+    static let appID = "dev.sebastiano.remozio.macos.experiments.lifecycle"
     static let teamID = "PVDFPZ5D64"
     enum Role: String, CaseIterable {
         case session, authority, transport, enclave
-        var label: String { "dev.remozio.experiments.lifecycle.\(rawValue)" }
+        var label: String { "dev.sebastiano.remozio.macos.experiments.lifecycle.\(rawValue)" }
         var executable: String {
             switch self {
             case .session: "RemozioLifecycleSession"

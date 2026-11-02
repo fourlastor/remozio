@@ -29,7 +29,7 @@ python3 scripts/check-macos-app.py
 The script builds Debug and Release, verifies their signatures and hardened runtime, and checks arm64 architecture, deployment targets, localization resources, and bundle contents. It does not launch either app. The repository gate runs this check on macOS.
 
 Build outputs are under `.build/macos-app/DerivedData/Build/Products/`.
-Debug uses `dev.remozio.mac.debug`; Release uses `dev.remozio.mac`.
+Debug uses `dev.sebastiano.remozio.macos.debug`; Release uses `dev.sebastiano.remozio.macos`.
 Both use ad-hoc signing for local build validation.
 The project enables the runtime signing option and disables the debug injection library.
 
@@ -129,7 +129,7 @@ The packaging check verifies both helper identities and non-root refusal before 
 ## Embedded command frontend
 
 The app embeds the `RemozioCommandFrontend` target as `Contents/Helpers/remozio`.
-Debug uses `dev.remozio.command-frontend.debug`; Release uses `dev.remozio.command-frontend`.
+Debug uses `dev.sebastiano.remozio.macos.command-frontend.debug`; Release uses `dev.sebastiano.remozio.macos.command-frontend`.
 Both tools preserve actual C argv bytes and require the separator before the target command.
 
 ```sh

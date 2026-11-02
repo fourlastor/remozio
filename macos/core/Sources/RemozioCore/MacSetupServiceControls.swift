@@ -76,7 +76,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         defer { placement.close() }
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
         let identity = try runningIdentity()
-        let release = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.remozio.mac")
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.sebastiano.remozio.macos")
         guard release.codeDirectoryHashes[.app] == identity.hash,
               release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
                 == AdministrativeSetupConfiguration.executablePath else { throw SetupRegistrationError.wrongRelease }
@@ -92,7 +92,7 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         let result = Self.state(service.status)
         try placement.validate()
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-        let current = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.remozio.mac")
+        let current = try SignedReleaseInspection.inspect(bundle, teamID: identity.team, appIdentifier: "dev.sebastiano.remozio.macos")
         guard try InstallationInventory.digest(current) == InstallationInventory.digest(release) else {
             throw SetupRegistrationError.wrongRelease
         }
@@ -109,10 +109,10 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
               SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
               SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
               let values = information as? [String: Any],
-              values[kSecCodeInfoIdentifier as String] as? String == "dev.remozio.mac",
+              values[kSecCodeInfoIdentifier as String] as? String == "dev.sebastiano.remozio.macos",
               let team = values[kSecCodeInfoTeamIdentifier as String] as? String,
               let hash = values[kSecCodeInfoUnique as String] as? Data else { throw SetupRegistrationError.wrongRelease }
-        let requirement = try XPCPeerPolicy(teamID: team, componentIdentifier: "dev.remozio.mac",
+        let requirement = try XPCPeerPolicy(teamID: team, componentIdentifier: "dev.sebastiano.remozio.macos",
             approvedCodeDirectoryHashes: [hash], expectedUserID: getuid()).requirement
         try DynamicCodeValidation.validateSelf(requirement: requirement)
         return Identity(team: team, hash: hash, requirement: requirement)

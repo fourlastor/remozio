@@ -15,7 +15,7 @@ from macos_build_checks import require, run, verify_executable
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / 'experiments/protected-bootstrap'
 BUILD = ROOT / '.build/protected-bootstrap'
-IDENTITY = 'dev.remozio.experiments.bootstrap'
+IDENTITY = 'dev.sebastiano.remozio.macos.experiments.bootstrap'
 ENTITLEMENT = 'com.apple.developer.security.privileged-file-operations'
 
 

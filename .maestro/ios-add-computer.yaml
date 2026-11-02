@@ -1,6 +1,6 @@
 # Add computer on the iOS simulator: a pasted invitation shows its claims; invalid text is rejected.
 # The invitation is the "ascii" row of protocol/vectors/pairing-invitation-v1.json.
-appId: dev.remozio.ios
+appId: dev.sebastiano.remozio.ios
 ---
 - launchApp:
     clearState: true

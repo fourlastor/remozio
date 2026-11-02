@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 from pathlib import Path
 import plistlib
+import re
 import unittest
 from unittest.mock import patch
 
@@ -18,11 +19,11 @@ class ReleaseManifestBuildTests(unittest.TestCase):
 
     def environment(self, configuration='Debug'):
         return {'SRCROOT': str(ROOT / 'macos/app'), 'BUILT_PRODUCTS_DIR': '/unused-test-products',
-                'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.remozio.mac' + ('.debug' if configuration == 'Debug' else ''),
+                'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.sebastiano.remozio.macos' + ('.debug' if configuration == 'Debug' else ''),
                 'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
 
-    def test_capacity_keeps_legacy_debug_and_release_manifest_bytes(self):
-        expected = {'Debug': 'bb98b7342fcf4bf362539d5642305ed0eefd2f0f14d3fd78e65988e79cd3dacd', 'Release': '070ed2cf0c713916b2e1375d924154a4d61507d894916db3d41a783dc635de41'}
+    def test_capacity_keeps_legacy_format_bytes_with_owned_app_ids(self):
+        expected = {'Debug': '78039e1874208a355a93e2e23e0f589df82a24c8252a26e17effe945ad7df29f', 'Release': 'af15c3ca748f571e4dc49c67c7a128f26ca64132190001aeb55dc9487bd4bd01'}
         original = MANIFEST.declarations
         added = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
@@ -39,6 +40,23 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for configuration, digest in expected.items():
                 info = MANIFEST.generate(self.environment(configuration))
                 self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
+
+    def test_manifest_component_ids_match_each_xcode_configuration(self):
+        project = (ROOT / 'macos/app/Remozio.xcodeproj/project.pbxproj').read_text()
+        for configuration in ('Debug', 'Release'):
+            expected = set()
+            for line in project.splitlines():
+                if f'name = {configuration}; buildSettings' in line:
+                    match = re.search(r'PRODUCT_BUNDLE_IDENTIFIER = ([^;]+);', line)
+                    if match:
+                        expected.add(match.group(1))
+            with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
+                    patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
+                MANIFEST.generate(self.environment(configuration))
+            manifest = encode.call_args_list[0].args[0]
+            self.assertEqual({component[1] for component in manifest[5]}, expected)
+            self.assertEqual(len(expected), 8)
+            self.assertTrue(all(value.startswith('dev.sebastiano.remozio.macos') for value in expected))
 
     def test_extended_capacity_selects_schema_and_keeps_explicit_request_features(self):
         original = MANIFEST.declarations
@@ -90,10 +108,10 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declaration = encode.call_args_list[0].args[0]
         self.assertEqual(declaration[0], 4)
         self.assertEqual(declaration[6], [{0: 4, 1: 4, 2: 'Contents/Helpers/RemozioCloudflared',
-            3: 'Contents/Helpers/RemozioCloudflared', 4: 'dev.remozio.cloudflared.debug',
+            3: 'Contents/Helpers/RemozioCloudflared', 4: 'dev.sebastiano.remozio.macos.cloudflared.debug',
             5: bytes([9]) * 20, 6: None, 7: None, 8: []}])
         self.assertEqual(len(declaration[5]), 8)
-        self.connector_identity.assert_called_once_with(Path('/unused-test-products/RemozioCloudflared'), 'dev.remozio.cloudflared.debug')
+        self.connector_identity.assert_called_once_with(Path('/unused-test-products/RemozioCloudflared'), 'dev.sebastiano.remozio.macos.cloudflared.debug')
 
     def test_missing_or_differently_signed_connector_cannot_produce_app_metadata(self):
         with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
@@ -123,10 +141,10 @@ class ReleaseManifestBuildTests(unittest.TestCase):
 
     def test_helper_signature_commands_have_explicit_deadlines(self):
         import subprocess
-        metadata = 'Identifier=dev.remozio.command-child\nCDHash=' + 'a' * 40 + '\nTeamIdentifier=ABCDEFGHIJ\nflags=0x10000(runtime)\n'
+        metadata = 'Identifier=dev.sebastiano.remozio.macos.command-child\nCDHash=' + 'a' * 40 + '\nTeamIdentifier=ABCDEFGHIJ\nflags=0x10000(runtime)\n'
         with patch.object(MANIFEST.subprocess, 'run', side_effect=[
             subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, '', metadata)]) as run:
-            digest, team = MANIFEST.signed_identity(Path('/unused-fixture'), 'dev.remozio.command-child', '1')
+            digest, team = MANIFEST.signed_identity(Path('/unused-fixture'), 'dev.sebastiano.remozio.macos.command-child', '1')
         self.assertEqual(len(digest), 20); self.assertEqual(team, 'ABCDEFGHIJ')
         self.assertEqual([call.kwargs['timeout'] for call in run.call_args_list], [20, 20])
 

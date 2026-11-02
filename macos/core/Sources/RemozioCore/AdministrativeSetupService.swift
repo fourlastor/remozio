@@ -6,8 +6,8 @@ public enum AdministrativeSetupServiceError: Error, Equatable { case invalidConf
 
 /// Retained Root-private startup inputs. Provisioning must establish current code floors and registration independently.
 public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertible {
-    public static let serviceName = "dev.remozio.setup"
-    public static let plistName = "dev.remozio.setup.plist"
+    public static let serviceName = "dev.sebastiano.remozio.macos.setup"
+    public static let plistName = "dev.sebastiano.remozio.macos.setup.plist"
     public static let startupPath = "/Library/Application Support/Remozio/setup.cbor"
     public static let executablePath = "Contents/Library/LaunchServices/RemozioSetup"
     public let machineDirectory: String

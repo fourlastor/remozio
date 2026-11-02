@@ -9,10 +9,10 @@ final class InstallationInventoryTests: XCTestCase {
     private func account(_ n: UInt8 = 1, uid: uid_t = 501) throws -> InstallationAccount {
         try .init(accountID: id(n), ownerUID: uid)
     }
-    private func daemon(_ role: AuthorityCodeRole = .authority, uid: uid_t = 0, label: String = "dev.remozio.authority", accountID: Data = Data(repeating: 1, count: 16)) throws -> InstallationService {
+    private func daemon(_ role: AuthorityCodeRole = .authority, uid: uid_t = 0, label: String = "dev.sebastiano.remozio.macos.authority", accountID: Data = Data(repeating: 1, count: 16)) throws -> InstallationService {
         try .init(role: role, kind: .daemon, domainUID: nil, executionUID: uid, label: label, plistName: label + ".plist", accountID: accountID)
     }
-    private func app(_ uid: uid_t = 501, label: String = "dev.remozio.mac", accountID: Data? = nil) throws -> InstallationService {
+    private func app(_ uid: uid_t = 501, label: String = "dev.sebastiano.remozio.macos", accountID: Data? = nil) throws -> InstallationService {
         try .init(role: .app, kind: .mainApp, domainUID: uid, executionUID: uid, label: label, plistName: nil, accountID: accountID ?? id(uid == 502 ? 2 : 1))
     }
     private func inventory(accounts: [InstallationAccount]? = nil, services: [InstallationService]? = nil,
@@ -21,13 +21,40 @@ final class InstallationInventoryTests: XCTestCase {
                   accounts: accounts ?? [account()], services: services ?? [daemon(), app()])
     }
     private func evidence(appHash: UInt8 = 1, authorityHash: UInt8 = 2) throws -> SignedReleaseEvidence {
-        let app = try ReleaseComponent(role: .app, identifier: "dev.remozio.mac", generation: 1,
+        let app = try ReleaseComponent(role: .app, identifier: "dev.sebastiano.remozio.macos", generation: 1,
             relativePath: "Contents/MacOS/Remozio", codeDirectoryHash: nil, build: "1", teamID: nil, formats: [])
-        let authority = try ReleaseComponent(role: .authority, identifier: "dev.remozio.authority", generation: 1,
+        let authority = try ReleaseComponent(role: .authority, identifier: "dev.sebastiano.remozio.macos.authority", generation: 1,
             relativePath: "Contents/Helpers/authority", codeDirectoryHash: Data(repeating: authorityHash, count: 20),
             build: "1", teamID: nil, formats: [])
         return .init(manifest: try .init(release: "1", build: "1", components: [app, authority]),
             codeDirectoryHashes: [.app: Data(repeating: appHash, count: 20), .authority: Data(repeating: authorityHash, count: 20)])
+    }
+
+    func testOwnedPlatformAndRetainedServiceLabelsRoundTrip() throws {
+        let labels = [
+            ("dev.sebastiano.remozio.macos", "dev.sebastiano.remozio.macos.authority"),
+            ("dev.remozio.mac", "dev.remozio.account." + String(repeating: "01", count: 16) + ".authority"),
+        ]
+        for (appLabel, authorityLabel) in labels {
+            let value = try inventory(services: [daemon(label: authorityLabel), app(label: appLabel)])
+            XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)
+        }
+    }
+
+    func testOwnedServiceNamesRejectOtherPlatformsAndNamespaceLookalikes() throws {
+        for label in ["dev.sebastiano.remozio.android", "dev.sebastiano.remozio.ios",
+                      "dev.sebastiano.remozio.macosx.authority", "dev.sebastiano.remozio.macos/authority"] {
+            XCTAssertThrowsError(try daemon(label: label))
+        }
+    }
+
+    func testMachineBootstrapRetainsTheOwnedSetupRegistration() throws {
+        let value = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 3, count: 32))
+        XCTAssertTrue(value.accounts.isEmpty)
+        XCTAssertEqual(value.services.map(\.label), ["dev.sebastiano.remozio.macos.setup"])
+        XCTAssertEqual(value.services.map(\.plistName), ["dev.sebastiano.remozio.macos.setup.plist"])
+        XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)
     }
 
     func testRoundTripRetainsEveryAccountAndRegistrationDomain() throws {
@@ -70,10 +97,10 @@ final class InstallationInventoryTests: XCTestCase {
         XCTAssertThrowsError(try daemon(uid: 401))
         XCTAssertThrowsError(try daemon(.transport, uid: 0))
         XCTAssertThrowsError(try daemon(.commandFrontend, uid: 401))
-        XCTAssertThrowsError(try inventory(services: [daemon(), daemon(.transport, uid: 501, label: "dev.remozio.transport")]))
+        XCTAssertThrowsError(try inventory(services: [daemon(), daemon(.transport, uid: 501, label: "dev.sebastiano.remozio.macos.transport")]))
         XCTAssertThrowsError(try inventory(services: [app()]))
         XCTAssertThrowsError(try InstallationService(role: .authority, kind: .daemon, domainUID: 501, executionUID: 0,
-            label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist"))
+            label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist"))
     }
 
     func testRejectsTraversalLabelsAndInvalidBundlePaths() throws {
@@ -83,7 +110,7 @@ final class InstallationInventoryTests: XCTestCase {
             XCTAssertThrowsError(try daemon(label: name))
         }
         XCTAssertThrowsError(try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-            label: "dev.remozio.authority", plistName: "../dev.remozio.authority.plist"))
+            label: "dev.sebastiano.remozio.macos.authority", plistName: "../dev.sebastiano.remozio.macos.authority.plist"))
     }
 
     func testRejectsEmptyAndOversizedInventoriesWithoutTruncation() throws {
@@ -127,7 +154,7 @@ final class InstallationInventoryTests: XCTestCase {
         try value.compareRelease(signed)
         XCTAssertThrowsError(try value.compareRelease(evidence(appHash: 4)))
         XCTAssertThrowsError(try value.compareRelease(evidence(authorityHash: 4)))
-        let missing = try inventory(services: [daemon(), app(), daemon(.transport, uid: 401, label: "dev.remozio.transport")],
+        let missing = try inventory(services: [daemon(), app(), daemon(.transport, uid: 401, label: "dev.sebastiano.remozio.macos.transport")],
                                     digest: InstallationInventory.digest(signed))
         XCTAssertThrowsError(try missing.compareRelease(signed))
         let wrongApp = try inventory(services: [daemon(), app(label: "dev.remozio.other")], digest: InstallationInventory.digest(signed))
@@ -193,7 +220,7 @@ final class InstallationInventoryTests: XCTestCase {
         XCTAssertThrowsError(try inventory(accounts: [account(), account(2, uid: 502)],
             services: [daemon(), app(502, accountID: id(1))]))
         XCTAssertThrowsError(try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-            label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: Data([1])))
+            label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: Data([1])))
     }
 
     func testNativeLoaderRejectsOrdinaryUserBeforeReadingAnyPath() throws {
@@ -256,7 +283,7 @@ final class InstallationInventoryTests: XCTestCase {
 
     func testBootstrapReleaseComparisonRequiresItsDeclaredSetupCode() throws {
         let base = try evidence()
-        let setup = try ReleaseComponent(role: .setupController, identifier: "dev.remozio.setup-controller", generation: 1,
+        let setup = try ReleaseComponent(role: .setupController, identifier: "dev.sebastiano.remozio.macos.setup-controller", generation: 1,
             relativePath: AdministrativeSetupConfiguration.executablePath, codeDirectoryHash: Data(repeating: 3, count: 20),
             build: "1", teamID: nil, formats: [])
         let manifest = try ReleaseManifest(release: "1", build: "1", components: base.manifest.components + [setup])

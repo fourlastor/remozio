@@ -46,7 +46,7 @@ public struct GatewayWakeEndpointConfiguration: Sendable {
             challengeLifetimeMillis: lifetime)
     }
     static func validServiceName(_ name: String) -> Bool {
-        name.hasPrefix("dev.remozio.") && (1...255).contains(name.utf8.count) &&
+        MacServiceNamespace.accepts(name) && (1...255).contains(name.utf8.count) &&
             name.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }
     }
 }

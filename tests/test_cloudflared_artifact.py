@@ -80,12 +80,12 @@ class ConnectorArtifactTests(unittest.TestCase):
             self.assertEqual({p.name for p in cache.iterdir()}, {'input.lock'})
 
     def test_signature_check_requires_the_expected_identifier_hash_and_runtime(self):
-        valid = 'Identifier=dev.remozio.cloudflared.debug\nCDHash=' + 'a' * 40 + '\nTeamIdentifier=not set\nCodeDirectory flags=0x10000(runtime)\n'
+        valid = 'Identifier=dev.sebastiano.remozio.macos.cloudflared.debug\nCDHash=' + 'a' * 40 + '\nTeamIdentifier=not set\nCodeDirectory flags=0x10000(runtime)\n'
         with patch.object(ARTIFACT, 'command', side_effect=[subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, '', valid)]):
-            digest, team = ARTIFACT.signed_tool_identity(Path('/owned-fixture'), 'dev.remozio.cloudflared.debug')
+            digest, team = ARTIFACT.signed_tool_identity(Path('/owned-fixture'), 'dev.sebastiano.remozio.macos.cloudflared.debug')
         self.assertEqual(digest, bytes.fromhex('a' * 40)); self.assertIsNone(team)
         for invalid in (valid.replace('.debug', '.other'), valid.replace('(runtime)', '(none)'), valid.replace('a' * 40, 'bad')):
             with self.subTest(invalid=invalid), patch.object(ARTIFACT, 'command', side_effect=[
                     subprocess.CompletedProcess([], 0), subprocess.CompletedProcess([], 0, '', invalid)]):
-                with self.assertRaises(ValueError): ARTIFACT.signed_tool_identity(Path('/owned-fixture'), 'dev.remozio.cloudflared.debug')
+                with self.assertRaises(ValueError): ARTIFACT.signed_tool_identity(Path('/owned-fixture'), 'dev.sebastiano.remozio.macos.cloudflared.debug')
 

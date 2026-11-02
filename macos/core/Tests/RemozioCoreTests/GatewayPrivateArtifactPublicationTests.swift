@@ -21,7 +21,7 @@ final class GatewayPrivateArtifactPublicationTests: XCTestCase {
         let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
             privateKeyID: "fixture-key", privateKeyPEM: Self.pem.get())
         let material = try GatewayPreparationMaterial.create(runtime: f.material.reference, provider: provider,
-            senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+            senderID: "123", packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
         let shared = URL(fileURLWithPath: "/private/tmp/remozio-gateway-files-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: shared, withIntermediateDirectories: false)
         defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: shared)) }

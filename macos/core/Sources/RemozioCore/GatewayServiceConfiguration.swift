@@ -131,7 +131,7 @@ public struct GatewayServiceConfiguration: Sendable {
               Self.validPath(directoryPath), Self.validPath(providerPath), Self.validPath(receiptKeyPath), providerPath != receiptKeyPath,
               !providerPath.hasPrefix(directoryPath + "/"), !receiptKeyPath.hasPrefix(directoryPath + "/"),
               providerPath != directoryPath, receiptKeyPath != directoryPath,
-              serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+              MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
             throw GatewayServiceError.invalidConfiguration
         }

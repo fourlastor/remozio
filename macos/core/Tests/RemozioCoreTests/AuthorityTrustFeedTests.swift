@@ -248,7 +248,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         DirectApprovalTransportHost(macID: mac, accountID: account, factory: { generation, _, _, _ in listeners.make(generation) }, validatePeer: { _, _ in })
     }
     private func registrationOffer() throws -> PhonePushRegistrationFrame {
-        try .offer(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+        try .offer(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
     }
     func testUnsupportedRegistrationKeepsPrimaryApprovalTrustAlive() async throws {
         let capabilities: [UInt64?] = [0, nil]
@@ -317,7 +317,7 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         await feed.close(); await host.close()
     }
     private func recoveryOffer() throws -> PhonePushRecoveryFrame {
-        try .resume(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+        try .resume(correlationID: Data(repeating: 9, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
     }
     func testUnsupportedRecoveryKeepsPrimaryApprovalTrustAlive() async throws {
         let capabilities: [UInt64?] = [0, nil]

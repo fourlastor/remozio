@@ -55,9 +55,9 @@ final class PhonePushRegistrationFrameTests: XCTestCase {
     }
     func testProviderRoutingHintsAreBoundedAndRedacted() throws {
         for token in ["", "space token", "newline\n", String(repeating: "x", count: 4097)] {
-            XCTAssertThrowsError(try PhonePushTokenOffer(token: token, projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            XCTAssertThrowsError(try PhonePushTokenOffer(token: token, projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         }
-        let offer = try PhonePushTokenOffer(token: "secret-provider-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android")
+        let offer = try PhonePushTokenOffer(token: "secret-provider-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android")
         XCTAssertEqual(String(reflecting: offer), "PhonePushTokenOffer(redacted)")
         XCTAssertThrowsError(try PhonePushRegistrationFrame.offer(correlationID: Data(count: 15), offer: offer).encode())
         XCTAssertNotEqual(PhonePushRegistrationOutcome.proofCommitted.rawValue, PhonePushRegistrationOutcome.mappingConfirmed.rawValue)

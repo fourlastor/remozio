@@ -16,7 +16,7 @@ from macos_build_checks import require, verify_executable
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'experiments/service-lifecycle'
 METADATA = ROOT / 'macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift'
-APP_ID = 'dev.remozio.experiments.lifecycle'
+APP_ID = 'dev.sebastiano.remozio.macos.experiments.lifecycle'
 ROLES = {'session': ('LaunchAgents', 'RemozioLifecycleSession'),
          'authority': ('LaunchDaemons', 'RemozioLifecycleAuthority'),
          'transport': ('LaunchDaemons', 'RemozioLifecycleTransport'),
@@ -145,7 +145,7 @@ def controls(app, identity):
         require(run(str(controller), '--validate-signing', check=False).returncode == 78,
                 'A fresh unnotarized build passed notarization preflight')
         checks.extend(['developer-id-publisher-validation', 'unnotarized-registration-refusal'])
-    for key, value in [('Label', 'dev.remozio.authority'), ('ProgramArguments', ['unexpected']),
+    for key, value in [('Label', 'dev.sebastiano.remozio.macos.authority'), ('ProgramArguments', ['unexpected']),
                        ('UserName', 'nobody'), ('KeepAlive', True)]:
         with tempfile.TemporaryDirectory(prefix='remozio-service-mutation-') as temporary:
             copy = Path(temporary) / app.name

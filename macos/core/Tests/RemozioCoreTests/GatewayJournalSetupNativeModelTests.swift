@@ -22,7 +22,7 @@ final class GatewayJournalSetupNativeModelTests: XCTestCase {
         let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
             privateKeyID: "fixture-key", privateKeyPEM: Self.pem.get())
         let material = try GatewayPreparationMaterial.create(runtime: f.material.reference, provider: provider,
-            senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+            senderID: "123", packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
         let settings = try GatewayServiceSettings(delivery: .init(maximumFlights: 4, minimumSendIntervalMillis: 1000),
             probe: .init(maximumAttempts: 3, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 300),
             wake: .init(maximumEntries: 32, maximumAttempts: 3, minimumEnrollmentIntervalMillis: 1000, maximumLifetimeMillis: 300000, maximumTTLSeconds: 300))

@@ -63,7 +63,7 @@ import Sparkle
         return
     }
     guard arguments[1] == "probe", let bundle = Bundle(url: root),
-          bundle.bundleIdentifier?.hasPrefix("dev.remozio.experiment.sparkle.") == true else {
+          bundle.bundleIdentifier?.hasPrefix("dev.sebastiano.remozio.macos.experiments.sparkle.") == true else {
         throw NSError(domain: "Expected disposable probe bundle", code: 1)
     }
     guard Bundle.main.bundleIdentifier == bundle.bundleIdentifier,

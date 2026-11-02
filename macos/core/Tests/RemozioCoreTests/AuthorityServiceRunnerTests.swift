@@ -134,8 +134,8 @@ final class AuthorityServiceRunnerTests: XCTestCase {
 
     private func requestInputs(_ index: UInt8) throws -> AuthorityRequestStartupConfiguration {
         let service = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.remozio.authority",
-            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: index, count: 20)], transportUID: 502,
+            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: index, count: 20)], transportUID: 502,
             continuityDirectory: "/Library/Application Support/Remozio/continuity")
         return try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/keys/authority-\(index).cbor",
             authorityPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation)

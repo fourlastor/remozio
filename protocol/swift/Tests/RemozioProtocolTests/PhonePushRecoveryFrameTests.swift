@@ -78,7 +78,7 @@ final class PhonePushRecoveryFrameTests: XCTestCase {
         let frame = PhonePushRecoveryFrame.state(correlationID: Data(0..<16), state: state)
         XCTAssertNil(try frame.encode().range(of: binding().challenge))
         XCTAssertEqual(String(reflecting: state), "PhonePushRecoveryState(redacted)")
-        let offer = try PhonePushTokenOffer(token: "private-provider-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android")
+        let offer = try PhonePushTokenOffer(token: "private-provider-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android")
         XCTAssertFalse(String(reflecting: PhonePushRecoveryFrame.resume(correlationID: Data(0..<16), offer: offer)).contains(offer.token))
     }
     func testInvalidStateAgesAndCorrelationsFailBeforeEncoding() throws {

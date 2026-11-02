@@ -165,8 +165,8 @@ final class GatewayJournalInitializationTests: XCTestCase {
         let config = try GatewayServiceConfiguration(registration: reference.gateway, receiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
             directoryPath: "/Library/Remozio/unused", providerPath: "/Library/Remozio/provider.json", receiptKeyPath: "/Library/Remozio/receipt.cbor",
             serviceUID: f.services.claims.first(where: { $0.role == .gateway })!.number, ownerUID: f.account.ownerUID,
-            serviceName: "dev.remozio.fixture.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
-            authorityHashes: [Data(repeating: 1, count: 20)], project: "synthetic-project", packageName: "dev.remozio.android", settings: settings)
+            serviceName: "dev.remozio.fixture.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.sebastiano.remozio.macos.authority",
+            authorityHashes: [Data(repeating: 1, count: 20)], project: "synthetic-project", packageName: "dev.sebastiano.remozio.android", settings: settings)
         let identity = GatewayJournalFileIdentity(directory: .init(device: 0, inode: 0), writer: .init(device: 0, inode: 0), database: .init(device: 0, inode: 0))
         XCTAssertThrowsError(try GatewayJournalInitialization.resume(configuration: config, expected: identity, mayInitializeEmpty: true)) {
             XCTAssertEqual($0 as? GatewayServiceError, .wrongAccount)

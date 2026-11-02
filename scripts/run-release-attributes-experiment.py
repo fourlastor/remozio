@@ -66,7 +66,7 @@ def signed_controls(root, identity, team):
     resource.parent.mkdir()
     resource.write_bytes(b"disposable resource")
     (contents / "Info.plist").write_bytes(plistlib.dumps({
-        "CFBundleExecutable": "Fixture", "CFBundleIdentifier": "dev.remozio.attribute-fixture",
+        "CFBundleExecutable": "Fixture", "CFBundleIdentifier": "dev.sebastiano.remozio.macos.experiments.attribute-fixture",
         "CFBundleName": "Fixture", "CFBundlePackageType": "APPL", "CFBundleVersion": "1"}))
     source = root / "main.c"
     source.write_text("int main(void) { return 0; }\n")

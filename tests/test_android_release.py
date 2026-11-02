@@ -10,7 +10,7 @@ spec.loader.exec_module(release)
 
 
 class AndroidReleaseTests(unittest.TestCase):
-    metadata = "package: name='dev.remozio.android' versionCode='2' versionName='0.2.0'\nminSdkVersion:'37'\ntargetSdkVersion:'37'\n"
+    metadata = "package: name='dev.sebastiano.remozio.android' versionCode='2' versionName='0.2.0'\nminSdkVersion:'37'\ntargetSdkVersion:'37'\n"
     fingerprint = 'a' * 64
 
     def test_versions_follow_updater_contract(self):
@@ -22,7 +22,7 @@ class AndroidReleaseTests(unittest.TestCase):
 
     def test_rejects_wrong_package_version_sdk_and_debug(self):
         release.check_metadata(self.metadata, '0.2.0', 2)
-        for text in (self.metadata.replace('dev.remozio.android', 'dev.remozio.android.debug'),
+        for text in (self.metadata.replace('dev.sebastiano.remozio.android', 'dev.sebastiano.remozio.android.debug'),
                      self.metadata.replace("versionCode='2'", "versionCode='1'"),
                      self.metadata.replace("minSdkVersion:'37'", "minSdkVersion:'36'"),
                      self.metadata.replace("versionName='0.2.0'", "versionName='0.1.0'"),

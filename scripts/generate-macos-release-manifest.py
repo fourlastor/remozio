@@ -187,13 +187,13 @@ def generate(environment):
     products = Path(environment['BUILT_PRODUCTS_DIR'])
     suffix = '.debug' if environment['CONFIGURATION'] == 'Debug' else ''
     identifier = environment['PRODUCT_BUNDLE_IDENTIFIER']
-    if identifier != 'dev.remozio.mac' + suffix or environment['MACOSX_DEPLOYMENT_TARGET'] != '26.0':
+    if identifier != 'dev.sebastiano.remozio.macos' + suffix or environment['MACOSX_DEPLOYMENT_TARGET'] != '26.0':
         raise ValueError('unsupported app identity or baseline')
     release, build = environment['MARKETING_VERSION'], environment['CURRENT_PROJECT_VERSION']
     components = []
     teams = set()
     for role, name, path, product, folder in COMPONENTS:
-        expected = 'dev.remozio.' + name + suffix
+        expected = 'dev.sebastiano.remozio.macos' + ('' if name == 'mac' else '.' + name) + suffix
         if product:
             plist = plistlib.loads((source / folder / 'Info.plist').read_bytes())
             generation = plist['RemozioSecurityGeneration']
@@ -207,7 +207,7 @@ def generate(environment):
         requests = [{0: 0, 1: 1, 2: schema, 3: [0, 2], 4: [1, 2, 4, 5]} for schema in (1, 2, 3)] if role in (2, 4) else []
         components.append({0: role, 1: expected, 2: int(generation), 3: path, 4: digest, 5: component_build,
                            6: team, 7: declarations(role), 8: requests, 9: 0})
-    connector_identifier = 'dev.remozio.cloudflared' + suffix
+    connector_identifier = 'dev.sebastiano.remozio.macos.cloudflared' + suffix
     connector_hash, connector_team = signed_connector_identity(products / 'RemozioCloudflared', connector_identifier)
     teams.add(connector_team)
     connector_path = 'Contents/Helpers/RemozioCloudflared'

@@ -15,7 +15,7 @@ final class GatewayWakeSignerTests: XCTestCase {
                                path: String = "/Library/Remozio/transport/wake.cbor") throws -> GatewayWakeSignerConfiguration {
         try GatewayWakeSignerConfiguration(binding: scope ?? binding(), credentialID: credential, transportUID: transport,
             ownerUID: owner, gatewayUID: gateway, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 7, count: 20)],
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 7, count: 20)],
             custody: custody, keyRecordPath: path, publicKey: key.publicKey.x963Representation)
     }
     private func record(key: P256.Signing.PrivateKey, scope: GatewaySubmissionBinding? = nil,

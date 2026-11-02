@@ -33,24 +33,24 @@ def check():
     run('codesign', '--verify', '--deep', '--strict', str(app))
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     require(info['LSMinimumSystemVersion'] == '26.0', 'Wrong app deployment target')
-    verify_executable(app / 'Contents/MacOS/RemozioPackaging', 'dev.remozio.experiments.app')
+    verify_executable(app / 'Contents/MacOS/RemozioPackaging', 'dev.sebastiano.remozio.macos.experiments.app')
     for role, (folder, executable) in ROLES.items():
         relative_path = f'Contents/Helpers/{executable}'
-        plist_path = app / f'Contents/Library/{folder}/dev.remozio.experiments.{role}.plist'
+        plist_path = app / f'Contents/Library/{folder}/dev.sebastiano.remozio.macos.experiments.{role}.plist'
         manifest = plistlib.loads(plist_path.read_bytes())
-        expected = {'Label': f'dev.remozio.experiments.{role}', 'BundleProgram': relative_path,
+        expected = {'Label': f'dev.sebastiano.remozio.macos.experiments.{role}', 'BundleProgram': relative_path,
                     'ProgramArguments': [executable, '--describe'], 'RunAtLoad': False}
         if role == 'session':
             expected['LimitLoadToSessionType'] = 'Aqua'
         require(manifest == expected, f'{role}: unexpected launch manifest')
         binary = app / relative_path
-        verify_executable(binary, f'dev.remozio.experiments.{role}')
+        verify_executable(binary, f'dev.sebastiano.remozio.macos.experiments.{role}')
         require(json.loads(run(str(binary), '--describe').stdout) ==
                 {'role': f'{role}-probe', 'capability': 'packaging-only'}, f'{role}: wrong probe')
         require(run(str(binary), check=False).returncode == 69, f'{role}: unexpected default behavior')
 
     for relative_path in ('Contents/Helpers/RemozioAuthorityProbe',
-                          'Contents/Library/LaunchAgents/dev.remozio.experiments.session.plist'):
+                          'Contents/Library/LaunchAgents/dev.sebastiano.remozio.macos.experiments.session.plist'):
         with tempfile.TemporaryDirectory(prefix='remozio-package-check-') as directory:
             copy = Path(directory) / app.name
             shutil.copytree(app, copy)

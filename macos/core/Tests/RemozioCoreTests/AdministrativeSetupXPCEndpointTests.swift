@@ -15,7 +15,7 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
             0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(epoch), 4: .unsigned(1),
             5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 3)
-        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
         return .init(descriptor: descriptor, codePolicy: policy, capabilities: .init(contracts: [contract: feature.map { [$0] } ?? []]),
             allowedContracts: [contract], installCommandReplay: replay)
@@ -41,7 +41,7 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
         let value = try InstallationInventory(macID: mac, installationID: Data(repeating: 5, count: 16), revision: Data(repeating: 6, count: 16),
             bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: release, count: 32),
             accounts: [.init(accountID: account, ownerUID: getuid())], services: [.init(role: .authority, kind: .daemon,
-                domainUID: nil, executionUID: 0, label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: account)])
+                domainUID: nil, executionUID: 0, label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account)])
         try store.upgradeInventoryStorage()
         return try store.writeInventory(value, expectedRevision: nil)
     }
@@ -341,7 +341,7 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
             let original = try machine.writeInventory(.init(macID: base.macID, installationID: base.installationID,
                 revision: base.revision, bundlePath: base.bundlePath, releaseDigest: base.releaseDigest, accounts: base.accounts,
                 services: base.services + [.init(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
-                    label: "dev.remozio.setup", plistName: "dev.remozio.setup.plist")]), expectedRevision: base.revision)
+                    label: "dev.sebastiano.remozio.macos.setup", plistName: "dev.sebastiano.remozio.macos.setup.plist")]), expectedRevision: base.revision)
             let expected = try begin(root, machine, original)
             var observed: InstallationInventory?
             let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: original.releaseDigest,
@@ -360,7 +360,7 @@ final class AdministrativeSetupXPCEndpointTests: XCTestCase {
                 if change == 1 { services = original.services.filter { $0.role != .setupController } }
                 else if change == 2 {
                     services = original.services.filter { $0.role != .setupController } + [try .init(role: .setupController,
-                        kind: .daemon, domainUID: nil, executionUID: 0, label: "dev.remozio.other", plistName: "dev.remozio.setup.plist")]
+                        kind: .daemon, domainUID: nil, executionUID: 0, label: "dev.remozio.other", plistName: "dev.sebastiano.remozio.macos.setup.plist")]
                 } else { services = original.services }
                 let next = try InstallationInventory(macID: original.macID, installationID: original.installationID,
                     revision: original.revision, bundlePath: change == 0 ? "/Library/Other/Remozio.app" : original.bundlePath,

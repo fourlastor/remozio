@@ -27,7 +27,7 @@ public struct InstallationServiceManifest {
               arguments[2] == configurationPath,
               arguments.allSatisfy({ !$0.utf8.contains(0) && $0.utf8.count < 4096 }),
               machServices.count <= 32,
-              machServices.allSatisfy({ ReleaseManifest.validToken($0) && $0.hasPrefix("dev.remozio.") }) else {
+              machServices.allSatisfy({ ReleaseManifest.validToken($0) && MacServiceNamespace.accepts($0) }) else {
             throw InstallationServiceManifestError.invalidExpectation
         }
         if declaration.kind == .agent {

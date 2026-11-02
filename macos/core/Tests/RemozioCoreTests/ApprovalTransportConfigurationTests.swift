@@ -9,8 +9,8 @@ import XCTest
 final class ApprovalTransportConfigurationTests: XCTestCase {
     private func configuration(owner: UInt32 = 501, service: UInt32 = 401, reference: Data = Data([1, 2, 3])) throws -> ApprovalTransportConfiguration {
         try ApprovalTransportConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            ownerUID: owner, serviceUID: service, authorityServiceName: "dev.remozio.authority",
-            teamID: "TEAMID1234", authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 3, count: 20)],
+            ownerUID: owner, serviceUID: service, authorityServiceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "TEAMID1234", authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 3, count: 20)],
             identityReference: reference, identityPublicKeyInfo: P256.Signing.PrivateKey().publicKey.derRepresentation)
     }
 

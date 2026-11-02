@@ -40,12 +40,12 @@ final class GatewayPreparationMaterialTests: XCTestCase {
         try body(account, runtime, directory)
     }
     private func make(_ runtime: RuntimeMaterialReference) throws -> GatewayPreparationMaterial {
-        try .create(runtime: runtime, provider: provider(), senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+        try .create(runtime: runtime, provider: provider(), senderID: "123", packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
     }
     private func path(_ directory: ProtectedSetupDirectory) -> String { directory.path + "/gateway-material.cbor" }
     private func restore(_ directory: ProtectedSetupDirectory, _ runtime: RuntimeMaterialReference,
                          expected: GatewayMaterialReference? = nil, provider supplied: SetupFCMConfiguration? = nil,
-                         sender: String = "123", package: String = "dev.remozio.android", verify: () throws -> Void = {},
+                         sender: String = "123", package: String = "dev.sebastiano.remozio.android", verify: () throws -> Void = {},
                          make: () throws -> GatewayPreparationMaterial,
                          stage: (AdministrativeSetupPublication.Stage) throws -> Void = { _ in }) throws -> GatewayPreparationMaterial {
         try GatewayMaterialPreparation.restoreOrCreate(directory: directory, owner: getuid(), runtime: runtime, expected: expected,
@@ -84,7 +84,7 @@ final class GatewayPreparationMaterialTests: XCTestCase {
             let config = try GatewayServiceConfiguration(registration: runtime.gateway, receiptPublicKey: value.phonePush.gatewayReceiptPublicKey,
                 directoryPath: "/Library/Remozio/gateway", providerPath: "/Library/Remozio/provider.json",
                 receiptKeyPath: "/Library/Remozio/receipt.cbor", serviceUID: 20001, ownerUID: runtime.services.ownerUID,
-                serviceName: "dev.remozio.fixture.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
+                serviceName: "dev.remozio.fixture.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.sebastiano.remozio.macos.authority",
                 authorityHashes: [Data(repeating: 1, count: 20)], project: value.phonePush.projectID,
                 packageName: value.phonePush.packageName, settings: settings)
             var reads = 0
@@ -100,7 +100,7 @@ final class GatewayPreparationMaterialTests: XCTestCase {
             let wakeRecord = try value.wakeKeyRecord
             let wakeConfig = try GatewayWakeSignerConfiguration(binding: wakeRecord.binding, credentialID: wakeRecord.credentialID,
                 transportUID: 20000, ownerUID: runtime.services.ownerUID, gatewayUID: 20001,
-                serviceName: "dev.remozio.fixture.gateway.wake", teamID: "ABCDEFGHIJ", gatewayIdentifier: "dev.remozio.gateway",
+                serviceName: "dev.remozio.fixture.gateway.wake", teamID: "ABCDEFGHIJ", gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway",
                 gatewayHashes: [Data(repeating: 2, count: 20)], custody: .protectedFile,
                 keyRecordPath: "/Library/Remozio/wake.cbor", publicKey: wakeRecord.publicKey)
             let signer = try GatewayWakeSigner.load(configuration: wakeConfig, realUID: 20000, effectiveUID: 20000) { path, owner in
@@ -146,9 +146,9 @@ final class GatewayPreparationMaterialTests: XCTestCase {
         try fixture { _, runtime, directory in
             let reference = try runtime.reference
             let value = try restore(directory, reference, make: { try self.make(reference) })
-            for (provider, sender, package) in [(try self.provider(keyID: "replacement-key"), "123", "dev.remozio.android"),
-                (try self.provider(project: "other-project"), "123", "dev.remozio.android"),
-                (try self.provider(), "456", "dev.remozio.android"), (try self.provider(), "123", "other.package")] {
+            for (provider, sender, package) in [(try self.provider(keyID: "replacement-key"), "123", "dev.sebastiano.remozio.android"),
+                (try self.provider(project: "other-project"), "123", "dev.sebastiano.remozio.android"),
+                (try self.provider(), "456", "dev.sebastiano.remozio.android"), (try self.provider(), "123", "other.package")] {
                 XCTAssertThrowsError(try restore(directory, reference, provider: provider, sender: sender, package: package,
                     make: { XCTFail("Never reset changed provider inputs"); throw Refused() })) {
                     XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
@@ -225,7 +225,7 @@ final class GatewayPreparationMaterialTests: XCTestCase {
             let value = try make(runtime.reference)
             for key in [runtime.services.authorityPublicKey, try runtime.reference.transportPublicKeyX963] {
                 let policy = try AuthorityPhonePushStartupConfiguration(projectID: "synthetic-project", senderID: "123",
-                    packageName: "dev.remozio.android", gatewayReceiptPublicKey: key)
+                    packageName: "dev.sebastiano.remozio.android", gatewayReceiptPublicKey: key)
                 XCTAssertThrowsError(try GatewayMaterialReference(materialID: value.materialID, runtime: runtime.reference,
                     phonePush: policy, materialDigest: Data(repeating: 1, count: 32),
                     wakeCredentialID: value.wakeCredentialID, wakePublicKey: value.reference.wakePublicKey))
@@ -240,7 +240,7 @@ final class GatewayPreparationMaterialTests: XCTestCase {
     func testFileWakeCreationRequiresConsentAndNeverReusesAnotherKeyRole() throws {
         try fixture { _, runtime, _ in
             XCTAssertThrowsError(try GatewayPreparationMaterial.create(runtime: runtime.reference, provider: provider(), senderID: "invalid",
-                packageName: "dev.remozio.android", fileWakeCustodyAccepted: false)) {
+                packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: false)) {
                 XCTAssertEqual($0 as? GatewayPreparationError, .custodyNotAccepted)
             }
             let value = try make(runtime.reference)
@@ -253,7 +253,7 @@ final class GatewayPreparationMaterialTests: XCTestCase {
     func testNativePreparationRefusesOrdinaryIdentityBeforeProtectedAccess() throws {
         try fixture { account, runtime, _ in
             XCTAssertThrowsError(try GatewayMaterialPreparation.prepare(account: account, runtime: runtime.reference, expected: nil,
-                provider: provider(), senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true, verifyCurrent: { XCTFail("No protected access") })) {
+                provider: provider(), senderID: "123", packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true, verifyCurrent: { XCTFail("No protected access") })) {
                 XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
             }
         }

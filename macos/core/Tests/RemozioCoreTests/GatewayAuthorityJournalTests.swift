@@ -930,7 +930,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
     private func installSubmissionFeatures(_ db: JournalDatabase) throws {
         try db.write { tx in
             _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
-                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                     installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
             ]), expectedRevision: nil)
             try tx.installCommandSubmissionReplay()
@@ -963,7 +963,7 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try fixture.scalar("PRAGMA user_version"), "12")
         try db.write { tx in
             _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
-                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                     installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
             ]), expectedRevision: nil)
             try tx.installCommandSubmissionReplay()

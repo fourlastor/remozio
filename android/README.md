@@ -11,8 +11,8 @@ Set `ANDROID_HOME` to that SDK and run:
 ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 ```
 
-The build writes the debug APK to `android/app/build/outputs/apk/debug/android-app-debug.apk`. Its package ID is `dev.remozio.android.debug`.
-Production uses `dev.remozio.android` and needs a separately provisioned signing identity.
+The build writes the debug APK to `android/app/build/outputs/apk/debug/android-app-debug.apk`. Its package ID is `dev.sebastiano.remozio.android.debug`.
+Production uses `dev.sebastiano.remozio.android` and needs a separately provisioned signing identity.
 
 The [release artifact procedure](releases.md) builds and verifies upload candidates. Production signing and publication still need configuration.
 

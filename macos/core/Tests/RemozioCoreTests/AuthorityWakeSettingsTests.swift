@@ -49,7 +49,7 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
              accountID: Data = Data(repeating: 2, count: 16)) throws {
             h = try .init(configureGateway: false, gatewayLedgerEnabled: false, macID: macID, accountID: accountID)
             journal = AuthorityJournal(requests: h.owner)
-            options = try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+            options = try .init(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
                 gatewayReceiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
                 maximumControls: 30, candidateLifetimeMilliseconds: 1000)
             let h = h

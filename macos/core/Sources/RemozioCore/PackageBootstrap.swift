@@ -46,7 +46,7 @@ public enum PackageBootstrap {
     }
     private static func verifyCaller(_ profile: PackageBootstrapProfile) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let requirement = try XPCPeerPolicy(teamID: profile.teamID, componentIdentifier: "dev.remozio.setup-controller",
+        let requirement = try XPCPeerPolicy(teamID: profile.teamID, componentIdentifier: "dev.sebastiano.remozio.macos.setup-controller",
             approvedCodeDirectoryHashes: [profile.setupHash], expectedUserID: 0).requirement
         try DynamicCodeValidation.validateSelf(requirement: requirement)
     }
@@ -96,7 +96,7 @@ public enum PackageBootstrap {
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
         defer { placement.close() }
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-        let release = try SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.remozio.mac")
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.sebastiano.remozio.macos")
         try profile.validate(release)
         let shared = try ProtectedSetupDirectory(anchor: "/", relativePath: String(sharedPath.dropFirst()), owner: 0,
             visibility: .sharedMetadata, createIfMissing: false)
@@ -104,7 +104,7 @@ public enum PackageBootstrap {
         let value = try body(shared, release, placement)
         try shared.validate(); try placement.validate()
         _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-        try profile.validate(SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.remozio.mac"))
+        try profile.validate(SignedReleaseInspection.inspect(bundle, teamID: profile.teamID, appIdentifier: "dev.sebastiano.remozio.macos"))
         return value
     }
     // Ordinary-owner fixtures inspect real private state. They do not establish package authorization or signatures.

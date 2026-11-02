@@ -43,7 +43,7 @@ final class RuntimeAuditUpgradeDependenciesTests: XCTestCase {
         let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
             privateKeyID: "fixture-key", privateKeyPEM: Self.pem.get())
         return try .create(runtime: preparation.intent.source, provider: provider, senderID: "123456789",
-            packageName: "dev.remozio.android", fileWakeCustodyAccepted: true,
+            packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true,
             maximumControls: 77, candidateLifetimeMilliseconds: 98765)
     }
     func journal(_ material: GatewayPreparationMaterial, _ preparation: RuntimeAuditUpgradePreparation,

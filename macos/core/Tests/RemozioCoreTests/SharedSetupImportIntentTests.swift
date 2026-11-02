@@ -22,7 +22,7 @@ final class SharedSetupImportIntentTests: XCTestCase {
                 privateKeyID: keyID, privateKeyPEM: Self.pem.get()),
             cloudflare: .init(accountID: String(repeating: "a", count: 32), zoneID: String(repeating: "b", count: 32),
                 dnsSuffix: "remozio.example.invalid", apiToken: token),
-            pushClient: .init(projectID: "synthetic-project", senderID: "123456789", packageName: "dev.remozio.android"),
+            pushClient: .init(projectID: "synthetic-project", senderID: "123456789", packageName: "dev.sebastiano.remozio.android"),
             appPreferences: preferences ? base.appPreferences : nil)
     }
     private let limits = try! CBORLimits(maxBytes: 70_000, maxDepth: 2, maxItems: 40)

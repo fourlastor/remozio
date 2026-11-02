@@ -1469,12 +1469,12 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
                        EnrolledApprovalKey(id: id(7), keyClass: .decision, publicKey: decisionKey.publicKey.x963Representation)]))
         let journal = try journalOwner(fixture, enrollment: enrollment)
         defer { try? journal.close() }
-        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: true)
         let installed = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
         let draft = try draft(), time = now()
         let payload = try journal.withRequests { try $0.admitFixture(draft, now: time, receiptTimeMs: nil) }
-        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
             approvedCodeDirectoryHashes: [id(3, 20)], expectedUserID: 501)
         let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peer, macID: id(1), accountID: id(2),
             maximumPayloadBytes: 4096, minimumEnvelopeVersion: 1, auditVersions: [])
@@ -1507,7 +1507,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try access.exchangeRequest(binding: stale, requestID: payload.requestID, decisionFrame: nil) { _, _, _, _ in
             XCTFail("Stale enrollment reached exchange"); return nil
         }) { XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision) }
-        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: installed.revision) }
         XCTAssertThrowsError(try access.requestFrame(binding: binding, requestID: payload.requestID) { _, _, _ in
@@ -1574,7 +1574,7 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
     }
     private func providerConfiguration(_ fixture: Fixture, maximum: Int = 4096, account: UInt8 = 2) throws -> AuthorityServiceConfiguration {
         try AuthorityServiceConfiguration(macID: id(1), accountID: id(account), journalDirectory: fixture.path.replacingOccurrences(of: "/journal.sqlite", with: ""),
-            serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [id(3, 20)], transportUID: 501, maximumPayloadBytes: maximum)
     }
     private func providers(_ configuration: AuthorityServiceConfiguration, _ environment: ProviderEnvironment) throws -> AuthorityRequestProviders {
@@ -1932,10 +1932,10 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
 
 extension ApprovalRequestCoordinatorTests {
     private func noticeAccess(_ journal: AuthorityJournal) throws -> (AuthorityTransportAccess, AuthorityPeerBinding) {
-        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let entry = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
-        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+        let peer = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
             approvedCodeDirectoryHashes: [id(3, 20)], expectedUserID: 501)
         let access = try AuthorityTransportAccess(journal: journal, peerPolicy: peer, macID: id(1), accountID: id(2),
             maximumPayloadBytes: 4096, minimumEnvelopeVersion: 1, auditVersions: [])
@@ -2000,7 +2000,7 @@ extension ApprovalRequestCoordinatorTests {
                 XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
             }
         let policy = try journal.read { try XCTUnwrap($0.codePolicy()) }
-        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let changed = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 2, minimumGeneration: 2, codeDirectoryHash: id(4, 20), active: true)
         _ = try journal.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [changed]), expectedRevision: policy.revision) }
         XCTAssertThrowsError(try access.exchangeRequest(binding: binding, requestID: id(20), decisionFrame: Data([1]),
@@ -2135,7 +2135,7 @@ extension ApprovalRequestCoordinatorTests {
         defer { try? journal.close() }
         let (access, binding) = try noticeAccess(journal)
         let policy = try XCTUnwrap(journal.read { try $0.codePolicy() }), setupID = id(31)
-        let disabled = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let disabled = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: id(3, 20), active: false)
         let next = try AuthorityCodePolicy(entries: [disabled]), calls = Mutex(0)
         let handler: AuthorityPairingReceiptProvider = { _, _, _, _ in

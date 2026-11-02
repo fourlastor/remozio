@@ -25,11 +25,11 @@ def check(configuration):
 
 def inspect_built_app(configuration):
     app = BUILD / f'DerivedData/Build/Products/{configuration}/Remozio.app'
-    identity = 'dev.remozio.mac.debug' if configuration == 'Debug' else 'dev.remozio.mac'
+    identity = 'dev.sebastiano.remozio.macos.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos'
     run('codesign', '--verify', '--deep', '--strict', str(app))
     verify_executable(app / 'Contents/MacOS/Remozio', identity)
     authority = app / 'Contents/Library/LaunchServices/RemozioAuthority'
-    authority_identity = 'dev.remozio.authority.debug' if configuration == 'Debug' else 'dev.remozio.authority'
+    authority_identity = 'dev.sebastiano.remozio.macos.authority.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.authority'
     require(authority.is_file(), 'Missing embedded authority executable')
     verify_executable(authority, authority_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(authority))
@@ -43,7 +43,7 @@ def inspect_built_app(configuration):
                                     text=True, capture_output=True, timeout=5)
             require(denied.returncode == 77, 'Authority must reject non-root startup before reading configuration')
     setup = app / 'Contents/Library/LaunchServices/RemozioSetup'
-    setup_identity = 'dev.remozio.setup-controller.debug' if configuration == 'Debug' else 'dev.remozio.setup-controller'
+    setup_identity = 'dev.sebastiano.remozio.macos.setup-controller.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.setup-controller'
     require(setup.is_file(), 'Missing embedded setup executable')
     verify_executable(setup, setup_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(setup))
@@ -66,7 +66,7 @@ def inspect_built_app(configuration):
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
     transport = app / 'Contents/Library/LaunchServices/RemozioTransport'
-    transport_identity = 'dev.remozio.transport.debug' if configuration == 'Debug' else 'dev.remozio.transport'
+    transport_identity = 'dev.sebastiano.remozio.macos.transport.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.transport'
     require(transport.is_file(), 'Missing embedded approval transport')
     verify_executable(transport, transport_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(transport))
@@ -89,7 +89,7 @@ def inspect_built_app(configuration):
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
     gateway = app / 'Contents/Library/LaunchServices/RemozioGateway'
-    gateway_identity = 'dev.remozio.gateway.debug' if configuration == 'Debug' else 'dev.remozio.gateway'
+    gateway_identity = 'dev.sebastiano.remozio.macos.gateway.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.gateway'
     require(gateway.is_file(), 'Missing embedded push gateway')
     verify_executable(gateway, gateway_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(gateway))
@@ -109,14 +109,14 @@ def inspect_built_app(configuration):
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
     child = app / 'Contents/Helpers/RemozioCommandChild'
-    child_identity = 'dev.remozio.command-child.debug' if configuration == 'Debug' else 'dev.remozio.command-child'
+    child_identity = 'dev.sebastiano.remozio.macos.command-child.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.command-child'
     require(child.is_file(), 'Missing embedded command child')
     verify_executable(child, child_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(child))
     child_original = BUILD / f'DerivedData/Build/Products/{configuration}/RemozioCommandChild'
     require(child.read_bytes() == child_original.read_bytes(), 'Embedding changed the signed command child')
     frontend = app / 'Contents/Helpers/remozio'
-    frontend_identity = 'dev.remozio.command-frontend.debug' if configuration == 'Debug' else 'dev.remozio.command-frontend'
+    frontend_identity = 'dev.sebastiano.remozio.macos.command-frontend.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.command-frontend'
     require(frontend.is_file(), 'Missing embedded command frontend')
     verify_executable(frontend, frontend_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(frontend))
@@ -152,7 +152,7 @@ def inspect_built_app(configuration):
                 os.close(read_descriptor)
                 if write_descriptor >= 0: os.close(write_descriptor)
     monitor = app / 'Contents/Helpers/RemozioCommandMonitor'
-    monitor_identity = 'dev.remozio.command-monitor.debug' if configuration == 'Debug' else 'dev.remozio.command-monitor'
+    monitor_identity = 'dev.sebastiano.remozio.macos.command-monitor.debug' if configuration == 'Debug' else 'dev.sebastiano.remozio.macos.command-monitor'
     require(monitor.is_file(), 'Missing embedded command monitor')
     verify_executable(monitor, monitor_identity)
     run('codesign', '--verify', '--strict', '-R', '=info[RemozioSecurityGeneration] = "1"', str(monitor))
@@ -171,7 +171,7 @@ def inspect_built_app(configuration):
             os.close(read_descriptor)
             if write_descriptor >= 0: os.close(write_descriptor)
     connector = app / RELATIVE_PATH
-    connector_identifier = 'dev.remozio.cloudflared' + ('.debug' if configuration == 'Debug' else '')
+    connector_identifier = 'dev.sebastiano.remozio.macos.cloudflared' + ('.debug' if configuration == 'Debug' else '')
     require(connector.is_file(), 'Missing pinned connector')
     require(run('lipo', '-archs', str(connector)).stdout.strip() == 'arm64', 'Unexpected connector architecture')
     signed_tool_identity(connector, connector_identifier)
@@ -195,14 +195,14 @@ def inspect_built_app(configuration):
     resources = plistlib.loads(run('plutil', '-convert', 'xml1', '-o', '-', str(strings)).stdout.encode())
     require(resources.get('This Mac is not configured') == 'This Mac is not configured', 'Missing application strings')
     daemon_directory = app / 'Contents/Library/LaunchDaemons'
-    require({p.name for p in daemon_directory.iterdir()} == {'dev.remozio.setup.plist', 'dev.remozio.authority.plist'}, 'Unexpected bundled daemon manifests')
-    job = plistlib.loads((daemon_directory / 'dev.remozio.setup.plist').read_bytes())
-    require(job == {'Label': 'dev.remozio.setup', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioSetup',
+    require({p.name for p in daemon_directory.iterdir()} == {'dev.sebastiano.remozio.macos.setup.plist', 'dev.sebastiano.remozio.macos.authority.plist'}, 'Unexpected bundled daemon manifests')
+    job = plistlib.loads((daemon_directory / 'dev.sebastiano.remozio.macos.setup.plist').read_bytes())
+    require(job == {'Label': 'dev.sebastiano.remozio.macos.setup', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioSetup',
         'ProgramArguments': ['Contents/Library/LaunchServices/RemozioSetup', '--configuration', '/Library/Application Support/Remozio/setup.cbor'],
-        'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.remozio.setup': True}},
+        'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.sebastiano.remozio.macos.setup': True}},
         'Setup manifest differs from the fixed local service contract')
-    authority_job = plistlib.loads((daemon_directory / 'dev.remozio.authority.plist').read_bytes())
-    require(authority_job == {'Label': 'dev.remozio.authority', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioAuthority', 'ProgramArguments': ['Contents/Library/LaunchServices/RemozioAuthority', '--command-configuration', '/Library/Application Support/Remozio/command-host.cbor'], 'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.remozio.authority': True, 'dev.remozio.presence': True, 'dev.remozio.commands': True}},
+    authority_job = plistlib.loads((daemon_directory / 'dev.sebastiano.remozio.macos.authority.plist').read_bytes())
+    require(authority_job == {'Label': 'dev.sebastiano.remozio.macos.authority', 'BundleProgram': 'Contents/Library/LaunchServices/RemozioAuthority', 'ProgramArguments': ['Contents/Library/LaunchServices/RemozioAuthority', '--command-configuration', '/Library/Application Support/Remozio/command-host.cbor'], 'UserName': 'root', 'RunAtLoad': True, 'KeepAlive': True, 'MachServices': {'dev.sebastiano.remozio.macos.authority': True, 'dev.sebastiano.remozio.macos.presence': True, 'dev.sebastiano.remozio.macos.commands': True}},
         'Authority manifest differs from the fixed command service contract')
     require(not (app / 'Contents/Library/LaunchAgents').exists(), 'Unexpected service manifests in the app scaffold')
     print(f'Mac app {configuration}: arm64, macOS 26, signature, runtime, resources, and bundle checks passed.')

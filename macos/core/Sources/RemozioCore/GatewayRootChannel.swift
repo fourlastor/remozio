@@ -62,7 +62,7 @@ public actor GatewayRootChannel {
     private var timer: Task<Void, Never>?
     public init(serviceName: String, gatewayPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000) throws {
         guard gatewayPolicy.expectedUserID > 0, (1...60_000).contains(timeoutMilliseconds),
-              serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+              MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
             throw GatewayRootChannelError.invalidConfiguration
         }

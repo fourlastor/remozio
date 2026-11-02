@@ -1,4 +1,4 @@
-package dev.remozio.android.push
+package dev.sebastiano.remozio.android.push
 
 import android.content.Context
 import android.util.Log

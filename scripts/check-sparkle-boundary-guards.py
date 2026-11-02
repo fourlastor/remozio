@@ -28,7 +28,7 @@ class NativeBoundaryGuards(unittest.TestCase):
         (app / 'Contents/Frameworks').mkdir()
         shutil.copytree((PRODUCTS / 'Sparkle.framework').resolve(), app / 'Contents/Frameworks/Sparkle.framework', symlinks=True)
         (app / 'Contents/Info.plist').write_bytes(plistlib.dumps({
-            'CFBundleIdentifier': 'dev.remozio.experiment.sparkleboundary.' + uuid.uuid4().hex,
+            'CFBundleIdentifier': 'dev.sebastiano.remozio.macos.experiments.sparkleboundary.' + uuid.uuid4().hex,
             'CFBundleName': 'Disposable Boundary Guard', 'CFBundleExecutable': 'SparkleBoundaryProbe',
             'CFBundlePackageType': 'APPL', 'CFBundleVersion': '1'}))
         cls.executable = executable

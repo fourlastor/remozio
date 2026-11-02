@@ -52,7 +52,7 @@ def main():
         worker.start()
         try:
             for case in ('valid', 'unsigned', 'tampered', 'wrong-key'):
-                identity = f'dev.remozio.experiment.sparkle.{uuid.uuid4().hex}'
+                identity = f'dev.sebastiano.remozio.macos.experiments.sparkle.{uuid.uuid4().hex}'
                 app = root / f'{case}.app'
                 executable = app / 'Contents/MacOS/SparkleProbe'
                 executable.parent.mkdir(parents=True)

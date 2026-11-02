@@ -23,7 +23,7 @@ connect to a computer, store an invitation, create keys, or approve anything.
 | `ios` | XcodeGen spec `project.yml`, the generated `Remozio.xcodeproj`, and a SwiftUI shell that hosts the Compose view and implements the camera scanner and clipboard. |
 | `tools/dev-invitation` | Development invitation for import tests on any host. |
 
-Minimum iOS is 18.5. The bundle ID is `dev.remozio.ios`.
+Minimum iOS is 18.5. The bundle ID is `dev.sebastiano.remozio.ios`.
 
 ## Build
 

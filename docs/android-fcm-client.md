@@ -6,7 +6,7 @@ Remote approval alerts require both, in addition to client registration.
 
 ## Setup and ownership
 
-In Settings, import the Android `google-services.json` file for the installed package. Debug builds use `dev.remozio.android.debug`. Production uses `dev.remozio.android`.
+In Settings, import the Android `google-services.json` file for the installed package. Debug builds use `dev.sebastiano.remozio.android.debug`. Production uses `dev.sebastiano.remozio.android`.
 The importer selects exactly one matching client. It rejects service-account documents, oversized input, malformed UTF-8, excessive nesting and ambiguous client entries.
 Server credentials stay on the Mac. Do not import a service-account key into the phone.
 

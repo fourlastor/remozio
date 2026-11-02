@@ -27,7 +27,7 @@ def check_metadata(text, version, code):
     if len(packages) != 1:
         raise ValueError('Expected one package')
     fields = dict(re.findall(r"([A-Za-z][A-Za-z0-9]*)='([^']*)'", packages[0]))
-    if fields.get('name') != 'dev.remozio.android' or fields.get('versionName') != version or fields.get('versionCode') != str(code):
+    if fields.get('name') != 'dev.sebastiano.remozio.android' or fields.get('versionName') != version or fields.get('versionCode') != str(code):
         raise ValueError('APK package or version does not match the release')
     if 'split' in fields or 'application-debuggable' in text or 'testOnly' in text:
         raise ValueError('APK must be standalone and production-only')
@@ -81,7 +81,7 @@ def prepare(apk, destination, sdk, version, code, fingerprint):
         (staging / 'SHA256SUMS').write_text(f'{digest}  {ASSET}\n')
         (staging / 'release.json').write_text(json.dumps({
             'schema': 1, 'versionName': version, 'versionCode': code,
-            'packageName': 'dev.remozio.android', 'asset': ASSET, 'bytes': total,
+            'packageName': 'dev.sebastiano.remozio.android', 'asset': ASSET, 'bytes': total,
             'sha256': digest, 'signerCertificateSha256': fingerprint.lower(),
         }, indent=2) + '\n')
         # mkdir refuses an existing destination, including one created during verification.

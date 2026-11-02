@@ -28,7 +28,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
     public init(serviceName: String, teamID: String, appIdentifier: String, appHashes: Set<Data>, owner: SetupAccountOwner,
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+        guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
             throw AdministrativeSetupError.invalidConfiguration
         }

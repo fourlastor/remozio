@@ -29,7 +29,7 @@ public enum GatewaySetupField: String, CaseIterable, Sendable {
 /// In-memory text fields only. Provider keys never enter preferences or this form value.
 public struct GatewaySetupForm: Sendable {
     public var senderID = ""
-    public var packageName = "dev.remozio.android"
+    public var packageName = "dev.sebastiano.remozio.android"
     public var fileWakeCustodyAccepted = false
     public var fields: [GatewaySetupField: String] = [:]
     public init() {}

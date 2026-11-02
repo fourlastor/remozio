@@ -255,7 +255,7 @@ final class JournalDatabaseTests: XCTestCase {
     }
 
     private func installRecoveryPolicy(_ database: JournalDatabase) throws -> AuthorityCodePolicySnapshot {
-        let entry = try AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.remozio.authority",
+        let entry = try AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.sebastiano.remozio.macos.authority",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 7, count: 20), active: true)
         return try database.write { try $0.installCodePolicy(AuthorityCodePolicy(entries: [entry]), expectedRevision: nil) }
     }

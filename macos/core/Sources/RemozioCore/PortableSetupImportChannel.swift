@@ -65,7 +65,7 @@ public actor PortableSetupImportChannel {
     private var timer: Task<Void, Never>?
     public init(serviceName: String, rootPolicy: XPCPeerPolicy, ownerUID: uid_t, recoveryEnabled: Bool = false,
                 timeoutMilliseconds: UInt64 = 5000, operationTimeoutMilliseconds: UInt64 = 600_000) throws {
-        guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+        guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               rootPolicy.expectedUserID == 0, ownerUID > 0, ownerUID < UInt32.max,
               (1...60_000).contains(timeoutMilliseconds), (1...900_000).contains(operationTimeoutMilliseconds) else {

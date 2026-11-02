@@ -100,7 +100,7 @@ class SDKFixtureSigner:
     def bundle(self, root, directory, products, identity, version, public_key, port):
         root = owned_root(root)
         if (directory not in ['Signer', 'Host', 'Candidate'] or version not in [1, 2]
-                or not re.fullmatch(r'dev\.remozio\.experiment\.sparkleboundary\.[0-9a-f]{32}', identity)
+                or not re.fullmatch(r'dev\.sebastiano\.remozio\.macos\.experiments\.sparkleboundary\.[0-9a-f]{32}', identity)
                 or not isinstance(port, int) or not 1 <= port <= 65535):
             raise ValueError('Invalid disposable fixture declaration')
         if len(base64.b64decode(public_key, validate=True)) != 32:

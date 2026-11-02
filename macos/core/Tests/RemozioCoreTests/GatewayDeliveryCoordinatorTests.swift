@@ -567,7 +567,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     func testCoordinatorUsesRealSenderThroughInterceptedHTTPTransport() async throws {
         CoordinatorHTTPFixture.requests.withLock { $0 = [] }
         let fixture = try Fixture(), provider = Provider([])
-        let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.remozio.android",
+        let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.sebastiano.remozio.android",
             transport: FCMHTTPTransport(timeoutSeconds: 2, protocolClasses: [CoordinatorHTTPFixture.self]))
         let coordinator = try fixture.coordinator(provider, sender: sender)
         try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
@@ -814,7 +814,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         return try XCTUnwrap(progress)
     }
     private func wakeToken(_ wake: FCMWake) throws -> String? {
-        let sender = try FCMWakeSender(project: "wake-fixture", packageName: "dev.remozio.android")
+        let sender = try FCMWakeSender(project: "wake-fixture", packageName: "dev.sebastiano.remozio.android")
         let request = try sender.request(wake, accessToken: FCMAccessToken("synthetic-access"), validateOnly: false)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         return (body["message"] as? [String: Any])?["token"] as? String
@@ -915,7 +915,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
             execute: { _ = try await coordinator.submitWake($0, signature: $1, challenge: $2) })
         let signerConfiguration = try GatewayWakeSignerConfiguration(binding: feed.binding, credentialID: id(20), transportUID: 401,
             ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)], custody: .protectedFile,
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [id(4, 20)], custody: .protectedFile,
             keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: key.publicKey.x963Representation)
         let record = try GatewayWakeKeyRecord(binding: feed.binding, credentialID: id(20), fileKey: key)
         let signer = try GatewayWakeSigner.load(configuration: signerConfiguration, realUID: 401, effectiveUID: 401,
@@ -1451,7 +1451,7 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
     func testApprovalWakeUsesRealSenderThroughInterceptedHTTPTransport() async throws {
         CoordinatorHTTPFixture.requests.withLock { $0 = [] }
         let f = try Fixture(), provider = Provider([])
-        let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.remozio.android",
+        let sender = try FCMWakeSender(project: "coordinator-fixture", packageName: "dev.sebastiano.remozio.android",
             transport: FCMHTTPTransport(timeoutSeconds: 2, protocolClasses: [CoordinatorHTTPFixture.self]))
         let c = try f.coordinator(provider, sender: sender, wakePolicy: wakePolicy())
         try await prepareWakes(f, c)

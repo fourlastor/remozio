@@ -28,7 +28,7 @@ final class PortablePushClientTests: XCTestCase {
             privateKeyID: "fixture-key", privateKeyPEM: Self.pem.get())
     }
     private func client(project: String = "synthetic-project") throws -> SetupPushClientConfiguration {
-        try .init(projectID: project, senderID: "123456789012", packageName: "dev.remozio.android")
+        try .init(projectID: project, senderID: "123456789012", packageName: "dev.sebastiano.remozio.android")
     }
     private func setup() throws -> PortableSetup {
         try .init(defaults: defaults(), fcm: provider(), pushClient: client())
@@ -72,18 +72,18 @@ final class PortablePushClientTests: XCTestCase {
             XCTAssertThrowsError(try value.canonicalBytes())
         }
         var root = try fields(setup()); root[2] = .null; try reject(root)
-        root = try fields(setup()); root[4] = .array(["other-project", "123456789012", "dev.remozio.android"].map(CBORValue.text)); try reject(root)
+        root = try fields(setup()); root[4] = .array(["other-project", "123456789012", "dev.sebastiano.remozio.android"].map(CBORValue.text)); try reject(root)
     }
     func testClientScopeRejectsInvalidSendersPackagesAndAdditionalDeviceData() throws {
         for sender in ["", "client-id-not-a-sender", "123\n", String(repeating: "1", count: 33)] {
-            XCTAssertThrowsError(try SetupPushClientConfiguration(projectID: "synthetic-project", senderID: sender, packageName: "dev.remozio.android"))
+            XCTAssertThrowsError(try SetupPushClientConfiguration(projectID: "synthetic-project", senderID: sender, packageName: "dev.sebastiano.remozio.android"))
         }
         for package in ["", "single", "dev.remozio/app", "1dev.remozio", "dev.remozio.\n"] {
             XCTAssertThrowsError(try SetupPushClientConfiguration(projectID: "synthetic-project", senderID: "123", packageName: package))
         }
         let invalid: [CBORValue] = [.null, .text("opaque"), .array([.text("synthetic-project"), .text("123")]),
-            .array([.text("synthetic-project"), .text("123"), .text("dev.remozio.android"), .text("device-token")]),
-            .array([.text("synthetic-project"), .unsigned(123), .text("dev.remozio.android")])]
+            .array([.text("synthetic-project"), .text("123"), .text("dev.sebastiano.remozio.android"), .text("device-token")]),
+            .array([.text("synthetic-project"), .unsigned(123), .text("dev.sebastiano.remozio.android")])]
         for value in invalid { var root = try fields(setup()); root[4] = value; try reject(root) }
     }
     func testClientScopeCannotBeSmuggledIntoOlderVersionsOrDroppedFromVersionThree() throws {

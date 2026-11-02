@@ -284,7 +284,7 @@ final class CommandCallerReadinessTests: XCTestCase {
     }
 
     func testPublicEntryRequiresRootPolicyBeforeEndpointOrInputUse() throws {
-        let policy = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+        let policy = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.sebastiano.remozio.macos.authority",
             approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: geteuid())
         XCTAssertThrowsError(try CommandCallerReadiness.submit(template(), inputDescriptor: -1,
             authorityPort: { XCTFail("Must not look up an authority"); return 0 }, authorityPolicy: policy,
@@ -601,7 +601,7 @@ extension CommandCallerReadinessTests {
     }
 
     func testMappedPublicReadinessRequiresRootPolicyBeforeAnyEndpointOrDescriptorUse() throws {
-        let policy = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+        let policy = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.sebastiano.remozio.macos.authority",
             approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: geteuid())
         do {
             let result = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: -1, outputDescriptor: -1, errorDescriptor: -1,
@@ -686,9 +686,9 @@ extension CommandCallerReadinessTests {
             if case .admitted(let session) = response { session.close() }; XCTFail("Refresh must not reset the deadline")
         } catch { XCTAssertEqual(error as? CommandCallerReadinessError, .deadlineExceeded(lastBusyReason: nil)) }
         XCTAssertEqual(refreshes, 1); try assertNoNextAttempt(endpoint)
-        let root = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+        let root = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.sebastiano.remozio.macos.authority",
             approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: 0)
-        let user = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.remozio.authority",
+        let user = try XPCPeerPolicy(teamID: "AB12345678", componentIdentifier: "dev.sebastiano.remozio.macos.authority",
             approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: geteuid())
         do {
             let response = try CommandCallerReadiness.submitMappedIO(template(), inputDescriptor: -1, outputDescriptor: -1,

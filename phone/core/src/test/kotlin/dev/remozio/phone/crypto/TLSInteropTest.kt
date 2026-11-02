@@ -460,7 +460,7 @@ class TLSInteropTest {
                                 val ready = PhonePushRecoveryFrame.decode(requireNotNull(channel.receive())) as PhonePushRecoveryFrame.Ready
                                 assertArrayEquals(probeID, ready.correlationID.copyBytes())
                                 val token = "synthetic-private-recovery-token-".repeat(200).take(4096)
-                                channel.send(PhonePushRecoveryFrame.Resume(resumeID, PhonePushTokenOffer(token, "project", "123", "dev.remozio.android")).encode())
+                                channel.send(PhonePushRecoveryFrame.Resume(resumeID, PhonePushTokenOffer(token, "project", "123", "dev.sebastiano.remozio.android")).encode())
                                 val response = PhonePushRecoveryFrame.decode(requireNotNull(channel.receive())) as PhonePushRecoveryFrame.State
                                 assertArrayEquals(resumeID, response.correlationID.copyBytes()); assertEquals(scope, response.state.metadata.scope)
                                 assertArrayEquals(java.security.MessageDigest.getInstance("SHA-256").digest(token.toByteArray()), response.state.metadata.tokenDigest)
@@ -515,7 +515,7 @@ class TLSInteropTest {
                                 assertTrue(channel.negotiated.peer.requests.isEmpty()); assertTrue(channel.negotiated.peer.auditVersions.isEmpty())
                                 val token = "synthetic-private-provider-token-".repeat(200).take(4096)
                                 val id = ByteArray(16) { 31 }
-                                channel.send(PhonePushRegistrationFrame.Offer(id, PhonePushTokenOffer(token, "project", "123", "dev.remozio.android")).encode())
+                                channel.send(PhonePushRegistrationFrame.Offer(id, PhonePushTokenOffer(token, "project", "123", "dev.sebastiano.remozio.android")).encode())
                                 val response = PhonePushRegistrationFrame.decode(requireNotNull(channel.receive())) as PhonePushRegistrationFrame.Outcome
                                 assertArrayEquals(id, response.correlationID.copyBytes())
                                 assertEquals(PhonePushRegistrationOutcome.INCOMPATIBLE, response.outcome)
