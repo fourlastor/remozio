@@ -11,7 +11,7 @@ final class EnclaveAuthorityRequestSignerTests: XCTestCase {
     private func id(_ value: UInt8) -> Data { Data(repeating: value, count: 16) }
     private func configuration() throws -> AuthorityServiceConfiguration {
         try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/private/tmp/remozio-test-journal",
-            serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501)
     }
     func testRecordRoundTripsBoundedWrappedBytesAndRedactsDescription() throws {

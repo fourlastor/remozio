@@ -146,7 +146,7 @@ final class SharedSetupImportRecordTests: XCTestCase {
             try .init(defaults: base.defaults,
                 fcm: .init(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
                     privateKeyID: keyID, privateKeyPEM: pem),
-                pushClient: .init(projectID: "synthetic-project", senderID: "123456789", packageName: "dev.remozio.android"))
+                pushClient: .init(projectID: "synthetic-project", senderID: "123456789", packageName: "dev.sebastiano.remozio.android"))
         }
         let selected = try proposal("synthetic-private-key-id")
         let intent = try SharedSetupImportIntent(scope: f.scope, proposal: selected)

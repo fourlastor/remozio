@@ -39,7 +39,7 @@ final class MacGatewaySetupControlsTests: XCTestCase {
         @MainActor func choices(accepted: Bool = true) throws -> GatewaySetupPreparationChoices {
             let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
                 privateKeyID: "fixture-key", privateKeyPEM: MacGatewaySetupControlsTests.pem.get())
-            return try .init(provider: provider, senderID: "123", packageName: "dev.remozio.android",
+            return try .init(provider: provider, senderID: "123", packageName: "dev.sebastiano.remozio.android",
                 settings: fixture.intent.configuration.settings, fileWakeCustodyAccepted: accepted)
         }
     }

@@ -49,17 +49,17 @@ class PhonePushRegistrationFrameTest {
     }
     @Test fun offeredTokensAndCorrelationIDsAreNotMutableOrPrintable() {
         val source = id.copyOf()
-        val offer = PhonePushTokenOffer("secret-provider-token", "project", "123", "dev.remozio.android")
+        val offer = PhonePushTokenOffer("secret-provider-token", "project", "123", "dev.sebastiano.remozio.android")
         val frame = PhonePushRegistrationFrame.Offer(source, offer); val before = frame.encode(); source.fill(0)
         assertContentEquals(before, frame.encode()); assertFalse(frame.toString().contains(offer.token))
         assertEquals("PhonePushTokenOffer(redacted)", offer.toString())
     }
     @Test fun providerRoutingHintsCannotCarryControlCharactersOrInvalidShapes() {
         for (token in listOf("", "space token", "newline\n", "x".repeat(4097))) {
-            assertFails { PhonePushTokenOffer(token, "project", "123", "dev.remozio.android") }
+            assertFails { PhonePushTokenOffer(token, "project", "123", "dev.sebastiano.remozio.android") }
         }
-        assertFails { PhonePushTokenOffer("token", "project\n", "123", "dev.remozio.android") }
-        assertFails { PhonePushTokenOffer("token", "project", "١", "dev.remozio.android") }
+        assertFails { PhonePushTokenOffer("token", "project\n", "123", "dev.sebastiano.remozio.android") }
+        assertFails { PhonePushTokenOffer("token", "project", "١", "dev.sebastiano.remozio.android") }
         assertFails { PhonePushTokenOffer("token", "project", "123", "package") }
         assertFails { PhonePushRegistrationFrame.Outcome(ByteArray(15), PhonePushRegistrationOutcome.UNAVAILABLE) }
     }

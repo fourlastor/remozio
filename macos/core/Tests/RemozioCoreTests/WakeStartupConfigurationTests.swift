@@ -10,23 +10,23 @@ final class WakeStartupConfigurationTests: XCTestCase {
     private func root() throws -> AuthorityWakeStartupConfiguration {
         let key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/Library/Remozio/journal",
-            serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.sebastiano.remozio.macos.authority", teamID: "TEAMID1234", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [id(3, count: 20)], transportUID: 401, maximumPayloadBytes: 4096, continuityDirectory: "/Library/Remozio/continuity")
         let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/root/key.cbor", authorityPublicKey: key)
         let registration = try GatewayRegistrationIdentity(ownerID: id(3), macID: id(1), accountID: id(2), gatewayID: id(4),
             lifecycleEpoch: id(5), rootPublicKey: key)
         return try .init(request: request, registration: registration, gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402,
-            teamID: "TEAMID1234", gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, count: 20)])
+            teamID: "TEAMID1234", gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [id(4, count: 20)])
     }
     private func transport(owner: UInt32 = 501, mac: UInt8 = 1) throws -> ApprovalTransportConfiguration {
-        try .init(macID: id(mac), accountID: id(2), ownerUID: owner, serviceUID: 401, authorityServiceName: "dev.remozio.authority",
-            teamID: "TEAMID1234", authorityIdentifier: "dev.remozio.authority", authorityHashes: [id(3, count: 20)],
+        try .init(macID: id(mac), accountID: id(2), ownerUID: owner, serviceUID: 401, authorityServiceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "TEAMID1234", authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [id(3, count: 20)],
             identityReference: Data([1]), identityPublicKeyInfo: P256.Signing.PrivateKey().publicKey.derRepresentation)
     }
     private func wake() throws -> GatewayWakeSignerConfiguration {
         try .init(binding: GatewaySubmissionBinding(ownerID: id(3), macID: id(1), accountID: id(2), gatewayID: id(4), lifecycleEpoch: id(5)),
             credentialID: id(6), transportUID: 401, ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, count: 20)], custody: .protectedFile,
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [id(4, count: 20)], custody: .protectedFile,
             keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
     }
     func testRootCanonicalConfigurationPinsHardwareIdentityScopeAndBoundedLease() throws {
@@ -73,8 +73,8 @@ final class WakeStartupConfigurationTests: XCTestCase {
     }
     func testPresenceStartupRoundTripKeepsDistinctAccountAndServices() throws {
         let wake = try root()
-        let original = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence",
-            teamID: "TEAMID1234", appIdentifier: "dev.remozio.mac", appHashes: [id(7, count: 20)],
+        let original = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: "dev.sebastiano.remozio.macos.presence",
+            teamID: "TEAMID1234", appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [id(7, count: 20)],
             policy: .init(idleMilliseconds: 120_000, observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
         let decoded = try AuthorityPresenceStartupConfiguration.decode(original.canonicalBytes)
         XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes)
@@ -92,7 +92,7 @@ final class WakeStartupConfigurationTests: XCTestCase {
     }
     func testPublicPresenceClientConfigurationPinsRootAndRejectsMalformedMetadata() throws {
         let original = try AuthorityPresenceClientConfiguration(macID: id(1), accountID: id(2), ownerUID: 501,
-            serviceName: "dev.remozio.presence", teamID: "TEAMID1234", rootIdentifier: "dev.remozio.authority", rootHashes: [id(7, count: 20)])
+            serviceName: "dev.sebastiano.remozio.macos.presence", teamID: "TEAMID1234", rootIdentifier: "dev.sebastiano.remozio.macos.authority", rootHashes: [id(7, count: 20)])
         let decoded = try AuthorityPresenceClientConfiguration.decode(original.canonicalBytes)
         XCTAssertEqual(decoded.canonicalBytes, original.canonicalBytes); XCTAssertEqual(decoded.rootPolicy.expectedUserID, 0)
         XCTAssertEqual(decoded.ownerUID, 501)

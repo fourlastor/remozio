@@ -46,7 +46,7 @@ def prepare(destination, probe="journal"):
         raise ValueError("The Android build configuration changed; inspect before adapting the probe")
     text = text.replace(before, before +
         '        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"\n' +
-        f'        testInstrumentationRunnerArguments["class"] = "dev.remozio.android.push.{probe_class}"\n')
+        f'        testInstrumentationRunnerArguments["class"] = "dev.sebastiano.remozio.android.push.{probe_class}"\n')
     text = text.replace('applicationIdSuffix = ".debug"', 'applicationIdSuffix = ".wakeprobe"')
     text = text.replace('    buildFeatures { compose = true }',
         '    installation { timeOutInMs = 60_000 }\n    buildFeatures { compose = true }')
@@ -71,11 +71,11 @@ def prepare(destination, probe="journal"):
         '        </provider>\n' + anchor)
     manifest.write_text(text)
     source = fixture / f"experiments/android-wake-demand/{probe_class}.kt"
-    target = fixture / f"android/app/src/androidTest/kotlin/dev/remozio/android/push/{probe_class}.kt"
+    target = fixture / f"android/app/src/androidTest/kotlin/dev/sebastiano/remozio/android/push/{probe_class}.kt"
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, target)
     if probe == "work":
-        shutil.copy2(fixture / "android/app/src/test/kotlin/dev/remozio/android/push/WakePipelineFixture.kt",
+        shutil.copy2(fixture / "android/app/src/test/kotlin/dev/sebastiano/remozio/android/push/WakePipelineFixture.kt",
             target.with_name("WakePipelineFixture.kt"))
     environment = {key: os.environ[key] for key in ("JAVA_HOME", "ANDROID_HOME")}
     for name, tasks, timeout in [
@@ -87,7 +87,7 @@ def prepare(destination, probe="journal"):
             "timeoutSec": timeout, "brief": True}]}
         (destination / (name + "-plan.json")).write_text(json.dumps(plan, indent=2) + "\n")
     proof = {"sourceHead": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "sourceHashes": hashes, "fixture": str(fixture), "package": "dev.remozio.android.wakeprobe",
+        "sourceHashes": hashes, "fixture": str(fixture), "package": "dev.sebastiano.remozio.android.wakeprobe",
         "probe": probe, "plainSourceCopy": True, "buildsRun": False, "devicesChanged": False}
     (destination / "preparation.json").write_text(json.dumps(proof, indent=2) + "\n")
     print("Prepared isolated source fixture: " + str(destination))

@@ -23,9 +23,9 @@ final class AdministrativeSetupPublicationTests: XCTestCase {
     }
     private func configuration(_ release: UInt8 = 3) throws -> AdministrativeSetupConfiguration {
         let policy = try AuthorityCodePolicy(entries: [
-            .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.mac", installedGeneration: 1,
+            .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos", installedGeneration: 1,
                 minimumGeneration: 1, codeDirectoryHash: Data(repeating: 1, count: 20), active: true),
-            .init(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.setup-controller", installedGeneration: 1,
+            .init(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.setup-controller", installedGeneration: 1,
                 minimumGeneration: 1, codeDirectoryHash: Data(repeating: 2, count: 20), active: true)])
         return try .init(machineDirectory: "/Library/Remozio/Machine", macID: Data(repeating: 1, count: 16),
             installationID: Data(repeating: 2, count: 16), releaseDigest: Data(repeating: release, count: 32), codePolicy: policy)

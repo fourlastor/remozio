@@ -23,7 +23,7 @@ class PendingPushChallengesTest {
         return StoredPhoneEnrollment(PhoneEnrollment(id(recordID), id(20), id(21), id(phone), id(4), "Synthetic host", key().takeLast(65).toByteArray(),
             key(), local(EnrollmentKeyRole.TRANSPORT), local(EnrollmentKeyRole.DECISION), local(EnrollmentKeyRole.BIOMETRIC), ByteArray(32) { 5 }, null), phase)
     }
-    private val offer = PhonePushTokenOffer("synthetic-token", "project", "123", "dev.remozio.android")
+    private val offer = PhonePushTokenOffer("synthetic-token", "project", "123", "dev.sebastiano.remozio.android")
     private fun metadata(record: StoredPhoneEnrollment, candidate: Int = 6, revision: ULong = 1u, owner: Int = 9,
                          token: String = offer.token, tag: ByteArray = record.enrollment.enrollmentTag.copyBytes()): PhonePushRegistrationMetadata {
         val e = record.enrollment

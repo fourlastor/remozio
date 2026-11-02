@@ -15,7 +15,7 @@ final class ServiceAccountPlanTests: XCTestCase {
             0: .unsigned(1), 1: .bytes(mac), 2: .bytes(accountID), 3: .bytes(Data(repeating: 3, count: 16)),
             4: .unsigned(1), 5: .unsigned(AuditEpochCause.initial.rawValue), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 3)
-        let code = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+        let code = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
         let initial = AuthorityJournalInitialization(descriptor: descriptor, codePolicy: code,
             capabilities: .init(contracts: [contract: []]), allowedContracts: [contract], installCommandReplay: true)

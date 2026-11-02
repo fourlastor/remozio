@@ -23,9 +23,9 @@ final class GatewayServiceConfigurationTests: XCTestCase {
                 gatewayID: id, lifecycleEpoch: id, rootPublicKey: root.publicKey.x963Representation),
             receiptPublicKey: receiptKey ?? receipt.publicKey.x963Representation, directoryPath: "/Library/Remozio/gateway",
             providerPath: providerPath, receiptKeyPath: "/Library/Remozio/receipt.cbor", serviceUID: serviceUID ?? uid, ownerUID: ownerUID,
-            serviceName: "dev.remozio.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
+            serviceName: "dev.sebastiano.remozio.macos.gateway", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.sebastiano.remozio.macos.authority",
             authorityHashes: [Data(repeating: 1, count: 20), Data(repeating: 2, count: 20)],
-            project: "fixture-project", packageName: "dev.remozio.android", settings: settings(), wakeEndpoint: wakeEndpoint)
+            project: "fixture-project", packageName: "dev.sebastiano.remozio.android", settings: settings(), wakeEndpoint: wakeEndpoint)
     }
     private var limits: CBORLimits { get throws { try CBORLimits(maxBytes: 65536, maxDepth: 4, maxItems: 128) } }
 
@@ -96,7 +96,7 @@ final class GatewayServiceConfigurationTests: XCTestCase {
         for hashes in [[Data(repeating: 1, count: 20), Data(repeating: 1, count: 20)],
                        [Data(repeating: 2, count: 20), Data(repeating: 1, count: 20)]] {
             var changed = original
-            changed[9] = .array([.text("ABCDEFGHIJ"), .text("dev.remozio.authority"), .array(hashes.map(CBORValue.bytes))])
+            changed[9] = .array([.text("ABCDEFGHIJ"), .text("dev.sebastiano.remozio.macos.authority"), .array(hashes.map(CBORValue.bytes))])
             try reject(changed)
         }
         var changed = original
@@ -106,7 +106,7 @@ final class GatewayServiceConfigurationTests: XCTestCase {
 
     func testRestrictedEndpointUsesExplicitSchemaAndIndependentAccountPolicy() throws {
         let endpoint = try GatewayWakeEndpointConfiguration(serviceName: "dev.remozio.gateway.wake", transportUID: 410,
-            teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport", approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)])
+            teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport", approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)])
         let config = try configuration(wakeEndpoint: endpoint), decoded = try GatewayServiceConfiguration.decode(config.canonicalBytes)
         XCTAssertEqual(decoded.canonicalBytes, config.canonicalBytes)
         XCTAssertEqual(decoded.wakeEndpoint?.policy.expectedUserID, 410)
@@ -122,17 +122,17 @@ final class GatewayServiceConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try GatewayServiceConfiguration.decode(DeterministicCBOR.encode(.map(missing), limits: limits)))
         for account in [uid_t(0), uid, uid_t(501)] {
             XCTAssertThrowsError(try configuration(wakeEndpoint: GatewayWakeEndpointConfiguration(serviceName: endpoint.serviceName,
-                transportUID: account, teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport",
+                transportUID: account, teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport",
                 approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)])))
         }
-        for (name, team, component) in [("dev.remozio.gateway", "ABCDEFGHIJ", "dev.remozio.transport"),
-            (endpoint.serviceName, "KLMNOPQRST", "dev.remozio.transport"),
-            (endpoint.serviceName, "ABCDEFGHIJ", "dev.remozio.authority")] {
+        for (name, team, component) in [("dev.sebastiano.remozio.macos.gateway", "ABCDEFGHIJ", "dev.sebastiano.remozio.macos.transport"),
+            (endpoint.serviceName, "KLMNOPQRST", "dev.sebastiano.remozio.macos.transport"),
+            (endpoint.serviceName, "ABCDEFGHIJ", "dev.sebastiano.remozio.macos.authority")] {
             XCTAssertThrowsError(try configuration(wakeEndpoint: GatewayWakeEndpointConfiguration(serviceName: name,
                 transportUID: 410, teamID: team, componentIdentifier: component, approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)])))
         }
         XCTAssertThrowsError(try GatewayWakeEndpointConfiguration(serviceName: "other.service", transportUID: 410,
-            teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.transport", approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)]))
+            teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos.transport", approvedCodeDirectoryHashes: [Data(repeating: 3, count: 20)]))
     }
 
     func testReceiptSignerChecksPurposeCanonicalPrivateKeyAndPinnedPublicKey() throws {

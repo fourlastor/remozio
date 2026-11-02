@@ -10,7 +10,7 @@ final class AuthorityPhonePushRecoveryTests: XCTestCase {
     private func resume(_ h: Harness, token: String = "synthetic-token", project: String = "project", time: UInt64 = 100,
                         binding: AuthorityPeerBinding? = nil, validate: (JournalTransaction) throws -> Void = { _ in }) throws -> PhonePushRecoveryFrame {
         let frame = PhonePushRecoveryFrame.resume(correlationID: Data(repeating: 80, count: 16),
-            offer: try PhonePushTokenOffer(token: token, projectID: project, senderID: "123", packageName: "dev.remozio.android"))
+            offer: try PhonePushTokenOffer(token: token, projectID: project, senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         return try h.owner.phonePushRecovery(frame, binding: binding ?? h.binding, provider: h.provider,
             now: .init(epoch: h.clock, milliseconds: time), wall: 900 + time, validateTransport: validate)
     }

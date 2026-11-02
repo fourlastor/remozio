@@ -7,7 +7,7 @@ import XCTest
 final class CommandFrontendConfigurationTests: XCTestCase {
     private func configuration() throws -> CommandFrontendConfiguration {
         try CommandFrontendConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            serviceName: "dev.remozio.commands", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.remozio.authority",
+            serviceName: "dev.sebastiano.remozio.macos.commands", teamID: "ABCDEFGHIJ", authorityIdentifier: "dev.sebastiano.remozio.macos.authority",
             authorityHashes: [Data(repeating: 4, count: 20), Data(repeating: 3, count: 20)],
             submissionLimits: CBORLimits(maxBytes: 262144, maxDepth: 16, maxItems: 4096),
             defaultIOMode: .pipes, defaultDisconnectBehavior: .terminate,

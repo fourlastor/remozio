@@ -14,7 +14,7 @@ final class AuthorityJournalInitializationTests: XCTestCase {
         let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
             0: .unsigned(1), 1: .bytes(macID ?? mac), 2: .bytes(account), 3: .bytes(epoch),
             4: .unsigned(1), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: bounds), limits: bounds)
-        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+        let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
         return AuthorityJournalInitialization(descriptor: descriptor, codePolicy: policy,
             capabilities: ContractCapabilities(contracts: [try contract: []]), allowedContracts: validPolicy ? [try contract] : [],

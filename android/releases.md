@@ -1,6 +1,6 @@
 # Android release artifacts
 
-The release build produces an optimized standalone APK for `dev.remozio.android`. It remains unsigned until the release owner signs it. CI assembles this variant to catch R8 and resource-shrinking failures; it never receives a signing key or publishes a release.
+The release build produces an optimized standalone APK for `dev.sebastiano.remozio.android`. It remains unsigned until the release owner signs it. CI assembles this variant to catch R8 and resource-shrinking failures; it never receives a signing key or publishes a release.
 
 ## Build and sign
 

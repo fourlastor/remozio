@@ -200,10 +200,10 @@ final class AdministrativeSetupChannelTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.calls, ["hello"])
     }
     func testPublicConfigurationRefusesInvalidScopeBeforeCreatingConnection() throws {
-        let root = try XPCPeerPolicy(teamID: "TEAMID1234", componentIdentifier: "dev.remozio.setup",
+        let root = try XPCPeerPolicy(teamID: "TEAMID1234", componentIdentifier: "dev.sebastiano.remozio.macos.setup",
             approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 0)
-        for (name, uid, timeout) in [("other.service", getuid(), UInt64(5000)), ("dev.remozio.setup", uid_t(0), UInt64(5000)),
-                                    ("dev.remozio.setup", getuid(), UInt64(0))] {
+        for (name, uid, timeout) in [("other.service", getuid(), UInt64(5000)), ("dev.sebastiano.remozio.macos.setup", uid_t(0), UInt64(5000)),
+                                    ("dev.sebastiano.remozio.macos.setup", getuid(), UInt64(0))] {
             XCTAssertThrowsError(try AdministrativeSetupChannel(serviceName: name, rootPolicy: root, accountID: account,
                 ownerUID: uid, timeoutMilliseconds: timeout)) { XCTAssertEqual($0 as? AdministrativeSetupChannelError, .invalidConfiguration) }
         }

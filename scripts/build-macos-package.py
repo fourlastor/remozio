@@ -21,7 +21,7 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = '/Library/Application Support/Remozio/Applications/Remozio.app'
 PARENT = str(Path(BUNDLE).parent)
-IDENTIFIERS = {'payload': 'dev.remozio.pkg.application', 'bootstrap': 'dev.remozio.pkg.bootstrap'}
+IDENTIFIERS = {'payload': 'dev.sebastiano.remozio.macos.pkg.application', 'bootstrap': 'dev.sebastiano.remozio.macos.pkg.bootstrap'}
 
 
 def signing_reader():

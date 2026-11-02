@@ -5,7 +5,7 @@ import XCTest
 
 final class XPCPeerPolicyTests: XCTestCase {
     private let codeHash = Data(repeating: 1, count: 20)
-    private func policy(team: String = "AB12345678", identifier: String = "dev.remozio.transport",
+    private func policy(team: String = "AB12345678", identifier: String = "dev.sebastiano.remozio.macos.transport",
                         hashes: Set<Data>? = nil, session: au_asid_t? = nil) throws -> XPCPeerPolicy {
         try XPCPeerPolicy(teamID: team, componentIdentifier: identifier, approvedCodeDirectoryHashes: hashes ?? [codeHash],
             expectedUserID: 501, expectedAuditSessionID: session)
@@ -18,7 +18,7 @@ final class XPCPeerPolicyTests: XCTestCase {
         XCTAssertTrue(value.requirement.contains("anchor apple generic"))
         XCTAssertTrue(value.requirement.contains("certificate leaf[field.1.2.840.113635.100.6.1.13] exists"))
         XCTAssertTrue(value.requirement.contains("certificate leaf[subject.OU] = \"AB12345678\""))
-        XCTAssertTrue(value.requirement.contains("identifier \"dev.remozio.transport\""))
+        XCTAssertTrue(value.requirement.contains("identifier \"dev.sebastiano.remozio.macos.transport\""))
         XCTAssertEqual(value.requirement.components(separatedBy: "cdhash H\"").count - 1, 2)
         XCTAssertTrue(value.requirement.contains("!(entitlement[\"com.apple.security.get-task-allow\"] exists)"))
     }
@@ -71,7 +71,7 @@ final class XPCPeerPolicyTests: XCTestCase {
         }.sorted().joined(separator: " or ")
         let expected = "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists "
             + "and certificate leaf[field.1.2.840.113635.100.6.1.13] exists "
-            + "and certificate leaf[subject.OU] = \"AB12345678\" and identifier \"dev.remozio.transport\" "
+            + "and certificate leaf[subject.OU] = \"AB12345678\" and identifier \"dev.sebastiano.remozio.macos.transport\" "
             + "and (\(formatted)) and !(entitlement[\"com.apple.security.get-task-allow\"] exists) "
             + "and !(entitlement[\"com.apple.security.cs.disable-library-validation\"] exists) "
             + "and !(entitlement[\"com.apple.security.cs.allow-dyld-environment-variables\"] exists) "

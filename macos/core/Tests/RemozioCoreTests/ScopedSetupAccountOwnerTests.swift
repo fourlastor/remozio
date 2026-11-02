@@ -28,7 +28,7 @@ final class ScopedSetupAccountOwnerTests: XCTestCase {
             _ = try machine.writeInventory(.init(macID: mac, installationID: Data(repeating: installation, count: 16),
                 revision: Data(repeating: 6, count: 16), bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: release,
                 accounts: [.init(accountID: account, ownerUID: getuid())], services: [.init(role: .authority, kind: .daemon,
-                    domainUID: nil, executionUID: 0, label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: account)]),
+                    domainUID: nil, executionUID: 0, label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account)]),
                 expectedRevision: nil)
         }
         func open(initialize: Bool = false, didCommit: (() throws -> Void)? = nil) throws -> PreparationIntentStore {
@@ -47,7 +47,7 @@ final class ScopedSetupAccountOwnerTests: XCTestCase {
                 0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(Data(repeating: 3, count: 16)),
                 4: .unsigned(1), 5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 3)
-            let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+            let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                 installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: true)])
             let initial = AuthorityJournalInitialization(descriptor: descriptor, codePolicy: policy,
                 capabilities: .init(contracts: [contract: []]), allowedContracts: [contract], installCommandReplay: true)

@@ -17,11 +17,11 @@ require(releaseVersion.substringBefore('-').substringBefore('+').split('.').all 
 }
 
 android {
-    namespace = "dev.remozio.android"
+    namespace = "dev.sebastiano.remozio.android"
     compileSdk = 37
     buildToolsVersion = "37.0.0"
     defaultConfig {
-        applicationId = "dev.remozio.android"
+        applicationId = "dev.sebastiano.remozio.android"
         minSdk = 37
         targetSdk = 37
         versionCode = releaseCode

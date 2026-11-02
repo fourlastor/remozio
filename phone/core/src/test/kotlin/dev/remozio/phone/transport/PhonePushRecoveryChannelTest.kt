@@ -25,7 +25,7 @@ class PhonePushRecoveryChannelTest {
         return StoredPhoneEnrollment(PhoneEnrollment(id(1), id(20), id(21), id(phone), id(4), "Synthetic host", key().takeLast(65).toByteArray(),
             key(), local(EnrollmentKeyRole.TRANSPORT), local(EnrollmentKeyRole.DECISION), local(EnrollmentKeyRole.BIOMETRIC), ByteArray(32) { 5 }, null), phase)
     }
-    private fun offer(token: String = "synthetic-token") = PhonePushTokenOffer(token, "project", "123", "dev.remozio.android")
+    private fun offer(token: String = "synthetic-token") = PhonePushTokenOffer(token, "project", "123", "dev.sebastiano.remozio.android")
     private fun binding(record: StoredPhoneEnrollment, token: String = "synthetic-token", tag: ByteArray = record.enrollment.enrollmentTag.copyBytes()): GatewayTokenBinding {
         val e = record.enrollment
         return GatewayTokenBinding(id(6), e.macID.copyBytes(), e.accountID.copyBytes(), id(7), id(8), e.phoneID.copyBytes(), e.epoch.copyBytes(),

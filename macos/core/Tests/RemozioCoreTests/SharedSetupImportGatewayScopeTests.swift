@@ -27,7 +27,7 @@ final class SharedSetupImportGatewayScopeTests: XCTestCase, @unchecked Sendable 
                 gateway: GatewaySetupForm().settingsSelection())
             let fcm = provider ? try SetupFCMConfiguration(project: "fixture-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
                 privateKeyID: "fixture", privateKeyPEM: pem.get()) : nil
-            let push = provider ? try SetupPushClientConfiguration(projectID: "fixture-project", senderID: "123", packageName: "dev.remozio.android") : nil
+            let push = provider ? try SetupPushClientConfiguration(projectID: "fixture-project", senderID: "123", packageName: "dev.sebastiano.remozio.android") : nil
             proposal = try .init(defaults: defaults, fcm: fcm,
                 cloudflare: .init(accountID: String(repeating: "a", count: 32), zoneID: String(repeating: "b", count: 32),
                     dnsSuffix: "remozio.example.invalid", apiToken: "synthetic-original-scope-token"), pushClient: push)
@@ -97,7 +97,7 @@ final class SharedSetupImportGatewayScopeTests: XCTestCase, @unchecked Sendable 
     }
     func testPartialAndMismatchedProviderInputsAreRejected() throws {
         let f = try Fixture(), selected = f.proposal
-        let mismatched = try SetupPushClientConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.remozio.android")
+        let mismatched = try SetupPushClientConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.sebastiano.remozio.android")
         let noGateway = SharedSetupDefaults(presence: selected.defaults.presence, wake: selected.defaults.wake, delivery: selected.defaults.delivery)
         for proposal in [PortableSetup(defaults: selected.defaults, fcm: selected.fcm),
                          PortableSetup(defaults: selected.defaults, pushClient: selected.pushClient),

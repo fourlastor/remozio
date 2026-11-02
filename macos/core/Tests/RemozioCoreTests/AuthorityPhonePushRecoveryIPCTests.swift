@@ -35,7 +35,7 @@ final class AuthorityPhonePushRecoveryIPCTests: XCTestCase, @unchecked Sendable 
     }
     private func resume() throws -> PhonePushRecoveryFrame {
         try .resume(correlationID: Data(repeating: 5, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token",
-            projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
     }
     private func metadata(_ binding: AuthorityPeerBinding, token: String = "synthetic-token") throws -> PhonePushRegistrationMetadata {
         let s = binding.scope

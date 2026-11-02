@@ -39,31 +39,31 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
         let paths = try RuntimePreparationPaths(accountID: id(22))
         let key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(21), accountID: id(22), journalDirectory: "/Library/Remozio/journal",
-            serviceName: scoped ? paths.authorityService : "dev.remozio.authority", teamID: "ABCDEFGHIJ", transportIdentifier: identifier(.transport),
+            serviceName: scoped ? paths.authorityService : "dev.sebastiano.remozio.macos.authority", teamID: "ABCDEFGHIJ", transportIdentifier: identifier(.transport),
             transportHashes: [id(UInt8(AuthorityCodeRole.transport.rawValue), 20)], transportUID: 401,
             continuityDirectory: "/Library/Remozio/continuity")
         let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: scoped ? paths.authorityDirectory + "/Key/" + AuthorityKeyProvisioning.recordFileName : "/Library/Remozio/key.cbor", authorityPublicKey: key)
         let wake = try AuthorityWakeStartupConfiguration(request: request,
             registration: .init(ownerID: id(23), macID: id(21), accountID: id(22), gatewayID: id(24), lifecycleEpoch: id(25), rootPublicKey: key),
-            gatewayServiceName: scoped ? paths.gatewayService : "dev.remozio.gateway", gatewayUID: 402, teamID: "ABCDEFGHIJ", gatewayIdentifier: identifier(.notificationGateway),
+            gatewayServiceName: scoped ? paths.gatewayService : "dev.sebastiano.remozio.macos.gateway", gatewayUID: 402, teamID: "ABCDEFGHIJ", gatewayIdentifier: identifier(.notificationGateway),
             gatewayHashes: [id(UInt8(AuthorityCodeRole.notificationGateway.rawValue), 20)])
-        let presence = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: scoped ? paths.presenceService : "dev.remozio.presence",
+        let presence = try AuthorityPresenceStartupConfiguration(wake: wake, ownerUID: 501, appServiceName: scoped ? paths.presenceService : "dev.sebastiano.remozio.macos.presence",
             teamID: "ABCDEFGHIJ", appIdentifier: identifier(.app), appHashes: [id(1, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
-        return try .init(presence: presence, serviceName: scoped ? paths.commandService : "dev.remozio.commands", policyPath: scoped ? paths.policy : "/Library/Remozio/elevation.cbor", environment: [],
+        return try .init(presence: presence, serviceName: scoped ? paths.commandService : "dev.sebastiano.remozio.macos.commands", policyPath: scoped ? paths.policy : "/Library/Remozio/elevation.cbor", environment: [],
             submissionLimits: .init(maxBytes: 8192, maxDepth: 8, maxItems: 1024), captureLimits: .init(maxBytes: 65536, maxDepth: 8, maxItems: 4096),
             execution: execution ? .init(monitorPath: monitorPath ?? (bundle + "/" + relative(.commandMonitor)), childPath: bundle + "/" + relative(.commandChild)) : nil)
     }
     private func config(policy: AuthorityCodePolicy? = nil, command: AuthorityCommandStartupConfiguration? = nil) throws -> InstalledAuthorityCommandConfiguration {
         try .init(machineDirectory: "/Library/Remozio/machine", installationID: id(26), releaseDigest: InstallationInventory.digest(release()),
-            codePolicy: policy ?? self.policy(), command: command ?? self.command(), label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist")
+            codePolicy: policy ?? self.policy(), command: command ?? self.command(), label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist")
     }
     private func inventory(owner: UInt32 = 501, account: Data? = nil, installation: Data? = nil, path: String? = nil,
-                           label: String = "dev.remozio.authority") throws -> InstallationInventory {
+                           label: String = "dev.sebastiano.remozio.macos.authority") throws -> InstallationInventory {
         let account = account ?? id(22)
         return try .init(macID: id(21), installationID: installation ?? id(26), revision: id(27), bundlePath: path ?? bundle,
             releaseDigest: InstallationInventory.digest(release()), accounts: [.init(accountID: account, ownerUID: owner)],
             services: [.init(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0, label: label,
-                plistName: "dev.remozio.authority.plist", accountID: account)])
+                plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account)])
     }
     private func scopedConfig() throws -> InstalledAuthorityCommandConfiguration {
         let paths = try RuntimePreparationPaths(accountID: id(22)), label = paths.namespace + ".authority"
@@ -156,13 +156,13 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
         let manifest = try InstallationServiceManifest(declaration: declaration, component: release.manifest.components.first { $0.role == .authority }!,
             configurationPath: "/Library/Remozio/command-host.cbor", userName: "root",
             arguments: [InstalledAuthorityCommandConfiguration.executablePath, "--command-configuration", "/Library/Remozio/command-host.cbor"],
-            machServices: ["dev.remozio.authority", "dev.remozio.presence", "dev.remozio.commands"], runAtLoad: true, keepAlive: true)
+            machServices: ["dev.sebastiano.remozio.macos.authority", "dev.sebastiano.remozio.macos.presence", "dev.sebastiano.remozio.macos.commands"], runAtLoad: true, keepAlive: true)
         var values: [String: Any] = ["Label": declaration.label, "BundleProgram": InstalledAuthorityCommandConfiguration.executablePath,
             "ProgramArguments": [InstalledAuthorityCommandConfiguration.executablePath, "--command-configuration", "/Library/Remozio/command-host.cbor"],
             "UserName": "root", "RunAtLoad": true, "KeepAlive": true,
-            "MachServices": ["dev.remozio.authority": true, "dev.remozio.presence": true, "dev.remozio.commands": true]]
+            "MachServices": ["dev.sebastiano.remozio.macos.authority": true, "dev.sebastiano.remozio.macos.presence": true, "dev.sebastiano.remozio.macos.commands": true]]
         XCTAssertNoThrow(try manifest.validate(PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0), inventory: inventory, release: release))
-        values["MachServices"] = ["dev.remozio.authority": true, "dev.remozio.presence": true, "dev.remozio.commands": true, "dev.remozio.extra": true]
+        values["MachServices"] = ["dev.sebastiano.remozio.macos.authority": true, "dev.sebastiano.remozio.macos.presence": true, "dev.sebastiano.remozio.macos.commands": true, "dev.remozio.extra": true]
         XCTAssertThrowsError(try manifest.validate(PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0), inventory: inventory, release: release))
     }
     func testOrdinaryAccountCannotReadHostConfigurationOrAcquireARegisteredRight() throws {
@@ -174,7 +174,7 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
         var port = mach_port_t(1234)
-        XCTAssertEqual("dev.remozio.commands".withCString { remozio_authority_check_in_service($0, &port) }, KERN_NO_ACCESS)
+        XCTAssertEqual("dev.sebastiano.remozio.macos.commands".withCString { remozio_authority_check_in_service($0, &port) }, KERN_NO_ACCESS)
         XCTAssertEqual(port, mach_port_t(MACH_PORT_NULL))
         for name in ["", String(repeating: "x", count: 128)] {
             port = 1234

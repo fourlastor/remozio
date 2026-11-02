@@ -35,7 +35,7 @@ final class PortableAppPreferencesFormatTests: XCTestCase {
             privateKeyID: "synthetic-key-id", privateKeyPEM: Self.pem.get())
     }
     private func client() throws -> SetupPushClientConfiguration {
-        try .init(projectID: "synthetic-project", senderID: "123456789012", packageName: "dev.remozio.android")
+        try .init(projectID: "synthetic-project", senderID: "123456789012", packageName: "dev.sebastiano.remozio.android")
     }
     private func fields(_ setup: PortableSetup) throws -> [UInt64: CBORValue] {
         guard case .map(let fields) = try DeterministicCBOR.decode(setup.canonicalBytes(), limits: limits) else { throw PortableSetupError.rejected }
@@ -103,9 +103,9 @@ final class PortableAppPreferencesFormatTests: XCTestCase {
         let legacy = try PortableSetup(defaults: defaults(expanded: false), fcm: provider(), pushClient: client(), appPreferences: preferences())
         XCTAssertThrowsError(try legacy.canonicalBytes())
         var changed = try fields(PortableSetup(defaults: defaults(expanded: false)).addingAppPreferences(preferences()))
-        changed[4] = .array([.text("synthetic-project"), .text("123456789012"), .text("dev.remozio.android")]); try reject(changed)
+        changed[4] = .array([.text("synthetic-project"), .text("123456789012"), .text("dev.sebastiano.remozio.android")]); try reject(changed)
         changed = try fields(PortableSetup(defaults: defaults(expanded: true), fcm: provider(), pushClient: client()).addingAppPreferences(preferences()))
-        changed[4] = .array([.text("other-project"), .text("123456789012"), .text("dev.remozio.android")]); try reject(changed)
+        changed[4] = .array([.text("other-project"), .text("123456789012"), .text("dev.sebastiano.remozio.android")]); try reject(changed)
         changed[4] = .text("device token"); try reject(changed)
     }
     func testUnknownPreferenceFieldsCannotBecomeLocalIdentityOrAuthoritySettings() throws {

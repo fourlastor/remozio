@@ -111,12 +111,12 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
                     signingLimits: limits, auditLimits: limits)
             }
             let key = key, signs = signs
-            provider = AuthorityPhonePushRegistration(policy: try .init(registration: registration, projectID: "project", senderID: "123", packageName: "dev.remozio.android"),
+            provider = AuthorityPhonePushRegistration(policy: try .init(registration: registration, projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"),
                 signing: { bytes in signs.increment(); return try key.signature(for: bytes).rawRepresentation })
         }
         deinit { owner.close(); try? db.close(); store.close(); try? FileManager.default.removeItem(at: root) }
         func offer(project: String = "project") throws -> PhonePushRegistrationFrame {
-            try .offer(correlationID: pushID(50), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: project, senderID: "123", packageName: "dev.remozio.android"))
+            try .offer(correlationID: pushID(50), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: project, senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         }
         func exchange(_ frame: PhonePushRegistrationFrame, time: UInt64 = 100, binding: AuthorityPeerBinding? = nil,
                       validate: (JournalTransaction) throws -> Void = { _ in }) throws -> PhonePushRegistrationFrame {
@@ -380,7 +380,7 @@ final class AuthorityPhonePushRegistrationTests: XCTestCase {
         let h = try Harness(), r = h.registration
         let changed = try GatewayRegistrationIdentity(ownerID: pushID(99), macID: r.macID, accountID: r.accountID,
             gatewayID: r.gatewayID, lifecycleEpoch: r.lifecycleEpoch, rootPublicKey: r.rootPublicKey)
-        let provider = AuthorityPhonePushRegistration(policy: try .init(registration: changed, projectID: "project", senderID: "123", packageName: "dev.remozio.android"),
+        let provider = AuthorityPhonePushRegistration(policy: try .init(registration: changed, projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"),
             signing: { _ in throw Failure.injected })
         XCTAssertThrowsError(try h.owner.preparePhonePushRegistration(provider, now: .init(epoch: h.clock, milliseconds: 100)))
         XCTAssertEqual(try h.head, 0)

@@ -61,7 +61,7 @@ final class GatewaySetupFormTests: XCTestCase {
         XCTAssertThrowsError(try form.choices(provider: provider))
         form.fileWakeCustodyAccepted = true; form[.operations] = "3"
         let choices = try form.choices(provider: provider)
-        XCTAssertEqual(choices.senderID, "123"); XCTAssertEqual(choices.packageName, "dev.remozio.android")
+        XCTAssertEqual(choices.senderID, "123"); XCTAssertEqual(choices.packageName, "dev.sebastiano.remozio.android")
         XCTAssertTrue(choices.fileWakeCustodyAccepted); XCTAssertEqual(choices.settings.maximumOperations, 3)
         form.senderID = "invalid sender"; XCTAssertThrowsError(try form.choices(provider: provider))
         form.senderID = "123"; form.packageName = "invalid package"; XCTAssertThrowsError(try form.choices(provider: provider))

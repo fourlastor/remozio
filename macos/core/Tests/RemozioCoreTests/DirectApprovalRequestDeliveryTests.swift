@@ -373,7 +373,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func recoveryResume(_ id: Data = DirectApprovalRequestDeliveryTests.id(32)) throws -> PhonePushRecoveryFrame {
         try .resume(correlationID: id, offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project",
-            senderID: "123", packageName: "dev.remozio.android"))
+            senderID: "123", packageName: "dev.sebastiano.remozio.android"))
     }
     func testRecoveryPreflightPrecedesResumeAndUsesTheDefaultPurposeHandler() async throws {
         let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], recoveryVersion: 2)

@@ -47,8 +47,8 @@ final class RelayConnectorProcess: @unchecked Sendable, CustomStringConvertible,
             try host.validateRelease(release)
             let identifier: String
             switch app.identifier {
-            case "dev.remozio.mac": identifier = "dev.remozio.cloudflared"
-            case "dev.remozio.mac.debug": identifier = "dev.remozio.cloudflared.debug"
+            case "dev.sebastiano.remozio.macos": identifier = "dev.sebastiano.remozio.macos.cloudflared"
+            case "dev.sebastiano.remozio.macos.debug": identifier = "dev.sebastiano.remozio.macos.cloudflared.debug"
             default: throw RuntimePreparationError.changedScope
             }
             let relative = "Contents/Helpers/RemozioCloudflared"

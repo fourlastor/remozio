@@ -100,7 +100,7 @@ final class RelayConnectorRuntimeTests: XCTestCase, @unchecked Sendable {
     func testReleaseRequiresTheTransportReaderAndSetupWriterForTheExistingReferenceVersion() throws {
         let name = RelayRunCredentialReference.formatName
         func component(_ role: AuthorityCodeRole, readers: Set<UInt64>, writers: Set<UInt64>) throws -> ReleaseComponent {
-            try .init(role: role, identifier: role == .transport ? "dev.remozio.transport" : "dev.remozio.setup",
+            try .init(role: role, identifier: role == .transport ? "dev.sebastiano.remozio.macos.transport" : "dev.sebastiano.remozio.macos.setup",
                 generation: 1, relativePath: role == .app ? "Contents/MacOS/Fixture" : "Contents/Library/LaunchServices/Fixture",
                 codeDirectoryHash: role == .app ? nil : Data(repeating: 1, count: 20),
                 build: "1", teamID: nil, formats: [.init(name: name, readers: readers, writers: writers)])

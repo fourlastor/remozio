@@ -6,7 +6,7 @@ import XCTest
 final class AuthoritySelfValidationTests: XCTestCase {
     func testAuthorityRequirementBindsExactGenerationAndReleaseIdentity() throws {
         for generation in [UInt64(1), 4, .max] {
-            let entry = try AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+            let entry = try AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                 installedGeneration: generation, minimumGeneration: generation, codeDirectoryHash: Data(repeating: 9, count: 20), active: true)
             let expression = try AuthoritySelfValidation.requirement(for: entry)
             var compiled: SecRequirement?
@@ -19,7 +19,7 @@ final class AuthoritySelfValidationTests: XCTestCase {
     }
     func testInactiveOrWrongRoleCannotSupplyAuthorityPolicy() throws {
         for (role, active) in [(AuthorityCodeRole.authority, false), (.transport, true)] {
-            let entry = try AuthorityCodeEntry(role: role, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+            let entry = try AuthorityCodeEntry(role: role, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                 installedGeneration: 4, minimumGeneration: 3, codeDirectoryHash: Data(repeating: 9, count: 20), active: active)
             XCTAssertThrowsError(try AuthoritySelfValidation.requirement(for: entry)) {
                 XCTAssertEqual($0 as? AuthoritySelfValidationError, .invalidPolicy)

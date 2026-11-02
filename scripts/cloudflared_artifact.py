@@ -125,7 +125,7 @@ def prepare(environment, fetch=download):
     value = pin()
     configuration = environment['CONFIGURATION']
     suffix = '.debug' if configuration == 'Debug' else ''
-    if configuration not in ('Debug', 'Release') or environment['PRODUCT_BUNDLE_IDENTIFIER'] != 'dev.remozio.mac' + suffix:
+    if configuration not in ('Debug', 'Release') or environment['PRODUCT_BUNDLE_IDENTIFIER'] != 'dev.sebastiano.remozio.macos' + suffix:
         raise ValueError('Unexpected app build identity')
     identity = environment.get('EXPANDED_CODE_SIGN_IDENTITY') or environment.get('CODE_SIGN_IDENTITY') or '-'
     if identity != '-' and not re.fullmatch(r'[0-9a-fA-F]{40}', identity):
@@ -138,7 +138,7 @@ def prepare(environment, fetch=download):
     with tempfile.TemporaryDirectory(prefix='.remozio-cloudflared-', dir=products) as temporary:
         candidate = Path(temporary) / PRODUCT; candidate.write_bytes(binary); candidate.chmod(0o755)
         entitlements = Path(temporary) / 'empty-entitlements.plist'; entitlements.write_bytes(plistlib.dumps({}))
-        identifier = 'dev.remozio.cloudflared' + suffix
+        identifier = 'dev.sebastiano.remozio.macos.cloudflared' + suffix
         command(['/usr/bin/codesign', '--force', '--sign', identity, '--options', 'runtime', '--identifier', identifier,
                  '--entitlements', entitlements, '--timestamp=none' if identity == '-' else '--timestamp', candidate])
         digest, team = signed_tool_identity(candidate, identifier)

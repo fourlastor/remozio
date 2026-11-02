@@ -22,7 +22,7 @@ final class AuthorityPhonePushSettingsTests: XCTestCase, @unchecked Sendable {
         init() throws {
             h = try .init(configureGateway: false, gatewayLedgerEnabled: false)
             journal = AuthorityJournal(requests: h.owner)
-            options = try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+            options = try .init(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
                 gatewayReceiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
                 maximumControls: 30, candidateLifetimeMilliseconds: 1000)
             let h = h, constructions = constructions
@@ -62,7 +62,7 @@ final class AuthorityPhonePushSettingsTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(cap.installedCommitDigest, next); XCTAssertEqual(f.constructions.value, 1)
         let recovery = cap.recoveryProvider()
         let resume = PhonePushRecoveryFrame.resume(correlationID: offer.correlationID,
-            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         guard case .state(_, let recovered) = try f.journal.withRequests({ try recovery($0, h.binding, resume, { _ in }) }) else { return XCTFail() }
         XCTAssertEqual(recovered.metadata, prepared); XCTAssertEqual(try h.head, head)
         let restored = try h.store.read()

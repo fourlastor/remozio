@@ -595,14 +595,14 @@ final class CheckpointedJournalTests: XCTestCase {
         _ = try commits.write(epoch: fixture.epoch) {
             _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
             return try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
-                identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                identifier: "dev.sebastiano.remozio.macos.transport", installedGeneration: 1, minimumGeneration: 1,
                 codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
         }
         try fixture.journal.close(); fixture.store.close()
         let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
         let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             journalDirectory: fixture.root.appendingPathComponent("journal").path, serviceName: "dev.remozio.authority.test",
-            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)],
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 3, count: 20)],
             transportUID: 501, continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
         let clock = try AuthorityClock()
         let service = try AuthorityService(configuration: configuration, journal: owner, expiryClock: { try clock.now() },
@@ -623,14 +623,14 @@ final class CheckpointedJournalTests: XCTestCase {
             _ = try commits.write(epoch: fixture.epoch) {
                 _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
                 return try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
-                    identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                    identifier: "dev.sebastiano.remozio.macos.transport", installedGeneration: 1, minimumGeneration: 1,
                     codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
             }
             try fixture.journal.close(); fixture.store.close()
             let owner = try AuthorityJournal(storage: fixture.openTransferredStorage())
             let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: wrongScope ? 9 : 1, count: 16),
                 accountID: Data(repeating: 2, count: 16), journalDirectory: fixture.root.appendingPathComponent("journal").path,
-                serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport",
+                serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
                 transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
                 continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
             if wrongScope {
@@ -883,7 +883,7 @@ final class CheckpointedJournalTests: XCTestCase {
         try fixture.reopen()
         let legacy = try XCTUnwrap(fixture.journal.read { try $0.codePolicy() })
         XCTAssertEqual(legacy.roleRevisions[.authority], initial.revision)
-        let unrelated = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport",
+        let unrelated = try AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
         let extended = try AuthorityCodePolicy(entries: legacy.policy.entries + [unrelated])
         let upgraded = try fixture.journal.write { try $0.installCodePolicy(extended, expectedRevision: legacy.revision) }
@@ -910,9 +910,9 @@ final class CheckpointedJournalTests: XCTestCase {
         let legacy = try legacyCodePolicy()
         let initial = try commits.write(epoch: fixture.epoch) { try $0.installCodePolicy(legacy, expectedRevision: nil) }
         let before = try fixture.store.read().committed
-        let child = try AuthorityCodeEntry(role: .commandChild, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.command-child",
+        let child = try AuthorityCodeEntry(role: .commandChild, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.command-child",
             installedGeneration: 5, minimumGeneration: 4, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
-        let monitor = try AuthorityCodeEntry(role: .commandMonitor, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.command-monitor",
+        let monitor = try AuthorityCodeEntry(role: .commandMonitor, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.command-monitor",
             installedGeneration: 3, minimumGeneration: 2, codeDirectoryHash: Data(repeating: 4, count: 20), active: false)
         let policy = try AuthorityCodePolicy(entries: initial.policy.entries + [child, monitor])
         let upgraded = try commits.write(epoch: fixture.epoch) {
@@ -1012,14 +1012,14 @@ final class CheckpointedJournalTests: XCTestCase {
         _ = try commits.write(epoch: fixture.epoch) {
             _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: []]), allowedContracts: [contract])
             return try $0.installCodePolicy(AuthorityCodePolicy(entries: [authority, AuthorityCodeEntry(role: .transport,
-                teamID: "ABCDEFGHIJ", identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.transport", installedGeneration: 1, minimumGeneration: 1,
                 codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
         }
         try fixture.journal.write { try fixture.append($0) }
         let owner = try recoveringOwner(fixture)
         let configuration = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             journalDirectory: fixture.root.appendingPathComponent("journal").path, serviceName: "dev.remozio.authority.test",
-            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)],
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 3, count: 20)],
             transportUID: 501, continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
         let clock = try AuthorityClock()
         let service = try AuthorityService(configuration: configuration, journal: owner, expiryClock: { try clock.now() },
@@ -1295,7 +1295,7 @@ final class CheckpointedJournalTests: XCTestCase {
     }
 
     private func codePolicy(installed: UInt64 = 4, minimum: UInt64 = 2, active: Bool = true) throws -> AuthorityCodePolicy {
-        try AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.remozio.authority",
+        try AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .authority, teamID: "ABCDEF1234", identifier: "dev.sebastiano.remozio.macos.authority",
             installedGeneration: installed, minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 8, count: 20), active: active)])
     }
 

@@ -222,7 +222,7 @@ final class DurableInstallationInventoryTests: XCTestCase {
             let appLabel = "dev.remozio.app." + String(repeating: "a", count: 225)
             let guiLabel = "dev.remozio.gui." + String(repeating: "g", count: 225)
             var services = [try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-                label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: accounts[0].accountID)]
+                label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: accounts[0].accountID)]
             for account in accounts {
                 services.append(try .init(role: .app, kind: .mainApp, domainUID: account.ownerUID, executionUID: account.ownerUID,
                     label: appLabel, plistName: nil, accountID: account.accountID))

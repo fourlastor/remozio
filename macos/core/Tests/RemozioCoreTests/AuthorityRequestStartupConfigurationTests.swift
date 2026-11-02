@@ -8,8 +8,8 @@ import XCTest
 final class AuthorityRequestStartupConfigurationTests: XCTestCase {
     private func service(continuity: Bool = true, maximumPayloadBytes: Int = 4096) throws -> AuthorityServiceConfiguration {
         try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.remozio.authority",
-            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)],
+            journalDirectory: "/Library/Application Support/Remozio/journal", serviceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "ABCDEFGHIJ", transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 3, count: 20)],
             transportUID: 502, maximumPayloadBytes: maximumPayloadBytes,
             continuityDirectory: continuity ? "/Library/Application Support/Remozio/continuity" : nil)
     }

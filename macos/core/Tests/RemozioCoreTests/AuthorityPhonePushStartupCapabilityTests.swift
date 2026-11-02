@@ -19,7 +19,7 @@ final class AuthorityPhonePushStartupCapabilityTests: XCTestCase, @unchecked Sen
         init() throws {
             h = try .init(configureGateway: false, gatewayLedgerEnabled: false)
             journal = AuthorityJournal(requests: h.owner)
-            options = try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+            options = try .init(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
                 gatewayReceiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation,
                 maximumControls: 30, candidateLifetimeMilliseconds: 1000)
         }

@@ -9,8 +9,8 @@ final class TransportFileIdentityTests: XCTestCase {
     private let path = "/Library/Application Support/Remozio/transport/identity.cbor"
     private func configuration(source: ApprovalTransportIdentitySource, pin: Data) throws -> ApprovalTransportConfiguration {
         try ApprovalTransportConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.remozio.authority",
-            teamID: "TEAMID1234", authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 3, count: 20)],
+            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "TEAMID1234", authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 3, count: 20)],
             identitySource: source, identityPublicKeyInfo: pin)
     }
     private func encode(_ fields: [UInt64: CBORValue]) throws -> Data {

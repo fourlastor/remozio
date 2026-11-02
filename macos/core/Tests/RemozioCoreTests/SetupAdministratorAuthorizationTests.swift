@@ -65,7 +65,7 @@ final class SetupAdministratorAuthorizationTests: XCTestCase {
     func testPublicHelperRefusesOrdinaryCallerBeforeConnectionOrRightsAccess() throws {
         guard getuid() > 0 else { throw XCTSkip("Ordinary account control") }
         let connection = NSXPCConnection(machServiceName: "dev.remozio.tests.not-registered")
-        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.mac",
+        let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.sebastiano.remozio.macos",
             approvedCodeDirectoryHashes: [Data(repeating: 0, count: 20)], expectedUserID: getuid())
         let invocation = XPCInvocationGuard(connection: connection, policy: policy)
         XCTAssertThrowsError(try SetupAdministratorAuthorization.validate(externalForm: Data(), invocation: invocation)) { error in

@@ -19,7 +19,7 @@ flowchart TD
 
 ## Registration boundary
 
-Only the fixed `dev.remozio.setup.plist` declaration is selectable.
+Only the fixed `dev.sebastiano.remozio.macos.setup.plist` declaration is selectable.
 The app must run from the protected package destination as an ordinary account.
 The Applications shortcut can resolve to that destination.
 The native Security API reports the running GUI app as its bundle.

@@ -10,8 +10,8 @@ RemozioPackaging.app/
       RemozioSessionProbe
       RemozioAuthorityProbe
     Library/
-      LaunchAgents/dev.remozio.experiments.session.plist
-      LaunchDaemons/dev.remozio.experiments.authority.plist
+      LaunchAgents/dev.sebastiano.remozio.macos.experiments.session.plist
+      LaunchDaemons/dev.sebastiano.remozio.macos.experiments.authority.plist
 ```
 
 The SwiftUI window reports SMAppService registration status. It never registers or unregisters a service. The probes print their role only with `--describe`; other invocations exit with `EX_UNAVAILABLE`. There is no startup loop or persistent background job.

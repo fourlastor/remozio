@@ -9,16 +9,16 @@ final class AuthorityCommandStartupV2Tests: XCTestCase {
     private func presence() throws -> AuthorityPresenceStartupConfiguration {
         let key = try P256.Signing.PrivateKey(rawRepresentation: Data(repeating: 9, count: 32)).publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id(1), accountID: id(2), journalDirectory: "/Library/Remozio/journal",
-            serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.sebastiano.remozio.macos.authority", teamID: "TEAMID1234", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [id(3, 20)], transportUID: 401, maximumPayloadBytes: 262_144, continuityDirectory: "/Library/Remozio/continuity")
         let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/key.cbor", authorityPublicKey: key)
         let registration = try GatewayRegistrationIdentity(ownerID: id(3), macID: id(1), accountID: id(2), gatewayID: id(4),
             lifecycleEpoch: id(5), rootPublicKey: key)
         let wake = try AuthorityWakeStartupConfiguration(request: request, registration: registration,
             gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402, teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [id(4, 20)])
-        return try .init(wake: wake, ownerUID: 501, appServiceName: "dev.remozio.presence", teamID: "TEAMID1234",
-            appIdentifier: "dev.remozio.mac", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [id(4, 20)])
+        return try .init(wake: wake, ownerUID: 501, appServiceName: "dev.sebastiano.remozio.macos.presence", teamID: "TEAMID1234",
+            appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [id(6, 20)], policy: .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000))
     }
     private func config(service: String = "dev.remozio.command", path: String = "/Library/Remozio/elevation.cbor",
                         environment: [CapturedEnvironmentEntry] = [], captureBytes: Int = 65_536,

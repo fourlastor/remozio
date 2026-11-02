@@ -8,8 +8,8 @@ import XCTest
 final class TransportRemoteStartupConfigurationTests: XCTestCase {
     private func transport() throws -> ApprovalTransportConfiguration {
         try .init(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
-            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.remozio.authority",
-            teamID: "TEAMID1234", authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 3, count: 20)],
+            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.sebastiano.remozio.macos.authority",
+            teamID: "TEAMID1234", authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 3, count: 20)],
             identityReference: Data([1]), identityPublicKeyInfo: P256.Signing.PrivateKey().publicKey.derRepresentation)
     }
     private func wake(_ transport: ApprovalTransportConfiguration) throws -> TransportWakeStartupConfiguration {
@@ -17,7 +17,7 @@ final class TransportRemoteStartupConfigurationTests: XCTestCase {
             macID: transport.macID, accountID: transport.accountID, gatewayID: Data(repeating: 4, count: 16),
             lifecycleEpoch: Data(repeating: 5, count: 16)), credentialID: Data(repeating: 6, count: 16),
             transportUID: 401, ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake",
-            teamID: "TEAMID1234", gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
+            teamID: "TEAMID1234", gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
             custody: .protectedFile, keyRecordPath: "/Library/Remozio/transport/wake.cbor",
             publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
         return try .init(transport: transport, wake: signer)

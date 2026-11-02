@@ -21,7 +21,7 @@ final class GatewaySetupChoicesTests: XCTestCase {
             maximumOperations: 5, handshakeTimeoutMillis: 3456, authorityLeaseMillis: 20000, providerTimeoutSeconds: 15,
             schedulerRetryMillis: 4321, maximumStoredControls: 5000, maximumPendingPerEnrollment: 3,
             maximumCandidateLifetimeMillis: 360000, databaseBusyMillis: 2000)
-        return try .init(provider: provider, senderID: "123", packageName: "dev.remozio.android", settings: settings, fileWakeCustodyAccepted: true)
+        return try .init(provider: provider, senderID: "123", packageName: "dev.sebastiano.remozio.android", settings: settings, fileWakeCustodyAccepted: true)
     }
     private let limits = try! CBORLimits(maxBytes: 65536, maxDepth: 8, maxItems: 256)
     private func changed(_ bytes: Data, _ edit: (inout [UInt64: CBORValue]) throws -> Void) throws -> Data {

@@ -31,7 +31,7 @@ final class GatewayJournalSetupExchangeTests: XCTestCase, @unchecked Sendable {
             let provider = try SetupFCMConfiguration(project: "synthetic-project", clientEmail: "fixture@fixture.iam.gserviceaccount.com",
                 privateKeyID: "fixture-key", privateKeyPEM: GatewayJournalSetupExchangeTests.pem.get())
             let material = try GatewayPreparationMaterial.create(runtime: runtime.material.reference, provider: provider,
-                senderID: "123", packageName: "dev.remozio.android", fileWakeCustodyAccepted: true)
+                senderID: "123", packageName: "dev.sebastiano.remozio.android", fileWakeCustodyAccepted: true)
             try runtime.machine.retainGatewayMaterial(material.reference)
             let settings = try GatewayServiceSettings(delivery: .init(maximumFlights: 4, minimumSendIntervalMillis: 1000),
                 probe: .init(maximumAttempts: 3, minimumRetryDelayMillis: 1000, maximumTTLSeconds: 300),

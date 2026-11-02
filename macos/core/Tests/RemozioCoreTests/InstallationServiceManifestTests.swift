@@ -5,15 +5,15 @@ import XCTest
 
 final class InstallationServiceManifestTests: XCTestCase {
     private func fixture() throws -> (InstallationServiceManifest, InstallationInventory, SignedReleaseEvidence, [String: Any]) {
-        let app = try ReleaseComponent(role: .app, identifier: "dev.remozio.mac", generation: 1,
+        let app = try ReleaseComponent(role: .app, identifier: "dev.sebastiano.remozio.macos", generation: 1,
             relativePath: "Contents/MacOS/Remozio", codeDirectoryHash: nil, build: "1", teamID: nil, formats: [])
-        let authority = try ReleaseComponent(role: .authority, identifier: "dev.remozio.authority", generation: 1,
+        let authority = try ReleaseComponent(role: .authority, identifier: "dev.sebastiano.remozio.macos.authority", generation: 1,
             relativePath: "Contents/Helpers/Authority", codeDirectoryHash: Data(repeating: 2, count: 20), build: "1", teamID: nil, formats: [])
         let release = SignedReleaseEvidence(manifest: try .init(release: "1", build: "1", components: [app, authority]),
             codeDirectoryHashes: [.app: Data(repeating: 1, count: 20), .authority: Data(repeating: 2, count: 20)])
         let account = try InstallationAccount(accountID: Data(repeating: 3, count: 16), ownerUID: 501)
         let service = try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-            label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: account.accountID)
+            label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account.accountID)
         let path = "/Library/Remozio/authority.cbor"
         let arguments = [authority.relativePath, "--configuration", path]
         let expected = try InstallationServiceManifest(declaration: service, component: authority, configurationPath: path,
@@ -59,7 +59,7 @@ final class InstallationServiceManifestTests: XCTestCase {
             configurationPath: "/Library/Remozio/authority.cbor", userName: "root",
             arguments: [other.relativePath, "--configuration", "/Library/Remozio/authority.cbor"],
             machServices: [], runAtLoad: true, keepAlive: false)
-        let plist: [String: Any] = ["Label": "dev.remozio.authority", "BundleProgram": other.relativePath,
+        let plist: [String: Any] = ["Label": "dev.sebastiano.remozio.macos.authority", "BundleProgram": other.relativePath,
             "ProgramArguments": [other.relativePath, "--configuration", "/Library/Remozio/authority.cbor"],
             "UserName": "root", "RunAtLoad": true, "KeepAlive": false]
         XCTAssertThrowsError(try expected.validate(encode(plist), inventory: inventory, release: release))

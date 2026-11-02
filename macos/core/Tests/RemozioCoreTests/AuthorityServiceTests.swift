@@ -10,7 +10,7 @@ final class AuthorityServiceTests: XCTestCase {
         try AuthorityServiceConfiguration(macID: Data(repeating: wrongScope ? 9 : 1, count: 16),
             accountID: Data(repeating: 2, count: 16), journalDirectory: fixture.directory,
             serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ",
-            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501)
+            transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501)
     }
     private func database(_ fixture: Fixture, initialize: Bool = true, configure: Bool = true, configureCode: Bool = true) throws -> sending JournalDatabase {
         let anchor = fixture.root.path
@@ -26,7 +26,7 @@ final class AuthorityServiceTests: XCTestCase {
         if initialize && configureCode {
             _ = try database.write {
                 try $0.installCodePolicy(AuthorityCodePolicy(entries: [AuthorityCodeEntry(role: .transport, teamID: "ABCDEFGHIJ",
-                    identifier: "dev.remozio.transport", installedGeneration: 1, minimumGeneration: 1,
+                    identifier: "dev.sebastiano.remozio.macos.transport", installedGeneration: 1, minimumGeneration: 1,
                     codeDirectoryHash: Data(repeating: 3, count: 20), active: true)]), expectedRevision: nil)
             }
         }
@@ -180,7 +180,7 @@ final class AuthorityServiceTests: XCTestCase {
     private func startup(_ fixture: Fixture, publicKey: Data? = nil) throws -> AuthorityRequestStartupConfiguration {
         let base = try AuthorityServiceConfiguration(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
             journalDirectory: fixture.directory, serviceName: "dev.remozio.authority.test", teamID: "ABCDEFGHIJ",
-            transportIdentifier: "dev.remozio.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
+            transportIdentifier: "dev.sebastiano.remozio.macos.transport", transportHashes: [Data(repeating: 3, count: 20)], transportUID: 501,
             continuityDirectory: fixture.root.appendingPathComponent("continuity").path)
         return try AuthorityRequestStartupConfiguration(service: base, keyRecordPath: fixture.root.appendingPathComponent("authority.cbor").path,
             authorityPublicKey: publicKey ?? P256.Signing.PrivateKey().publicKey.x963Representation)

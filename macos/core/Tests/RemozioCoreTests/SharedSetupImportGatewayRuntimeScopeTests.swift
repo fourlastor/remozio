@@ -17,7 +17,7 @@ final class SharedSetupImportGatewayRuntimeScopeTests: XCTestCase {
                 maximumWakeConnections: changedLimits ? 5 : 4)
             proposal = .init(defaults: .init(presence: core.runtime.plan.host.command.presence.presence.policy, gateway: selection),
                 fcm: provider ? core.provider : nil,
-                pushClient: provider ? try .init(projectID: core.provider.project, senderID: senderID, packageName: "dev.remozio.android") : nil)
+                pushClient: provider ? try .init(projectID: core.provider.project, senderID: senderID, packageName: "dev.sebastiano.remozio.android") : nil)
             retained = try .init(scope: .init(account: core.runtime.account, inventory: XCTUnwrap(core.machine.inventory())), proposal: proposal)
             if publish { try publishImport(phase: phase) }
         }

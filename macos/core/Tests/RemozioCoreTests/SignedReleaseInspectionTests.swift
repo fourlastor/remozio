@@ -20,7 +20,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             guard FileManager.default.fileExists(atPath: app.path) else {
                 throw XCTSkip("Build the app first; scripts/check.sh checks both real bundles before these tests.")
             }
-            let identifier = "dev.remozio.mac" + (configuration == "Debug" ? ".debug" : "")
+            let identifier = "dev.sebastiano.remozio.macos" + (configuration == "Debug" ? ".debug" : "")
             let evidence = try inspect(app, identifier: identifier)
             XCTAssertEqual(evidence.manifest.components.count, 8)
             XCTAssertEqual(evidence.codeDirectoryHashes.count, 8)
@@ -147,10 +147,10 @@ final class SignedReleaseInspectionTests: XCTestCase {
                      "Contents/Library/LaunchDaemons/" + AdministrativeSetupConfiguration.plistName] {
             let copy = root.appendingPathComponent(UUID().uuidString + ".app")
             try FileManager.default.copyItem(at: original, to: copy)
-            XCTAssertNoThrow(try inspect(copy, identifier: "dev.remozio.mac.debug"))
+            XCTAssertNoThrow(try inspect(copy, identifier: "dev.sebastiano.remozio.macos.debug"))
             let changed = copy.appendingPathComponent(path)
             let file = try FileHandle(forWritingTo: changed); try file.seekToEnd(); try file.write(contentsOf: Data([0x41])); try file.close()
-            XCTAssertThrowsError(try inspect(copy, identifier: "dev.remozio.mac.debug"))
+            XCTAssertThrowsError(try inspect(copy, identifier: "dev.sebastiano.remozio.macos.debug"))
         }
     }
     func testReSigningChangedHelperCannotBypassTheAppManifestHash() throws {
@@ -162,7 +162,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
         let copy = root.appendingPathComponent("Remozio.app")
         try FileManager.default.copyItem(at: original, to: copy)
         let child = copy.appendingPathComponent("Contents/Helpers/RemozioCommandChild")
-        for (path, identifier) in [(child, "dev.remozio.command-child.debug"), (copy, "dev.remozio.mac.debug")] {
+        for (path, identifier) in [(child, "dev.sebastiano.remozio.macos.command-child.debug"), (copy, "dev.sebastiano.remozio.macos.debug")] {
             let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
             // A different code requirement changes the helper CDHash while preserving its identifier and generation.
             process.arguments = ["--force", "--sign", "-", "--options", "runtime", "--identifier", identifier,
@@ -170,7 +170,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
             try process.run(); process.waitUntilExit(); XCTAssertEqual(process.terminationStatus, 0)
         }
-        XCTAssertThrowsError(try inspect(copy, identifier: "dev.remozio.mac.debug")) {
+        XCTAssertThrowsError(try inspect(copy, identifier: "dev.sebastiano.remozio.macos.debug")) {
             XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
         }
     }
@@ -206,14 +206,14 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 try FileManager.default.copyItem(at: copy.appendingPathComponent("Contents/Helpers/RemozioCommandChild"), to: extra)
             }
             let sign = Process(); sign.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-            sign.arguments = ["--force", "--sign", "-", "--options", "runtime", "--identifier", "dev.remozio.mac.debug", copy.path]
+            sign.arguments = ["--force", "--sign", "-", "--options", "runtime", "--identifier", "dev.sebastiano.remozio.macos.debug", copy.path]
             sign.standardOutput = FileHandle.nullDevice; sign.standardError = FileHandle.nullDevice
             try sign.run(); sign.waitUntilExit(); XCTAssertEqual(sign.terminationStatus, 0)
             let verify = Process(); verify.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
             verify.arguments = ["--verify", "--deep", "--strict", copy.path]
             verify.standardOutput = FileHandle.nullDevice; verify.standardError = FileHandle.nullDevice
             try verify.run(); verify.waitUntilExit(); XCTAssertEqual(verify.terminationStatus, 0)
-            XCTAssertThrowsError(try inspect(copy, identifier: "dev.remozio.mac.debug"), relativePath) {
+            XCTAssertThrowsError(try inspect(copy, identifier: "dev.sebastiano.remozio.macos.debug"), relativePath) {
                 XCTAssertEqual($0 as? ReleaseManifestError, .identityMismatch)
             }
         }
@@ -266,12 +266,12 @@ final class SignedReleaseInspectionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let link = root.appendingPathComponent("candidate.app")
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: repository)
-        XCTAssertThrowsError(try inspect(link, identifier: "dev.remozio.mac.debug")) {
+        XCTAssertThrowsError(try inspect(link, identifier: "dev.sebastiano.remozio.macos.debug")) {
             XCTAssertEqual($0 as? ReleaseManifestError, .unsafePath)
         }
     }
     func testReleaseEntitlementsBindToTrustedTeamAndComponent() {
-        let identifier = "dev.remozio.mac", team = "ABCDEFGHIJ"
+        let identifier = "dev.sebastiano.remozio.macos", team = "ABCDEFGHIJ"
         let applicationKey = "com.apple.application-identifier", teamKey = "com.apple.developer.team-identifier"
         for values: [String: Any] in [[:], [applicationKey: team + "." + identifier], [teamKey: team],
                                       [applicationKey: team + "." + identifier, teamKey: team]] {
@@ -287,7 +287,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
         }
     }
     func testAdHocFixtureEntitlementsCannotClaimATeam() {
-        let identifier = "dev.remozio.mac"
+        let identifier = "dev.sebastiano.remozio.macos"
         XCTAssertTrue(SignedReleaseInspection.validEntitlements([:], identifier: identifier, teamID: nil))
         XCTAssertTrue(SignedReleaseInspection.validEntitlements(["com.apple.application-identifier": identifier], identifier: identifier, teamID: nil))
         for values: [String: Any] in [["com.apple.application-identifier": "ABCDEFGHIJ." + identifier],
@@ -298,7 +298,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
     }
     func testProductionIdentityInputsCannotInjectARequirement() throws {
         for team in ["", "abcdef1234", "ABCDEFGHIJ\" or true"] {
-            XCTAssertThrowsError(try SignedReleaseInspection.inspect(repository, teamID: team, appIdentifier: "dev.remozio.mac")) {
+            XCTAssertThrowsError(try SignedReleaseInspection.inspect(repository, teamID: team, appIdentifier: "dev.sebastiano.remozio.macos")) {
                 XCTAssertEqual($0 as? ReleaseManifestError, .invalidDeclaration)
             }
         }

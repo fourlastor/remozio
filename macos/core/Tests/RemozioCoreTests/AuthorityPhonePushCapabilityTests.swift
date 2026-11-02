@@ -9,7 +9,7 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
     private struct Denied: Error {}
     private let commit = Data(repeating: 71, count: 32)
     private func options(_ h: AuthorityPhonePushRegistrationTests.Harness) throws -> AuthorityPhonePushStartupConfiguration {
-        try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+        try .init(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
             gatewayReceiptPublicKey: P256.Signing.PrivateKey().publicKey.x963Representation, maximumControls: 30, candidateLifetimeMilliseconds: 1000)
     }
     private func capability(_ h: AuthorityPhonePushRegistrationTests.Harness, _ journal: AuthorityJournal,
@@ -23,7 +23,7 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
         let cap = capability(h, journal), registration = cap.registrationProvider(), recovery = cap.recoveryProvider()
         let offer = try h.offer(), checkpoint = try h.store.read()
         let resume = PhonePushRecoveryFrame.resume(correlationID: offer.correlationID,
-            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         let unavailable = try journal.withRequests { try registration($0, h.binding, offer, { _ in }) }
         guard case .outcome(_, .unavailable) = unavailable else { return XCTFail() }
         guard case .outcome(_, .unavailable) = try journal.withRequests({ try recovery($0, h.binding, resume, { _ in }) }) else { return XCTFail() }
@@ -48,7 +48,7 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try h.store.read(), checkpoint); XCTAssertEqual(try h.head, head)
         let recovery = cap.recoveryProvider()
         let resume = PhonePushRecoveryFrame.resume(correlationID: offer.correlationID,
-            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         guard case .state(_, let second) = try journal.withRequests({ try recovery($0, h.binding, resume, { _ in }) }) else { return XCTFail() }
         XCTAssertEqual(first, second.metadata)
         XCTAssertThrowsError(try cap.install(self.options(h), commitDigest: commit, verifyCurrent: {}))
@@ -110,7 +110,7 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
             }
         }
         XCTAssertNil(cap.publication); XCTAssertTrue(try journal.validatePeer(h.binding))
-        let wrong = try AuthorityPhonePushStartupConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.remozio.android",
+        let wrong = try AuthorityPhonePushStartupConfiguration(projectID: "another-project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
             gatewayReceiptPublicKey: options.gatewayReceiptPublicKey, maximumControls: 30, candidateLifetimeMilliseconds: 1000)
         XCTAssertThrowsError(try cap.install(wrong, commitDigest: commit, verifyCurrent: {}))
         XCTAssertNil(cap.publication); XCTAssertTrue(try cap.install(options, commitDigest: commit, verifyCurrent: {}))
@@ -163,7 +163,7 @@ final class AuthorityPhonePushCapabilityTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try cap.install(self.options(h), commitDigest: commit, verifyCurrent: {}))
         XCTAssertTrue(try cap.install(options, commitDigest: commit, verifyCurrent: {})); XCTAssertEqual(constructions.value, 1)
         let resume = PhonePushRecoveryFrame.resume(correlationID: offer.correlationID,
-            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+            offer: try .init(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         guard case .state(_, let retained) = try journal.withRequests({ try recovery($0, h.binding, resume, { _ in }) }) else { return XCTFail() }
         XCTAssertEqual(retained.metadata, original); try h.assertCheckpoint(); XCTAssertTrue(try journal.validatePeer(h.binding))
     }

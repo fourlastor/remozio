@@ -57,7 +57,7 @@ struct RenderSetupPreview {
         guard portableKeyProcess.terminationStatus == 0 else { fatalError("Could not generate the disposable preview key") }
         let portableProvider = try SetupFCMConfiguration(project: "remozio-preview", clientEmail: "preview@fixture.iam.gserviceaccount.com",
             privateKeyID: "synthetic-preview-key", privateKeyPEM: String(decoding: portableKey, as: UTF8.self))
-        let portableClient = try SetupPushClientConfiguration(projectID: "remozio-preview", senderID: "123456789012", packageName: "dev.remozio.android")
+        let portableClient = try SetupPushClientConfiguration(projectID: "remozio-preview", senderID: "123456789012", packageName: "dev.sebastiano.remozio.android")
         let portableFull = PortableSetup(defaults: portableDefaults, fcm: portableProvider,
             pushClient: portableClient, appPreferences: portablePreferences).preview
         let portableSettingsOnly = PortableSetup(defaults: portableDefaults).preview

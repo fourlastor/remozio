@@ -20,9 +20,9 @@ public enum MachineBootstrap {
         defer { placement.close() }
         func inspect() throws -> SignedReleaseEvidence {
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-            let release = try SignedReleaseInspection.inspect(bundle, teamID: teamID, appIdentifier: "dev.remozio.mac")
+            let release = try SignedReleaseInspection.inspect(bundle, teamID: teamID, appIdentifier: "dev.sebastiano.remozio.macos")
             guard let host = release.manifest.components.first(where: { $0.role == .setupController }),
-                  host.identifier == "dev.remozio.setup-controller", host.relativePath == AdministrativeSetupConfiguration.executablePath,
+                  host.identifier == "dev.sebastiano.remozio.macos.setup-controller", host.relativePath == AdministrativeSetupConfiguration.executablePath,
                   let hash = release.codeDirectoryHashes[.setupController] else { throw MachineBootstrapError.wrongExecutable }
             let requirement = try XPCPeerPolicy(teamID: teamID, componentIdentifier: host.identifier,
                 approvedCodeDirectoryHashes: [hash], expectedUserID: 0).requirement

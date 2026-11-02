@@ -92,7 +92,7 @@ final class TransportWakeAuthorizationTests: XCTestCase, @unchecked Sendable {
         let key = P256.Signing.PrivateKey(), credential = Data(repeating: 3, count: 16)
         let configuration = try GatewayWakeSignerConfiguration(binding: binding, credentialID: credential, transportUID: 401,
             ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
             custody: .protectedFile, keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: key.publicKey.x963Representation)
         let record = try GatewayWakeKeyRecord(binding: binding, credentialID: credential, fileKey: key)
         return try GatewayWakeSigner.load(configuration: configuration, realUID: 401, effectiveUID: 401,
@@ -121,12 +121,12 @@ final class TransportWakeAuthorizationTests: XCTestCase, @unchecked Sendable {
     func testNativeRuntimeConstructionRejectsOrdinaryAccountBeforeGuardOrPrivateKeyRestoration() throws {
         let binding = try binding()
         let transport = try ApprovalTransportConfiguration(macID: binding.macID, accountID: binding.accountID,
-            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.remozio.authority", teamID: "TEAMID1234",
-            authorityIdentifier: "dev.remozio.authority", authorityHashes: [Data(repeating: 4, count: 20)],
+            ownerUID: 501, serviceUID: 401, authorityServiceName: "dev.sebastiano.remozio.macos.authority", teamID: "TEAMID1234",
+            authorityIdentifier: "dev.sebastiano.remozio.macos.authority", authorityHashes: [Data(repeating: 4, count: 20)],
             identityReference: Data([1]), identityPublicKeyInfo: P256.Signing.PrivateKey().publicKey.derRepresentation)
         let wake = try GatewayWakeSignerConfiguration(binding: binding, credentialID: Data(repeating: 3, count: 16), transportUID: 401,
             ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
             custody: .protectedFile, keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: P256.Signing.PrivateKey().publicKey.x963Representation)
         let configuration = try TransportWakeStartupConfiguration(transport: transport, wake: wake)
         XCTAssertThrowsError(try configuration.makeRuntime(verifyCurrent: { XCTFail("Native process admission must run first") })) {

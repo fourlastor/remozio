@@ -15,7 +15,7 @@ final class SharedSetupImportGatewayApplicationTests: XCTestCase, @unchecked Sen
             core = try .init(retainMaterial: false)
             privateState = try .init(anchor: core.runtime.f.root.path, relativePath: "ImportGatewayPrivate", owner: getuid())
             selection = try .init(service: core.bundle.gateway.settings, activation: .init())
-            choices = try .init(provider: core.provider, senderID: "123", packageName: "dev.remozio.android",
+            choices = try .init(provider: core.provider, senderID: "123", packageName: "dev.sebastiano.remozio.android",
                 settings: selection.service, fileWakeCustodyAccepted: true)
             if prepared { try prepare(on: core.machine) }
         }
@@ -57,7 +57,7 @@ final class SharedSetupImportGatewayApplicationTests: XCTestCase, @unchecked Sen
         }
         func proposal() -> PortableSetup {
             .init(defaults: .init(presence: core.runtime.plan.host.command.presence.presence.policy, gateway: selection),
-                fcm: core.provider, pushClient: try! .init(projectID: core.provider.project, senderID: "123", packageName: "dev.remozio.android"))
+                fcm: core.provider, pushClient: try! .init(projectID: core.provider.project, senderID: "123", packageName: "dev.sebastiano.remozio.android"))
         }
         func owner(proposal selected: PortableSetup? = nil, importedRuntime: GatewaySetupImportedRuntimeOperations? = nil) throws -> SetupAccountOwner {
             let account = core.runtime.account, f = core.runtime.f
@@ -103,7 +103,7 @@ final class SharedSetupImportGatewayApplicationTests: XCTestCase, @unchecked Sen
         let f = try Fixture(), fields = try XCTUnwrap(JSONSerialization.jsonObject(with: f.core.material.providerJSON) as? [String: String])
         let provider = try SetupFCMConfiguration(project: f.core.provider.project, clientEmail: fields["client_email"]!,
             privateKeyID: "different-fixture-key", privateKeyPEM: fields["private_key"]!)
-        let altered = try GatewaySetupPreparationChoices(provider: provider, senderID: "123", packageName: "dev.remozio.android",
+        let altered = try GatewaySetupPreparationChoices(provider: provider, senderID: "123", packageName: "dev.sebastiano.remozio.android",
             settings: f.selection.service, fileWakeCustodyAccepted: true)
         XCTAssertThrowsError(try f.validate(choices: altered)) { XCTAssertEqual($0 as? GatewayPreparationError, .conflictingMaterial) }
     }

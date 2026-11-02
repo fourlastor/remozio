@@ -151,7 +151,7 @@ final class AuthorityCodePolicyTests: XCTestCase {
         return try DeterministicCBOR.encode(.map(fields), limits: limits)
     }
 
-    private func entry(role: AuthorityCodeRole = .authority, team: String = "ABCDEF1234", identifier: String = "dev.remozio.authority",
+    private func entry(role: AuthorityCodeRole = .authority, team: String = "ABCDEF1234", identifier: String = "dev.sebastiano.remozio.macos.authority",
                        installed: UInt64 = 1, minimum: UInt64 = 1, active: Bool = true) throws -> AuthorityCodeEntry {
         try AuthorityCodeEntry(role: role, teamID: team, identifier: identifier, installedGeneration: installed,
             minimumGeneration: minimum, codeDirectoryHash: Data(repeating: 7, count: 20), active: active)

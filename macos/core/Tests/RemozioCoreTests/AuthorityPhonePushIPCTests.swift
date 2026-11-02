@@ -36,7 +36,7 @@ final class AuthorityPhonePushIPCTests: XCTestCase, @unchecked Sendable {
             transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, revision: UUID())
     }
     private func offer() throws -> PhonePushRegistrationFrame {
-        try .offer(correlationID: Data(repeating: 5, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+        try .offer(correlationID: Data(repeating: 5, count: 16), offer: PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
     }
     func testCapabilityZeroSendsNoBindingOrTokenAndPreservesBasicChannel() async throws {
         let driver = Driver(version: 0) { _ in XCTFail("Must not send token"); return Data() }

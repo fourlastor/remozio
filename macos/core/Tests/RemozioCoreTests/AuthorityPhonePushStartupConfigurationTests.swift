@@ -6,20 +6,20 @@ import XCTest
 
 final class AuthorityPhonePushStartupConfigurationTests: XCTestCase {
     private func configuration(key: Data? = nil) throws -> AuthorityPhonePushStartupConfiguration {
-        try .init(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+        try .init(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
             gatewayReceiptPublicKey: key ?? P256.Signing.PrivateKey().publicKey.x963Representation,
             maximumControls: 17, candidateLifetimeMilliseconds: 42_000)
     }
     private func wake(_ push: AuthorityPhonePushStartupConfiguration? = nil) throws -> AuthorityWakeStartupConfiguration {
         let id = Data(repeating: 1, count: 16), key = P256.Signing.PrivateKey().publicKey.x963Representation
         let service = try AuthorityServiceConfiguration(macID: id, accountID: id, journalDirectory: "/Library/Remozio/journal",
-            serviceName: "dev.remozio.authority", teamID: "TEAMID1234", transportIdentifier: "dev.remozio.transport",
+            serviceName: "dev.sebastiano.remozio.macos.authority", teamID: "TEAMID1234", transportIdentifier: "dev.sebastiano.remozio.macos.transport",
             transportHashes: [Data(repeating: 3, count: 20)], transportUID: 401, maximumPayloadBytes: 4096,
             continuityDirectory: "/Library/Remozio/continuity")
         let request = try AuthorityRequestStartupConfiguration(service: service, keyRecordPath: "/Library/Remozio/root/key.cbor", authorityPublicKey: key)
         return try .init(request: request, registration: GatewayRegistrationIdentity(ownerID: id, macID: id, accountID: id,
                 gatewayID: id, lifecycleEpoch: id, rootPublicKey: key), gatewayServiceName: "dev.remozio.gateway.root", gatewayUID: 402,
-            teamID: "TEAMID1234", gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)], phonePush: push)
+            teamID: "TEAMID1234", gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 4, count: 20)], phonePush: push)
     }
     func testOptInRoundTripPreservesProviderAndClockPolicy() throws {
         let config = try configuration(), epoch = UUID(), policy = try config.journalPolicy(clockEpoch: epoch)
@@ -55,6 +55,6 @@ final class AuthorityPhonePushStartupConfigurationTests: XCTestCase {
         XCTAssertThrowsError(try config.registrationPolicy(original.registration))
         XCTAssertThrowsError(try AuthorityWakeStartupConfiguration(request: original.request, registration: original.registration,
             gatewayServiceName: original.gatewayServiceName, gatewayUID: 402, teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating:4,count:20)], phonePush: config))
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating:4,count:20)], phonePush: config))
     }
 }

@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-APP_IDENTIFIER = 'dev.remozio.mac'
+APP_IDENTIFIER = 'dev.sebastiano.remozio.macos'
 DEFAULT_TEAM = 'AAAAAAAAAA'
 APP = Path('.build/macos-app/DerivedData/Build/Products/Release/Remozio.app')
 
@@ -159,7 +159,7 @@ def measure(probe, *, identity=None, team=None, export_app=None, secure_timestam
                         continue
                     executable = app / relative
                     run(['/usr/bin/codesign', '--force', '--sign', identity, timestamp,
-                         '--options', 'runtime', '--identifier', 'dev.remozio.' + name, executable])
+                         '--options', 'runtime', '--identifier', 'dev.sebastiano.remozio.macos.' + name, executable])
                     shutil.copy2(executable, products / product)
                 info_path = app / 'Contents/Info.plist'
                 info = plistlib.loads(info_path.read_bytes())

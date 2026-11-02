@@ -17,9 +17,9 @@ final class PackageBootstrapTests: XCTestCase {
             guard chmod(root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
             shared = try ProtectedSetupDirectory(anchor: root.path, relativePath: "Shared", owner: getuid(), visibility: .sharedMetadata)
             apps = try ProtectedSetupDirectory(anchor: root.path, relativePath: "Apps", owner: getuid(), visibility: .sharedMetadata)
-            let app = try ReleaseComponent(role: .app, identifier: "dev.remozio.mac", generation: 1,
+            let app = try ReleaseComponent(role: .app, identifier: "dev.sebastiano.remozio.macos", generation: 1,
                 relativePath: "Contents/MacOS/Remozio", codeDirectoryHash: nil, build: "1", teamID: "ABCDEFGHIJ", formats: [])
-            let setup = try ReleaseComponent(role: .setupController, identifier: "dev.remozio.setup-controller", generation: 1,
+            let setup = try ReleaseComponent(role: .setupController, identifier: "dev.sebastiano.remozio.macos.setup-controller", generation: 1,
                 relativePath: AdministrativeSetupConfiguration.executablePath, codeDirectoryHash: Data(repeating: 2, count: 20),
                 build: "1", teamID: "ABCDEFGHIJ", formats: [])
             let evidence = SignedReleaseEvidence(manifest: try .init(release: "1", build: "1", components: [app, setup]),

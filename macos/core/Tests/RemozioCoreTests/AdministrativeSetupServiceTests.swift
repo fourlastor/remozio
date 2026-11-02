@@ -8,19 +8,19 @@ final class AdministrativeSetupServiceTests: XCTestCase {
     private let mac = Data(repeating: 1, count: 16), installation = Data(repeating: 2, count: 16)
     private func release(generation: UInt64 = 1, path: String = AdministrativeSetupConfiguration.executablePath) throws -> SignedReleaseEvidence {
         let components = try [
-            ReleaseComponent(role: .app, identifier: "dev.remozio.mac", generation: 1, relativePath: "Contents/MacOS/Remozio",
+            ReleaseComponent(role: .app, identifier: "dev.sebastiano.remozio.macos", generation: 1, relativePath: "Contents/MacOS/Remozio",
                 codeDirectoryHash: nil, build: "1", teamID: "ABCDEFGHIJ", formats: []),
-            ReleaseComponent(role: .authority, identifier: "dev.remozio.authority", generation: 1, relativePath: "Contents/Library/LaunchServices/Authority",
+            ReleaseComponent(role: .authority, identifier: "dev.sebastiano.remozio.macos.authority", generation: 1, relativePath: "Contents/Library/LaunchServices/Authority",
                 codeDirectoryHash: Data(repeating: 4, count: 20), build: "1", teamID: "ABCDEFGHIJ", formats: []),
-            ReleaseComponent(role: .setupController, identifier: "dev.remozio.setup-controller", generation: generation, relativePath: path,
+            ReleaseComponent(role: .setupController, identifier: "dev.sebastiano.remozio.macos.setup-controller", generation: generation, relativePath: path,
                 codeDirectoryHash: Data(repeating: 8, count: 20), build: "1", teamID: "ABCDEFGHIJ", formats: [])]
         return try .init(manifest: .init(release: "1", build: "1", components: components),
             codeDirectoryHashes: [.app: Data(repeating: 3, count: 20), .authority: Data(repeating: 4, count: 20), .setupController: Data(repeating: 8, count: 20)])
     }
     private func policy(generation: UInt64 = 1, hash: UInt8 = 8, active: Bool = true, app: Bool = true) throws -> AuthorityCodePolicy {
-        var entries = [try AuthorityCodeEntry(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.setup-controller",
+        var entries = [try AuthorityCodeEntry(role: .setupController, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.setup-controller",
             installedGeneration: generation, minimumGeneration: generation, codeDirectoryHash: Data(repeating: hash, count: 20), active: active)]
-        if app { entries.append(try .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.mac",
+        if app { entries.append(try .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos",
             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)) }
         return try .init(entries: entries)
     }
@@ -28,10 +28,10 @@ final class AdministrativeSetupServiceTests: XCTestCase {
         try .init(machineDirectory: "/Library/Remozio/machine", macID: mac, installationID: installation,
             releaseDigest: InstallationInventory.digest(release), codePolicy: policy ?? self.policy())
     }
-    private func inventory(_ release: SignedReleaseEvidence, installation: Data? = nil, setup: Bool = true, label: String = "dev.remozio.setup") throws -> InstallationInventory {
+    private func inventory(_ release: SignedReleaseEvidence, installation: Data? = nil, setup: Bool = true, label: String = "dev.sebastiano.remozio.macos.setup") throws -> InstallationInventory {
         let account = try InstallationAccount(accountID: Data(repeating: 5, count: 16), ownerUID: 501)
         var services = [try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
-            label: "dev.remozio.authority", plistName: "dev.remozio.authority.plist", accountID: account.accountID)]
+            label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist", accountID: account.accountID)]
         if setup { services.append(try .init(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
             label: label, plistName: AdministrativeSetupConfiguration.plistName)) }
         return try .init(macID: mac, installationID: installation ?? self.installation, revision: Data(repeating: 6, count: 16),

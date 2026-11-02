@@ -111,7 +111,7 @@ final class GatewayWakeChannelTests: XCTestCase, @unchecked Sendable {
         let key = P256.Signing.PrivateKey(), binding = try binding(), credential = Data(repeating: 3, count: 16)
         let config = try GatewayWakeSignerConfiguration(binding: binding, credentialID: credential, transportUID: 401,
             ownerUID: 501, gatewayUID: 402, serviceName: "dev.remozio.gateway.wake", teamID: "TEAMID1234",
-            gatewayIdentifier: "dev.remozio.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
+            gatewayIdentifier: "dev.sebastiano.remozio.macos.gateway", gatewayHashes: [Data(repeating: 4, count: 20)],
             custody: .protectedFile, keyRecordPath: "/Library/Remozio/transport/wake.cbor", publicKey: key.publicKey.x963Representation)
         let record = try GatewayWakeKeyRecord(binding: binding, credentialID: credential, fileKey: key)
         let signer = try GatewayWakeSigner.load(configuration: config, realUID: 401, effectiveUID: 401, read: { _, _ in try record.encode() })

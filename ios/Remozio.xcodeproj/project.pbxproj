@@ -166,7 +166,7 @@
 					"-framework",
 					RemozioUI,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.remozio.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.sebastiano.remozio.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -314,7 +314,7 @@
 					"-framework",
 					RemozioUI,
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.remozio.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.sebastiano.remozio.ios;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
 			};

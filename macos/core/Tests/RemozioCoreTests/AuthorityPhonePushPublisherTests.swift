@@ -143,7 +143,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
                         writer: writer, expectedAuditHead: UInt64(enrollmentCount), gateway: gateway).gatewayControl
                 case .submissionRotation, .submissionRevocation:
                     _ = try tx.installCodePolicy(AuthorityCodePolicy(entries: [
-                        AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.authority",
+                        AuthorityCodeEntry(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
                             installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 3, count: 20), active: true)
                     ]), expectedRevision: nil)
                     try tx.installCommandSubmissionReplay()
@@ -221,7 +221,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         func recoveryState() throws -> PhonePushRecoveryState {
             try journal.withRequests { owner in
                 let request = PhonePushRecoveryFrame.resume(correlationID: Data(repeating: 98, count: 16),
-                    offer: try PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.remozio.android"))
+                    offer: try PhonePushTokenOffer(token: "synthetic-token", projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android"))
                 guard case .state(_, let state) = try owner.phonePushRecovery(request, binding: root.binding, provider: root.provider,
                     now: clock.now(), wall: clock.wall(), validateTransport: { _ in }) else { throw CocoaError(.fileReadUnknown) }
                 return state
@@ -250,7 +250,7 @@ final class AuthorityPhonePushPublisherTests: XCTestCase, @unchecked Sendable {
         let cap = AuthorityPhonePushCapability(journal: f.journal, registration: f.root.registration,
             clock: { f.clock.now() }, wall: { f.clock.wall() }, makeProvider: { _ in f.root.provider })
         slot.withLock { $0 = cap }
-        let options = try AuthorityPhonePushStartupConfiguration(projectID: "project", senderID: "123", packageName: "dev.remozio.android",
+        let options = try AuthorityPhonePushStartupConfiguration(projectID: "project", senderID: "123", packageName: "dev.sebastiano.remozio.android",
             gatewayReceiptPublicKey: f.driver.receiptKey.publicKey.x963Representation, maximumControls: 30, candidateLifetimeMilliseconds: 1000)
         let service = try AuthorityWakeService(makePublisher: { f.publisher }, hints: AuthorityWakeHintSource(registration: f.root.registration),
             interval: 100, startRequests: {}, closeRequests: {}, phonePushCapability: cap)
