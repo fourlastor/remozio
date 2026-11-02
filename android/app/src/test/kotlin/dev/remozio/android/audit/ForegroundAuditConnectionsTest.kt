@@ -226,4 +226,29 @@ class ForegroundAuditConnectionsTest {
             rows = emptyList(); host.enrollmentsChanged(); runCurrent(); assertTrue(host.peers().isEmpty())
         } finally { run.cancelAndJoin(); a.connection.closeAndJoin(); wrong.connection.closeAndJoin() }
     }
+
+    @Test fun immediateCompletionDoesNotLeaveThePeerBusy() = runBlocking {
+        val fixture = Peer(1, Dispatchers.Unconfined)
+        val peer = ForegroundAuditPeer(fixture.record)
+        peer.enableRequests()
+        var sendReturned = false
+        var completedDuringSend = false
+        val receiver = launch(Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            assertFalse(checkNotNull(peer.nextRequest()))
+            completedDuringSend = !sendReturned
+            peer.roundFinished()
+        }
+        try {
+            assertTrue(peer.request(false))
+            sendReturned = true
+            receiver.join()
+            assertTrue(completedDuringSend, "The receiver must finish during the channel handoff")
+            assertFalse(peer.working.value)
+            assertTrue(peer.request(true))
+        } finally {
+            receiver.cancelAndJoin()
+            peer.retire()
+            fixture.connection.closeAndJoin()
+        }
+    }
 }
