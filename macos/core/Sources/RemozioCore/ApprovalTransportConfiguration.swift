@@ -47,7 +47,7 @@ public struct ApprovalTransportConfiguration: Sendable, CustomStringConvertible 
                 refreshMilliseconds: UInt64 = 5000) throws {
         guard macID.count == 16, accountID.count == 16, ownerUID > 0, ownerUID < UInt32.max,
               serviceUID > 0, serviceUID < UInt32.max, serviceUID != ownerUID,
-              authorityServiceName.hasPrefix("dev.remozio."), (1...255).contains(authorityServiceName.utf8.count),
+              MacServiceNamespace.accepts(authorityServiceName), (1...255).contains(authorityServiceName.utf8.count),
               authorityServiceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) ||
                   (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               (1...64).contains(maximumConnections),

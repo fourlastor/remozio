@@ -23,7 +23,7 @@ public struct CommandFrontendConfiguration: Sendable {
                 authorityIdentifier: String, authorityHashes: Set<Data>, submissionLimits: CBORLimits,
                 defaultIOMode: CommandIOMode, defaultDisconnectBehavior: StartedCommandDisconnect,
                 readiness: CommandCallerReadinessConfiguration) throws {
-        guard macID.count == 16, accountID.count == 16, serviceName.hasPrefix("dev.remozio."),
+        guard macID.count == 16, accountID.count == 16, MacServiceNamespace.accepts(serviceName),
               !serviceName.isEmpty, serviceName.utf8.count < remozio_frontend_service_name_capacity(), serviceName.utf8.allSatisfy({
                   (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45
               }), submissionLimits.maxBytes <= Int(UInt32.max) - 1024 else { throw Self.invalid }

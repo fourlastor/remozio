@@ -66,7 +66,7 @@ public struct InstallationService: Equatable, Sendable {
               6: accountID.map(CBORValue.bytes) ?? .null])
     }
     fileprivate static func token(_ value: String) -> Bool {
-        value.hasPrefix("dev.remozio.") && value.utf8.count <= 255 && value.utf8.allSatisfy {
+        MacServiceNamespace.accepts(value) && value.utf8.count <= 255 && value.utf8.allSatisfy {
             (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45
         }
     }

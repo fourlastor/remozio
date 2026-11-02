@@ -35,7 +35,7 @@ public struct AuthorityServiceConfiguration: Sendable {
         guard macID.count == 16, accountID.count == 16, transportUID > 0, transportUID < UInt32.max,
               journalDirectory.hasPrefix("/"), journalDirectory.utf8.count < Int(PATH_MAX), !components.isEmpty,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
-              serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+              MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               (1...16_777_216).contains(maximumPayloadBytes), minimumEnvelopeVersion > 0,
               auditVersions.count <= 16, !auditVersions.contains(0), (1...64).contains(maximumConnections),

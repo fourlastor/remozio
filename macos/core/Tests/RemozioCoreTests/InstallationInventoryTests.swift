@@ -30,6 +30,33 @@ final class InstallationInventoryTests: XCTestCase {
             codeDirectoryHashes: [.app: Data(repeating: appHash, count: 20), .authority: Data(repeating: authorityHash, count: 20)])
     }
 
+    func testOwnedPlatformAndRetainedServiceLabelsRoundTrip() throws {
+        let labels = [
+            ("dev.sebastiano.remozio.macos", "dev.sebastiano.remozio.macos.authority"),
+            ("dev.remozio.mac", "dev.remozio.account." + String(repeating: "01", count: 16) + ".authority"),
+        ]
+        for (appLabel, authorityLabel) in labels {
+            let value = try inventory(services: [daemon(label: authorityLabel), app(label: appLabel)])
+            XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)
+        }
+    }
+
+    func testOwnedServiceNamesRejectOtherPlatformsAndNamespaceLookalikes() throws {
+        for label in ["dev.sebastiano.remozio.android", "dev.sebastiano.remozio.ios",
+                      "dev.sebastiano.remozio.macosx.authority", "dev.sebastiano.remozio.macos/authority"] {
+            XCTAssertThrowsError(try daemon(label: label))
+        }
+    }
+
+    func testMachineBootstrapRetainsTheOwnedSetupRegistration() throws {
+        let value = try InstallationInventory.machineBootstrap(macID: id(1), installationID: id(2), revision: id(3),
+            bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 3, count: 32))
+        XCTAssertTrue(value.accounts.isEmpty)
+        XCTAssertEqual(value.services.map(\.label), ["dev.sebastiano.remozio.macos.setup"])
+        XCTAssertEqual(value.services.map(\.plistName), ["dev.sebastiano.remozio.macos.setup.plist"])
+        XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)
+    }
+
     func testRoundTripRetainsEveryAccountAndRegistrationDomain() throws {
         let value = try inventory(accounts: [account(2, uid: 502), account()], services: [app(502), daemon(), app()])
         XCTAssertEqual(try InstallationInventory.decode(value.canonicalBytes, expectedMacID: id(1)), value)

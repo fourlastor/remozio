@@ -129,7 +129,7 @@ public actor AdministrativeSetupChannel {
 
     public init(serviceName: String, rootPolicy: XPCPeerPolicy, accountID: Data? = nil, ownerUID: uid_t, serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false, gatewaySettings: Bool = false,
                 gatewayOperationTimeoutMilliseconds: UInt64 = 60_000, timeoutMilliseconds: UInt64 = 5000, onClose: @escaping @Sendable () -> Void = {}) throws {
-        guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+        guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               (!(serviceAccounts || runtime || activation || gateway || gatewayActivation || gatewaySettings) || accountID == nil), rootPolicy.expectedUserID == 0, accountID == nil || accountID?.count == 16, ownerUID > 0, ownerUID < UInt32.max,
               (1...60_000).contains(timeoutMilliseconds), (1...300_000).contains(gatewayOperationTimeoutMilliseconds) else { throw AdministrativeSetupChannelError.invalidConfiguration }

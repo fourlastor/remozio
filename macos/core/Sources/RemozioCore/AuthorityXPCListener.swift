@@ -124,7 +124,7 @@ public final class AuthorityXPCListener: NSObject, NSXPCListenerDelegate, @unche
                 phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
                 phoneRouting: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)? = nil,
                 wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
-        guard serviceName.hasPrefix("dev.remozio."), (1...255).contains(serviceName.utf8.count),
+        guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
         registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)

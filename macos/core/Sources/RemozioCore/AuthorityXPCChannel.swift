@@ -217,7 +217,7 @@ public actor AuthorityXPCChannel {
 
     public init(serviceName: String, peerPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000,
                 onClose: @escaping @Sendable () -> Void) throws {
-        guard (1...255).contains(serviceName.utf8.count), serviceName.hasPrefix("dev.remozio."),
+        guard (1...255).contains(serviceName.utf8.count), MacServiceNamespace.accepts(serviceName),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }),
               peerPolicy.expectedUserID == 0, (1...60_000).contains(timeoutMilliseconds) else { throw AuthorityXPCError.invalidConfiguration }
         driver = NativeAuthorityXPC(serviceName: serviceName, policy: peerPolicy)
