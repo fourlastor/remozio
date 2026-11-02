@@ -154,10 +154,6 @@ public actor AuthorityWakeService {
         do {
             let signer = try EnclaveAuthorityRequestSigner.load(path: configuration.request.keyRecordPath,
                 configuration: configuration.request.service, expectedPublicKey: configuration.request.authorityPublicKey, journal: journal)
-            let providers: AuthorityRequestProviders
-            if let presence { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, presence: presence) }
-            else { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, routing: routing) }
-            let auditVersions: Set<UInt64> = providers.phoneAudit == nil ? [] : configuration.request.service.auditVersions.intersection([1])
             let ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)?
             if let presence { ownerRouting = { owner, moment in try presence.routing(owner: owner, now: moment) } }
             else { ownerRouting = nil }
@@ -166,6 +162,14 @@ public actor AuthorityWakeService {
                 guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
                 return UInt64(value)
             }
+            let providers: AuthorityRequestProviders
+            if let presence {
+                let routingWall: (@Sendable () -> UInt64?)? = configuration.request.service.maximumPayloadBytes >= PhoneRoutingFrame.maximumBytes
+                    ? { @Sendable in try? phonePushWall() } : nil
+                providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer,
+                    presence: presence, routingWallTime: routingWall)
+            } else { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, routing: routing) }
+            let auditVersions: Set<UInt64> = providers.phoneAudit == nil ? [] : configuration.request.service.auditVersions.intersection([1])
             let phoneCapability = AuthorityPhonePushCapability(journal: journal, registration: configuration.registration,
                 clock: { try clock.now() }, wall: phonePushWall, makeProvider: {
                     try AuthorityPhonePushRegistration(policy: $0.registrationPolicy(configuration.registration), signer: signer)

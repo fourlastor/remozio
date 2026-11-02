@@ -166,6 +166,10 @@ public final class AuthorityService: @unchecked Sendable {
             if let selectedAudit = requestProviders?.phoneAudit {
                 auditHandler = { owner, binding, frame, validate in try selectedAudit(owner, binding, frame, frameClock, validate) }
             } else { auditHandler = nil }
+            let routingHandler: (@Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
+            if let selectedRouting = requestProviders?.phoneRouting {
+                routingHandler = { owner, binding, frame in try selectedRouting(owner, binding, frame, frameClock) }
+            } else { routingHandler = nil }
             let hintHandler: (@Sendable () throws -> AuthorityWakeHints)?
             guard wakeHintFeed == nil || wakeHints == nil else { throw AuthorityServiceConfigurationError.invalidConfiguration }
             if let wakeHints { hintHandler = wakeHints }
@@ -181,7 +185,7 @@ public final class AuthorityService: @unchecked Sendable {
                 handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
-                phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: auditHandler,
+                phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: auditHandler, phoneRouting: routingHandler,
                 wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)

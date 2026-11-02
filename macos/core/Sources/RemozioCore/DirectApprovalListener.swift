@@ -33,6 +33,7 @@ public struct DirectApprovalPeer: Sendable {
     func channelMaximumPayloadBytes(for purpose: EnrolledChannelPurpose) -> Int {
         if case .pushRegistration = purpose { return PhonePushRegistrationFrame.maximumBytes }
         if case .pushRecovery = purpose { return PhonePushRecoveryFrame.maximumBytes }
+        if case .routing = purpose { return PhoneRoutingFrame.maximumBytes }
         if case .audit = purpose { return min(maximumPayloadBytes, PhoneAuditFrame.maximumBytes) }
         guard case .pendingSnapshot = purpose else { return maximumPayloadBytes }
         let signedFrames = min(maximumPayloadBytes, PendingRequestSnapshotFrame.maximumFrameBytes) +
@@ -126,21 +127,21 @@ public final class DirectApprovalListener: @unchecked Sendable {
     private var ready = false
 
     /// Audit is offered only after the owning service verifies the Root IPC path.
-    static func purposes(enablePhoneAudit: Bool = false) -> [EnrolledChannelPurpose] {
+    static func purposes(enablePhoneRouting: Bool = false, enablePhoneAudit: Bool = false) -> [EnrolledChannelPurpose] {
         let base: [EnrolledChannelPurpose] = [.approvals, .pairingReceipt, .pendingSnapshot, .pushRegistration, .pushRecovery]
-        return base + (enablePhoneAudit ? [.audit] : [])
+        return base + (enablePhoneRouting ? [.routing] : []) + (enablePhoneAudit ? [.audit] : [])
     }
     /// Loopback mode never advertises. Local-network mode publishes the Android discovery hint on an ephemeral port.
     public convenience init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
-                maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000, enablePhoneAudit: Bool = false,
+                maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15_000, enablePhoneRouting: Bool = false, enablePhoneAudit: Bool = false,
                 event: @escaping @Sendable (DirectListenerEvent) -> Void,
                 handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void) throws {
         try self.init(identity: identity, peers: peers, binding: binding, maximumConnections: maximumConnections,
-            timeoutMilliseconds: timeoutMilliseconds, enablePhoneAudit: enablePhoneAudit, event: event, handler: handler,
+            timeoutMilliseconds: timeoutMilliseconds, enablePhoneRouting: enablePhoneRouting, enablePhoneAudit: enablePhoneAudit, event: event, handler: handler,
             sharedWorkBudget: AuthorityXPCWorkBudget(maximum: maximumConnections))
     }
     init(identity: SecIdentity, peers: [DirectApprovalPeer], binding: Binding = .localNetwork,
-         maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000, enablePhoneAudit: Bool = false,
+         maximumConnections: Int = 8, timeoutMilliseconds: UInt64 = 15000, enablePhoneRouting: Bool = false, enablePhoneAudit: Bool = false,
          event: @escaping @Sendable (DirectListenerEvent) -> Void,
          handler: @escaping @Sendable (DirectApprovalPeer, NegotiatedNetworkChannel) async throws -> Void,
          sharedWorkBudget: AuthorityXPCWorkBudget) throws {
@@ -159,7 +160,7 @@ public final class DirectApprovalListener: @unchecked Sendable {
         sec_protocol_options_set_peer_authentication_required(options, true)
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_tls_tickets_enabled(options, false)
-        for purpose in Self.purposes(enablePhoneAudit: enablePhoneAudit) {
+        for purpose in Self.purposes(enablePhoneRouting: enablePhoneRouting, enablePhoneAudit: enablePhoneAudit) {
             sec_protocol_options_add_tls_application_protocol(options, purpose.applicationProtocol)
         }
         sec_protocol_options_set_verify_block(options, { metadata, _, complete in
@@ -237,8 +238,8 @@ public final class DirectApprovalListener: @unchecked Sendable {
                 }
                 if purpose == .audit, !peer.auditVersions.contains(1) { throw DirectListenerError.invalidConfiguration }
                 let framed = try await NegotiatedNetworkChannel.acceptStarted(channel: channel, scope: peer.scope,
-                    requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .audit) ? [] : peer.requests,
-                    auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery) ? [] : peer.auditVersions),
+                    requests: (purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing || purpose == .audit) ? [] : peer.requests,
+                    auditVersions: purpose == .audit ? [1] : ((purpose == .pushRegistration || purpose == .pushRecovery || purpose == .routing) ? [] : peer.auditVersions),
                     maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose),
                     trustedMinimum: peer.minimumEnvelopeVersion, timeoutMilliseconds: timeout, purpose: purpose)
                 do { try Task.checkCancellation(); try await handler(peer, framed) }

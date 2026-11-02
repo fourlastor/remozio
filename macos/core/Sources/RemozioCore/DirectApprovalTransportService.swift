@@ -68,6 +68,8 @@ public actor DirectApprovalTransportService {
                         try await self.runPhonePushRegistration(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .pushRecovery:
                         try await self.runPhonePushRecovery(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .routing:
+                        try await self.runPhoneRouting(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .audit:
                         try await self.runPhoneAudit(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
@@ -75,6 +77,12 @@ public actor DirectApprovalTransportService {
             }
             try await feed.start(host: host)
             if useDefaultDelivery {
+                let routingSupported: Bool
+                do { try await feed.requirePhoneRoutingSupport(); routingSupported = true }
+                catch is CancellationError { throw CancellationError() }
+                catch { routingSupported = false }
+                try Task.checkCancellation()
+                try await host.configurePhoneRoutingSupport(routingSupported)
                 let auditSupported: Bool
                 do { try await feed.requirePhoneAuditSupport(); auditSupported = true }
                 catch is CancellationError { throw CancellationError() }
@@ -330,6 +338,16 @@ public actor DirectApprovalTransportService {
         let response: PhoneAuditFrame
         do { response = try await feed.phoneAudit(session.peer, revision: session.revision, frame: frame) }
         catch AuthorityXPCError.unsupportedPhoneAudit { response = .failure(queryNonce: frame.queryNonce, reason: .incompatible) }
+        try await validate(session)
+        return response
+    }
+
+    /// Read or apply once through the current Root incarnation. A missing acknowledgment never causes a replay.
+    public func phoneRouting(for session: DirectApprovalSession, frame: PhoneRoutingFrame) async throws -> PhoneRoutingFrame {
+        try await validate(session)
+        let response: PhoneRoutingFrame
+        do { response = try await feed.phoneRouting(session.peer, revision: session.revision, frame: frame) }
+        catch AuthorityXPCError.unsupportedPhoneRouting { response = .failure(queryNonce: frame.queryNonce, reason: .incompatible) }
         try await validate(session)
         return response
     }

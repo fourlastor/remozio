@@ -146,6 +146,29 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let request = try PhonePushRecoveryFrame.decode(frame)
             reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .unavailable).encode()))
         }
+        private var routingCapability: UInt64? = 0
+        private var routingReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var routingFrame: Data?
+        private var routingCalls = 0
+        let routingSent = XCTestExpectation(description: "held routing")
+        var routingCount: Int { lock.withLock { routingCalls } }
+        func setRoutingVersion(_ value: UInt64?) { lock.withLock { routingCapability = value } }
+        func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let version = lock.withLock({ routingCapability }) { reply(.routingVersion(version)) }
+            else { reply(.failed) }
+        }
+        func routing(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { routingCalls += 1; routingFrame = frame; routingReply = reply }
+            routingSent.fulfill()
+        }
+        func finishRouting() throws {
+            let value = lock.withLock { () -> (Data?, (@Sendable (AuthorityXPCReply) -> Void)?) in
+                let value = (routingFrame, routingReply); routingFrame = nil; routingReply = nil; return value
+            }
+            guard let frame = value.0, let reply = value.1 else { return }
+            let request = try PhoneRoutingFrame.decode(frame)
+            reply(.routing(try PhoneRoutingFrame.failure(queryNonce: request.queryNonce, reason: .unavailable).encode()))
+        }
         private var auditCapability: UInt64? = 0
         private var auditReply: (@Sendable (AuthorityXPCReply) -> Void)?
         private var auditFrame: Data?
@@ -387,6 +410,101 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         try await feed.start(host: host); try await host.start()
         try await feed.requirePhonePushRecoverySupport(); try await feed.requirePhonePushRecoverySupport()
         XCTAssertEqual(auxiliary.recoveryCount, 0); XCTAssertEqual(primary.recoveryCount, 0)
+        XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testUnsupportedRoutingKeepsPrimaryApprovalTrustAlive() async throws {
+        let capabilities: [UInt64?] = [0, nil]
+        for capability in capabilities {
+            let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+            auxiliary.setRoutingVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { _ = try await feed.phoneRouting(trust.peers[0], revision: trust.revision, frame: .status(queryNonce: Data(repeating: 9, count: 32))); XCTFail("Expected optional refusal") } catch { }
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.routingCount, 0)
+            XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            XCTAssertEqual(factory.count, 2)
+            await feed.close(); await host.close()
+        }
+    }
+    func testRoutingUsesSeparateRPCAndReturnsOnlyForTheCurrentAuthorityLease() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRoutingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneRoutingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneRouting(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.routingSent], timeout: 2)
+        try auxiliary.finishRouting()
+        guard case .failure(let correlation, let result) = try await pending.value else { return XCTFail("Missing status") }
+        XCTAssertEqual(correlation, request.queryNonce); XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(primary.routingCount, 0); XCTAssertEqual(auxiliary.routingCount, 1); XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testPrimaryInterruptionDiscardsLateRoutingReply() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRoutingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneRoutingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneRouting(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.routingSent], timeout: 2)
+        primary.interrupt(); try auxiliary.finishRouting()
+        do { _ = try await pending.value; XCTFail("Retired authority returned routing success") } catch { }
+        do { try await feed.validatePeer(trust.peers[0], revision: trust.revision); XCTFail("Retired primary revived") } catch { }
+        XCTAssertEqual(auxiliary.routingCount, 1); XCTAssertGreaterThan(auxiliary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testCancelledRoutingRetiresOnlyItsOptionalLink() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRoutingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneRoutingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneRouting(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.routingSent], timeout: 2)
+        pending.cancel(); try auxiliary.finishRouting()
+        do { _ = try await pending.value; XCTFail("Cancelled routing returned success") } catch { }
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(auxiliary.routingCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testAuxiliaryInterruptionDiscardsRoutingReplyWithoutRetiringPrimary() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRoutingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneRoutingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneRouting(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.routingSent], timeout: 2)
+        auxiliary.interrupt(); try auxiliary.finishRouting()
+        do { _ = try await pending.value; XCTFail("Retired optional connection returned a result") } catch {}
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.routingCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testRoutingPreflightDoesNotSendPrivateFieldsOrOpenRepeatedConnections() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setRoutingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        try await feed.requirePhoneRoutingSupport(); try await feed.requirePhoneRoutingSupport()
+        XCTAssertEqual(auxiliary.routingCount, 0); XCTAssertEqual(primary.routingCount, 0)
         XCTAssertEqual(factory.count, 2)
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         await feed.close(); await host.close()
