@@ -55,7 +55,7 @@ abstract class AuditDetailsInteractionChecks<A : ComponentActivity>(activityClas
 
         card().performKeyInput { pressKey(Key.Enter) }
         ui.onNodeWithText(title).assertIsDisplayed()
-        Espresso.pressBack()
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         ui.onNodeWithText(title).assertDoesNotExist()
         card().assertIsDisplayed().assertIsFocused()
         assertTrue(ui.activityRule.scenario.state == Lifecycle.State.RESUMED)
@@ -74,6 +74,7 @@ internal data class NativeAccessibilityNode(
 
 internal object NativeAccessibilityFrames {
     fun capture(activity: Activity, scene: String): List<NativeAccessibilityNode> {
+        val logTag = InstrumentationRegistry.getArguments().getString("remozioA11yTag") ?: "RemozioAuditA11y"
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
         automation.waitForIdle(500, 5_000)
         automation.clearCache()
@@ -82,11 +83,13 @@ internal object NativeAccessibilityFrames {
         val frame = System.currentTimeMillis().toString() + "-" + scene
         val window = activity.windowManager.currentWindowMetrics.bounds
         val metrics = activity.resources.displayMetrics
-        val header = JSONObject().put("schema", 1).put("frame", frame).put("scene", scene)
+        val header = JSONObject().put("schema", 2).put("frame", frame).put("scene", scene)
             .put("activity", activity.javaClass.name).put("widthPixels", window.width()).put("heightPixels", window.height())
             .put("density", metrics.density).put("fontScale", activity.resources.configuration.fontScale)
             .put("touchMode", activity.window.decorView.isInTouchMode)
-        Log.i("RemozioAuditA11y", JSONObject(header.toString()).put("kind", "begin").toString())
+        val columns = listOf("path", "class", "labels", "editable", "enabled", "clickable", "heading", "keyboardFocused",
+            "focusable", "accessibilityFocused", "visible", "error", "windowId", "bounds")
+        Log.i(logTag, JSONObject(header.toString()).put("kind", "begin").put("columns", JSONArray(columns)).toString())
         val pending = ArrayDeque<Pair<AccessibilityNodeInfo, String>>()
         pending.add(root to "0")
         val nodes = mutableListOf<NativeAccessibilityNode>()
@@ -98,16 +101,14 @@ internal object NativeAccessibilityFrames {
             nodes += NativeAccessibilityNode(path, node.className.toString(), labels, node.isEditable, node.isEnabled,
                 node.isClickable, node.isHeading, node.error?.toString())
             val bounds = Rect().also(node::getBoundsInScreen)
-            Log.i("RemozioAuditA11y", JSONObject().put("schema", 1).put("frame", frame).put("kind", "node")
-                .put("path", path).put("class", node.className).put("labels", JSONArray(labels.map { it.take(256) }))
-                .put("editable", node.isEditable).put("enabled", node.isEnabled).put("clickable", node.isClickable)
-                .put("heading", node.isHeading).put("keyboardFocused", node.isFocused)
-                .put("focusable", node.isFocusable)
-                .put("accessibilityFocused", node.isAccessibilityFocused).put("visible", node.isVisibleToUser)
-                .put("error", node.error).put("windowId", node.windowId).put("bounds", bounds.toShortString()).toString())
+            val values = JSONArray().put(path).put(node.className).put(JSONArray(labels.map { it.take(256) }))
+                .put(node.isEditable).put(node.isEnabled).put(node.isClickable).put(node.isHeading).put(node.isFocused)
+                .put(node.isFocusable).put(node.isAccessibilityFocused).put(node.isVisibleToUser)
+                .put(node.error ?: JSONObject.NULL).put(node.windowId).put(bounds.toShortString())
+            Log.i(logTag, JSONObject().put("schema", 2).put("frame", frame).put("kind", "node").put("values", values).toString())
             for (index in 0 until node.childCount) node.getChild(index)?.let { pending.add(it to "$path/$index") }
         }
-        Log.i("RemozioAuditA11y", JSONObject(header.toString()).put("kind", "end").put("nodes", nodes.size).toString())
+        Log.i(logTag, JSONObject(header.toString()).put("kind", "end").put("nodes", nodes.size).toString())
         return nodes
     }
 }
