@@ -151,6 +151,7 @@ internal class WebSocketTLSRelay(upstreamPort: Int, trustOuter: Boolean = true, 
         captured.write(bytes)
     }
     fun capture(): ByteArray = synchronized(captured) { captured.toByteArray() }
+    fun connectorRequest() = requireNotNull(server.takeRequest(5, TimeUnit.SECONDS))
 
     override fun close() {
         var failure: Throwable? = null

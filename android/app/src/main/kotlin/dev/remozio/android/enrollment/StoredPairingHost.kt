@@ -21,7 +21,7 @@ internal class StoredPairingHost(
     private val openForSetup: () -> EncryptedEnrollmentStore,
     private val openExisting: () -> EncryptedEnrollmentStore?,
     private val enrollmentAccess: Mutex,
-    private val invalidateLocked: (Set<CborValue.Bytes>) -> Unit,
+    private val invalidateLocked: suspend (Set<CborValue.Bytes>) -> Unit,
     private val validateKeys: (PhoneEnrollment) -> Unit,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val onChanged: () -> Unit = {},

@@ -12,6 +12,9 @@ import dev.remozio.android.push.StoredWakeNotifications
 import dev.remozio.android.push.PushDeliveryReports
 import dev.remozio.phone.requests.ElapsedInstant
 import dev.remozio.android.audit.androidStoredAuditReader
+import dev.remozio.android.audit.androidAuditConnections
+import dev.remozio.android.audit.AuditWorkSettings
+import dev.remozio.android.audit.ForegroundAuditConnections
 import dev.remozio.android.enrollment.AndroidPairingAttempt
 import dev.remozio.android.enrollment.AndroidEnrollmentStore
 import dev.remozio.android.enrollment.validatePairingKeys
@@ -166,26 +169,32 @@ class RemozioApplication : Application() {
                 try { macUpdateProgress.invalidateRecordsLocked(ids) }
                 finally {
                     try { macUpdateScheduling.invalidateRecordsLocked(ids) }
-                    finally {
-                        try { routing.invalidateRecordsLocked(ids) }
-                        finally {
-                            try { commands.invalidateRecordsLocked(ids) }
-                            finally {
-                                try { wakeFetches.invalidateRecordsLocked(ids) }
-                                finally {
-                                    try { wakeNotifications.invalidateRecordsLocked(ids) }
-                                    finally { pushRegistrations.invalidateRecordsLocked(ids) }
-                                }
-                            }
-                        }
-                    }
+                    finally { retireEnrollmentConnectionsLocked(ids) }
                 }
             }, ::validatePairingKeys, onChanged = {
                 foregroundCommands.refresh()
                 foregroundRouting.refresh()
+                foregroundAudits.enrollmentsChanged()
                 scope.launch(Dispatchers.IO) { pushRegistrationWork.changed() }
             },
         )
+    }
+
+    private suspend fun retireEnrollmentConnectionsLocked(ids: Set<dev.remozio.protocol.CborValue.Bytes>) {
+        try { auditConnections.invalidateRecordsLocked(ids) }
+        finally {
+            try { routing.invalidateRecordsLocked(ids) }
+            finally {
+                try { commands.invalidateRecordsLocked(ids) }
+                finally {
+                    try { wakeFetches.invalidateRecordsLocked(ids) }
+                    finally {
+                        try { wakeNotifications.invalidateRecordsLocked(ids) }
+                        finally { pushRegistrations.invalidateRecordsLocked(ids) }
+                    }
+                }
+            }
+        }
     }
     internal val pairingReceipts by lazy {
         PairingReceiptRecovery(pairing, { parent, record -> androidPairingReceiptWire(this, parent, record) })
@@ -194,6 +203,9 @@ class RemozioApplication : Application() {
         attempt.close()
         return scope.async { runCatching { attempt.closeAndJoin() } }
     }
-    internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess) }
+    internal val auditWorkSettings by lazy { AuditWorkSettings(this) }
+    internal val auditConnections by lazy { androidAuditConnections(this, scope, enrollmentAccess, auditWorkSettings::read) }
+    internal val foregroundAudits by lazy { ForegroundAuditConnections(auditConnections::activeRecords, auditConnections::acquire) }
+    internal val audits by lazy { androidStoredAuditReader(this, enrollmentAccess, auditConnections::readSnapshot) }
     internal val updates by lazy { androidUpdateHost(this, scope) }
 }

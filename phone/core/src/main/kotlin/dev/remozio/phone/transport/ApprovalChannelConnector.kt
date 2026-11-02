@@ -5,6 +5,7 @@ import dev.remozio.protocol.ChannelScope
 import dev.remozio.protocol.PairingReceiptFrame
 import dev.remozio.protocol.PendingRequestSnapshotFrame
 import dev.remozio.protocol.PhonePushRegistrationFrame
+import dev.remozio.protocol.PhoneAuditFrame
 import dev.remozio.protocol.PhoneRoutingFrame
 import dev.remozio.protocol.PhonePushRecoveryFrame
 import java.io.IOException
@@ -21,6 +22,7 @@ enum class EnrolledChannelPurpose(val applicationProtocol: String) {
     UPDATE_SCHEDULING(dev.remozio.protocol.PhoneUpdateSchedulingFrame.APPLICATION_PROTOCOL),
     UPDATE_SCHEDULING_V2(dev.remozio.protocol.PhoneUpdateSchedulingFrameV2.APPLICATION_PROTOCOL),
     UPDATE_PROGRESS(dev.remozio.protocol.PhoneUpdateProgressFrame.APPLICATION_PROTOCOL),
+    AUDIT(PhoneAuditFrame.APPLICATION_PROTOCOL),
 }
 
 /** Supplies ciphertext only. All routes use the same enrolled identity and peer pin. */

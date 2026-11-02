@@ -3,12 +3,12 @@ import Darwin
 import Foundation
 import Network
 import Security
-import RemozioCore
+@testable import RemozioCore
 import RemozioProtocol
 
-// Synthetic loopback echo only. Never package this executable with the app.
+// Synthetic loopback fixtures only. Never package this executable with the app.
 enum ProbeError: Error { case invalidInput, identityImport(OSStatus) }
-struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int? }
+struct Setup: Decodable { let peerPublicKey: String; let negotiate: Bool?; let commandMessages: Bool?; let secondPeerPublicKey: String?; let maximumConnections: Int?; let pairing: Bool?; let holdPairingStage: Bool?; let receiptRecovery: Bool?; let pushRegistration: Bool?; let pushRecovery: Bool?; let recoverySupported: Bool?; let maximumPayloadBytes: Int?; let routing: Bool?; let routingSupported: Bool?; let audit: Bool?; let auditSupported: Bool?; let decisionPublicKey: String?; let biometricPublicKey: String? }
 
 func emit(_ fields: [String: Int]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields) else { exit(1) }
@@ -176,6 +176,65 @@ if setup.pairing == true {
     try pairing.start()
     DispatchQueue.global().async { _ = getchar(); Task { await pairing.closeAndWait(); exit(0) } }
     dispatchMain()
+}
+if setup.routing == true || setup.audit == true {
+    guard let decisionText = setup.decisionPublicKey, let decision = Data(base64Encoded: decisionText),
+          let biometricText = setup.biometricPublicKey, let biometric = Data(base64Encoded: biometricText) else { throw ProbeError.invalidInput }
+    let fixture = try RoutingFixture(directory: URL(fileURLWithPath: CommandLine.arguments[1]).deletingLastPathComponent().path,
+        phoneTransport: peer, decision: decision, biometric: biometric,
+        supported: setup.routing == true && setup.routingSupported != false,
+        auditSupported: setup.audit == true && setup.auditSupported != false,
+        maximumPayloadBytes: setup.audit == true ? (setup.maximumPayloadBytes ?? 65_536) : 16_384)
+    let feed = AuthorityTrustFeed(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16), factory: { onClose in
+        AuthorityXPCChannel(driver: try fixture.driver(), onClose: onClose)
+    })
+    let host = try DirectApprovalTransportHost(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
+        identity: identity, binding: .loopback, maximumConnections: 4, timeoutMilliseconds: 4000,
+        validatePeer: { try await feed.validatePeer($0, revision: $1) }, handler: { _, _ in throw ProbeError.invalidInput })
+    let service = DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true)
+    Task {
+        do {
+            try await service.start()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(7))
+            while true {
+                if case .ready(let port) = await service.state {
+                    let data = try JSONSerialization.data(withJSONObject: ["port": Int(port), "authorityPublicKey": fixture.authorityPublicKey.base64EncodedString()])
+                    FileHandle.standardOutput.write(data + Data([10])); break
+                }
+                guard ContinuousClock.now < deadline else { throw ProbeError.invalidInput }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        } catch {
+            FileHandle.standardError.write(Data("Routing fixture startup failed: \(error)\n".utf8)); exit(1)
+        }
+    }
+    DispatchQueue.global().async {
+        while true {
+            var line = Data()
+            while true {
+                let byte = getchar()
+                if byte == EOF {
+                    Task {
+                        await service.closeAndWait()
+                        do { try fixture.close(); exit(0) }
+                        catch {
+                            FileHandle.standardError.write(Data("Routing fixture cleanup failed: \(error)\n".utf8)); exit(1)
+                        }
+                    }
+                    return
+                }
+                if byte == 10 { break }
+                guard line.count < 1024 else { exit(1) }
+                line.append(UInt8(byte))
+            }
+            do {
+                let command = try JSONDecoder().decode([String: String].self, from: line)
+                let result = try fixture.control(command["command"] ?? "")
+                FileHandle.standardOutput.write(try JSONSerialization.data(withJSONObject: result) + Data([10]))
+            } catch { exit(1) }
+        }
+    }
+    withExtendedLifetime((fixture, service)) { dispatchMain() }
 }
 if setup.negotiate == true {
     let scope = try ChannelScope(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),

@@ -22,17 +22,23 @@ class AuditCacheBinding(macID: ByteArray, accountID: ByteArray, authorityPublicK
     val macID: ByteArray get() = mac.copyBytes()
     val accountID: ByteArray get() = account.copyBytes()
     val authorityPublicKey: ByteArray get() = authority.copyBytes()
-    internal fun associatedData() = DeterministicCbor.encode(CborValue.Fields(mapOf(
-        0uL to CborValue.Text("dev.remozio.audit-cache"), 1uL to CborValue.Unsigned(1u),
+    internal fun associatedData(domain: String = "dev.remozio.audit-cache") = DeterministicCbor.encode(CborValue.Fields(mapOf(
+        0uL to CborValue.Text(domain), 1uL to CborValue.Unsigned(1u),
         2uL to mac, 3uL to account, 4uL to authority,
     )), CborLimits(256, 2, 16))
 }
 
 /** Production supplies an Android Keystore key. This class never generates or exports key material. */
-class AuditArchiveCipher(private val key: SecretKey, val maximumPlaintextBytes: Int) {
+class AuditArchiveCipher private constructor(private val key: SecretKey, val maximumPlaintextBytes: Int,
+    private val domain: String, private val magic: ByteArray) {
+    constructor(key: SecretKey, maximumPlaintextBytes: Int) : this(key, maximumPlaintextBytes,
+        "dev.remozio.audit-cache", "RMZAUD01".encodeToByteArray())
+    internal companion object {
+        fun localSync(key: SecretKey) = AuditArchiveCipher(key, 1024,
+            "dev.remozio.audit-local-sync", "RMZAS001".encodeToByteArray())
+    }
     init { require(maximumPlaintextBytes > 0 && maximumPlaintextBytes <= Int.MAX_VALUE - 36) }
     val maximumCiphertextBytes: Int get() = maximumPlaintextBytes + 36
-    private val magic = "RMZAUD01".encodeToByteArray()
 
     fun encrypt(plaintext: ByteArray, binding: AuditCacheBinding): ByteArray {
         if (plaintext.size > maximumPlaintextBytes) throw AuditCacheException()
@@ -40,7 +46,7 @@ class AuditArchiveCipher(private val key: SecretKey, val maximumPlaintextBytes: 
         cipher.init(Cipher.ENCRYPT_MODE, key)
         val iv = cipher.iv
         if (iv.size != 12 || cipher.parameters.getParameterSpec(GCMParameterSpec::class.java).tLen != 128) throw AuditCacheException()
-        cipher.updateAAD(binding.associatedData())
+        cipher.updateAAD(binding.associatedData(domain))
         val encrypted = cipher.doFinal(plaintext)
         if (encrypted.size != plaintext.size + 16) throw AuditCacheException()
         return magic + iv + encrypted
@@ -50,7 +56,7 @@ class AuditArchiveCipher(private val key: SecretKey, val maximumPlaintextBytes: 
         if (envelope.size !in 36..maximumCiphertextBytes || !envelope.copyOfRange(0, 8).contentEquals(magic)) throw AuditCacheException()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, envelope.copyOfRange(8, 20)))
-        cipher.updateAAD(binding.associatedData())
+        cipher.updateAAD(binding.associatedData(domain))
         return cipher.doFinal(envelope, 20, envelope.size - 20)
     }
 }
@@ -67,12 +73,27 @@ class EncryptedAuditCache private constructor(
     private val capacity: AuditEvidenceLimits,
     private val archiveLimits: CborLimits,
     private var evidence: AuditEvidenceStore,
+    private val localSync: AuditLocalSyncArchive?,
 ) : AutoCloseable {
     private var closed = false
     private var writeFailed = false
 
     @Synchronized
     fun snapshot(): AuditEvidenceSnapshot { check(!closed) { "Audit cache is closed" }; return evidence.snapshot() }
+
+    /** Local display metadata only. Missing or damaged metadata never changes the verified evidence snapshot. */
+    @Synchronized
+    fun localSyncTimes(): AuditLocalSyncTimes? { check(!closed); return localSync?.snapshot() }
+
+    /** Only the live receiver path calls this, after durable proof acceptance. Offline import never records a sync. */
+    @Synchronized
+    internal fun recordLocalSync(kind: AuditEvidenceKind, body: ByteArray, completed: Boolean) {
+        check(!closed && !writeFailed)
+        val archive = localSync ?: return
+        val bodyID = CborValue.Bytes(body)
+        val selected = evidence.snapshot().proofs.single { it.kind == kind && it.canonicalBody == bodyID }
+        archive.record(selected, completed)
+    }
 
     @Synchronized
     fun append(receipt: ReceivedAuditPage): AuditEvidenceAcceptance = appendProof(AuditEvidenceKind.PAGE, receipt.canonicalBody, receipt.signature)
@@ -98,13 +119,14 @@ class EncryptedAuditCache private constructor(
 
     @Synchronized
     override fun close() {
-        if (!closed) { closed = true; storage.close() }
+        if (!closed) { closed = true; try { localSync?.close() } finally { storage.close() } }
     }
 
     companion object {
         /** On failure, the caller still owns storage and must close it. No failed load resets or overwrites a cache. */
         fun open(storage: AuditCiphertextStorage, cipher: AuditArchiveCipher, binding: AuditCacheBinding,
-                 protocolLimits: AuditPageLimits, capacity: AuditEvidenceLimits, archiveLimits: CborLimits): EncryptedAuditCache {
+                 protocolLimits: AuditPageLimits, capacity: AuditEvidenceLimits, archiveLimits: CborLimits,
+                 localSync: (AuditEvidenceSnapshot) -> AuditLocalSyncArchive? = { null }): EncryptedAuditCache {
             require(cipher.maximumPlaintextBytes == archiveLimits.maxBytes)
             val bytes = storage.read(cipher.maximumCiphertextBytes)
             val restored = newStore(binding, protocolLimits, capacity)
@@ -112,7 +134,7 @@ class EncryptedAuditCache private constructor(
                 val plaintext = cipher.decrypt(bytes, binding)
                 try { restore(plaintext, restored, archiveLimits, capacity.maximumProofs) } finally { plaintext.fill(0) }
             }
-            return EncryptedAuditCache(storage, cipher, binding, protocolLimits, capacity, archiveLimits, restored)
+            return EncryptedAuditCache(storage, cipher, binding, protocolLimits, capacity, archiveLimits, restored, localSync(restored.snapshot()))
         }
 
         private fun newStore(binding: AuditCacheBinding, limits: AuditPageLimits, capacity: AuditEvidenceLimits) =

@@ -63,4 +63,44 @@ tasks.register<Test>("approvalFlowTest") {
     val auditPeer = rootProject.layout.projectDirectory.file(".build/approval-flow/AuditFlowPeer")
     inputs.file(auditPeer)
     systemProperty("remozio.test.auditPeer", auditPeer.asFile.absolutePath)
+    val nativeTransportEvidence = layout.buildDirectory.dir("reports/native-transport-evidence")
+    outputs.dir(nativeTransportEvidence)
+    systemProperty("remozio.test.auditTransportEvidence", nativeTransportEvidence.get().asFile.absolutePath)
+    systemProperty("remozio.test.routingEvidence", nativeTransportEvidence.get().asFile.absolutePath)
+}
+
+// The full approvalFlowTest includes these cases. This task keeps the focused native routing check small.
+tasks.register<Test>("routingFlowTest") {
+    description = "Runs the synthetic native Swift and Kotlin routing exchange."
+    group = "verification"
+    dependsOn(tasks.testClasses)
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter { includeTestsMatching("dev.remozio.phone.crypto.TLSInteropTest.routing*") }
+    val peer = rootProject.layout.projectDirectory.file(".build/approval-flow/TLSPeer")
+    inputs.file(peer)
+    systemProperty("remozio.test.tlsPeer", peer.asFile.absolutePath)
+    val evidence = layout.buildDirectory.dir("reports/routing-evidence")
+    outputs.dir(evidence)
+    systemProperty("remozio.test.routingEvidence", evidence.get().asFile.absolutePath)
+}
+
+// Included by approvalFlowTest. Keep the native audit/routing regression path small during development.
+tasks.register<Test>("auditTransportFlowTest") {
+    description = "Runs native Swift and Kotlin audit transport with routing regression controls."
+    group = "verification"
+    dependsOn(tasks.testClasses)
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter {
+        includeTestsMatching("dev.remozio.phone.crypto.TLSInteropTest.audit*")
+        includeTestsMatching("dev.remozio.phone.crypto.TLSInteropTest.routing*")
+    }
+    val peer = rootProject.layout.projectDirectory.file(".build/approval-flow/TLSPeer")
+    inputs.file(peer)
+    systemProperty("remozio.test.tlsPeer", peer.asFile.absolutePath)
+    val evidence = layout.buildDirectory.dir("reports/audit-transport-evidence")
+    outputs.dir(evidence)
+    systemProperty("remozio.test.auditTransportEvidence", evidence.get().asFile.absolutePath)
+    systemProperty("remozio.test.routingEvidence", evidence.get().asFile.absolutePath)
 }
