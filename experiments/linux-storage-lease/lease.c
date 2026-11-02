@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "lease.h"
+#include "descriptor-walk.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -14,7 +15,6 @@
 #include <unistd.h>
 
 #define RSL_MAX_NODES 64
-#define RSL_MAX_PATH 4096
 struct node {
     int fd;
     int parent;
@@ -87,56 +87,39 @@ static rsl_result add(rsl_lease *lease, int fd, int parent, const char *name,
     lease->nodes[lease->count++] = node;
     return RSL_OK;
 }
-static bool valid_path(const char *path, bool absolute) {
-    if (!path || !*path || strnlen(path, RSL_MAX_PATH) == RSL_MAX_PATH ||
-        (absolute ? path[0] != '/' : path[0] == '/')) return false;
-    const char *component = path + (absolute ? 1 : 0);
-    while (*component) {
-        const char *end = strchr(component, '/');
-        size_t length = end ? (size_t)(end - component) : strlen(component);
-        if (length == 0 || length > NAME_MAX || (length == 1 && component[0] == '.') ||
-            (length == 2 && component[0] == '.' && component[1] == '.')) return false;
-        if (!end) return true;
-        component = end + 1;
-    }
-    return false; /* No '/', empty relative path or trailing slash. */
-}
 static rsl_result walk(rsl_lease *lease, const char *path, bool anchor_path) {
-    char copy[RSL_MAX_PATH];
-    memcpy(copy, path, strlen(path) + 1);
-    char *component = copy + (anchor_path ? 1 : 0);
-    while (*component) {
-        char *next = strchr(component, '/');
-        if (next) *next = 0;
+    rdw_cursor cursor;
+    rdw_begin(&cursor, path, anchor_path);
+    const char *component;
+    bool last;
+    while ((component = rdw_next(&cursor, &last))) {
         int parent = (int)lease->count - 1;
-        int fd = openat(lease->nodes[parent].fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        int fd = rdw_open_directory(lease->nodes[parent].fd, component);
         if (fd < 0) return RSL_SYSTEM;
-        rsl_result result = add(lease, fd, parent, component, true, !anchor_path || next == NULL);
+        rsl_result result = add(lease, fd, parent, component, true, !anchor_path || last);
         if (result != RSL_OK) return result;
-        if (!next) break;
-        component = next + 1;
     }
     return RSL_OK;
 }
 rsl_result rsl_acquire(const char *anchor, const char *relative, uid_t fixture_owner, rsl_lease **out) {
     if (!out) return RSL_ARGUMENT;
     *out = NULL;
-    if (!valid_path(anchor, true) || !valid_path(relative, false) ||
-        strlen(anchor) + strlen(relative) + 1 >= RSL_MAX_PATH) return RSL_ARGUMENT;
+    if (!rdw_valid_path(anchor, true) || !rdw_valid_path(relative, false) ||
+        strlen(anchor) + strlen(relative) + 1 >= RDW_MAX_PATH) return RSL_ARGUMENT;
     if (fixture_owner == 0 || fixture_owner != getuid() || getuid() != geteuid() || getgid() != getegid())
         return RSL_ORDINARY_OWNER_REQUIRED;
     rsl_lease *lease = calloc(1, sizeof(*lease));
     if (!lease) return RSL_SYSTEM;
     lease->owner = fixture_owner;
     lease->process = getpid();
-    int root = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int root = rdw_open_root();
     rsl_result result = root < 0 ? RSL_SYSTEM : add(lease, root, -1, "/", true, false);
     if (result == RSL_OK) result = walk(lease, anchor, true);
     if (result == RSL_OK) result = walk(lease, relative, false);
     int parent = (int)lease->count - 1;
     const char *names[] = {"writer.lock", "fixture.data"};
     for (size_t i = 0; result == RSL_OK && i < 2; ++i) {
-        int fd = openat(lease->nodes[parent].fd, names[i], O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+        int fd = rdw_open_file(lease->nodes[parent].fd, names[i], O_RDWR);
         if (fd < 0) { result = RSL_SYSTEM; break; }
         result = add(lease, fd, parent, names[i], false, true);
         if (result == RSL_OK && i == 0 && flock(fd, LOCK_EX | LOCK_NB))
@@ -157,13 +140,11 @@ rsl_result rsl_validate(rsl_lease *lease) {
         result = RSL_ORDINARY_OWNER_REQUIRED;
     for (size_t i = 0; result == RSL_OK && i < lease->count; ++i) {
         const struct node *node = &lease->nodes[i];
-        struct stat held, named;
-        if (fstat(node->fd, &held) ||
-            fstatat(node->parent < 0 ? AT_FDCWD : lease->nodes[node->parent].fd,
-                    node->name, &named, AT_SYMLINK_NOFOLLOW)) result = RSL_SYSTEM;
-        else if (held.st_dev != node->device || held.st_ino != node->inode ||
-                 named.st_dev != node->device || named.st_ino != node->inode ||
-                 (named.st_mode & S_IFMT) != (node->directory ? S_IFDIR : S_IFREG)) result = RSL_CHANGED;
+        struct stat held;
+        rdw_recheck_result recheck = rdw_recheck(node->parent < 0 ? AT_FDCWD : lease->nodes[node->parent].fd, node->name,
+                                                 node->fd, node->device, node->inode, node->directory, &held);
+        if (recheck == RDW_UNAVAILABLE) result = RSL_SYSTEM;
+        else if (recheck == RDW_CHANGED) result = RSL_CHANGED;
         else result = metadata(lease, node, &held);
     }
     if (result != RSL_OK) lease->retired = true;

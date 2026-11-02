@@ -32,7 +32,9 @@ refuses a successful report. `--output` saves the same sanitized JSON.
 The component acquires, rather than creates, the fixture's existing
 `ANCHOR/RELATIVE/{writer.lock,fixture.data}`. It walks absolute anchor components
 from `/` and then relative directory components with `openat`, `O_NOFOLLOW`,
-`O_DIRECTORY` and `O_CLOEXEC`; empty, dot, dot-dot, trailing separators, oversized
+`O_DIRECTORY` and `O_CLOEXEC`, through `descriptor-walk`, which the
+[placement validator](../linux-placement-validator/README.md) also uses; empty, dot,
+dot-dot, trailing separators, oversized
 paths/components and more than 64 retained nodes refuse. All traversed directory
 identities are rechecked through their retained parent. Ancestors before the
 explicit private anchor have no production ownership/ACL policy: `/tmp` is a
