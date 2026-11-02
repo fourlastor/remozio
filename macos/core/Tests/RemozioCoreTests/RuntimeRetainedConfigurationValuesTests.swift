@@ -98,14 +98,24 @@ final class RuntimeRetainedConfigurationValuesTests: XCTestCase {
         let plan = try f.retain()
         XCTAssertThrowsError(try plan.configurationBundle(account: f.f.account, initialization: other.initialization,
             inventory: f.inventory, clients: f.clients))
-        XCTAssertThrowsError(try plan.configurationBundle(account: f.f.account, initialization: f.initialization,
-            inventory: other.inventory, clients: f.clients))
-        let wrongPath = try InstallationInventory(macID: f.inventory.macID, installationID: f.inventory.installationID,
-            revision: f.inventory.revision, bundlePath: f.inventory.bundlePath + ".other",
-            releaseDigest: f.inventory.releaseDigest, accounts: f.inventory.accounts,
-            services: f.inventory.services, formatVersion: f.inventory.formatVersion)
-        XCTAssertThrowsError(try plan.configurationBundle(account: f.f.account, initialization: f.initialization,
-            inventory: wrongPath, clients: f.clients))
+        // Fixtures share the Mac, installation, release and bundle path; only the random revision differs.
+        // So `other.inventory` is not foreign in scope. Change each scope field separately instead.
+        func inventory(macID: Data? = nil, installationID: Data? = nil, releaseDigest: Data? = nil,
+                       bundlePath: String? = nil) throws -> InstallationInventory {
+            try InstallationInventory(macID: macID ?? f.inventory.macID,
+                installationID: installationID ?? f.inventory.installationID, revision: f.inventory.revision,
+                bundlePath: bundlePath ?? f.inventory.bundlePath, releaseDigest: releaseDigest ?? f.inventory.releaseDigest,
+                accounts: f.inventory.accounts, services: f.inventory.services, formatVersion: f.inventory.formatVersion)
+        }
+        // The inventory requires a bundle path that ends in ".app".
+        let otherApp = (f.inventory.bundlePath as NSString).deletingLastPathComponent + "/Other.app"
+        for foreign in [try inventory(macID: Data(repeating: 9, count: 16)),
+                        try inventory(installationID: Data(repeating: 9, count: 16)),
+                        try inventory(releaseDigest: Data(repeating: 9, count: 32)),
+                        try inventory(bundlePath: otherApp)] {
+            XCTAssertThrowsError(try plan.configurationBundle(account: f.f.account, initialization: f.initialization,
+                inventory: foreign, clients: f.clients))
+        }
         XCTAssertNil(try f.f.machine.runtimeActivation(accountID: f.f.account.accountID).plan)
     }
     func testRejectsEachForeignClient() throws {
