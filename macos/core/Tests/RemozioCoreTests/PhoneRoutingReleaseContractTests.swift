@@ -123,7 +123,12 @@ final class PhoneRoutingReleaseContractTests: XCTestCase {
         hashes[.transport] = changedHash
         let candidate = try SignedReleaseEvidence(manifest: .init(release: "0.1.0", build: "1", components: components),
             codeDirectoryHashes: hashes)
-        XCTAssertThrowsError(try PhoneRoutingReleaseContract.selectedVersion(in: candidate, policy: policy,
-            nativeHosts: true, maximumPayloadBytes: PhoneRoutingFrame.maximumBytes))
+        XCTAssertNotEqual(try XCTUnwrap(original.codeDirectoryHashes[.transport]), changedHash)
+        XCTAssertEqual(try PhoneRoutingReleaseContract.selectedVersion(in: candidate, policy: policy,
+            nativeHosts: true, maximumPayloadBytes: PhoneRoutingFrame.maximumBytes), 1)
+        XCTAssertEqual(try GatewaySettingsNativeSupport.mode(release: original, policy: policy), .native)
+        XCTAssertThrowsError(try GatewaySettingsNativeSupport.mode(release: candidate, policy: policy)) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
     }
 }
