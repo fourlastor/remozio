@@ -33,7 +33,10 @@ class AuditSettingsAccessibilityTest {
         assertTrue(timeoutNodes.any { it.editable && it.ownsLabel(text(R.string.audit_settings_seconds), timeoutNodes) && it.error != null })
         ui.onNodeWithText(text(R.string.audit_settings_save)).performScrollTo().assertIsDisplayed().assertIsNotEnabled()
         val saveNodes = NativeAccessibilityFrames.capture(activity, "settings-invalid-save")
-        assertTrue("The disabled Save node must be exposed: $saveNodes", saveNodes.any { it.role == "android.widget.Button" && it.ownsLabel(text(R.string.audit_settings_save), saveNodes) && !it.enabled })
+        assertTrue("The disabled Save action must own its label and button role: $saveNodes", saveNodes.any { action ->
+            action.clickable && !action.enabled && action.ownsLabel(text(R.string.audit_settings_save), saveNodes) &&
+                saveNodes.any { it.role == "android.widget.Button" && (it.path == action.path || it.path.startsWith("${action.path}/")) }
+        })
         assertEquals(original, AuditWorkSettings(activity).read())
         Espresso.pressBackUnconditionally()
         ui.waitUntil(5_000) { ui.activityRule.scenario.state != Lifecycle.State.RESUMED }
