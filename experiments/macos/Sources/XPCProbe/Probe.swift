@@ -137,6 +137,8 @@ final class ProbeService: NSObject, ProbeProtocol {
         default: reply(nil)
         }
     }
+    func phoneAuditVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
+    func phoneAudit(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func phonePushRecoveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
     func phonePushRecovery(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) {
         // This standalone experiment uses synthetic nonces, never provider tokens or enrollment records.
