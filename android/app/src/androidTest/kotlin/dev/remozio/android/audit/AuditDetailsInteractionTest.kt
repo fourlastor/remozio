@@ -3,6 +3,7 @@ package dev.remozio.android.audit
 import android.app.Activity
 import android.graphics.Rect
 import android.util.Log
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.input.key.Key
@@ -11,6 +12,8 @@ import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.Lifecycle
 import androidx.test.espresso.Espresso
+import androidx.test.espresso.action.ViewActions
+import androidx.test.espresso.matcher.ViewMatchers
 import androidx.test.platform.app.InstrumentationRegistry
 import dev.remozio.android.R
 import org.json.JSONArray
@@ -31,7 +34,10 @@ abstract class AuditDetailsInteractionChecks<A : ComponentActivity>(activityClas
         val close = ui.activity.getString(R.string.audit_close)
         fun card() = ui.onAllNodes(hasText(details) and hasClickAction()).onFirst()
         ui.onNode(hasScrollToIndexAction()).performScrollToNode(hasText(details))
-        ui.onRoot().performKeyInput { pressKey(Key.Tab) }
+        NativeAccessibilityFrames.capture(ui.activity, "audit-before-keyboard")
+        Espresso.onView(ViewMatchers.isRoot()).perform(ViewActions.pressKey(KeyEvent.KEYCODE_TAB))
+        ui.runOnIdle { check(!ui.activity.window.decorView.isInTouchMode) { "The Android window must enter keyboard mode." } }
+        NativeAccessibilityFrames.capture(ui.activity, "audit-after-keyboard")
         card().performSemanticsAction(SemanticsActions.RequestFocus) { assertTrue(it()) }
         card().assertIsFocused().performKeyInput { pressKey(Key.Enter) }
         ui.onNodeWithText(title).assertIsDisplayed()
@@ -69,7 +75,8 @@ internal data class NativeAccessibilityNode(
 internal object NativeAccessibilityFrames {
     fun capture(activity: Activity, scene: String): List<NativeAccessibilityNode> {
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
-        automation.waitForIdle(100, 5_000)
+        automation.waitForIdle(500, 5_000)
+        automation.clearCache()
         val root = checkNotNull(automation.rootInActiveWindow)
         check(root.packageName?.toString() == "dev.remozio.android.debug")
         val frame = System.currentTimeMillis().toString() + "-" + scene
@@ -78,6 +85,7 @@ internal object NativeAccessibilityFrames {
         val header = JSONObject().put("schema", 1).put("frame", frame).put("scene", scene)
             .put("activity", activity.javaClass.name).put("widthPixels", window.width()).put("heightPixels", window.height())
             .put("density", metrics.density).put("fontScale", activity.resources.configuration.fontScale)
+            .put("touchMode", activity.window.decorView.isInTouchMode)
         Log.i("RemozioAuditA11y", JSONObject(header.toString()).put("kind", "begin").toString())
         val pending = ArrayDeque<Pair<AccessibilityNodeInfo, String>>()
         pending.add(root to "0")
@@ -94,6 +102,7 @@ internal object NativeAccessibilityFrames {
                 .put("path", path).put("class", node.className).put("labels", JSONArray(labels.map { it.take(256) }))
                 .put("editable", node.isEditable).put("enabled", node.isEnabled).put("clickable", node.isClickable)
                 .put("heading", node.isHeading).put("keyboardFocused", node.isFocused)
+                .put("focusable", node.isFocusable)
                 .put("accessibilityFocused", node.isAccessibilityFocused).put("visible", node.isVisibleToUser)
                 .put("error", node.error).put("windowId", node.windowId).put("bounds", bounds.toShortString()).toString())
             for (index in 0 until node.childCount) node.getChild(index)?.let { pending.add(it to "$path/$index") }

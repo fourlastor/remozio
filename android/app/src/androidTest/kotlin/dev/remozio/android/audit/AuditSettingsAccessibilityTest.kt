@@ -31,7 +31,7 @@ class AuditSettingsAccessibilityTest {
         Espresso.closeSoftKeyboard()
         val timeoutNodes = NativeAccessibilityFrames.capture(activity, "settings-invalid-timeout")
         assertTrue(timeoutNodes.any { it.editable && it.ownsLabel(text(R.string.audit_settings_seconds), timeoutNodes) && it.error != null })
-        ui.onNodeWithText(text(R.string.audit_settings_save)).performScrollTo().assertIsNotEnabled()
+        ui.onNodeWithText(text(R.string.audit_settings_save)).performScrollTo().assertIsDisplayed().assertIsNotEnabled()
         val saveNodes = NativeAccessibilityFrames.capture(activity, "settings-invalid-save")
         assertTrue(saveNodes.any { it.role == "android.widget.Button" && it.ownsLabel(text(R.string.audit_settings_save), saveNodes) && !it.enabled })
         assertEquals(original, AuditWorkSettings(activity).read())
