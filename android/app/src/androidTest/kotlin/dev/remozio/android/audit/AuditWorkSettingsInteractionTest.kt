@@ -75,8 +75,10 @@ class AuditWorkSettingsInteractionTest {
     )
     private fun save(policy: AuditWorkPolicy) {
         val button = saveButton().performScrollTo().assertIsEnabled()
-        with(button.getUnclippedBoundsInRoot()) {
-            check((right - left).value >= 48f && (bottom - top).value >= 48f)
+        val node = button.fetchSemanticsNode()
+        val minimumPixels = 48f * node.layoutInfo.density.density
+        with(node.touchBoundsInRoot) {
+            check(width + 1 >= minimumPixels && height + 1 >= minimumPixels) { "Save touch bounds: $this; minimum: $minimumPixels" }
         }
         button.performClick()
         ui.waitUntil(5_000) { settings.read() == policy }
