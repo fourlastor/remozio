@@ -203,7 +203,7 @@ final class RuntimeAuditUpgradeConfigurationTests: XCTestCase {
                                 guard value.name == name else { return value }
                                 return try .init(name: value.name,
                                     readers: missing == 0 ? value.readers.subtracting([version]) : value.readers,
-                                    writers: missing == 0 ? value.writers : value.writers.subtracting([version]))
+                                    writers: value.writers.subtracting([version]))
                             }
                         }
                         return try .init(role: component.role, identifier: component.identifier,

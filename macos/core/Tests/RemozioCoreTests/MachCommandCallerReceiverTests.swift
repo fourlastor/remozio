@@ -7169,7 +7169,11 @@ extension MachCommandCallerReceiverTests {
                 defer { reply.caller.close(); right?.close() }
                 let frame = try CommandStreamFrame.decode(reply.payload, binding: binding, direction: .toFrontend)
                 try incoming.accept(frame)
-                guard case .output(let bytes) = frame.body else { throw CommandStreamError.closed }
+                guard case .output(let bytes) = frame.body else {
+                    throw NSError(domain: "RemozioPTYFixture", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey:
+                            "Expected PTY output \(String(decoding: expected, as: UTF8.self)); received \(frame.body)"])
+                }
                 output.append(bytes)
                 guard output.count <= expected.count, expected.prefix(output.count) == output else { throw CommandStreamError.malformed }
             }
