@@ -157,6 +157,7 @@ public actor AuthorityWakeService {
             let providers: AuthorityRequestProviders
             if let presence { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, presence: presence) }
             else { providers = try AuthorityRequestProviders(configuration: configuration.request.service, signer: signer, routing: routing) }
+            let auditVersions: Set<UInt64> = providers.phoneAudit == nil ? [] : configuration.request.service.auditVersions.intersection([1])
             let ownerRouting: (@Sendable (ApprovalRequestCoordinator, AuthorityMoment) throws -> PresenceRouting)?
             if let presence { ownerRouting = { owner, moment in try presence.routing(owner: owner, now: moment) } }
             else { ownerRouting = nil }
@@ -195,7 +196,7 @@ public actor AuthorityWakeService {
             if let presence, let appEndpoint {
                 presenceListener = try AuthorityPresenceXPCListener(configuration: appEndpoint, journal: journal, presence: presence, clock: clock,
                     pairingConfiguration: pairingConfiguration, signer: pairingConfiguration == nil ? nil : signer,
-                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: configuration.request.service.auditVersions)
+                    minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: auditVersions)
             } else { presenceListener = nil }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
             return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,

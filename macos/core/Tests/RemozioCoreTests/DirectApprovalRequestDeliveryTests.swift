@@ -5,7 +5,7 @@ import XCTest
 @testable import RemozioCore
 
 final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable {
-    private static func id(_ value: UInt8) -> Data { Data(repeating: value, count: 16) }
+    private static func id(_ value: UInt8, _ count: Int = 16) -> Data { Data(repeating: value, count: count) }
     private static func capability(features: Set<UInt64> = []) throws -> ChannelRequestCapability {
         try .init(kind: 0, wireVersion: 1, schemaVersion: 1, features: features)
     }
@@ -72,6 +72,52 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                 let request = try PhonePushRecoveryFrame.decode(frame)
                 guard case .resume = request else { return reply(.failed) }
                 reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .expired).encode()))
+            } catch { reply(.failed) }
+        }
+        var auditVersionValue: UInt64? = 0
+        private let auditKey = P256.Signing.PrivateKey()
+        var auditPublicKey: Data { auditKey.publicKey.x963Representation }
+        private var auditCalls = 0
+        var auditCount: Int { lock.withLock { auditCalls } }
+        private var holdAuditReply = false
+        private var auditHeld: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var auditResult: Data?
+        let auditRequested = XCTestExpectation(description: "audit requested")
+        func holdAudit() { lock.withLock { holdAuditReply = true } }
+        func finishAudit() {
+            let result = lock.withLock { let result = (auditHeld, auditResult); auditHeld = nil; auditResult = nil; return result }
+            if let reply = result.0, let bytes = result.1 { reply(.audit(bytes)) }
+        }
+        func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let version = auditVersionValue { reply(.auditVersion(version)) } else { reply(.failed) }
+        }
+        func audit(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { auditCalls += 1 }
+            do {
+                let request = try PhoneAuditFrame.decode(frame)
+                let bounds = try AuditReplyLimits.phoneFrame(maximumBytes: 4096)
+                let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                    0: .unsigned(1), 1: .bytes(Data(repeating: 1, count: 16)), 2: .bytes(Data(repeating: 2, count: 16)),
+                    3: .bytes(Data(repeating: 7, count: 16)), 4: .unsigned(8), 5: .unsigned(1), 6: .null, 7: .null, 8: .null,
+                ]), limits: bounds.descriptor), limits: bounds.descriptor)
+                let read = try AuditEpochRead(descriptor: descriptor, retainedAfter: 0, head: 0)
+                let builder = try AuditReplyBuilder(macID: descriptor.macID, accountID: descriptor.accountID,
+                    authorityPublicKey: auditPublicKey, limits: bounds, signer: { try self.auditKey.signature(for: $0).rawRepresentation })
+                let response: PhoneAuditFrame
+                switch request {
+                case .historyQuery(let nonce, let epoch, let after):
+                    let signed = try builder.history(.init(nonce: nonce, epoch: epoch, after: after), current: read)
+                    response = .historyResponse(queryNonce: nonce, canonicalPayload: signed.canonicalBody, signature: signed.signature)
+                case .pageQuery(let nonce, let epoch, let generation, let after):
+                    let signed = try builder.page(.init(nonce: nonce, epoch: epoch, generation: generation, after: after), epoch: read, canonicalRecords: [])
+                    response = .pageResponse(queryNonce: nonce, canonicalPayload: signed.canonicalBody, signature: signed.signature)
+                default: throw ApprovalChannelError.invalidInput
+                }
+                let result = try response.encode()
+                let held = lock.withLock {
+                    if holdAuditReply { auditHeld = reply; auditResult = result; return true }; return false
+                }
+                if held { auditRequested.fulfill() } else { reply(.audit(result)) }
             } catch { reply(.failed) }
         }
         private var receiptQueries: [Data] = []
@@ -195,10 +241,10 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         var sentSequence: UInt64 = 0
         var expectations: [(Int, XCTestExpectation)] = []
         init(scope: ChannelScope, requests: [ChannelRequestCapability], maximum: Int = 4096,
-             failWrite: Bool = false, holdWrite: Bool = false, persistent: Bool = false) throws {
+             failWrite: Bool = false, holdWrite: Bool = false, persistent: Bool = false, auditVersions: Set<UInt64> = []) throws {
             self.maximum = maximum; self.failWrite = failWrite; self.holdWrite = holdWrite; self.persistent = persistent
             owner = try ChannelNegotiation(local: ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: 7, count: 32),
-                envelopeVersions: [1], requests: requests, auditVersions: []), trustedMinimum: 1)
+                envelopeVersions: [1], requests: requests, auditVersions: auditVersions), trustedMinimum: 1)
             input = [Self.frame(try owner.offer())]
         }
         func awaitOpen(timeoutMilliseconds: UInt64) async throws { }
@@ -269,12 +315,13 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     private func setup(ids: [Data], frames: [Data: Data], maximum: Int = 4096, features: Set<UInt64> = [],
                        automatic: Bool = true, exchangeSupported: Bool = false, statuses: [Data: Data] = [:],
                        decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000, recoveryVersion: UInt64? = 0,
+                       auditVersion: UInt64? = 0, auditOnly: Bool = false,
                        handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void = { _, _ in }) async throws -> (DirectApprovalTransportService, DirectApprovalTransportHost, Driver, Factory, DirectApprovalPeer) {
         let peer = try DirectApprovalPeer(scope: Self.scope(), transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation,
-            requests: [Self.capability(features: features)], auditVersions: [], maximumPayloadBytes: maximum)
+            requests: auditOnly ? [] : [Self.capability(features: features)], auditVersions: auditOnly ? [1] : [], maximumPayloadBytes: maximum)
         let trust = DirectApprovalTrust(macID: Self.id(1), accountID: Self.id(2), revision: UUID(), peers: [peer])
         let driver = Driver(trust: trust, ids: ids, frames: frames, exchangeSupported: exchangeSupported, statuses: statuses, decisions: decisions), factory = Factory()
-        driver.recoveryVersionValue = recoveryVersion
+        driver.recoveryVersionValue = recoveryVersion; driver.auditVersionValue = auditVersion
         let feed = AuthorityTrustFeed(macID: Self.id(1), accountID: Self.id(2), factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
         let host = DirectApprovalTransportHost(macID: Self.id(1), accountID: Self.id(2),
             factory: { generation, _, _, handler in factory.make(generation, handler) },
@@ -285,7 +332,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
                          purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
-        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: purpose == .pushRecovery ? [] : peer.requests, auditVersions: [],
+        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: (purpose == .pushRecovery || purpose == .audit) ? [] : peer.requests, auditVersions: purpose == .audit ? [1] : [],
             maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose), purpose: purpose)
     }
     private func recoveryResume(_ id: Data = DirectApprovalRequestDeliveryTests.id(32)) throws -> PhonePushRecoveryFrame {
@@ -956,5 +1003,100 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
         XCTAssertLessThan(start.duration(to: .now), .seconds(2))
         let closed = await phone.closed; XCTAssertTrue(closed)
         await service.close()
+    }
+}
+
+extension DirectApprovalRequestDeliveryTests {
+    private func auditQuery(page: Bool = false) -> PhoneAuditFrame {
+        page ? .pageQuery(queryNonce: Self.id(21, 32), epoch: Self.id(7), generation: 8, after: 0) :
+            .historyQuery(queryNonce: Self.id(21, 32), epoch: nil, after: nil)
+    }
+    func testAuditDefaultHandlerReturnsSignedHistoryAndPagesWithoutCommandCapabilities() async throws {
+        for page in [false, true] {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], auditVersion: 1, auditOnly: true)
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true, auditVersions: [1])
+            let channel = try await connect(phone, peer, purpose: .audit), query = auditQuery(page: page)
+            try await phone.submit(query.encode()); try await factory.run(peer, channel)
+            let payloads = await phone.payloads; XCTAssertEqual(payloads.count, 1)
+            let response = try PhoneAuditFrame.decode(XCTUnwrap(payloads.first))
+            try AuthorityPhoneAuditExchange.response(response, to: query, binding: AuthorityPeerBinding(peer: peer, revision: driver.trust.revision))
+            let bounds = try AuditReplyLimits.phoneFrame(maximumBytes: 4096)
+            switch response {
+            case .historyResponse(_, let body, let signature):
+                XCTAssertFalse(page)
+                XCTAssertTrue(try AuditHistoryStatusSignature.verify(signature: signature, publicKey: driver.auditPublicKey,
+                    wireVersion: 1, canonicalPayload: body, payloadLimits: bounds.history, inputLimits: bounds.signing))
+            case .pageResponse(_, let body, let signature):
+                XCTAssertTrue(page)
+                XCTAssertTrue(try AuditBatchSignature.verify(signature: signature, publicKey: driver.auditPublicKey,
+                    wireVersion: 1, canonicalPayload: body, payloadLimits: bounds.batch, inputLimits: bounds.signing))
+            default: XCTFail("Missing signed audit reply")
+            }
+            XCTAssertTrue(driver.exchangeQueries.isEmpty); XCTAssertEqual(driver.discoveryCount, 0); XCTAssertEqual(driver.auditCount, 1)
+            let closed = await phone.closed; XCTAssertTrue(closed); await service.close()
+        }
+    }
+    func testAuditUnsupportedRootReturnsIncompatibleWithoutApprovalWork() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, auditOnly: true)
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true, auditVersions: [1])
+        let channel = try await connect(phone, peer, purpose: .audit), session = try await host.admit(peer, generation: factory.generation)
+        let query = auditQuery(); try await phone.submit(query.encode())
+        try await service.runPhoneAudit(for: session, over: channel)
+        let payloads = await phone.payloads
+        guard case .failure(let nonce, .incompatible) = try PhoneAuditFrame.decode(XCTUnwrap(payloads.first)) else {
+            await service.close(); return XCTFail("Failure became history")
+        }
+        XCTAssertEqual(nonce, query.queryNonce); XCTAssertEqual(driver.auditCount, 0); XCTAssertEqual(driver.discoveryCount, 0)
+        await service.close()
+    }
+    func testAuditRejectsWrongPurposeScopeCapabilitiesAndVersionBeforeRootWork() async throws {
+        for mismatch in 0..<4 {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, auditVersion: 1, auditOnly: true)
+            let scope = try mismatch == 1 ? Self.scope(phone: 5) : peer.scope
+            let requests = try mismatch == 2 ? [Self.capability()] : []
+            let versions: Set<UInt64> = mismatch == 3 ? [] : [1]
+            let phone = try Phone(scope: scope, requests: requests, persistent: true, auditVersions: versions)
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: requests,
+                auditVersions: versions, maximumPayloadBytes: 4096, purpose: mismatch == 0 ? .approvals : .audit)
+            let session = try await host.admit(peer, generation: factory.generation)
+            do { try await service.runPhoneAudit(for: session, over: channel); XCTFail("Unbound audit accepted") } catch {}
+            XCTAssertEqual(driver.auditCount, 0); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+    func testAuditRejectsMalformedResponseAndOversizedQueriesBeforeRootWork() async throws {
+        let invalid = [Data([1]), Data(count: PhoneAuditFrame.maximumQueryBytes + 1),
+            try PhoneAuditFrame.failure(queryNonce: Self.id(21, 32), reason: .unavailable).encode()]
+        for bytes in invalid {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], auditVersion: 1, auditOnly: true)
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true, auditVersions: [1])
+            let channel = try await connect(phone, peer, purpose: .audit); try await phone.submit(bytes)
+            do { try await factory.run(peer, channel); XCTFail("Invalid query accepted") } catch {}
+            XCTAssertEqual(driver.auditCount, 0); let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty)
+            await service.close()
+        }
+    }
+    func testAuditRetiredTrustWithholdsTheLateRootReplyWithoutReplay() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], auditVersion: 1, auditOnly: true)
+        driver.holdAudit()
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true, auditVersions: [1])
+        let channel = try await connect(phone, peer, purpose: .audit); try await phone.submit(auditQuery().encode())
+        let operation = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.auditRequested], timeout: 2)
+        try await host.replaceTrust(driver.trust); driver.finishAudit()
+        do { try await operation.value; XCTFail("Retired evidence published") } catch {}
+        let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty); XCTAssertEqual(driver.auditCount, 1)
+        await service.close()
+    }
+    func testAuditFailedAndBlockedWritesCloseWithoutRepeatingRootWork() async throws {
+        for blocked in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, auditVersion: 1, auditOnly: true)
+            let phone = try Phone(scope: peer.scope, requests: [], failWrite: !blocked, holdWrite: blocked, persistent: true, auditVersions: [1])
+            let channel = try await connect(phone, peer, purpose: .audit), session = try await host.admit(peer, generation: factory.generation)
+            try await phone.submit(auditQuery().encode())
+            do { try await service.runPhoneAudit(for: session, over: channel, timeoutMilliseconds: 100); XCTFail("Failed write accepted") } catch {}
+            XCTAssertEqual(driver.auditCount, 1); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
     }
 }

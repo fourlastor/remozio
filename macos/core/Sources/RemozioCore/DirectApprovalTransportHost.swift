@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import Synchronization
 
 public enum DirectHostError: Error { case stopped, staleSession, authorityUnavailable, wrongScope }
 public enum DirectHostState: Sendable, Equatable {
@@ -31,6 +32,8 @@ public actor DirectApprovalTransportHost {
     private let validatePeer: @Sendable (DirectApprovalPeer, UUID) async throws -> Void
     private var handler: @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void
     private var handlerSealed = false
+    private final class FeatureSupport: Sendable { let value = Mutex(false) }
+    private let phoneAuditSupport = FeatureSupport()
     private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
@@ -49,10 +52,11 @@ public actor DirectApprovalTransportHost {
         self.macID = macID; self.accountID = accountID
         self.validatePeer = validatePeer; self.handler = handler
         let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
+        let auditSupport = phoneAuditSupport
         factory = { _, peers, event, handler in
             try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
-                event: event, handler: handler, sharedWorkBudget: connectionBudget)
+                enablePhoneAudit: auditSupport.value.withLock { $0 }, event: event, handler: handler, sharedWorkBudget: connectionBudget)
         }
     }
 
@@ -66,6 +70,12 @@ public actor DirectApprovalTransportHost {
     func configureHandler(_ value: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void) throws {
         guard !handlerSealed, !closed else { throw DirectHostError.stopped }
         handler = value
+    }
+
+    /// Configure before listener admission. Support stays fixed for this authority incarnation.
+    func configurePhoneAuditSupport(_ enabled: Bool) throws {
+        guard !handlerSealed, !closed else { throw DirectHostError.stopped }
+        phoneAuditSupport.value.withLock { $0 = enabled }
     }
 
     public func start() throws {

@@ -93,7 +93,7 @@ def declarations(role):
     if role in (2, 8):
         values.append({0: 'runtime.preparation-material', 1: [1, 2, 3], 2: [1, 2, 3] if role == 8 else [], 3: {}})
     host_formats = {
-        2: [('runtime.activation-plan', [1, 2], []),
+        2: [('runtime.activation-plan', [1, 2, 3, 4], []),
             ('runtime.gateway-settings-consumer-host', [1], []),
             ('runtime.gateway-settings-fence', [1, 2], [2]),
             ('gateway.gateway-settings-control', [2], [2]), ('transport.gateway-settings-control', [2], [2]),
@@ -106,7 +106,7 @@ def declarations(role):
             ('runtime.gateway-settings-fence', [1, 2], []),
             ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
-        8: [('runtime.activation-plan', [1, 2], [1, 2]),
+        8: [('runtime.activation-plan', [1, 2, 3, 4], [1, 2, 3, 4]),
             ('runtime.gateway-settings-consumer-host', [1], [1]),
             ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
@@ -116,6 +116,18 @@ def declarations(role):
         raise ValueError('duplicate format declaration before host overrides')
     for name, readers, writers in host_formats.get(role, []):
         by_name[name] = {0: name, 1: readers, 2: writers, 3: {}}
+    if role in (2, 4):
+        for name in ('authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
+                     'routing.away-control', 'routing.status-response'):
+            writers = [1] if name in ('authority.routing-ipc', 'phone.routing-frame') or (role == 2 and name != 'routing.away-control') else []
+            if name in by_name:
+                raise ValueError('duplicate routing format declaration')
+            by_name[name] = {0: name, 1: [1], 2: writers, 3: {}}
+        for name in ('authority.audit-ipc', 'phone.audit-frame', 'audit.history-status', 'audit.batch'):
+            writers = [1] if role == 2 or name in ('authority.audit-ipc', 'phone.audit-frame') else []
+            if name in by_name:
+                raise ValueError('duplicate audit format declaration')
+            by_name[name] = {0: name, 1: [1], 2: writers, 3: {}}
     return sorted(by_name.values(), key=lambda v: v[0])
 
 

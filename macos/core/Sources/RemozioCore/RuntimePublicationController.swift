@@ -10,6 +10,7 @@ enum RuntimePublicationController {
     static func prepare(machine: PreparationIntentStore, account: AccountPreparationIntent,
                         expected: RuntimePreparationState, fileCustodyAccepted: Bool,
                         serviceActivityEnabled: Bool = false,
+                        selectAuditDelivery: @escaping (RuntimeMaterialReference?) throws -> UInt64? = { _ in nil },
                         verifyCurrent: () throws -> Void) throws -> RuntimePreparationState {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
@@ -37,7 +38,8 @@ enum RuntimePublicationController {
                                     accountID: account.accountID, expectedPublicKey: services.authorityPublicKey)
                             }, restoreMaterial: { services, reference, verify in
                                 try RuntimeMaterialPreparation.prepareFileIdentity(account: account, services: services, expected: reference,
-                                    fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: serviceActivityEnabled, verifyCurrent: verify)
+                                    fileCustodyAccepted: fileCustodyAccepted, serviceActivityEnabled: serviceActivityEnabled,
+                                    selectAuditDelivery: selectAuditDelivery, verifyCurrent: verify)
                             }, verifyActivity: { activity in
                                 try RuntimeMaterialPreparation.validateServiceActivity(account: account, activity: activity, verifyCurrent: current)
                             }, publish: { bundle, material, verify in

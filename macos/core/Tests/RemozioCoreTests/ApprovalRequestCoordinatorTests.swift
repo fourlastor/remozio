@@ -2149,3 +2149,207 @@ extension ApprovalRequestCoordinatorTests {
         XCTAssertEqual(calls.withLock { $0 }, 1)
     }
 }
+
+extension ApprovalRequestCoordinatorTests {
+    private func auditQuery(page: Bool = false, epoch: UInt8 = 3, after: UInt64 = 0) -> PhoneAuditFrame {
+        page ? .pageQuery(queryNonce: id(44, 32), epoch: id(epoch), generation: UInt64(epoch), after: after) :
+            .historyQuery(queryNonce: id(44, 32), epoch: nil, after: nil)
+    }
+    private func auditReply(_ owner: ApprovalRequestCoordinator, _ binding: AuthorityPeerBinding,
+                            frame: PhoneAuditFrame? = nil, maximum: Int = 4096) throws -> PhoneAuditFrame {
+        try owner.phoneAudit(frame ?? auditQuery(), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+            maximumFrameBytes: maximum, now: { self.now(120) }, signer: { try self.key.signature(for: $0).rawRepresentation })
+    }
+    private func auditStatus(_ reply: PhoneAuditFrame) throws -> AuditHistoryStatus {
+        guard case .historyResponse(let nonce, let body, let signature) = reply else { throw Failure.fixture }
+        let bounds = try AuditReplyLimits.phoneFrame(maximumBytes: 4096)
+        XCTAssertEqual(nonce, id(44, 32))
+        XCTAssertTrue(try AuditHistoryStatusSignature.verify(signature: signature, publicKey: key.publicKey.x963Representation,
+            wireVersion: 1, canonicalPayload: body, payloadLimits: bounds.history, inputLimits: bounds.signing))
+        let status = try AuditHistoryStatus.decode(body, limits: bounds.history, descriptorLimits: bounds.descriptor)
+        XCTAssertEqual(status.queryNonce, nonce); XCTAssertEqual(status.macID, id(1)); XCTAssertEqual(status.accountID, id(2))
+        return status
+    }
+    private func auditBatch(_ reply: PhoneAuditFrame, maximum: Int = 4096) throws -> AuditBatch {
+        guard case .pageResponse(let nonce, let body, let signature) = reply else { throw Failure.fixture }
+        let bounds = try AuditReplyLimits.phoneFrame(maximumBytes: maximum)
+        XCTAssertEqual(nonce, id(44, 32))
+        XCTAssertTrue(try AuditBatchSignature.verify(signature: signature, publicKey: key.publicKey.x963Representation,
+            wireVersion: 1, canonicalPayload: body, payloadLimits: bounds.batch, inputLimits: bounds.signing))
+        let batch = try AuditBatch.decode(body, batchLimits: bounds.batch, recordLimits: bounds.record, maximumRecords: bounds.maximumRecords)
+        XCTAssertEqual(batch.queryNonce, nonce); XCTAssertEqual(batch.macID, id(1)); XCTAssertEqual(batch.accountID, id(2))
+        return batch
+    }
+    func testPhoneAuditReadsBothReplyKindsWithoutChangingHistoryOrContinuity() throws {
+        for checkpointed in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture)
+            let owner: ApprovalRequestCoordinator, store: ContinuityStore?
+            if checkpointed { (owner, store) = try checkpointedOwner(fixture, db, writer) }
+            else { owner = try self.owner(db, writer); store = nil }
+            defer { owner.close(); try? db.close(); store?.close() }
+            let binding = try frameBinding(db), original = try events(db, writer), boundary = try store?.read()
+            let status = try auditStatus(auditReply(owner, binding))
+            XCTAssertEqual(status.disposition, .discovery); XCTAssertEqual(status.current.epoch, writer.epoch)
+            XCTAssertEqual(status.currentHead, 1)
+            let page = try auditBatch(auditReply(owner, binding, frame: auditQuery(page: true)))
+            XCTAssertEqual(page.records.map(\.sequence), [1]); XCTAssertEqual(page.records, original)
+            XCTAssertEqual(try events(db, writer), original)
+            if let boundary { XCTAssertEqual(try store?.read(), boundary); try assertCheckpoint(db, store!, writer) }
+        }
+    }
+    func testPhoneAuditBoundsCompletePagesAtTheConfiguredChannelBudget() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        for _ in 0..<8 { _ = try owner.admitFixture(draft(), now: now(), receiptTimeMs: nil) }
+        let binding = try frameBinding(db), original = try events(db, writer)
+        var cursor: UInt64 = 0, seen: [UInt64] = []
+        while cursor < UInt64(original.count) {
+            let reply = try auditReply(owner, binding, frame: auditQuery(page: true, after: cursor), maximum: 1024)
+            XCTAssertLessThanOrEqual(try reply.encode().count, 1024)
+            let page = try auditBatch(reply, maximum: 1024)
+            XCTAssertFalse(page.records.isEmpty); XCTAssertLessThan(page.records.count, original.count)
+            seen += page.records.map(\.sequence); cursor = try XCTUnwrap(page.records.last).sequence
+        }
+        XCTAssertEqual(seen, original.map(\.sequence)); XCTAssertEqual(try events(db, writer), original)
+    }
+    func testPhoneAuditPreservesHistoryReconciliationAndRetentionGaps() throws {
+        let fixture = try Fixture(), (db, oldWriter) = try setup(fixture)
+        let writer = try db.write { try $0.createEpoch(descriptor(4)) }, owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        let binding = try frameBinding(db)
+        func history(_ epoch: UInt8, _ after: UInt64) throws -> AuditHistoryStatus {
+            try auditStatus(auditReply(owner, binding, frame: .historyQuery(queryNonce: id(44, 32), epoch: id(epoch), after: after)))
+        }
+        let available = try history(3, 0)
+        XCTAssertEqual(available.disposition, .available); XCTAssertEqual(available.current.epoch, id(4))
+        XCTAssertEqual(available.queried?.epoch, id(3)); XCTAssertEqual(available.queriedHead, 1)
+        XCTAssertEqual(try history(3, 2).disposition, .cursorAhead)
+        let missing = try history(8, 0)
+        XCTAssertEqual(missing.disposition, .unavailable); XCTAssertNil(missing.queried)
+        let empty = try auditBatch(auditReply(owner, binding, frame: auditQuery(page: true, epoch: 4)))
+        XCTAssertTrue(empty.records.isEmpty); XCTAssertEqual(empty.head, 0)
+        try db.write { try $0.prune(epoch: oldWriter.epoch, through: 1, expectedHead: 1) }
+        let gap = try auditBatch(auditReply(owner, binding, frame: auditQuery(page: true)))
+        XCTAssertEqual(gap.retainedAfter, 1); XCTAssertEqual(gap.head, 1); XCTAssertTrue(gap.records.isEmpty)
+        let retained = try history(3, 0)
+        XCTAssertEqual(retained.queriedRetainedAfter, 1); XCTAssertEqual(retained.disposition, .available)
+    }
+    func testPhoneAuditRejectsInvalidRolesBoundsScopeAndKeysBeforeSigning() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        let binding = try frameBinding(db), original = try events(db, writer)
+        let wrongScope = try AuthorityPeerBinding(scope: ChannelScope(macID: id(1), accountID: id(88),
+            phoneID: binding.scope.phoneID, enrollmentEpoch: binding.scope.enrollmentEpoch),
+            transportPublicKey: binding.transportPublicKey, revision: binding.revision)
+        let cases: [(PhoneAuditFrame, AuthorityPeerBinding, Data, Int)] = [
+            (.failure(queryNonce: id(44, 32), reason: .unavailable), binding, key.publicKey.x963Representation, 4096),
+            (.historyResponse(queryNonce: id(44, 32), canonicalPayload: Data([1]), signature: Data(count: 64)), binding, key.publicKey.x963Representation, 4096),
+            (.historyQuery(queryNonce: id(44, 31), epoch: nil, after: nil), binding, key.publicKey.x963Representation, 4096),
+            (.historyQuery(queryNonce: id(44, 32), epoch: id(3), after: nil), binding, key.publicKey.x963Representation, 4096),
+            (auditQuery(), wrongScope, key.publicKey.x963Representation, 4096),
+            (auditQuery(), binding, Data(), 4096),
+            (auditQuery(), binding, key.publicKey.x963Representation, PhoneAuditFrame.overheadBytes),
+            (auditQuery(), binding, key.publicKey.x963Representation, PhoneAuditFrame.maximumBytes + 1)]
+        for (frame, peer, publicKey, maximum) in cases {
+            XCTAssertThrowsError(try owner.phoneAudit(frame, binding: peer, authorityPublicKey: publicKey, maximumFrameBytes: maximum,
+                now: { self.now() }, signer: { _ in XCTFail("Invalid input reached signer"); throw Failure.fixture }))
+        }
+        XCTAssertEqual(try events(db, writer), original)
+    }
+    func testPhoneAuditRejectsInvalidPageEpochGenerationAndAheadCursorBeforeSigning() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        let binding = try frameBinding(db)
+        for query in [auditQuery(page: true, epoch: 8), auditQuery(page: true, after: 2),
+                      .pageQuery(queryNonce: id(44, 32), epoch: id(3), generation: 4, after: 0)] {
+            XCTAssertThrowsError(try owner.phoneAudit(query, binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                maximumFrameBytes: 4096, now: { self.now() }, signer: { _ in XCTFail("Invalid cursor reached signer"); throw Failure.fixture }))
+        }
+        XCTAssertEqual(try auditStatus(auditReply(owner, binding)).currentHead, 1)
+    }
+    func testPhoneAuditRechecksEnrollmentAfterSigningBothReplyKinds() throws {
+        for page in [false, true] {
+            let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+            defer { owner.close(); try? db.close() }
+            let binding = try frameBinding(db)
+            var calls = 0
+            XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                maximumFrameBytes: 4096, now: { self.now() }, signer: { input in
+                    calls += 1
+                    // Simulate a trust change at the callback boundary; production callbacks cannot reenter.
+                    _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: self.id(5), epoch: self.id(9),
+                        expectedTrustRevision: binding.revision, eventID: self.id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: 1) }
+                    return try self.key.signature(for: input).rawRepresentation
+                }))
+            XCTAssertEqual(calls, 1)
+            XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                maximumFrameBytes: 4096, now: { self.now() }, signer: { _ in XCTFail("Revoked binding reached signer"); throw Failure.fixture }))
+        }
+    }
+    func testPhoneAuditStaleRevisionAndChangedTransportAreRejectedBeforeSigning() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        let binding = try frameBinding(db)
+        for stale in [try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: binding.transportPublicKey, revision: UUID()),
+                      try AuthorityPeerBinding(scope: binding.scope, transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, revision: binding.revision)] {
+            for page in [false, true] {
+                XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: stale, authorityPublicKey: key.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: { self.now() }, signer: { _ in XCTFail("Stale binding reached signer"); throw Failure.fixture }))
+            }
+        }
+    }
+    func testPhoneAuditChecksIndependentContinuityBeforeAndAfterSigning() throws {
+        for changeAfterSign in [false, true] {
+            for page in [false, true] {
+                let fixture = try Fixture(), (db, writer) = try setup(fixture), (owner, store) = try checkpointedOwner(fixture, db, writer)
+                defer { owner.close(); try? db.close(); store.close() }
+                let binding = try frameBinding(db)
+                func breakBoundary() throws {
+                    // A valid journal write without its independent checkpoint simulates rollback or interrupted ownership.
+                    _ = try db.write { try $0.revokeApprovalEnrollment(phoneID: self.id(5), epoch: self.id(9),
+                        expectedTrustRevision: binding.revision, eventID: self.id(31), receiptTimeMs: nil, writer: writer, expectedAuditHead: 1) }
+                }
+                if !changeAfterSign { try breakBoundary() }
+                var calls = 0
+                XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: { self.now() }, signer: { input in
+                        calls += 1; try breakBoundary(); return try self.key.signature(for: input).rawRepresentation
+                    })) { XCTAssertEqual($0 as? CheckpointedJournal.Failure, .boundaryMismatch) }
+                XCTAssertEqual(calls, changeAfterSign ? 1 : 0); XCTAssertTrue(owner.retired)
+            }
+        }
+    }
+    func testPhoneAuditRejectsBadSignaturesWithoutRetiringHealthyOwner() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+        defer { owner.close(); try? db.close() }
+        let binding = try frameBinding(db), wrongKey = P256.Signing.PrivateKey()
+        for page in [false, true] {
+            for signature in [Data(), Data(count: 64), try wrongKey.signature(for: Data([1])).rawRepresentation] {
+                XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: { self.now() }, signer: { _ in signature }))
+                XCTAssertFalse(owner.retired)
+            }
+        }
+        XCTAssertEqual(try auditStatus(auditReply(owner, binding)).currentHead, 1)
+    }
+    func testPhoneAuditChecksFinalClockAndOwnerLifetime() throws {
+        for mode in 0..<4 {
+            for page in [false, true] {
+                let fixture = try Fixture(), (db, writer) = try setup(fixture), owner = try owner(db, writer)
+                defer { owner.close(); try? db.close() }
+                let binding = try frameBinding(db)
+                var signed = false
+                XCTAssertThrowsError(try owner.phoneAudit(auditQuery(page: page), binding: binding, authorityPublicKey: key.publicKey.x963Representation,
+                    maximumFrameBytes: 4096, now: {
+                        AuthorityMoment(epoch: signed && mode == 1 ? UUID() : self.clock, milliseconds: signed && mode == 0 ? 100 : 120)
+                    }, signer: { input in
+                        signed = true
+                        if mode == 2 { owner.close() }
+                        if mode == 3 { try db.close() }
+                        return try self.key.signature(for: input).rawRepresentation
+                    }))
+                XCTAssertTrue(signed)
+            }
+        }
+    }
+}

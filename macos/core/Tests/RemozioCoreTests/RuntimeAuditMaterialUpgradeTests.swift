@@ -44,6 +44,32 @@ final class RuntimeAuditMaterialUpgradeTests: XCTestCase {
             XCTAssertNotEqual(try target.reference.materialDigest, try original.reference.materialDigest)
         }
     }
+    func testTargetConfigurationAdmitsAuditAndKeepsThePairingIdentityAndJobs() throws {
+        let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true, auditDelivery: true)
+        let source = try RuntimePreparationMaterial(materialID: f.material.materialID, services: f.services,
+            transportIdentity: f.material.transportIdentity, transportPublicKeyInfo: f.material.transportPublicKeyInfo,
+            gateway: f.material.gateway, serviceActivity: f.material.serviceActivity)
+        let target = try RuntimeAuditMaterialUpgrade.prepare(material: source, expected: source.reference,
+            account: f.account, activity: XCTUnwrap(f.material.serviceActivity), installedRelease: XCTUnwrap(f.nativeRelease),
+            policy: f.plan.host.codePolicy)
+        let initialization = try XCTUnwrap(f.machine.initialization(accountID: f.account.accountID))
+        let inventory = try XCTUnwrap(f.machine.inventory())
+        let old = try RuntimeConfigurationBundle.initial(account: f.account, initialization: initialization,
+            reference: source.reference, inventory: inventory)
+        let bundle = try RuntimeConfigurationBundle.initial(account: f.account, initialization: initialization,
+            reference: target.reference, inventory: inventory)
+        XCTAssertEqual(old.command.presence.wake.request.service.auditVersions, [])
+        XCTAssertEqual(bundle.command.presence.wake.request.service.auditVersions, [1])
+        XCTAssertEqual(bundle.command.presence.pairing?.transportPublicKey, old.command.presence.pairing?.transportPublicKey)
+        XCTAssertEqual(bundle.command.presence.wake.registration, old.command.presence.wake.registration)
+        XCTAssertEqual(bundle.transport.transport.identityPublicKeyInfo, old.transport.transport.identityPublicKeyInfo)
+        let plan = try RuntimeActivationPlan(account: f.account, initialization: initialization,
+            runtime: .init(reference: target.reference, configurationPublished: true), inventory: inventory,
+            gatewaySettingsRelease: f.nativeRelease)
+        XCTAssertEqual(plan.authorityJob.declaration, f.plan.authorityJob.declaration)
+        XCTAssertEqual(plan.transportJob.declaration, f.plan.transportJob.declaration)
+        XCTAssertEqual(try plan.encoded, try f.plan.encoded)
+    }
     func testAlreadySelectedMaterialIsByteIdenticalButStillNeedsCurrentCapabilities() throws {
         let f = try AuditMaterialUpgradeFixture()
         XCTAssertEqual(try upgrade(f, f.material).encoded, try f.material.encoded)

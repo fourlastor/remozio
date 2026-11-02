@@ -125,6 +125,21 @@ final class AuthorityTransportAccess: Sendable {
         })
     }
 
+    func phoneAudit(binding: AuthorityPeerBinding, frame: PhoneAuditFrame,
+                    handler: @Sendable (ApprovalRequestCoordinator, AuthorityPeerBinding, PhoneAuditFrame,
+                                        @Sendable (JournalTransaction) throws -> Void) throws -> PhoneAuditFrame) throws -> PhoneAuditFrame {
+        guard frame.isQuery, try frame.encode().count <= PhoneAuditFrame.maximumQueryBytes else { throw AuthorityXPCError.invalidMessage }
+        return try journal.withValidatedRequests(validate: { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }, body: { owner in
+            try handler(owner, binding, frame, { transaction in
+                try self.requireCurrent(transaction)
+                try transaction.requireDirectApprovalBinding(binding)
+            })
+        })
+    }
+
     private func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {

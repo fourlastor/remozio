@@ -144,7 +144,9 @@ public final class AdministrativeSetupService {
                 accountCodePolicy: configuration.codePolicy, prepareRuntime: { machine, account, expected, accepted, verify in
                     let enabled = try GatewaySettingsNativeSupport.serviceActivityEnabled(reference: expected.reference, mode: nativeMode)
                     return try RuntimePublicationController.prepare(machine: machine, account: account, expected: expected,
-                        fileCustodyAccepted: accepted, serviceActivityEnabled: enabled, verifyCurrent: verify)
+                        fileCustodyAccepted: accepted, serviceActivityEnabled: enabled, selectAuditDelivery: { reference in
+                            try RuntimeAuditDeliverySupport.selectedVersion(reference: reference, release: release, policy: configuration.codePolicy)
+                        }, verifyCurrent: verify)
                 }, releaseActivity: activity,
                 gatewayJournalOperation: .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID),
                 gatewayActivationOperation: nativeMode == .native

@@ -21,9 +21,21 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 'CONFIGURATION': configuration, 'PRODUCT_BUNDLE_IDENTIFIER': 'dev.remozio.mac' + ('.debug' if configuration == 'Debug' else ''),
                 'MACOSX_DEPLOYMENT_TARGET': '26.0', 'CURRENT_PROJECT_VERSION': '1', 'MARKETING_VERSION': '0.1.0'}
 
-    def test_capacity_keeps_current_debug_and_release_manifest_bytes(self):
+    def test_capacity_keeps_legacy_debug_and_release_manifest_bytes(self):
         expected = {'Debug': 'bb98b7342fcf4bf362539d5642305ed0eefd2f0f14d3fd78e65988e79cd3dacd', 'Release': '070ed2cf0c713916b2e1375d924154a4d61507d894916db3d41a783dc635de41'}
-        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
+        original = MANIFEST.declarations
+        added = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
+                 'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
+                 'phone.audit-frame', 'audit.history-status', 'audit.batch'}
+        def legacy(role):
+            values = [dict(value) for value in original(role) if value[0] not in added]
+            for value in values:
+                if value[0] == 'runtime.activation-plan':
+                    value[1] = [1, 2]
+                    value[2] = [1, 2] if role == 8 else []
+            return values
+        with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
+                patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
             for configuration, digest in expected.items():
                 info = MANIFEST.generate(self.environment(configuration))
                 self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
@@ -34,8 +46,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             def declarations(role):
                 values = original(role)
                 if role == 2:
-                    values += [MANIFEST.format_declaration(f'capacity.{index}', [1])
-                               for index in range(count - len(values))]
+                    values = [MANIFEST.format_declaration(f'capacity.{index}', [1])
+                              for index in range(count)]
                 return sorted(values, key=lambda value: value[0])
             with patch.object(MANIFEST, 'declarations', side_effect=declarations), \
                     patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
@@ -59,7 +71,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
                 with self.assertRaisesRegex(ValueError, error):
                     MANIFEST.generate(self.environment())
-        self.assertLessEqual(max(len(original(role)) for role, *_ in MANIFEST.COMPONENTS), 32)
+        self.assertLessEqual(max(len(original(role)) for role, *_ in MANIFEST.COMPONENTS), 64)
 
     def test_capacity_keeps_the_global_byte_budget(self):
         original = MANIFEST.declarations
@@ -76,7 +88,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
             MANIFEST.generate(self.environment())
         declaration = encode.call_args_list[0].args[0]
-        self.assertEqual(declaration[0], 2)
+        self.assertEqual(declaration[0], 4)
         self.assertEqual(declaration[6], [{0: 4, 1: 4, 2: 'Contents/Helpers/RemozioCloudflared',
             3: 'Contents/Helpers/RemozioCloudflared', 4: 'dev.remozio.cloudflared.debug',
             5: bytes([9]) * 20, 6: None, 7: None, 8: []}])
@@ -258,7 +270,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
-                self.assertEqual(declarations[name], {0: name, 1: [1, 2], 2: [1, 2] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[name], {0: name, 1: [1, 2, 3, 4], 2: [1, 2, 3, 4] if role == 8 else [], 3: {}})
             else:
                 self.assertNotIn(name, declarations)
 
@@ -283,7 +295,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         names = ('relay.run-credential-reference', 'relay.run-credential-material')
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
-            self.assertLessEqual(len(declarations), 32)
+            self.assertLessEqual(len(declarations), 64)
             for name in names:
                 if role == 8:
                     self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1], 3: {}})
@@ -327,6 +339,39 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertEqual(declared[name], MANIFEST.format_declaration(name, versions))
                 else:
                     self.assertNotIn(name, declared)
-            self.assertLessEqual(len(declared), 32)
+            self.assertLessEqual(len(declared), 64)
             self.assertNotIn('setup.portable-import-operation', declared)
             self.assertNotIn('setup.portable-import-result', declared)
+
+    def test_phone_routing_and_audit_formats_have_exact_role_directions(self):
+        routing = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
+                   'routing.away-control', 'routing.status-response'}
+        audit = {'authority.audit-ipc', 'phone.audit-frame', 'audit.history-status', 'audit.batch'}
+        authority_writes = routing - {'routing.away-control'}
+        transport_writes = {'authority.routing-ipc', 'phone.routing-frame',
+                            'authority.audit-ipc', 'phone.audit-frame'}
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = MANIFEST.declarations(role)
+            by_name = {value[0]: value for value in declarations}
+            self.assertEqual(len(by_name), len(declarations))
+            for name in routing | audit:
+                if role not in (2, 4):
+                    self.assertNotIn(name, by_name)
+                    continue
+                writes = name in (authority_writes | audit if role == 2 else transport_writes)
+                self.assertEqual(by_name[name], {0: name, 1: [1], 2: [1] if writes else [], 3: {}})
+
+    def test_phone_capabilities_use_extended_manifest_capacity_without_claiming_request_features(self):
+        counts = {role: len(MANIFEST.declarations(role)) for role, *_ in MANIFEST.COMPONENTS}
+        self.assertGreater(counts[2], 32)
+        self.assertLessEqual(max(counts.values()), 64)
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
+                patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
+            info = MANIFEST.generate(self.environment())
+        root = encode.call_args_list[0].args[0]
+        self.assertEqual(root[0], 4)
+        for component in root[5]:
+            self.assertEqual(len(component[7]), counts[component[0]])
+            for request in component[8]:
+                self.assertEqual(request[5], [])
+        self.assertLessEqual(len(info['RemozioReleaseManifest']), 65536)

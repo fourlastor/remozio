@@ -146,6 +146,32 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let request = try PhonePushRecoveryFrame.decode(frame)
             reply(.recovery(try PhonePushRecoveryFrame.outcome(correlationID: request.correlationID, failure: .unavailable).encode()))
         }
+        private var auditCapability: UInt64? = 0
+        private var auditReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var auditFrame: Data?
+        private var auditCalls = 0
+        private var auditProbes = 0
+        let auditSent = XCTestExpectation(description: "held audit")
+        var auditCount: Int { lock.withLock { auditCalls } }
+        var auditVersionCount: Int { lock.withLock { auditProbes } }
+        func setAuditVersion(_ value: UInt64?) { lock.withLock { auditCapability = value } }
+        func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            let version = lock.withLock { auditProbes += 1; return auditCapability }
+            if let version { reply(.auditVersion(version)) }
+            else { reply(.failed) }
+        }
+        func audit(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { auditCalls += 1; auditFrame = frame; auditReply = reply }
+            auditSent.fulfill()
+        }
+        func finishAudit() throws {
+            let value = lock.withLock { () -> (Data?, (@Sendable (AuthorityXPCReply) -> Void)?) in
+                let value = (auditFrame, auditReply); auditFrame = nil; auditReply = nil; return value
+            }
+            guard let frame = value.0, let reply = value.1 else { return }
+            let request = try PhoneAuditFrame.decode(frame)
+            reply(.audit(try PhoneAuditFrame.failure(queryNonce: request.queryNonce, reason: .unavailable).encode()))
+        }
         private var actorCloseGate: DispatchSemaphore?
         let actorCloseEntered = XCTestExpectation(description: "held channel actor cleanup")
         func holdActorClose() { lock.withLock { actorCloseGate = DispatchSemaphore(value: 0) } }
@@ -185,10 +211,10 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         }
     }
     private let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16)
-    private func trust(empty: Bool = false) throws -> DirectApprovalTrust {
+    private func trust(empty: Bool = false, auditVersions: Set<UInt64> = []) throws -> DirectApprovalTrust {
         let peer = try DirectApprovalPeer(scope: ChannelScope(macID: mac, accountID: account,
             phoneID: Data(repeating: 3, count: 16), enrollmentEpoch: Data(repeating: 4, count: 16)),
-            transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, requests: [], auditVersions: [], maximumPayloadBytes: 1024)
+            transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, requests: [], auditVersions: auditVersions, maximumPayloadBytes: 1024)
         return DirectApprovalTrust(macID: mac, accountID: account, revision: UUID(), peers: empty ? [] : [peer])
     }
     private func feed(_ driver: Driver, maximumWaiting: Int = 8) -> AuthorityTrustFeed {
@@ -364,6 +390,171 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(factory.count, 2)
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         await feed.close(); await host.close()
+    }
+    func testUnsupportedAuditKeepsPrimaryApprovalTrustAlive() async throws {
+        let capabilities: [UInt64?] = [0, nil]
+        for capability in capabilities {
+            let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+            auxiliary.setAuditVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { _ = try await feed.phoneAudit(trust.peers[0], revision: trust.revision, frame: .historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)); XCTFail("Expected optional refusal") } catch { }
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.auditCount, 0)
+            XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            XCTAssertEqual(factory.count, 2)
+            await feed.close(); await host.close()
+        }
+    }
+    func testAuditUsesSeparateRPCAndReturnsOnlyForTheCurrentAuthorityLease() async throws {
+        let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneAuditFrame.historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)
+        let pending = Task { try await feed.phoneAudit(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.auditSent], timeout: 2)
+        try auxiliary.finishAudit()
+        guard case .failure(let correlation, let result) = try await pending.value else { return XCTFail("Missing status") }
+        XCTAssertEqual(correlation, request.queryNonce); XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(primary.auditCount, 0); XCTAssertEqual(auxiliary.auditCount, 1); XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testPrimaryInterruptionDiscardsLateAuditReply() async throws {
+        let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneAuditFrame.historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)
+        let pending = Task { try await feed.phoneAudit(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.auditSent], timeout: 2)
+        primary.interrupt(); try auxiliary.finishAudit()
+        do { _ = try await pending.value; XCTFail("Retired authority returned audit success") } catch { }
+        do { try await feed.validatePeer(trust.peers[0], revision: trust.revision); XCTFail("Retired primary revived") } catch { }
+        XCTAssertEqual(auxiliary.auditCount, 1); XCTAssertGreaterThan(auxiliary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testCancelledAuditRetiresOnlyItsOptionalLink() async throws {
+        let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneAuditFrame.historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)
+        let pending = Task { try await feed.phoneAudit(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.auditSent], timeout: 2)
+        pending.cancel(); try auxiliary.finishAudit()
+        do { _ = try await pending.value; XCTFail("Cancelled audit returned success") } catch { }
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(auxiliary.auditCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testAuxiliaryInterruptionDiscardsAuditReplyWithoutRetiringPrimary() async throws {
+        let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneAuditFrame.historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)
+        let pending = Task { try await feed.phoneAudit(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.auditSent], timeout: 2)
+        auxiliary.interrupt(); try auxiliary.finishAudit()
+        do { _ = try await pending.value; XCTFail("Retired optional connection returned a result") } catch {}
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.auditCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testAuditPreflightDoesNotSendPrivateFieldsOrOpenRepeatedConnections() async throws {
+        let trust = try trust(auditVersions: [1]), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        try await feed.requirePhoneAuditSupport(); try await feed.requirePhoneAuditSupport()
+        XCTAssertEqual(auxiliary.auditCount, 0); XCTAssertEqual(primary.auditCount, 0)
+        XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testEmptyStartupProbesAuditBeforeTheFirstPhoneEnrolls() async throws {
+        let empty = try trust(empty: true), primary = try Driver(empty), auxiliary = try Driver(empty)
+        auxiliary.setAuditVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        let service = DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true)
+        do {
+            try await service.start()
+            XCTAssertEqual(auxiliary.auditVersionCount, 1)
+            XCTAssertEqual(auxiliary.auditCount, 0)
+            XCTAssertTrue(listeners.values.isEmpty)
+            let initialState = await service.state
+            XCTAssertEqual(initialState, .noEligiblePhones)
+            let enrolled = try trust(auditVersions: [1])
+            try primary.replace(enrolled); try await feed.refresh()
+            XCTAssertEqual(listeners.values.count, 1)
+            let generation = try XCTUnwrap(listeners.generation)
+            let session = try await host.admit(enrolled.peers[0], generation: generation)
+            let request = PhoneAuditFrame.historyQuery(queryNonce: Data(repeating: 9, count: 32), epoch: nil, after: nil)
+            let pending = Task { try await service.phoneAudit(for: session, frame: request) }
+            await fulfillment(of: [auxiliary.auditSent], timeout: 2)
+            try auxiliary.finishAudit()
+            guard case .failure(let nonce, let reason) = try await pending.value else {
+                await service.close(); return XCTFail("Missing audit response")
+            }
+            XCTAssertEqual(nonce, request.queryNonce); XCTAssertEqual(reason, .unavailable)
+            XCTAssertEqual(auxiliary.auditVersionCount, 1)
+            XCTAssertEqual(primary.auditCount, 0); XCTAssertEqual(primary.closeCount, 0)
+        } catch { await service.close(); throw error }
+        await service.close()
+    }
+    func testEmptyStartupWithUnsupportedAuditKeepsLaterLegacyApprovalAlive() async throws {
+        for capability: UInt64? in [0, nil] {
+            let empty = try trust(empty: true), primary = try Driver(empty), auxiliary = try Driver(empty)
+            auxiliary.setAuditVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            let service = DirectApprovalTransportService(feed: feed, host: host, useDefaultDelivery: true)
+            do {
+                try await service.start()
+                XCTAssertEqual(auxiliary.auditVersionCount, 1)
+                XCTAssertEqual(auxiliary.auditCount, 0); XCTAssertEqual(primary.closeCount, 0)
+                let legacy = try trust()
+                try primary.replace(legacy); try await feed.refresh()
+                try await feed.validatePeer(legacy.peers[0], revision: legacy.revision)
+                do { try await feed.requirePhoneAuditSupport(); XCTFail("Legacy trust enabled audit") }
+                catch AuthorityXPCError.unsupportedPhoneAudit {}
+                XCTAssertEqual(auxiliary.auditVersionCount, 1)
+                XCTAssertEqual(primary.closeCount, 0)
+                XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            } catch { await service.close(); throw error }
+            await service.close()
+        }
+    }
+    func testAuditPreflightSkipsTheOptionalRPCForLegacySnapshots() async throws {
+        for versions: Set<UInt64> in [[], [2]] {
+            let trust = try trust(auditVersions: versions), primary = try Driver(trust), auxiliary = try Driver(trust)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { try await feed.requirePhoneAuditSupport(); XCTFail("Unsupported audit probed") }
+            catch AuthorityXPCError.unsupportedPhoneAudit {}
+            XCTAssertEqual(factory.count, 1); XCTAssertEqual(auxiliary.auditCount, 0)
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            await feed.closeAndWait(); await host.closeAndWait()
+        }
     }
     func testServiceStartsAfterTrustAndRetiresOnClose() async throws {
         let listeners = Listeners(), host = host(listeners), feed = feed(try Driver(trust()))
