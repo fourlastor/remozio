@@ -26,9 +26,18 @@ The host advertises audit transport only after it verifies actual Root support.
 
 ## Qualification
 
-This prepared slice has not compiled or run tests.
-Earlier private component counts do not qualify this source.
-The full local gate and rebuilt native peers remain required before publication.
-Preview source does not qualify rendered UI states.
-Android Keystore, AtomicFile, actual lifecycle and installed Mac-Pixel delivery remain unqualified.
+This slice compiled and passed the automated local gate through verified source-bound stage receipts.
+The gate covers 40 native stages and 1,265 portable methods.
+It also covers 4,300 Core methods with one expected skip and 361 Python methods with 24 expected skips.
+Reused results keep their original source and terminal receipts.
+Native peers compiled before their interoperability tests.
+
+Five Android instrumentation methods cover Settings, large-font navigation, details dismissal and native accessibility nodes.
+The visual record retains 57 inspected component renders.
+The current unsigned release APK matches the earlier artifact byte for byte.
+The retained renders qualify component appearance, not background work or installed delivery.
+
+Android Keystore, AtomicFile failure behavior and lifecycle behavior on a physical phone remain unqualified.
+Installed Root, caller validation, real provider semantics and Mac-Pixel delivery also remain unqualified.
+TalkBack traversal and accessibility focus restoration need attended checks.
 The attended checks require the user at the Mac.
