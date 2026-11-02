@@ -12,7 +12,7 @@ enum ProbeSigning {
               let entitlements = dictionary[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
               let value = entitlements[entitlement] as? NSNumber,
               CFGetTypeID(value) == CFBooleanGetTypeID(), value.boolValue,
-              SecRequirementCreateWithString("anchor apple generic and identifier \"dev.remozio.experiments.bootstrap\"" as CFString, [], &requirement) == errSecSuccess,
+              SecRequirementCreateWithString("anchor apple generic and identifier \"dev.sebastiano.remozio.macos.experiments.bootstrap\"" as CFString, [], &requirement) == errSecSuccess,
               let requirement, SecCodeCheckValidity(code, [], requirement) == errSecSuccess else { return false }
         return true
     }

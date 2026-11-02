@@ -26,7 +26,7 @@ func fixtureBundle(_ root: URL) throws -> Bundle {
     let bundle = Bundle.main
     let prefix = root.path + "/", path = bundle.bundleURL.standardizedFileURL.path
     guard path.hasPrefix(prefix), path == bundle.bundleURL.resolvingSymlinksInPath().path,
-          bundle.bundleIdentifier?.hasPrefix("dev.remozio.experiment.sparkleboundary.") == true,
+          bundle.bundleIdentifier?.hasPrefix("dev.sebastiano.remozio.macos.experiments.sparkleboundary.") == true,
           bundle.object(forInfoDictionaryKey: "SUEnableInstallerLauncherService") as? Bool == false,
           bundle.object(forInfoDictionaryKey: "SUEnableDownloaderService") as? Bool == false,
           bundle.object(forInfoDictionaryKey: "SUEnableAutomaticChecks") as? Bool == false,

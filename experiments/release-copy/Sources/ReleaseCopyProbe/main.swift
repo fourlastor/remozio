@@ -6,7 +6,7 @@ var phase = "argument validation"
 do {
     let args = CommandLine.arguments
     guard (5...6).contains(args.count), args.count == 5 || ["raise-floor", "inspect-only", "durable-copy"].contains(args[5]),
-          getuid() != 0, getuid() == geteuid(), args[4].hasPrefix("dev.remozio.experiment.sparkleboundary.") else { exit(64) }
+          getuid() != 0, getuid() == geteuid(), args[4].hasPrefix("dev.sebastiano.remozio.macos.experiments.sparkleboundary.") else { exit(64) }
     let source = URL(fileURLWithPath: args[1]), parent = URL(fileURLWithPath: args[2])
     for root in [source.deletingLastPathComponent().deletingLastPathComponent(), parent.deletingLastPathComponent()] {
         guard root.lastPathComponent.hasPrefix("remozio-sparkle-boundary-") else { exit(64) }

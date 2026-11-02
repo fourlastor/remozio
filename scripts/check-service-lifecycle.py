@@ -16,7 +16,7 @@ from macos_build_checks import require, verify_executable
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'experiments/service-lifecycle'
 METADATA = ROOT / 'macos/core/Sources/RemozioCore/ProtectedStorageMetadata.swift'
-APP_ID = 'dev.remozio.experiments.lifecycle'
+APP_ID = 'dev.sebastiano.remozio.macos.experiments.lifecycle'
 ROLES = {'session': ('LaunchAgents', 'RemozioLifecycleSession'),
          'authority': ('LaunchDaemons', 'RemozioLifecycleAuthority'),
          'transport': ('LaunchDaemons', 'RemozioLifecycleTransport'),
