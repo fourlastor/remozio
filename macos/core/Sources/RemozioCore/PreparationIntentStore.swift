@@ -78,6 +78,15 @@ public final class PreparationIntentStore {
         } catch { shutdown(); throw error }
     }
     deinit { shutdown() }
+    /// Validates the held storage lease between read stages.
+    func validateStorageLease(nativeDirectory: String? = nil) throws {
+        guard !unavailable else { throw PreparationStoreError.unavailable }
+        guard db != nil else { throw PreparationStoreError.closed }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        if let nativeDirectory { try lease.requireNativeLocation(nativeDirectory) }
+        else { try lease.validate() }
+    }
+
     public func close() throws {
         guard !active else { throw PreparationStoreError.transactionActive }
         shutdown()

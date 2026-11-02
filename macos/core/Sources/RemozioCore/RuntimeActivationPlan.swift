@@ -244,6 +244,56 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         guard try result.encoded == bytes else { throw RuntimeActivationError.invalidPlan }; return result
     }
     static var limits: CBORLimits { get throws { try .init(maxBytes: 262144, maxDepth: 1, maxItems: 17) } }
+
+    /// Retains published values after validating their account and release scope.
+    static func retainingPublished(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+                                  reference: RuntimeMaterialReference, inventory: InstallationInventory,
+                                  installedRelease: SignedReleaseEvidence, command: AuthorityCommandStartupConfiguration,
+                                  transport: TransportPairingStartupConfiguration,
+                                  host existingHost: InstalledAuthorityCommandConfiguration?,
+                                  gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration?,
+                                  clients: RuntimeActivationClients) throws -> Self {
+        try RuntimeConfigurationBundle.validateScope(account: account, initialization: initialization,
+            reference: reference, inventory: inventory)
+        try inventory.compareRelease(installedRelease)
+        let host: InstalledAuthorityCommandConfiguration
+        if let existingHost {
+            guard existingHost.command.canonicalBytes == command.canonicalBytes else { throw RuntimeActivationError.conflictingPlan }
+            host = existingHost
+        } else {
+            let label = try RuntimePreparationPaths(accountID: account.accountID).namespace + ".authority"
+            let prepared = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
+                installationID: inventory.installationID, releaseDigest: inventory.releaseDigest,
+                codePolicy: account.initialAuthority.codePolicy, command: command, label: label,
+                plistName: label + ".plist", jobPlacement: .systemAccount)
+            host = try reference.serviceActivity == nil ? prepared : prepared.enablingGatewaySettingsControl(release: installedRelease)
+        }
+        try host.validateRelease(installedRelease, bundlePath: inventory.bundlePath)
+        let maximum = command.presence.wake.request.service.maximumPayloadBytes
+        let routing = try PhoneRoutingReleaseContract.selectedVersion(in: installedRelease, policy: host.codePolicy,
+            nativeHosts: reference.serviceActivity != nil, maximumPayloadBytes: maximum)
+        let audit = try PhoneAuditReleaseContract.selectedVersion(in: installedRelease, policy: host.codePolicy,
+            nativeHosts: reference.serviceActivity != nil, maximumPayloadBytes: maximum)
+        if reference.auditDeliveryVersion != nil {
+            try PhoneAuditReleaseContract.validateDelivery(installedRelease, policy: host.codePolicy)
+        }
+        let plan = try Self(reference: reference, bundlePath: inventory.bundlePath, host: host, transport: transport,
+            gatewaySettingsHost: gatewaySettingsHost, phoneRoutingVersion: routing, phoneAuditVersion: audit)
+        try plan.validate(account: account, reference: reference)
+        _ = try plan.configurationBundle(account: account, initialization: initialization, inventory: inventory, clients: clients)
+        return plan
+    }
+    func requireConfigurationScope(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+        inventory: InstallationInventory) throws {
+        try validate(account: account, reference: reference)
+        guard bundlePath == inventory.bundlePath else { throw RuntimeActivationError.changedScope }
+        try RuntimeConfigurationBundle.validateScope(account: account, initialization: initialization,
+            reference: reference, inventory: inventory)
+    }
+    func configurationBundle(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+                             inventory: InstallationInventory, clients: RuntimeActivationClients) throws -> RuntimeConfigurationBundle {
+        try .init(retaining: self, account: account, initialization: initialization, inventory: inventory, clients: clients)
+    }
 }
 
 /// Historical registration progress. It is not a current launchd or process health result.

@@ -157,4 +157,95 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             throw RuntimePreparationError.invalidRecord
         }
     }
+
+    static func validateScope(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+                              reference: RuntimeMaterialReference, inventory: InstallationInventory) throws {
+        try reference.validate(account: account, services: reference.services)
+        guard account.storagePrepared, initialization.complete,
+              initialization.accountID == account.accountID, initialization.macID == account.macID,
+              initialization.installationID == account.installationID, initialization.releaseDigest == account.releaseDigest,
+              initialization.initializationBytes == account.initializationBytes,
+              inventory.macID == account.macID, inventory.installationID == account.installationID,
+              inventory.releaseDigest == account.releaseDigest else { throw RuntimePreparationError.changedScope }
+    }
+
+    /// Preserves startup and client values after checking their scope.
+    init(retaining plan: RuntimeActivationPlan, account: AccountPreparationIntent,
+         initialization: AuthorityInitializationIntent, inventory: InstallationInventory,
+         clients: RuntimeActivationClients) throws {
+        try plan.requireConfigurationScope(account: account, initialization: initialization, inventory: inventory)
+        try self.init(retaining: plan.host.command, transport: plan.transport, reference: plan.reference,
+            account: account, initialization: initialization, inventory: inventory,
+            policy: account.initialAuthority.codePolicy, clients: clients)
+    }
+
+    private init(retaining command: AuthorityCommandStartupConfiguration, transport transportConfiguration: TransportPairingStartupConfiguration,
+        reference: RuntimeMaterialReference, account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+        inventory: InstallationInventory, policy: AuthorityCodePolicy, clients: RuntimeActivationClients) throws {
+        let paths = try RuntimePreparationPaths(accountID: account.accountID), services = reference.services
+        func peer(_ role: AuthorityCodeRole, _ uid: UInt32) throws -> XPCPeerPolicy {
+            guard let entry = policy.entries.first(where: { $0.role == role && $0.active }) else {
+                throw RuntimeActivationError.changedScope
+            }
+            return try .init(teamID: entry.teamID, componentIdentifier: entry.identifier,
+                approvedCodeDirectoryHashes: [entry.codeDirectoryHash], expectedUserID: uid)
+        }
+        func matches(_ actual: XPCPeerPolicy, _ expected: XPCPeerPolicy) -> Bool {
+            actual.requirement == expected.requirement && actual.expectedUserID == expected.expectedUserID &&
+                actual.expectedAuditSessionID == expected.expectedAuditSessionID
+        }
+        guard let transport = services.claims.first(where: { $0.role == .transport }),
+              let gateway = services.claims.first(where: { $0.role == .gateway }) else { throw RuntimeActivationError.changedScope }
+        let rootPeer = try peer(.authority, 0), appPeer = try peer(.app, account.ownerUID)
+        let transportPeer = try peer(.transport, transport.number), gatewayPeer = try peer(.notificationGateway, gateway.number)
+        _ = try peer(.commandFrontend, account.ownerUID)
+        _ = try peer(.commandMonitor, 0); _ = try peer(.commandChild, 0)
+        let presence = command.presence, wake = presence.wake, request = wake.request
+        let service = request.service, direct = transportConfiguration.transport, control = transportConfiguration.control
+        guard service.macID == account.macID, service.accountID == account.accountID,
+              service.journalDirectory == (initialization.journalPath as NSString).deletingLastPathComponent,
+              service.continuityDirectory == (initialization.continuityPath as NSString).deletingLastPathComponent,
+              service.serviceName == paths.authorityService, matches(service.transportPolicy, transportPeer),
+              service.auditVersions == Set(reference.auditDeliveryVersion.map { [$0] } ?? []),
+              request.keyRecordPath == paths.authorityDirectory + "/Key/" + AuthorityKeyProvisioning.recordFileName,
+              request.authorityPublicKey == services.authorityPublicKey,
+              wake.registration == reference.gateway, wake.gatewayServiceName == paths.gatewayService,
+              matches(wake.gatewayPolicy, gatewayPeer),
+              presence.presence.macID == account.macID, presence.presence.accountID == account.accountID,
+              presence.presence.ownerUID == account.ownerUID, presence.endpoint.serviceName == paths.presenceService,
+              matches(presence.endpoint.appPolicy, appPeer),
+              try presence.pairing?.transportPublicKey == reference.transportPublicKeyX963,
+              command.serviceName == paths.commandService, command.policyPath == paths.policy,
+              command.execution?.monitorPath == inventory.bundlePath + "/Contents/Helpers/RemozioCommandMonitor",
+              command.execution?.childPath == inventory.bundlePath + "/Contents/Helpers/RemozioCommandChild",
+              direct.macID == account.macID, direct.accountID == account.accountID,
+              direct.ownerUID == account.ownerUID, direct.serviceUID == transport.number,
+              direct.authorityServiceName == paths.authorityService, matches(direct.authorityPolicy, rootPeer),
+              direct.identitySource == .protectedFile(path: paths.transportIdentity),
+              direct.identityPublicKeyInfo == reference.transportPublicKeyInfo,
+              control.macID == account.macID, control.accountID == account.accountID,
+              control.ownerUID == account.ownerUID, control.transportUID == transport.number,
+              control.serviceName == paths.pairingService, matches(control.appPolicy, appPeer),
+              matches(control.transportPolicy, transportPeer) else { throw RuntimeActivationError.changedScope }
+        if let signer = transportConfiguration.wake?.wake {
+            let registration = reference.gateway
+            let binding = try GatewaySubmissionBinding(ownerID: registration.ownerID, macID: registration.macID,
+                accountID: registration.accountID, gatewayID: registration.gatewayID, lifecycleEpoch: registration.lifecycleEpoch)
+            guard signer.binding == binding, signer.transportUID == transport.number, signer.ownerUID == account.ownerUID,
+                  matches(signer.gatewayPolicy, gatewayPeer), signer.serviceName == paths.gatewayWakeService,
+                  signer.custody == .protectedFile, signer.keyRecordPath == paths.transportWakeKey else {
+                throw RuntimeActivationError.changedScope
+            }
+        }
+        let p = clients.presence, c = clients.pairing, f = clients.frontend
+        guard p.macID == account.macID, p.accountID == account.accountID, p.ownerUID == account.ownerUID,
+              p.serviceName == paths.presenceService, matches(p.rootPolicy, rootPeer),
+              c.macID == account.macID, c.accountID == account.accountID, c.ownerUID == account.ownerUID,
+              c.transportUID == transport.number, c.serviceName == paths.pairingService,
+              matches(c.appPolicy, appPeer), matches(c.transportPolicy, transportPeer),
+              f.macID == account.macID, f.accountID == account.accountID, f.serviceName == paths.commandService,
+              matches(f.authorityPolicy, rootPeer) else { throw RuntimeActivationError.changedScope }
+        self.paths = paths; self.command = command; self.transport = transportConfiguration
+        presenceClient = p; pairingClient = c; frontendClient = f; elevationPolicy = try account.commandPolicy
+    }
 }
