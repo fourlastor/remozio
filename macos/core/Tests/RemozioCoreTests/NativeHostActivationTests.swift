@@ -17,7 +17,12 @@ enum NativeHostReleaseFixture {
             if [.authority, .setupController].contains(code.role) {
                 formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: planVersions, writers: code.role == .setupController ? planVersions : []))
                 formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))
-                formats.append(try .init(name: "authority.installation-preparation", readers: Set(UInt64(1)...11), writers: Set(UInt64(1)...11)))
+                let preparationVersions = Set(UInt64(1)...(auditDelivery ? 12 : 11))
+                formats.append(try .init(name: "authority.installation-preparation", readers: preparationVersions, writers: preparationVersions))
+                if auditDelivery {
+                    formats.append(try .init(name: RuntimeAuditUpgradeRecord.formatName, readers: [1],
+                        writers: code.role == .setupController ? [1] : []))
+                }
                 formats.append(try .init(name: "authority.command-host-config", readers: [1, 2, 3], writers: [1, 2, 3]))
                 formats.append(try .init(name: GatewaySettingsControlReleaseValidation.formatName, readers: [1], writers: [1]))
             }

@@ -72,5 +72,20 @@ struct RuntimeAuditUpgradeRecord: Equatable, Sendable, CustomStringConvertible, 
         let value = try Self(intent: .decode(intent), phase: phase, revision: revision)
         guard try value.encoded == data else { throw RuntimePreparationError.invalidRecord }; return value
     }
+    static func validatePreparation(_ intent: RuntimeAuditUpgradeIntent, release: SignedReleaseEvidence,
+                                    policy: AuthorityCodePolicy) throws {
+        try intent.validate(policy: policy)
+        guard try InstallationInventory.digest(release) == intent.source.services.releaseDigest else {
+            throw RuntimePreparationError.changedScope
+        }
+        guard try RuntimeAuditDeliverySupport.selectedVersion(reference: nil, release: release, policy: policy) == 1 else {
+            throw RuntimePreparationError.incomplete
+        }
+        let formats = try [AuthorityCodeRole.authority, .setupController].flatMap { role in
+            try [RetainedReleaseFormat(role: role, name: "authority.installation-preparation", readVersions: [12], writeVersions: [12]),
+                 RetainedReleaseFormat(role: role, name: formatName, readVersions: [1], writeVersions: role == .setupController ? [1] : [])]
+        }
+        try ReleaseCompatibilityPreflight.validate(release, policy: policy, requirements: .init(formats: formats, requests: []))
+    }
     static let limits = try! CBORLimits(maxBytes: 24_576, maxDepth: 1, maxItems: 9)
 }

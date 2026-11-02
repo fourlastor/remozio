@@ -99,6 +99,17 @@ struct RelayRunCredentialMaterial: Sendable, CustomStringConvertible, CustomDebu
         self.materialID = materialID; self.planBytes = plan.bytes
         self.tunnelRecordDigest = Data(SHA256.hash(data: created.bytes)); self.runtime = runtime; self.credential = credential
     }
+    /// Retain the same operational credential. The owner must separately bind the current protected import records.
+    func preparingAuditUpgrade(_ preparation: RuntimeAuditUpgradePreparation, expected: RelayRunCredentialReference) throws -> Self {
+        guard runtime == preparation.intent.source, try reference == expected,
+              let port = preparation.source.transport.relayPort else { throw RuntimePreparationError.changedScope }
+        _ = try RelayRunCredentialReference.decodeForTransport(expected.encoded, runtime: runtime, relayPort: port)
+        return .init(retaining: self, runtime: preparation.intent.target)
+    }
+    private init(retaining source: Self, runtime: RuntimeMaterialReference) {
+        materialID = source.materialID; planBytes = source.planBytes; tunnelRecordDigest = source.tunnelRecordDigest
+        self.runtime = runtime; credential = source.credential
+    }
     static func validateScope(expected: SharedSetupImportIntent, plan: SharedSetupImportRelayPlan,
                               created: SharedSetupRelayProvisioningRecord, runtime: RuntimeMaterialReference,
                               account: AccountPreparationIntent, inventory: InstallationInventory) throws -> CloudflareTunnelObservation {
