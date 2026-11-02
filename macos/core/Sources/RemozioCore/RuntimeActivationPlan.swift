@@ -86,6 +86,28 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         try .initial(account: account, initialization: initialization, reference: reference, inventory: inventory,
             presencePolicyOverride: host.command.presence.presence.policy, relayPortOverride: transport.relayPort)
     }
+    /// Prepares values only. The owner must verify and coordinate retained dependencies before live replacement.
+    func preparingAuditUpgrade(_ intent: RuntimeAuditUpgradeIntent, installedRelease: SignedReleaseEvidence,
+                               currentPolicy: AuthorityCodePolicy) throws -> Self {
+        try RuntimeAuditUpgradeRecord.validatePreparation(intent, release: installedRelease, policy: currentPolicy)
+        guard reference == intent.source, try host.codePolicy.bytes == currentPolicy.bytes,
+              try RuntimeAuditDeliverySupport.selectedVersion(reference: intent.target, release: installedRelease,
+                policy: currentPolicy, maximumPayloadBytes: host.command.presence.wake.request.service.maximumPayloadBytes) == 1 else {
+            throw RuntimeActivationError.changedScope
+        }
+        let consumers = try GatewaySettingsNativeHostPlan(reference: intent.target, bundlePath: bundlePath, policy: currentPolicy)
+        try consumers.validateRelease(installedRelease)
+        let nextHost = try InstalledAuthorityCommandConfiguration(machineDirectory: host.machineDirectory,
+            installationID: host.installationID, releaseDigest: host.releaseDigest, codePolicy: currentPolicy,
+            command: RuntimeAuditUpgradeConfiguration.command(host.command), label: host.label, plistName: host.plistName,
+            jobPlacement: host.jobPlacement, gatewaySettingsControlEnabled: true)
+        try nextHost.validateRelease(installedRelease, bundlePath: bundlePath)
+        let nextTransport = try TransportPairingStartupConfiguration(transport: transport.transport, control: transport.control,
+            wake: transport.wake, relayPort: transport.relayPort, settingsHost: consumers.transport)
+        return try Self(reference: intent.target, bundlePath: bundlePath, host: nextHost, transport: nextTransport,
+            gatewaySettingsHost: consumers.gateway, phoneRoutingVersion: phoneRoutingVersion,
+            phoneAuditVersion: PhoneAuditReleaseContract.version)
+    }
     private init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
                  transport: TransportPairingStartupConfiguration,
                  gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? = nil,

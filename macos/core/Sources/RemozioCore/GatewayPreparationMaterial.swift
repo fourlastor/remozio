@@ -85,6 +85,13 @@ struct GatewayPreparationMaterial: CustomStringConvertible, CustomDebugStringCon
         self.providerJSON = providerJSON; self.receiptKeyRecord = receiptKeyRecord
         self.wakeCredentialID = wakeCredentialID; self.wakePrivateKey = wakePrivateKey
     }
+    /// Preserve all private material. The preparation owner must revalidate current scope before any publication.
+    func preparingAuditUpgrade(_ preparation: RuntimeAuditUpgradePreparation, expected: GatewayMaterialReference) throws -> Self {
+        guard runtime == preparation.intent.source, try reference == expected else { throw GatewayPreparationError.changedScope }
+        return try .init(materialID: materialID, runtime: preparation.intent.target, phonePush: phonePush,
+            providerJSON: providerJSON, receiptKeyRecord: receiptKeyRecord,
+            wakeCredentialID: wakeCredentialID, wakePrivateKey: wakePrivateKey)
+    }
     static func create(runtime: RuntimeMaterialReference, provider: SetupFCMConfiguration, senderID: String,
                        packageName: String, fileWakeCustodyAccepted: Bool, maximumControls: Int = 4096,
                        candidateLifetimeMilliseconds: UInt64 = 300000) throws -> Self {
