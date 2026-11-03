@@ -41,7 +41,7 @@ def declarations(role):
         5: [('command.frontend-config', [1]), ('command.submission', [1])],
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
         8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]), ('authority.code-policy', [1, 2, 3]),
-            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]),
+            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
             ('authority.journal', [12, 13, 14, 15, 16])],
         11: [('command.child-frame', [1, 2])],
         12: [('command.monitor-frame', [2]), ('command.child-frame', [1, 2])],
@@ -57,7 +57,7 @@ def declarations(role):
             values.append(format_declaration(name, versions))
     if role == 2:
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
-        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], {1: 2}))
+        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], {1: 2}))
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
     # Recovery fences include the retained settings revision and selected commit.
     records = {
@@ -93,6 +93,8 @@ def declarations(role):
     if role in (2, 8):
         values.append({0: 'runtime.preparation-material', 1: [1, 2, 3], 2: [1, 2, 3] if role == 8 else [], 3: {}})
         values.append({0: 'runtime.audit-upgrade-record', 1: [1], 2: [1] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.audit-upgrade-graph', 1: [1], 2: [1] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.audit-upgrade-graph-record', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     host_formats = {
         2: [('runtime.activation-plan', [1, 2, 3, 4], []),
             ('runtime.gateway-settings-consumer-host', [1], []),

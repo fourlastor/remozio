@@ -118,6 +118,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 if role == .authority || role == .setupController {
                     records.append((RuntimePreparationMaterial.formatName, RuntimePreparationMaterial.supportedVersions))
                     records.append((RuntimeAuditUpgradeRecord.formatName, RuntimeAuditUpgradeRecord.supportedVersions))
+                    records.append((RuntimeAuditUpgradeGraph.formatName, RuntimeAuditUpgradeGraph.supportedVersions))
+                    records.append((RuntimeAuditUpgradeGraphRecord.formatName, RuntimeAuditUpgradeGraphRecord.supportedVersions))
                 }
                 for (name, versions) in records {
                     let declaration = try XCTUnwrap(component.formats.first { $0.name == name })

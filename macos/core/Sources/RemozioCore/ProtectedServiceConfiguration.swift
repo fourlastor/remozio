@@ -51,8 +51,17 @@ public enum ProtectedServiceConfiguration {
             privateFile: privateFile, ancestorOwner: ancestorOwner, allowMissingLeaf: false) else { throw JournalLeaseError.system(ENOENT) }
         return bytes
     }
+    // Only the typed private recovery format receives a larger bound. Service readers retain their original limit.
+    static func readAuditGraph(anchor: String, intentID: Data, contentDigest: Data, owner: uid_t) throws -> Data {
+        guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
+        let file = AdministrativeSetupPublication.File.auditUpgradeGraph(intentID: intentID, contentDigest: contentDigest)
+        try file.validate()
+        guard let bytes = try readRecord(anchor: anchor, relativePath: file.name, owner: owner, privateFile: true,
+            ancestorOwner: owner, allowMissingLeaf: false, byteLimit: RuntimeAuditUpgradeGraph.maximumBytes) else { throw JournalLeaseError.system(ENOENT) }
+        return bytes
+    }
     private static func readRecord(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool,
-                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool) throws -> Data? {
+                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool, byteLimit: Int = maximumBytes) throws -> Data? {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !anchor.utf8.contains(0),
               anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
@@ -106,7 +115,7 @@ public enum ProtectedServiceConfiguration {
             try retain(descriptor, parent: parent, name: part, directory: directory)
         }
         let file = nodes.last!
-        guard file.info.st_size > 0, file.info.st_size <= maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        guard file.info.st_size > 0, file.info.st_size <= byteLimit else { throw JournalLeaseError.unsafeMetadata }
         var result = Data(count: Int(file.info.st_size)), offset = 0
         while offset < result.count {
             let count = result.withUnsafeMutableBytes {
