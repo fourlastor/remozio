@@ -17,9 +17,9 @@
 #include <termios.h>
 #include <unistd.h>
 
-enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6, control_fd = 7, terminal_fd = 8 };
+enum { configuration_fd = 3, directory_fd = 4, status_fd = 5, release_fd = 6, control_fd = 7, terminal_fd = 8, activity_fd = 9 };
 typedef struct {
-    int configuration, directory, status, release, control_pipe;
+    int configuration, directory, status, release, control_pipe, activity;
     remozio_command_process_t *target;
     remozio_command_process_observation_t observed;
     mach_timebase_info_data_t timebase;
@@ -56,13 +56,22 @@ static int private_descriptor(int descriptor, bool writing) {
     if (writing && fcntl(descriptor, F_SETNOSIGPIPE, 1) < 0) return system_error();
     return 0;
 }
-static int close_other_descriptors(void) {
+static int activity_descriptor(int descriptor) {
+    struct stat held;
+    int flags = fcntl(descriptor, F_GETFL), private_flags = fcntl(descriptor, F_GETFD);
+    if (flags < 0 || private_flags < 0 || fstat(descriptor, &held)) return system_error();
+    if (!S_ISREG(held.st_mode) || held.st_size || held.st_nlink != 1 ||
+        (held.st_mode & 07777) != 0600 || (flags & O_ACCMODE) != O_RDWR) return EINVAL;
+    if (fcntl(descriptor, F_SETFD, private_flags | FD_CLOEXEC) < 0) return system_error();
+    return 0;
+}
+static int close_other_descriptors(bool activity) {
     int bytes = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, NULL, 0);
     if (bytes <= 0 || bytes > 1024 * 1024 || bytes % sizeof(struct proc_fdinfo)) return EIO;
     struct proc_fdinfo *items = malloc((size_t)bytes); if (!items) return ENOMEM;
     int received = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, items, bytes);
     if (received < 0 || received > bytes || received % sizeof(*items)) { free(items); return EIO; }
-    for (size_t i = 0; i < (size_t)received / sizeof(*items); ++i) if (items[i].proc_fd >= 9) close(items[i].proc_fd);
+    for (size_t i = 0; i < (size_t)received / sizeof(*items); ++i) if (items[i].proc_fd >= (activity ? 10 : 9)) close(items[i].proc_fd);
     free(items); return 0;
 }
 static void fail(monitor_t *monitor, int error) {
@@ -219,15 +228,16 @@ static int pump_status(monitor_t *monitor) {
     return 0;
 }
 int main(int argc, char **argv) {
-    if (argc != 3 || strcmp(argv[1], "--monitor") || argv[2][0] != '/' || strnlen(argv[2], PATH_MAX) >= PATH_MAX) return EX_USAGE;
+    if (argc != 3 || (strcmp(argv[1], "--monitor") && strcmp(argv[1], "--monitor-with-activity")) || argv[2][0] != '/' || strnlen(argv[2], PATH_MAX) >= PATH_MAX) return EX_USAGE;
     if (geteuid() != 0 || getuid() != 0) return EX_NOPERM;
     if (getsid(0) != getpid() || getpgrp() != getpid()) return EX_CONFIG;
-    monitor_t monitor = {.configuration = configuration_fd, .directory = directory_fd, .status = status_fd, .release = release_fd, .control_pipe = control_fd};
+    bool activity = !strcmp(argv[1], "--monitor-with-activity");
+    monitor_t monitor = {.activity = activity ? activity_fd : -1, .configuration = configuration_fd, .directory = directory_fd, .status = status_fd, .release = release_fd, .control_pipe = control_fd};
     if (mach_timebase_info(&monitor.timebase) != KERN_SUCCESS || !monitor.timebase.numer || !monitor.timebase.denom) return EX_CONFIG;
     monitor.started = milliseconds(&monitor); monitor.deadline = monitor.started + 60000;
     int error = private_descriptor(status_fd, true); if (error) return EX_CONFIG;
     if ((error = private_descriptor(configuration_fd, false)) || (error = private_descriptor(release_fd, false)) ||
-        (error = private_descriptor(control_fd, false)) || (error = close_other_descriptors())) fail(&monitor, error);
+        (error = private_descriptor(control_fd, false)) || (error = close_other_descriptors(activity)) || (activity && (error = activity_descriptor(activity_fd)))) fail(&monitor, error);
     struct stat directory; int directory_flags = fcntl(directory_fd, F_GETFD);
     if (!monitor.failure && (directory_flags < 0 || fstat(directory_fd, &directory) || !S_ISDIR(directory.st_mode) || fcntl(directory_fd, F_SETFD, directory_flags | FD_CLOEXEC) < 0)) fail(&monitor, EINVAL);
     bool cancel_attempted = false;
@@ -268,6 +278,6 @@ int main(int argc, char **argv) {
     if (remozio_command_process_dispose(monitor.target)) return EX_SOFTWARE;
     close_descriptor(&monitor.configuration); close_descriptor(&monitor.directory); close_descriptor(&monitor.status);
     close_descriptor(&monitor.release); close_descriptor(&monitor.control_pipe);
-    close(terminal_fd);
+    close(terminal_fd); close_descriptor(&monitor.activity);
     return monitor.failure ? EX_SOFTWARE : EX_OK;
 }

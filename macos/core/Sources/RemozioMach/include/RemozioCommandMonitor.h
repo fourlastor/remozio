@@ -34,6 +34,13 @@ int remozio_command_monitor_spawn(const char *monitor_path, const char *child_pa
 int remozio_command_monitor_spawn_with_terminal(const char *monitor_path, const char *child_path,
     const void *frame, size_t count, int input, int output, int error, int directory, int terminal,
     remozio_command_monitor_t **monitor);
+/* The trusted monitor retains a duplicate of the caller's held shared Root activity
+ * description on private descriptor 9. Never pass it to the approved program.
+ * A negative terminal selects ordinary pipes or the existing format-1 terminal mode.
+ * The caller must verify support for --monitor-with-activity in the signed helper. */
+int remozio_command_monitor_spawn_with_activity(const char *monitor_path, const char *child_path,
+    const void *frame, size_t count, int input, int output, int error, int directory,
+    int terminal, int activity, remozio_command_monitor_t **monitor);
 /* Bounded private-frame/status/control progress and nonblocking kernel/reap observations.
  * Register and independently bind the prepared target before making release available.
  * A status record, clean EOF or monitor exit alone is never a command outcome.

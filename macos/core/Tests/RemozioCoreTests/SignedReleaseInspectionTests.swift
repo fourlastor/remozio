@@ -128,6 +128,13 @@ final class SignedReleaseInspectionTests: XCTestCase {
                     XCTAssertTrue(declaration.migrations.isEmpty)
                 }
             }
+            for item in try CommandMonitorActivityContract.requirements {
+                let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == item.role })
+                let declaration = try XCTUnwrap(component.formats.first { $0.name == item.name })
+                XCTAssertEqual(declaration.readers, item.readVersions)
+                XCTAssertEqual(declaration.writers, item.writeVersions)
+                XCTAssertTrue(declaration.migrations.isEmpty)
+            }
             XCTAssertEqual(try formats("authority.command-host-config").readers, InstalledAuthorityCommandConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-config").readers, AuthorityCommandStartupConfiguration.supportedVersions)
             XCTAssertEqual(try formats("authority.command-execution-config").readers, AuthorityCommandExecutionConfiguration.supportedVersions)

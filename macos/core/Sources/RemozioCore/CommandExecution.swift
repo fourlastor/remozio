@@ -63,7 +63,8 @@ final class CommandExecution {
     }
 
     /// A failed spawn can return a live monitor. Retain it until actual reaping or ownership loss.
-    func prepare(monitorPath: String, childPath: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32) throws {
+    func prepare(monitorPath: String, childPath: String, preparationMilliseconds: UInt32, fileCreationMask: UInt32,
+                 releaseActivity: ReleaseActivityToken? = nil) throws {
         guard validation != nil, !disposed, !released, !cancelledBeforeRelease, monitor == nil,
               (resources.capture.ioMode == .pipes && !resources.requiresStreamPump ||
                resources.capture.ioMode == .pty && resources.requiresStreamPump) else { throw CommandExecutionError.unavailable }
@@ -92,10 +93,14 @@ final class CommandExecution {
                 pump = try CommandPTYStreamPump(pty: privatePTY, channel: resources.makeStreamAuthority())
             } else { pty = nil }
             defer { pty?.sealSlave() }
-            func spawn(_ input: Int32, _ output: Int32, _ error: Int32, terminal: Int32? = nil) -> Int32 {
-                frame.withUnsafeBytes { bytes in
+            func spawn(_ input: Int32, _ output: Int32, _ error: Int32, terminal: Int32? = nil) throws -> Int32 {
+                func perform(activity: Int32? = nil) -> Int32 { frame.withUnsafeBytes { bytes in
                     monitorPath.withCString { monitorPath in
                         childPath.withCString { childPath in
+                            if let activity {
+                                return remozio_command_monitor_spawn_with_activity(monitorPath, childPath, bytes.baseAddress, bytes.count,
+                                    input, output, error, directory, terminal ?? -1, activity, &monitor)
+                            }
                             if let terminal {
                                 return remozio_command_monitor_spawn_with_terminal(monitorPath, childPath, bytes.baseAddress, bytes.count,
                                     input, output, error, directory, terminal, &monitor)
@@ -103,18 +108,20 @@ final class CommandExecution {
                             return remozio_command_monitor_spawn(monitorPath, childPath, bytes.baseAddress, bytes.count, input, output, error, directory, &monitor)
                         }
                     }
-                }
+                } }
+                if let releaseActivity { return try releaseActivity.withSharedDescriptorForSpawn { perform(activity: $0) } }
+                return perform()
             }
             if let pty {
                 if resources.requiresMappedLayout {
                     guard let layout = resources.capture.stdioLayout else { throw CommandExecutionError.unavailable }
                     return try pty.withBorrowedMappedStreams(layout: layout, direct: [input, output, error]) { streams, terminal in
-                        spawn(streams[0], streams[1], streams[2], terminal: terminal)
+                        try spawn(streams[0], streams[1], streams[2], terminal: terminal)
                     }
                 }
-                return try pty.withBorrowedSlave { spawn($0, $0, $0) }
+                return try pty.withBorrowedSlave { try spawn($0, $0, $0) }
             }
-            return spawn(input, output, error)
+            return try spawn(input, output, error)
         }
         monitorOwned = monitor != nil
         if status != 0 { cancelBeforeRelease(); throw CommandExecutionError.native(status) }

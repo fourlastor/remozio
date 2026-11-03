@@ -48,6 +48,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     writeVersions: current.writeVersions.union(writes))
             } else { formats.append(try .init(role: role, name: name, readVersions: reads, writeVersions: writes)) }
         }
+        if native {
+            for item in try CommandMonitorActivityContract.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
         let upgrades = inputs.auditUpgrades + inputs.auditGraphs.map(\.upgrade)
         if !upgrades.isEmpty {
             for role in [AuthorityCodeRole.authority, .setupController] {
