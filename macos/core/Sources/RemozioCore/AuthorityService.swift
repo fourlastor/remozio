@@ -70,6 +70,8 @@ public final class AuthorityService: @unchecked Sendable {
     }
 
     static func openJournal(configuration: AuthorityServiceConfiguration, routingPolicy: RoutingJournalPolicy? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> AuthorityJournal {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try RuntimeAuditUpgradeStartupFence.requireOpen(macID: configuration.macID, accountID: configuration.accountID)
         let journal: AuthorityJournal
         if configuration.continuityDirectory != nil {
             journal = try AuthorityJournal(recovering: AuthorityStorage.open(configuration: configuration, routingPolicy: routingPolicy, gatewayPolicy: gatewayPolicy),

@@ -114,12 +114,14 @@ final class SignedReleaseInspectionTests: XCTestCase {
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                 var records = [(RuntimeMaterialReference.formatName, RuntimeMaterialReference.supportedVersions),
-                               (ServiceReleaseActivityReference.formatName, ServiceReleaseActivityReference.supportedVersions)]
+                               (ServiceReleaseActivityReference.formatName, ServiceReleaseActivityReference.supportedVersions),
+                               (RuntimeAuditUpgradeStartupFence.formatName, RuntimeAuditUpgradeStartupFence.supportedVersions)]
                 if role == .authority || role == .setupController {
                     records.append((RuntimePreparationMaterial.formatName, RuntimePreparationMaterial.supportedVersions))
                     records.append((RuntimeAuditUpgradeRecord.formatName, RuntimeAuditUpgradeRecord.supportedVersions))
                     records.append((RuntimeAuditUpgradeGraph.formatName, RuntimeAuditUpgradeGraph.supportedVersions))
                     records.append((RuntimeAuditUpgradeGraphRecord.formatName, RuntimeAuditUpgradeGraphRecord.supportedVersions))
+                    records.append((RuntimeAuditUpgradeCutoverRecord.formatName, RuntimeAuditUpgradeCutoverRecord.supportedVersions))
                 }
                 for (name, versions) in records {
                     let declaration = try XCTUnwrap(component.formats.first { $0.name == name })

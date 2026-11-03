@@ -53,6 +53,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let resume: (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent
     private let verifyHost: (InstallationInventory) throws -> Void
     private let accountCodePolicy: AuthorityCodePolicy?
+    private let verifyAccountStartup: (Data, Data) throws -> Void
     private let lookupAccount: (uid_t) throws -> LocalAccountIdentity
     private let prepareAccount: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> AccountPreparationIntent
     private let prepareServices: (PreparationIntentStore, AccountPreparationIntent, () throws -> Void) throws -> ServiceAccountPlanStorage.State
@@ -76,7 +77,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
             gatewayJournalOperation: .native(machineDirectory: machineDirectory, macID: macID),
             gatewayActivationOperation: .native(machineDirectory: machineDirectory, macID: macID),
             gatewaySettingsOperation: .native(machineDirectory: machineDirectory, macID: macID),
-            importedGatewayOperation: .native(machineDirectory: machineDirectory, macID: macID))
+            importedGatewayOperation: .native(machineDirectory: machineDirectory, macID: macID),
+            verifyAccountStartup: RuntimeAuditUpgradeStartupFence.requireOpen)
     }
     // Same-owner lifecycle fixtures use the same scoped factory as production.
     convenience init(openMachine: @escaping () throws -> PreparationIntentStore, expectedReleaseDigest: Data,
@@ -93,9 +95,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
          gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
-         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil,
+         verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in }) throws {
         try self.init(machines: .scoped(openMachine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
     }
     // Logical endpoint fixtures retain actual protected storage. They do not prove production lease lifetime.
     convenience init(machine: PreparationIntentStore, expectedReleaseDigest: Data,
@@ -112,9 +115,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
          }, activationOperations: RuntimeActivationOperations = .native, releaseActivity: ReleaseActivityBarrier? = nil,
          gatewayJournalOperation: GatewaySetupJournalOperations? = nil, gatewayActivationOperation: GatewaySetupActivationOperations? = nil,
          gatewaySettingsOperation: GatewaySetupSettingsOperations? = nil,
-         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil) throws {
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations? = nil,
+         verifyAccountStartup: @escaping (Data, Data) throws -> Void = { _, _ in }) throws {
         try self.init(machines: .retained(machine), expectedReleaseDigest: expectedReleaseDigest, resume: resume, verifyHost: verifyHost,
-            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation)
+            accountCodePolicy: accountCodePolicy, lookupAccount: lookupAccount, prepareAccount: prepareAccount, prepareServices: prepareServices, prepareRuntime: prepareRuntime, activationOperations: activationOperations, releaseActivity: releaseActivity, gatewayJournalOperation: gatewayJournalOperation, gatewayActivationOperation: gatewayActivationOperation, gatewaySettingsOperation: gatewaySettingsOperation, importedGatewayOperation: importedGatewayOperation, verifyAccountStartup: verifyAccountStartup)
     }
     private init(machines: Machines, expectedReleaseDigest: Data,
          resume: @escaping (PreparationIntentStore, AuthorityInitializationIntent) throws -> AuthorityInitializationIntent,
@@ -125,7 +129,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
          prepareRuntime: @escaping (PreparationIntentStore, AccountPreparationIntent, RuntimePreparationState, Bool, () throws -> Void) throws -> RuntimePreparationState,
          activationOperations: RuntimeActivationOperations, releaseActivity: ReleaseActivityBarrier?,
          gatewayJournalOperation: GatewaySetupJournalOperations?, gatewayActivationOperation: GatewaySetupActivationOperations?, gatewaySettingsOperation: GatewaySetupSettingsOperations?,
-         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?) throws {
+         importedGatewayOperation: GatewaySetupImportedRuntimeOperations?, verifyAccountStartup: @escaping (Data, Data) throws -> Void) throws {
+        self.verifyAccountStartup = verifyAccountStartup
         self.releaseActivity = releaseActivity; self.gatewayJournalOperation = gatewayJournalOperation
         self.gatewayActivationOperation = gatewayActivationOperation; self.gatewaySettingsOperation = gatewaySettingsOperation
         self.importedGatewayOperation = importedGatewayOperation
@@ -1877,6 +1882,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             throw AdministrativeSetupError.changedInstallation
         }
         try LocalAccountDirectory.validateOwnership(lookupAccount(callerUID), uid: callerUID, directoryID: value.directoryID)
+        try verifyAccountStartup(value.macID, value.accountID)
     }
     private static func initialAuthority(macID: Data, accountID: Data, codePolicy: AuthorityCodePolicy) throws -> AuthorityJournalInitialization {
         let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
@@ -1902,6 +1908,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
               try currentInventory(machine).accounts.contains(where: { $0.accountID == accountID && $0.ownerUID == callerUID }) else {
             throw AdministrativeSetupError.wrongAccount
         }
+        try verifyAccountStartup(currentInventory(machine).macID, accountID)
     }
 }
 

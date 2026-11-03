@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -285,7 +285,7 @@ public final class PreparationIntentStore {
             guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
             let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
                 guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
-                try requireRuntimeAuditUpgradeScope(record.intent); return record
+                try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true); return record
             }
             let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
             if schema >= 13 {
@@ -301,8 +301,16 @@ public final class PreparationIntentStore {
                     return records
                 }
             } else { auditGraphs = [] }
+            let auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = try schema >= 14 ? accounts("SELECT account FROM runtime_audit_cutover_v1 ORDER BY account").map { id in
+                guard let record = try loadRuntimeAuditCutover(accountID: id) else { throw PreparationStoreError.corruptRecord }
+                let runtime = try loadRuntimePreparation(accountID: id), intent = record.graph.upgrade.intent
+                guard runtime.configurationPublished, runtime.reference == (record.phase == .metadataCommitted ? intent.target : intent.source) else {
+                    throw RuntimePreparationError.changedScope
+                }
+                return record
+            } : []
             try identity(macID)
-            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs)
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers)
         }
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
@@ -803,7 +811,7 @@ public final class PreparationIntentStore {
             try identity(macID)
             guard try scalar("PRAGMA user_version") >= 12 else { return nil }
             let record = try loadRuntimeAuditUpgrade(accountID: accountID)
-            if let record { try requireRuntimeAuditUpgradeScope(record.intent) }
+            if let record { try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true) }
             return record
         }
     }
@@ -850,11 +858,18 @@ public final class PreparationIntentStore {
             return next
         }
     }
-    private func requireRuntimeAuditUpgradeScope(_ intent: RuntimeAuditUpgradeIntent) throws {
+    private func requireRuntimeAuditUpgradeScope(_ intent: RuntimeAuditUpgradeIntent, allowCommitted: Bool = false) throws {
         guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimePreparationError.incomplete }
         try requireRuntimeMaterialScope(intent.source)
         let current = try loadRuntimePreparation(accountID: intent.source.services.accountID)
-        guard current.configurationPublished, current.reference == intent.source else { throw RuntimePreparationError.changedScope }
+        guard current.configurationPublished else { throw RuntimePreparationError.changedScope }
+        if current.reference == intent.source { return }
+        guard allowCommitted, current.reference == intent.target, try scalar("PRAGMA user_version") >= 14,
+              let cutover = try loadRuntimeAuditCutover(accountID: intent.source.services.accountID),
+              cutover.phase == .metadataCommitted, cutover.graph.upgrade.intent == intent,
+              try loadRuntimeAuditGraph(accountID: intent.source.services.accountID, contentDigest: cutover.graph.contentDigest) == cutover.graph else {
+            throw RuntimePreparationError.changedScope
+        }
     }
     func runtimeAuditGraph(accountID: Data, contentDigest: Data) throws -> RuntimeAuditUpgradeGraphRecord? {
         guard accountID.count == 16, contentDigest.count == 32 else { throw RuntimePreparationError.invalidRecord }
@@ -882,7 +897,7 @@ public final class PreparationIntentStore {
                 try exec("CREATE TABLE runtime_audit_graph_v1(account BLOB NOT NULL CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),content BLOB NOT NULL CHECK(length(content)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 28672),PRIMARY KEY(account,content)) STRICT, WITHOUT ROWID")
                 try exec("CREATE TABLE runtime_audit_graph_chunks_v1(account BLOB NOT NULL CHECK(length(account)=16),content BLOB NOT NULL CHECK(length(content)=32),part INTEGER NOT NULL CHECK(part BETWEEN 0 AND 511),bytes BLOB NOT NULL CHECK(length(bytes) BETWEEN 1 AND 16384),PRIMARY KEY(account,content,part)) STRICT, WITHOUT ROWID")
                 try exec("PRAGMA user_version=13")
-            } else { guard schema == 13 else { throw PreparationStoreError.incompatibleStore } }
+            } else { guard (13...14).contains(schema) else { throw PreparationStoreError.incompatibleStore } }
             guard try scalar("SELECT COUNT(*) FROM runtime_audit_graph_v1") < 64 else { throw RuntimePreparationError.exhausted }
             let record = try RuntimeAuditUpgradeGraphRecord(upgrade: graph.upgrade, contentDigest: graph.digest)
             try statement("INSERT INTO runtime_audit_graph_v1 VALUES(?,?,?,?,?,?)") { row in
@@ -982,6 +997,244 @@ public final class PreparationIntentStore {
                   sqlite3_column_type(row, 2) == SQLITE_INTEGER, sqlite3_column_int64(row, 2) == Int64(record.phase.rawValue),
                   try blob(row, column: 3, maximum: 32) == record.contentDigest, record.contentDigest == contentDigest,
                   try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return record
+        }
+    }
+
+    func runtimeAuditCutover(accountID: Data) throws -> RuntimeAuditUpgradeCutoverRecord? {
+        guard accountID.count == 16 else { throw RuntimePreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 14 else { return nil }
+            let current = try loadRuntimeAuditCutover(accountID: accountID)
+            if let current {
+                let runtime = try loadRuntimePreparation(accountID: accountID)
+                let intent = current.graph.upgrade.intent
+                guard runtime.configurationPublished,
+                      runtime.reference == (current.phase == .metadataCommitted ? intent.target : intent.source) else {
+                    throw RuntimePreparationError.changedScope
+                }
+            }
+            return current
+        }
+    }
+    // Selection alone does not freeze settings. Replacing an unstarted selection requires its exact revision.
+    func selectRuntimeAuditCutover(_ graph: RuntimeAuditUpgradeGraph, record: RuntimeAuditUpgradeGraphRecord,
+                                   replacing: RuntimeAuditUpgradeCutoverRecord? = nil,
+                                   installedRelease: SignedReleaseEvidence, currentPolicy: AuthorityCodePolicy) throws -> RuntimeAuditUpgradeCutoverRecord {
+        try graph.requireOwner(getuid()); try record.validate(graph)
+        try RuntimeAuditUpgradeCutoverRecord.validateCapabilities(installedRelease, policy: currentPolicy)
+        try RuntimeAuditUpgradeRecord.validatePreparation(graph.upgrade.intent, release: installedRelease, policy: currentPolicy)
+        return try transaction(write: true) {
+            try identity(macID)
+            let schema = try scalar("PRAGMA user_version"), account = graph.snapshot.plan.sourceAccount.accountID
+            guard schema >= 13, record.phase == .fileStored,
+                  try loadRuntimeAuditGraph(accountID: account, contentDigest: graph.digest) == record,
+                  try loadRuntimeAuditGraphBytes(record) == graph.bytes else { throw RuntimePreparationError.incomplete }
+            let old = try schema >= 14 ? loadRuntimeAuditCutover(accountID: account) : nil
+            if let old, old.graph == record {
+                try requireRuntimeAuditCutoverMetadata(graph, target: old.phase == .metadataCommitted)
+                return old
+            }
+            if let old {
+                guard old.phase == .selected, old == replacing else { throw PreparationStoreError.staleRevision }
+                let existingFence: Data?
+                if graph.snapshot.ownership == .native {
+                    existingFence = try ProtectedServiceConfiguration.readOptionalAuditFence(accountID: account)
+                } else {
+                    guard let parent = graph.snapshot.retainedParents[.services] else { throw RuntimePreparationError.changedScope }
+                    existingFence = try ProtectedServiceConfiguration.readOptional(anchor: parent.path,
+                        relativePath: RuntimeAuditUpgradeStartupFence.fileName, owner: getuid())
+                }
+                guard existingFence == nil else { throw RuntimeAuditUpgradeStartupError.recoveryRequired }
+            } else { guard replacing == nil else { throw PreparationStoreError.staleRevision } }
+            try requireRuntimeAuditGraphSource(graph)
+            if schema == 13 {
+                try exec("CREATE TABLE runtime_audit_cutover_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),content BLOB NOT NULL CHECK(length(content)=32),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase BETWEEN 1 AND 4),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 30720)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=14")
+            }
+            let next = try RuntimeAuditUpgradeCutoverRecord(graph: record)
+            if let old { try writeRuntimeAuditCutover(next, replacing: old) }
+            else {
+                guard try scalar("SELECT COUNT(*) FROM runtime_audit_cutover_v1") < 64 else { throw RuntimePreparationError.exhausted }
+                try statement("INSERT INTO runtime_audit_cutover_v1 VALUES(?,?,?,?,1,?)") { row in
+                    try bind(account, column: 1, row: row); try bind(graph.upgrade.intent.id, column: 2, row: row)
+                    try bind(graph.digest, column: 3, row: row); try bind(next.revision, column: 4, row: row)
+                    try bind(next.encoded, column: 5, row: row)
+                    guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                }
+            }
+            try identity(macID); return next
+        }
+    }
+    // The controller holds its live barrier and verifies files independently. No persisted phase recreates that authority.
+    func advanceRuntimeAuditCutover(_ expected: RuntimeAuditUpgradeCutoverRecord, graph: RuntimeAuditUpgradeGraph,
+                                   to phase: RuntimeAuditUpgradeCutoverRecord.Phase, installedRelease: SignedReleaseEvidence,
+                                   currentPolicy: AuthorityCodePolicy, verifyBarrierAndArtifacts: () throws -> Void) throws -> RuntimeAuditUpgradeCutoverRecord {
+        guard phase == .filesChanging || phase == .filesVerified,
+              phase.rawValue == expected.phase.rawValue + 1 else { throw PreparationStoreError.invalidTransition }
+        try graph.requireOwner(getuid()); try expected.graph.validate(graph)
+        try RuntimeAuditUpgradeCutoverRecord.validateCapabilities(installedRelease, policy: currentPolicy)
+        try RuntimeAuditUpgradeRecord.validatePreparation(graph.upgrade.intent, release: installedRelease, policy: currentPolicy)
+        try verifyBarrierAndArtifacts()
+        return try transaction(write: true) {
+            try identity(macID)
+            let current = try requireRuntimeAuditCutover(expected, graph: graph)
+            try requireRuntimeAuditCutoverMetadata(graph, target: false)
+            try requireRuntimeAuditCutoverImport(graph, target: phase == .filesVerified)
+            try verifyBarrierAndArtifacts()
+            if current.phase == phase { return current }
+            guard current == expected else { throw PreparationStoreError.staleRevision }
+            let next = try RuntimeAuditUpgradeCutoverRecord(graph: current.graph, phase: phase)
+            try writeRuntimeAuditCutover(next, replacing: current)
+            try verifyBarrierAndArtifacts(); return next
+        }
+    }
+    enum AuditCutoverMetadataStage: CaseIterable {
+        case foregroundMaterial, foregroundActivation, gatewayMaterial, gatewayJournal, gatewayActivation, gatewaySettings, cutoverRecord
+    }
+    // All related machine rows move together. The owner must freshly verify every live target and the complete runtime barrier.
+    func commitRuntimeAuditCutover(_ expected: RuntimeAuditUpgradeCutoverRecord, graph: RuntimeAuditUpgradeGraph,
+                                  installedRelease: SignedReleaseEvidence, currentPolicy: AuthorityCodePolicy,
+                                  verifyBarrierAndTargets: () throws -> Void,
+                                  didUpdate: (AuditCutoverMetadataStage) throws -> Void = { _ in }) throws -> RuntimeAuditUpgradeCutoverRecord {
+        guard expected.phase == .filesVerified else { throw PreparationStoreError.invalidTransition }
+        try graph.requireOwner(getuid()); try expected.graph.validate(graph)
+        try RuntimeAuditUpgradeCutoverRecord.validateCapabilities(installedRelease, policy: currentPolicy)
+        try RuntimeAuditUpgradeRecord.validatePreparation(graph.upgrade.intent, release: installedRelease, policy: currentPolicy)
+        try verifyBarrierAndTargets()
+        return try transaction(write: true) {
+            try identity(macID)
+            let current = try requireRuntimeAuditCutover(expected, graph: graph)
+            try requireRuntimeAuditCutoverMetadata(graph, target: current.phase == .metadataCommitted)
+            try requireRuntimeAuditCutoverImport(graph, target: true); try verifyBarrierAndTargets()
+            if current.phase == .metadataCommitted { return current }
+            guard current == expected else { throw PreparationStoreError.staleRevision }
+            let p = graph.snapshot.plan, account = p.sourceAccount.accountID, next = p.preparation.target
+            try replaceRuntimeAuditRow("UPDATE runtime_preparation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                account: account, before: p.preparation.intent.source.encoded, after: p.preparation.intent.target.encoded,
+                digest: p.preparation.intent.target.materialDigest)
+            try didUpdate(.foregroundMaterial)
+            try replaceRuntimeAuditRow("UPDATE runtime_activation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                account: account, before: p.preparation.source.encoded, after: next.encoded, digest: Data(SHA256.hash(data: next.encoded)))
+            try didUpdate(.foregroundActivation)
+            if let old = p.sourceGateway.reference, let new = p.gateway.reference {
+                try replaceRuntimeAuditRow("UPDATE gateway_preparation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                    account: account, before: old.encoded, after: new.encoded, digest: new.materialDigest)
+            }
+            try didUpdate(.gatewayMaterial)
+            if let old = p.sourceGateway.journal.intent, let new = p.gateway.journal.intent {
+                guard try old.fileDigest == new.fileDigest else { throw RuntimePreparationError.changedScope }
+                try replaceRuntimeAuditRow("UPDATE gateway_journal_preparation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                    account: account, before: old.encoded, after: new.encoded, digest: new.digest)
+            }
+            try didUpdate(.gatewayJournal)
+            if let old = p.sourceGateway.activation.plan, let new = p.gateway.activation.plan {
+                try replaceRuntimeAuditRow("UPDATE gateway_runtime_activation_v1 SET digest=?,record=? WHERE account=? AND record=?",
+                    account: account, before: old.encoded, after: new.encoded, digest: new.digest)
+            }
+            try didUpdate(.gatewayActivation)
+            if p.sourceGateway.settings.active != nil || p.sourceGateway.settings.pending != nil {
+                guard let newActivation = p.gateway.activation.plan else { throw RuntimePreparationError.changedScope }
+                try statement("UPDATE gateway_settings_transition_v1 SET activation=?,digest=?,active=?,pending=? WHERE account=?") { row in
+                    try bind(newActivation.digest, column: 1, row: row)
+                    try bind(p.gateway.settings.active?.digest ?? newActivation.digest, column: 2, row: row)
+                    for (column, bytes) in [(Int32(3), try p.gateway.settings.active?.encoded), (Int32(4), try p.gateway.settings.pending?.encoded)] {
+                        if let bytes { try bind(bytes, column: column, row: row) }
+                        else { guard sqlite3_bind_null(row, column) == SQLITE_OK else { throw PreparationStoreError.corruptRecord } }
+                    }
+                    try bind(account, column: 5, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+            }
+            try didUpdate(.gatewaySettings)
+            try requireRuntimeAuditCutoverMetadata(graph, target: true)
+            try requireRuntimeAuditCutoverImport(graph, target: true); try verifyBarrierAndTargets()
+            let committed = try RuntimeAuditUpgradeCutoverRecord(graph: current.graph, phase: .metadataCommitted)
+            try writeRuntimeAuditCutover(committed, replacing: current); try didUpdate(.cutoverRecord)
+            try requireRuntimeAuditUpgradeScope(graph.upgrade.intent, allowCommitted: true)
+            return committed
+        }
+    }
+    private func replaceRuntimeAuditRow(_ sql: String, account: Data, before: Data, after: Data, digest: Data) throws {
+        try statement(sql) { row in
+            try bind(digest, column: 1, row: row); try bind(after, column: 2, row: row)
+            try bind(account, column: 3, row: row); try bind(before, column: 4, row: row)
+            guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+        }
+    }
+    private func requireRuntimeAuditCutover(_ expected: RuntimeAuditUpgradeCutoverRecord, graph: RuntimeAuditUpgradeGraph) throws -> RuntimeAuditUpgradeCutoverRecord {
+        guard try scalar("PRAGMA user_version") >= 14,
+              let current = try loadRuntimeAuditCutover(accountID: graph.snapshot.plan.sourceAccount.accountID),
+              current.graph == expected.graph, try loadRuntimeAuditGraphBytes(current.graph) == graph.bytes else {
+            throw PreparationStoreError.staleRevision
+        }
+        return current
+    }
+    private func requireRuntimeAuditCutoverMetadata(_ graph: RuntimeAuditUpgradeGraph, target: Bool) throws {
+        if !target { try requireRuntimeAuditGraphSource(graph, verifyImport: false); return }
+        let p = graph.snapshot.plan, account = p.sourceAccount.accountID
+        try requireRuntimeMaterialScope(p.preparation.intent.target); try requireAccountPreparation(p.sourceAccount)
+        guard try loadRuntimeAuditUpgrade(accountID: account) == graph.upgrade,
+              try loadInitialization(accountID: account) == p.sourceInitialization,
+              try loadInventoryRecord() == p.sourceInventory else { throw RuntimePreparationError.changedScope }
+        let runtime = try loadRuntimePreparation(accountID: account), foreground = try loadRuntimeActivation(accountID: account)
+        let gateway = try loadGatewayRuntimeActivation(accountID: account), settings = try loadGatewaySettingsTransition(accountID: account)
+        guard runtime.configurationPublished, runtime.reference == p.preparation.intent.target,
+              try foreground.plan?.encoded == p.preparation.target.encoded, foreground.jobsRegistered == p.sourceJobsRegistered,
+              try loadGatewayPreparation(accountID: account).reference == p.gateway.reference,
+              try loadGatewayJournalPreparation(accountID: account) == p.gateway.journal,
+              try gateway.plan?.encoded == p.gateway.activation.plan?.encoded,
+              gateway.filesPublished == p.gateway.activation.filesPublished, gateway.jobRegistered == p.gateway.activation.jobRegistered,
+              try settings.active?.encoded == p.gateway.settings.active?.encoded,
+              try settings.pending?.encoded == p.gateway.settings.pending?.encoded, settings.phase == p.gateway.settings.phase else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
+    private func requireRuntimeAuditCutoverImport(_ graph: RuntimeAuditUpgradeGraph, target: Bool) throws {
+        let p = graph.snapshot.plan
+        let imports = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: p.sourceInventory.installationID)
+        let current = imports?.records.first { $0.accountID == p.sourceAccount.accountID }
+        if !target { guard current == p.sourceImport?.source else { throw RuntimePreparationError.changedScope }; return }
+        guard let old = p.sourceImport?.source else {
+            guard current == nil else { throw RuntimePreparationError.changedScope }; return
+        }
+        guard let current, current.accountID == old.accountID, current.operationID == old.operationID,
+              current.revision == old.revision, current.phase == old.phase, current.digest == old.digest,
+              current.portableVersion == old.portableVersion, current.settingsVersion == old.settingsVersion,
+              current.relay == old.relay, current.relayProvisioning == old.relayProvisioning,
+              current.accessApplication == old.accessApplication, current.dnsRecord == old.dnsRecord else {
+            throw RuntimePreparationError.changedScope
+        }
+        if let reference = p.sourceImport?.targetReference {
+            guard current.runCredential?.reference == reference,
+                  try current.runCredential?.digest == Data(SHA256.hash(data: reference.encoded)) else { throw RuntimePreparationError.changedScope }
+        } else { guard current.runCredential == nil else { throw RuntimePreparationError.changedScope } }
+    }
+    private func writeRuntimeAuditCutover(_ next: RuntimeAuditUpgradeCutoverRecord, replacing old: RuntimeAuditUpgradeCutoverRecord) throws {
+        try statement("UPDATE runtime_audit_cutover_v1 SET content=?,revision=?,phase=?,record=? WHERE account=? AND revision=?") { row in
+            try bind(next.graph.contentDigest, column: 1, row: row); try bind(next.revision, column: 2, row: row)
+            try bind(Int64(next.phase.rawValue), column: 3, row: row); try bind(next.encoded, column: 4, row: row)
+            try bind(old.graph.upgrade.intent.source.services.accountID, column: 5, row: row); try bind(old.revision, column: 6, row: row)
+            guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+        }
+    }
+    private func loadRuntimeAuditCutover(accountID: Data) throws -> RuntimeAuditUpgradeCutoverRecord? {
+        try statement("SELECT attempt,content,revision,phase,record FROM runtime_audit_cutover_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return nil }
+            let record = try RuntimeAuditUpgradeCutoverRecord.decode(blob(row, column: 4, maximum: 30720))
+            guard record.graph.upgrade.intent.source.services.accountID == accountID,
+                  record.graph.upgrade.intent.source.services.macID == macID,
+                  try blob(row, column: 0, maximum: 16) == record.graph.upgrade.intent.id,
+                  try blob(row, column: 1, maximum: 32) == record.graph.contentDigest,
+                  try blob(row, column: 2, maximum: 16) == record.revision,
+                  sqlite3_column_type(row, 3) == SQLITE_INTEGER, sqlite3_column_int64(row, 3) == Int64(record.phase.rawValue),
+                  try step(row) == SQLITE_DONE,
+                  try loadRuntimeAuditGraph(accountID: accountID, contentDigest: record.graph.contentDigest) == record.graph,
+                  try loadRuntimeAuditUpgrade(accountID: accountID) == record.graph.upgrade else {
+                throw PreparationStoreError.corruptRecord
+            }
             return record
         }
     }
@@ -1548,6 +1801,7 @@ public final class PreparationIntentStore {
         if version >= 11 { expected.append("gateway_settings_transition_v1") }
         if version >= 12 { expected.append("runtime_audit_upgrade_v1") }
         if version >= 13 { expected += ["runtime_audit_graph_v1", "runtime_audit_graph_chunks_v1"] }
+        if version >= 14 { expected.append("runtime_audit_cutover_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

@@ -7,9 +7,21 @@ enum GatewaySettingsFenceRemoval {
     static func remove(_ bytes: Data, directory: ProtectedSetupDirectory, owner: uid_t,
                        verifyCurrent: () throws -> Void, didValidate: () throws -> Void = {},
                        didRemove: () throws -> Void = {}) throws -> Result {
+        try removeRecord(bytes, file: .gatewaySettingsFence, directory: directory, owner: owner,
+            verifyCurrent: verifyCurrent, didValidate: didValidate, didRemove: didRemove)
+    }
+    static func removeAuditStartupFence(_ bytes: Data, directory: ProtectedSetupDirectory, owner: uid_t,
+                                       verifyCurrent: () throws -> Void, didValidate: () throws -> Void = {},
+                                       didRemove: () throws -> Void = {}) throws -> Result {
+        _ = try RuntimeAuditUpgradeStartupFence.decode(bytes)
+        return try removeRecord(bytes, file: .auditUpgradeStartupFence, directory: directory, owner: owner,
+            verifyCurrent: verifyCurrent, didValidate: didValidate, didRemove: didRemove)
+    }
+    private static func removeRecord(_ bytes: Data, file: AdministrativeSetupPublication.File,
+                                     directory: ProtectedSetupDirectory, owner: uid_t, verifyCurrent: () throws -> Void,
+                                     didValidate: () throws -> Void, didRemove: () throws -> Void) throws -> Result {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
-        let file = AdministrativeSetupPublication.File.gatewaySettingsFence
         func verify() throws { try verifyCurrent(); try directory.validate() }
         func requireAbsent(_ parent: Int32) throws {
             var named = stat()
