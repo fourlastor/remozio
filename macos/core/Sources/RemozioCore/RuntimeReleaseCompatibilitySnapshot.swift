@@ -94,7 +94,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             for role in [AuthorityCodeRole.authority, .setupController] {
                 try include(role, RuntimePreparationMaterial.formatName, [materialVersion], role == .setupController ? [materialVersion] : [])
                 if let plan {
-                    let activationVersion: UInt64 = plan.consumerHosts == nil ? 1 : 2
+                    let activationVersion = plan.formatVersion
                     try include(role, RuntimeActivationPlan.formatName, [activationVersion], role == .setupController ? [activationVersion] : [])
                 }
             }
@@ -104,6 +104,16 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             if runtime.configurationPublished || plan != nil {
                 for role in [AuthorityCodeRole.transport, .setupController] {
                     try include(role, "transport.pairing-config", [transportVersion], role == .setupController ? [transportVersion] : [])
+                }
+            }
+            if plan?.phoneRoutingVersion != nil {
+                for record in try PhoneRoutingReleaseContract.requirements {
+                    try include(record.role, record.name, record.readVersions, record.writeVersions)
+                }
+            }
+            if plan?.phoneAuditVersion != nil {
+                for record in try PhoneAuditReleaseContract.requirements {
+                    try include(record.role, record.name, record.readVersions, record.writeVersions)
                 }
             }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)

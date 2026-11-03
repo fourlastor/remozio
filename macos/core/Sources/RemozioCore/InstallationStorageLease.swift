@@ -28,6 +28,13 @@ final class InstallationStorageLease {
         }
         try storage.validate()
     }
+    /// Refuses a fixture lease when native storage is required.
+    func requireNativeLocation(_ path: String) throws {
+        guard owner == 0, anchor == "/", relativeDirectory == String(path.dropFirst()), path.hasPrefix("/") else {
+            throw JournalLeaseError.invalidPath
+        }
+        try validate()
+    }
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try storage.directoryIdentities()
     }
