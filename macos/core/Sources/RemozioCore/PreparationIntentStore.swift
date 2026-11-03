@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -281,8 +281,14 @@ public final class PreparationIntentStore {
                     activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
                     settingsPhase: settings.phase?.rawValue))
             }
+            let upgradeIDs = try schema >= 12 ? accounts("SELECT account FROM runtime_audit_upgrade_v1 ORDER BY account") : []
+            guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
+            let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
+                guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
+                try requireRuntimeAuditUpgradeScope(record.intent); return record
+            }
             try identity(macID)
-            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport)
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades)
         }
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
@@ -777,6 +783,111 @@ public final class PreparationIntentStore {
             return .init(reference: selected)
         }
     }
+    func runtimeAuditUpgrade(accountID: Data) throws -> RuntimeAuditUpgradeRecord? {
+        guard accountID.count == 16 else { throw RuntimePreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 12 else { return nil }
+            let record = try loadRuntimeAuditUpgrade(accountID: accountID)
+            if let record { try requireRuntimeAuditUpgradeScope(record.intent) }
+            return record
+        }
+    }
+    // The owner supplies current protected policy. This retains intent only, before any staging or cutover.
+    func retainRuntimeAuditUpgrade(_ intent: RuntimeAuditUpgradeIntent, currentPolicy: AuthorityCodePolicy, installedRelease: SignedReleaseEvidence) throws -> RuntimeAuditUpgradeRecord {
+        try RuntimeAuditUpgradeRecord.validatePreparation(intent, release: installedRelease, policy: currentPolicy)
+        return try transaction(write: true) {
+            try identity(macID); try requireRuntimeAuditUpgradeScope(intent)
+            if try scalar("PRAGMA user_version") >= 12, let existing = try loadRuntimeAuditUpgrade(accountID: intent.source.services.accountID) {
+                guard existing.intent == intent else { throw RuntimePreparationError.conflictingMaterial }; return existing
+            }
+            try upgradeAuditPreparationStorage()
+            guard try scalar("SELECT COUNT(*) FROM runtime_audit_upgrade_v1") < 64 else { throw RuntimePreparationError.exhausted }
+            let value = try RuntimeAuditUpgradeRecord(intent: intent, phase: .retained), encoded = try value.encoded
+            try statement("INSERT INTO runtime_audit_upgrade_v1 VALUES(?,?,?,?,?,?)") { row in
+                try bind(intent.source.services.accountID, column: 1, row: row); try bind(intent.id, column: 2, row: row)
+                try bind(value.revision, column: 3, row: row); try bind(Int64(value.phase.rawValue), column: 4, row: row)
+                try bind(Data(SHA256.hash(data: encoded)), column: 5, row: row); try bind(encoded, column: 6, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            return value
+        }
+    }
+    // The protected owner verifies the actual staged artifact first. This marker is not a file operation or a cutover permit.
+    func markRuntimeAuditMaterialStaged(_ expected: RuntimeAuditUpgradeRecord, currentPolicy: AuthorityCodePolicy, installedRelease: SignedReleaseEvidence) throws -> RuntimeAuditUpgradeRecord {
+        try RuntimeAuditUpgradeRecord.validatePreparation(expected.intent, release: installedRelease, policy: currentPolicy)
+        return try transaction(write: true) {
+            try identity(macID); try requireRuntimeAuditUpgradeScope(expected.intent)
+            guard try scalar("PRAGMA user_version") >= 12,
+                  let current = try loadRuntimeAuditUpgrade(accountID: expected.intent.source.services.accountID),
+                  current.intent == expected.intent else { throw RuntimePreparationError.incomplete }
+            if current.phase == .materialStaged {
+                guard expected.phase == .retained || expected == current else { throw PreparationStoreError.staleRevision }
+                return current
+            }
+            guard expected == current else { throw PreparationStoreError.staleRevision }
+            let next = try RuntimeAuditUpgradeRecord(intent: current.intent, phase: .materialStaged), encoded = try next.encoded
+            try statement("UPDATE runtime_audit_upgrade_v1 SET revision=?,phase=2,digest=?,record=? WHERE account=? AND revision=? AND phase=1") { row in
+                try bind(next.revision, column: 1, row: row); try bind(Data(SHA256.hash(data: encoded)), column: 2, row: row)
+                try bind(encoded, column: 3, row: row); try bind(current.intent.source.services.accountID, column: 4, row: row)
+                try bind(current.revision, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+            return next
+        }
+    }
+    private func requireRuntimeAuditUpgradeScope(_ intent: RuntimeAuditUpgradeIntent) throws {
+        guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimePreparationError.incomplete }
+        try requireRuntimeMaterialScope(intent.source)
+        let current = try loadRuntimePreparation(accountID: intent.source.services.accountID)
+        guard current.configurationPublished, current.reference == intent.source else { throw RuntimePreparationError.changedScope }
+    }
+    private func loadRuntimeAuditUpgrade(accountID: Data) throws -> RuntimeAuditUpgradeRecord? {
+        try statement("SELECT attempt,revision,phase,digest,record FROM runtime_audit_upgrade_v1 WHERE account=?") { row in
+            try bind(accountID, column: 1, row: row)
+            if try step(row) == SQLITE_DONE { return nil }
+            let bytes = try blob(row, column: 4, maximum: 24576), record: RuntimeAuditUpgradeRecord
+            do { record = try .decode(bytes) } catch { throw PreparationStoreError.corruptRecord }
+            guard record.intent.source.services.macID == macID, record.intent.source.services.accountID == accountID,
+                  try blob(row, column: 0, maximum: 16) == record.intent.id,
+                  try blob(row, column: 1, maximum: 16) == record.revision,
+                  sqlite3_column_type(row, 2) == SQLITE_INTEGER,
+                  sqlite3_column_int64(row, 2) == Int64(record.phase.rawValue),
+                  try blob(row, column: 3, maximum: 32) == Data(SHA256.hash(data: bytes)),
+                  try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return record
+        }
+    }
+    private func upgradeAuditPreparationStorage() throws {
+        var version = try scalar("PRAGMA user_version")
+        guard version >= 6 else { throw RuntimePreparationError.incomplete }
+        if version == 6 {
+            try exec("CREATE TABLE runtime_activation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),material BLOB NOT NULL UNIQUE CHECK(length(material)=16),digest BLOB NOT NULL CHECK(length(digest)=32),registered INTEGER NOT NULL CHECK(registered IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262144)) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=7"); version = 7
+        }
+        if version == 7 {
+            try exec("CREATE TABLE gateway_preparation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),material BLOB NOT NULL UNIQUE CHECK(length(material)=16),receipt BLOB NOT NULL UNIQUE CHECK(length(receipt)=65),credential BLOB NOT NULL UNIQUE CHECK(length(credential)=16),wake BLOB NOT NULL UNIQUE CHECK(length(wake)=65),digest BLOB NOT NULL CHECK(length(digest)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 16384)) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=8"); version = 8
+        }
+        if version == 8 {
+            try exec("CREATE TABLE gateway_journal_preparation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),intent BLOB NOT NULL UNIQUE CHECK(length(intent)=16),material BLOB NOT NULL CHECK(length(material)=16),files BLOB NOT NULL UNIQUE CHECK(length(files)=32),digest BLOB NOT NULL CHECK(length(digest)=32),initialized INTEGER NOT NULL CHECK(initialized IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 131072)) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=9"); version = 9
+        }
+        if version == 9 {
+            try exec("CREATE TABLE gateway_runtime_activation_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),journal BLOB NOT NULL UNIQUE CHECK(length(journal)=16),material BLOB NOT NULL CHECK(length(material)=16),digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),published INTEGER NOT NULL CHECK(published IN (0,1)),registered INTEGER NOT NULL CHECK(registered IN (0,1)),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 270336),CHECK(registered=0 OR published=1)) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=10"); version = 10
+        }
+        if version == 10 {
+            try exec("CREATE TABLE gateway_settings_transition_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),activation BLOB NOT NULL CHECK(length(activation)=32),sequence INTEGER NOT NULL CHECK(sequence>=0),digest BLOB NOT NULL CHECK(length(digest)=32),active BLOB CHECK(active IS NULL OR length(active) BETWEEN 1 AND 32768),pending BLOB CHECK(pending IS NULL OR length(pending) BETWEEN 1 AND 32768),phase INTEGER CHECK(phase BETWEEN 0 AND 3),CHECK((sequence=0 AND active IS NULL) OR (sequence>0 AND active IS NOT NULL)),CHECK((pending IS NULL AND phase IS NULL) OR (pending IS NOT NULL AND phase IS NOT NULL))) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=11"); version = 11
+        }
+        if version == 11 {
+            try exec("CREATE TABLE runtime_audit_upgrade_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),attempt BLOB NOT NULL UNIQUE CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),digest BLOB NOT NULL CHECK(length(digest)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 24576)) STRICT, WITHOUT ROWID")
+            try exec("PRAGMA user_version=12"); version = 12
+        }
+        try identity(macID)
+    }
+
     func runtimePreparation(accountID: Data) throws -> RuntimePreparationState {
         guard accountID.count == 16 else { throw RuntimePreparationError.invalidRecord }
         return try transaction(write: false) {
@@ -1287,7 +1398,7 @@ public final class PreparationIntentStore {
         let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard names.count < 12, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                guard names.count < 13, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
                       String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
                 names.append(String(cString: name))
@@ -1305,6 +1416,7 @@ public final class PreparationIntentStore {
         if version >= 9 { expected.append("gateway_journal_preparation_v1") }
         if version >= 10 { expected.append("gateway_runtime_activation_v1") }
         if version >= 11 { expected.append("gateway_settings_transition_v1") }
+        if version >= 12 { expected.append("runtime_audit_upgrade_v1") }
         expected.sort()
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
