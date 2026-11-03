@@ -194,10 +194,12 @@ public struct GatewayServiceConfiguration: Sendable {
     }
 
     /// Native startup rechecks directory membership and the process groups before private access.
-    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent) throws {
+    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent,
+                              requireStartupOpen: (Data, Data) throws -> Void = RuntimeAuditUpgradeStartupFence.requireOpen) throws {
         try requireProcess(realUID: getuid(), effectiveUID: geteuid())
         do { try validate(serviceUID, ownerUID) }
         catch { throw GatewayServiceError.wrongAccount }
+        try requireStartupOpen(registration.macID, registration.accountID)
     }
     func requireProcess(realUID: uid_t, effectiveUID: uid_t) throws {
         guard realUID == serviceUID, effectiveUID == serviceUID else { throw GatewayServiceError.wrongAccount }

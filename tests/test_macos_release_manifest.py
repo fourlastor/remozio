@@ -28,7 +28,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         added = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
                  'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record',
-                 'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'command.monitor-activity'}
+                 'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record',
+                 'runtime.audit-upgrade-startup-fence', 'command.monitor-activity'}
         def legacy(role):
             values = [dict(value) for value in original(role) if value[0] not in added]
             for value in values:
@@ -45,9 +46,18 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 info = MANIFEST.generate(self.environment(configuration))
                 self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
 
+    def test_audit_upgrade_startup_fence_declares_all_native_participants(self):
+        for role, *_ in MANIFEST.COMPONENTS:
+            by_name = {value[0]: value for value in MANIFEST.declarations(role)}
+            name = 'runtime.audit-upgrade-startup-fence'
+            if role in (2, 4, 6, 8):
+                self.assertEqual(by_name[name], {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(name, by_name)
+
     def test_audit_upgrade_record_has_only_its_storage_readers_and_setup_writer(self):
         names = {'runtime.audit-upgrade-record', 'runtime.audit-upgrade-graph',
-                 'runtime.audit-upgrade-graph-record'}
+                 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record'}
         for role, *_ in MANIFEST.COMPONENTS:
             formats = MANIFEST.declarations(role)
             by_name = {value[0]: value for value in formats}
@@ -60,13 +70,13 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                     self.assertNotIn(name, by_name)
             if role in (2, 8):
                 preparation = by_name['authority.installation-preparation']
-                self.assertEqual(preparation[1], list(range(1, 14)))
-                self.assertEqual(preparation[2], list(range(1, 14)))
+                self.assertEqual(preparation[1], list(range(1, 15)))
+                self.assertEqual(preparation[2], list(range(1, 15)))
                 self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
 
     def test_generated_manifests_retain_the_audit_record_within_the_existing_bounds(self):
         names = {'runtime.audit-upgrade-record', 'runtime.audit-upgrade-graph',
-                 'runtime.audit-upgrade-graph-record'}
+                 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record'}
         for configuration in ('Debug', 'Release'):
             with self.subTest(configuration=configuration), \
                     patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
@@ -81,7 +91,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if component[0] in (2, 8):
                     self.assertIn(12, formats['authority.installation-preparation'][1])
                     self.assertIn(13, formats['authority.installation-preparation'][1])
-                    self.assertNotIn(14, formats['authority.installation-preparation'][1])
+                    self.assertIn(14, formats['authority.installation-preparation'][1])
+                    self.assertNotIn(15, formats['authority.installation-preparation'][1])
                 for request in component[8]:
                     self.assertEqual(request[5], [])
             self.assertLessEqual(len(info['RemozioReleaseManifest']), 65536)
@@ -239,7 +250,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3])
-        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], 3: {1: 2}})
+        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -249,7 +260,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])

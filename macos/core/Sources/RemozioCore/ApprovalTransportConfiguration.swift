@@ -91,10 +91,12 @@ public struct ApprovalTransportConfiguration: Sendable, CustomStringConvertible 
         return value
     }
     /// Native startup rechecks directory membership and the process groups before private access.
-    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent) throws {
+    func requireNativeProcess(validate: (uid_t, uid_t) throws -> Void = DedicatedServiceAccount.requireCurrent,
+                              requireStartupOpen: (Data, Data) throws -> Void = RuntimeAuditUpgradeStartupFence.requireOpen) throws {
         try requireProcess(realUID: getuid(), effectiveUID: geteuid())
         do { try validate(serviceUID, ownerUID) }
         catch { throw ApprovalTransportStartupError.wrongAccount }
+        try requireStartupOpen(macID, accountID)
     }
     func requireProcess(realUID: UInt32, effectiveUID: UInt32) throws {
         guard realUID == serviceUID, effectiveUID == serviceUID else { throw ApprovalTransportStartupError.wrongAccount }

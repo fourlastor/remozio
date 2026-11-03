@@ -84,7 +84,9 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
     }
     public static func load(path: String) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        return try decode(ProtectedServiceConfiguration.read(path: path))
+        let value = try decode(ProtectedServiceConfiguration.read(path: path))
+        try RuntimeAuditUpgradeStartupFence.requireOpen(macID: value.command.macID, accountID: value.command.accountID)
+        return value
     }
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), case .unsigned(let version) = f[0], supportedVersions.contains(version),

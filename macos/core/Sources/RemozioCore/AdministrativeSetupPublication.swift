@@ -46,6 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
+        case auditUpgradeStartupFence
         case auditUpgradeMaterial(intentID: Data)
         case auditUpgradeGraph(intentID: Data, contentDigest: Data)
         case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
@@ -73,6 +74,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
+            case .auditUpgradeStartupFence: RuntimeAuditUpgradeStartupFence.fileName
             case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + id.map { String(format: "%02x", $0) }.joined() + "-" + digest.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + id.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .gatewayMaterial: "gateway-material.cbor"
@@ -108,7 +110,7 @@ public enum AdministrativeSetupPublication {
         }
         var mode: mode_t {
             switch self {
-            case .transportRelayReference, .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewaySettingsHost, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
+            case .auditUpgradeStartupFence, .transportRelayReference, .transportGatewayRuntime, .gatewayRuntimeCommit, .gatewaySettingsRevision, .gatewaySettingsFence, .gatewaySettingsHost, .gatewayConfiguration, .gatewayJournalSetup, .gatewayJournalService, .transportConfiguration, .presenceClient, .pairingClient, .frontendClient, .accountJob, .gatewayJournalJob: 0o644
             default: 0o600
             }
         }

@@ -43,6 +43,7 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
         (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
         guard host.bundlePath == MachineBootstrap.bundlePath else { throw GatewayPreparationError.changedScope }
         try DedicatedServiceAccount.requireCurrent(serviceUID: host.serviceUID, ownerUID: host.runtime.services.ownerUID)
+        try RuntimeAuditUpgradeStartupFence.requireOpen(macID: host.runtime.services.macID, accountID: host.runtime.services.accountID)
         let bundle = URL(fileURLWithPath: host.bundlePath)
         let placement = try ReleaseDestinationLease.readForServiceRegistration(path: bundle.deletingLastPathComponent().path)
         var scope: GatewaySettingsConsumerNativeScope?
@@ -76,6 +77,7 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
             guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
                     == AdministrativeSetupConfiguration.executablePath else { throw GatewayPreparationError.changedScope }
             try current.validate()
+            try RuntimeAuditUpgradeStartupFence.requireOpen(macID: host.runtime.services.macID, accountID: host.runtime.services.accountID)
             return (current, release)
         } catch { scope?.close(); placement.close(); throw error }
     }

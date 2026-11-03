@@ -17,12 +17,12 @@ enum NativeHostReleaseFixture {
             if [.authority, .setupController].contains(code.role) {
                 formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: planVersions, writers: code.role == .setupController ? planVersions : []))
                 formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))
-                let preparationVersions = Set(UInt64(1)...(auditDelivery ? 13 : 11))
+                let preparationVersions = Set(UInt64(1)...(auditDelivery ? 14 : 11))
                 formats.append(try .init(name: "authority.installation-preparation", readers: preparationVersions, writers: preparationVersions))
                 if auditDelivery {
                     formats.append(try .init(name: RuntimeAuditUpgradeRecord.formatName, readers: [1],
                         writers: code.role == .setupController ? [1] : []))
-                    for name in [RuntimeAuditUpgradeGraph.formatName, RuntimeAuditUpgradeGraphRecord.formatName] {
+                    for name in [RuntimeAuditUpgradeGraph.formatName, RuntimeAuditUpgradeGraphRecord.formatName, RuntimeAuditUpgradeCutoverRecord.formatName] {
                         formats.append(try .init(name: name, readers: [1], writers: code.role == .setupController ? [1] : []))
                     }
                 }
@@ -32,6 +32,10 @@ enum NativeHostReleaseFixture {
             if [.authority, .transport, .notificationGateway, .setupController].contains(code.role) {
                 formats.append(try .init(name: RuntimeMaterialReference.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))
                 formats.append(try .init(name: ServiceReleaseActivityReference.formatName, readers: [1], writers: code.role == .setupController ? [1] : []))
+                if auditDelivery {
+                    formats.append(try .init(name: RuntimeAuditUpgradeStartupFence.formatName, readers: [1],
+                        writers: code.role == .setupController ? [1] : []))
+                }
                 formats.append(try .init(name: GatewaySettingsConsumerHostConfiguration.formatName, readers: [1],
                     writers: code.role == .setupController ? [1] : []))
                 formats.append(try .init(name: GatewayRuntimeSettingsFenceReleaseValidation.formatName, readers: [1, 2],

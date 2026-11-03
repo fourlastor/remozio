@@ -60,8 +60,19 @@ public enum ProtectedServiceConfiguration {
             ancestorOwner: owner, allowMissingLeaf: false, byteLimit: RuntimeAuditUpgradeGraph.maximumBytes) else { throw JournalLeaseError.system(ENOENT) }
         return bytes
     }
+    // Only this fixed public marker treats missing legacy containers as absence. Other optional readers stay leaf-only.
+    static func readOptionalAuditFence(accountID: Data) throws -> Data? {
+        let path = try RuntimePreparationPaths(accountID: accountID).serviceDirectory + "/" + RuntimeAuditUpgradeStartupFence.fileName
+        return try readRecord(anchor: "/", relativePath: String(path.dropFirst()), owner: 0, privateFile: false,
+            ancestorOwner: 0, allowMissingLeaf: true, allowMissingAncestors: true)
+    }
+    static func readOptionalAuditFence(anchor: String, relativeDirectory: String, owner: uid_t) throws -> Data? {
+        guard getuid() == owner, geteuid() == owner, owner > 0 else { throw JournalLeaseError.unsafeMetadata }
+        return try readRecord(anchor: anchor, relativePath: relativeDirectory + "/" + RuntimeAuditUpgradeStartupFence.fileName,
+            owner: owner, privateFile: false, ancestorOwner: owner, allowMissingLeaf: true, allowMissingAncestors: true)
+    }
     private static func readRecord(anchor: String, relativePath: String, owner: uid_t, privateFile: Bool,
-                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool, byteLimit: Int = maximumBytes) throws -> Data? {
+                                   ancestorOwner: uid_t?, allowMissingLeaf: Bool, byteLimit: Int = maximumBytes, allowMissingAncestors: Bool = false) throws -> Data? {
         let parts = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !anchor.utf8.contains(0),
               anchor.utf8.count + relativePath.utf8.count + 1 < Int(PATH_MAX),
@@ -106,7 +117,7 @@ public enum ProtectedServiceConfiguration {
             let parent = nodes.last!.fd, directory = index < parts.count - 1
             let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (directory ? O_DIRECTORY : 0)
             let descriptor = openat(parent, part, flags)
-            if descriptor < 0, !directory, allowMissingLeaf, errno == ENOENT {
+            if descriptor < 0, ((!directory && allowMissingLeaf) || (directory && allowMissingAncestors)), errno == ENOENT {
                 try validateNodes()
                 var named = stat()
                 guard fstatat(parent, part, &named, AT_SYMLINK_NOFOLLOW) != 0, errno == ENOENT else { throw JournalLeaseError.identityChanged }
