@@ -96,6 +96,49 @@ enum GatewayJournalFileProvisioning {
             try verify(); return Result(identity: identity, created: true)
         }
     }
+    /// Read-only identities. This takes no writer lock, initializes nothing and proves no journal contents or quiescence.
+    static func observe(parent: ProtectedSetupDirectory, processOwner: uid_t, serviceUID: uid_t, serviceGID: gid_t,
+                        expected: GatewayJournalFileIdentity?, verifyCurrent: () throws -> Void) throws -> GatewayJournalFileIdentity? {
+        guard getuid() == processOwner, geteuid() == processOwner,
+              serviceUID > 0, serviceUID < UInt32.max, serviceGID > 0, serviceGID < UInt32.max else {
+            throw JournalLeaseError.unsafeMetadata
+        }
+        let processID = getpid()
+        func verify() throws {
+            guard getpid() == processID, getuid() == processOwner, geteuid() == processOwner else { throw JournalLeaseError.unsafeMetadata }
+            try verifyCurrent(); try parent.validate()
+        }
+        try verify()
+        let result = try parent.withSharedDirectory { parentFD -> GatewayJournalFileIdentity? in
+            let directory = openat(parentFD, directoryName, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            if directory < 0 {
+                guard errno == ENOENT else { throw JournalLeaseError.system(errno) }
+                guard expected == nil else { throw GatewayPreparationError.missingMaterial }
+                var absent = stat()
+                guard fstatat(parentFD, directoryName, &absent, AT_SYMLINK_NOFOLLOW) < 0, errno == ENOENT else {
+                    throw JournalLeaseError.identityChanged
+                }
+                return nil
+            }
+            defer { _ = Darwin.close(directory) }
+            _ = try metadata(directory, parent: parentFD, name: directoryName, directory: true,
+                owner: serviceUID, group: serviceGID, ancestor: processOwner)
+            let writer = openat(directory, writerName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard writer >= 0 else { throw JournalLeaseError.system(errno) }; defer { _ = Darwin.close(writer) }
+            let database = openat(directory, databaseName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard database >= 0 else { throw JournalLeaseError.system(errno) }; defer { _ = Darwin.close(database) }
+            let identity = try inspect(parent: parentFD, name: directoryName, directory: directory, writer: writer, database: database,
+                serviceUID: serviceUID, serviceGID: serviceGID, processOwner: processOwner, requireEmpty: false)
+            guard expected == nil || expected == identity else { throw JournalLeaseError.identityChanged }
+            try verify()
+            guard try inspect(parent: parentFD, name: directoryName, directory: directory, writer: writer, database: database,
+                serviceUID: serviceUID, serviceGID: serviceGID, processOwner: processOwner, requireEmpty: false) == identity else {
+                throw JournalLeaseError.identityChanged
+            }
+            return identity
+        }
+        try verify(); return result
+    }
     private static func inspectExisting(parent: Int32, directory: Int32, serviceUID: uid_t, serviceGID: gid_t,
                                         processOwner: uid_t, expected: GatewayJournalFileIdentity?, verify: () throws -> Void) throws -> Result {
         _ = try metadata(directory, parent: parent, name: directoryName, directory: true, owner: serviceUID, group: serviceGID, ancestor: processOwner)
