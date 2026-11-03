@@ -46,6 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
+        case auditUpgradeMaterial(intentID: Data)
         case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence, transportRelayReference
         case runtimeRecord, gatewayMaterial, relayRunMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
@@ -71,6 +72,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
+            case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + id.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .gatewayMaterial: "gateway-material.cbor"
             case .relayRunMaterial: "relay-run-material.cbor"
             case .transportTunnelToken: "transport-tunnel.token"
@@ -134,6 +136,8 @@ public enum AdministrativeSetupPublication {
                 guard account.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .gatewayJournalJob(let account, let intent):
                 guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
+            case .auditUpgradeMaterial(let id):
+                guard id.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .accountJob(let account, let role):
                 guard account.count == 16, role == .authority || role == .transport || role == .notificationGateway else {
                     throw AdministrativeSetupPublicationError.invalidArtifact
