@@ -25,19 +25,21 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let gateways: [Gateway]
         let sharedImport: SharedSetupImportCompatibilitySnapshot?
         let auditUpgrades: [RuntimeAuditUpgradeRecord]
+        let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
-             sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = []) {
+             sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
+             auditGraphs: [RuntimeAuditUpgradeGraphRecord] = []) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
-            self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades
+            self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs
         }
     }
     let inputs: Inputs
     let requirements: RetainedReleaseRequirements
-    private var native: Bool { (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty) }
+    private var native: Bool { (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty || !inputs.auditGraphs.isEmpty) }
 
     static func capture(machine: PreparationIntentStore) throws -> Self {
         let inputs = try machine.retainedRuntimeCompatibilityInputs()
-        let native = (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty)
+        let native = (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty || !inputs.auditGraphs.isEmpty)
         var formats = try native ? GatewaySettingsNativeHostPlan.releaseRequirements.formats : []
         func include(_ role: AuthorityCodeRole, _ name: String, _ reads: Set<UInt64>, _ writes: Set<UInt64>) throws {
             if let index = formats.firstIndex(where: { $0.role == role && $0.name == name }) {
@@ -46,7 +48,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     writeVersions: current.writeVersions.union(writes))
             } else { formats.append(try .init(role: role, name: name, readVersions: reads, writeVersions: writes)) }
         }
-        let upgrades = inputs.auditUpgrades
+        let upgrades = inputs.auditUpgrades + inputs.auditGraphs.map(\.upgrade)
         if !upgrades.isEmpty {
             for role in [AuthorityCodeRole.authority, .setupController] {
                 try include(role, RuntimeAuditUpgradeRecord.formatName, [1], role == .setupController ? [1] : [])
@@ -63,6 +65,14 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                         try include(role, RuntimePreparationMaterial.formatName, [reference.formatVersion], role == .setupController ? [reference.formatVersion] : [])
                     }
                 }
+            }
+        }
+        if !inputs.auditGraphs.isEmpty {
+            for record in try RuntimeAuditUpgradeGraph.requirements {
+                try include(record.role, record.name, record.readVersions, record.writeVersions)
+            }
+            for role in [AuthorityCodeRole.authority, .setupController] {
+                try include(role, RuntimeAuditUpgradeGraphRecord.formatName, [1], role == .setupController ? [1] : [])
             }
         }
         if let imports = inputs.sharedImport {

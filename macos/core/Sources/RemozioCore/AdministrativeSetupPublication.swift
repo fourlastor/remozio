@@ -47,6 +47,7 @@ public enum AdministrativeSetupPublication {
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
         case auditUpgradeMaterial(intentID: Data)
+        case auditUpgradeGraph(intentID: Data, contentDigest: Data)
         case importRelayPlan(accountID: Data), importRelayProvisioning(accountID: Data), importAccessApplication(accountID: Data), importDNSRecord(accountID: Data), importRelayRunReference(accountID: Data)
         case authorityGatewayRuntime, transportGatewayRuntime, gatewayRuntimeCommit, gatewaySettingsRevision, gatewaySettingsFence, transportRelayReference
         case runtimeRecord, gatewayMaterial, relayRunMaterial, gatewaySettingsHost, gatewayConfiguration, gatewayJournalSetup, gatewayJournalService, commandConfiguration, commandHost, elevationPolicy, transportConfiguration
@@ -72,6 +73,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
+            case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + id.map { String(format: "%02x", $0) }.joined() + "-" + digest.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + id.map { String(format: "%02x", $0) }.joined() + ".cbor"
             case .gatewayMaterial: "gateway-material.cbor"
             case .relayRunMaterial: "relay-run-material.cbor"
@@ -99,6 +101,10 @@ public enum AdministrativeSetupPublication {
             case .pairingClient(let uid): "pairing-client-\(uid).cbor"
             case .frontendClient(let uid): "frontend-\(uid).cbor"
             }
+        }
+        var maximumBytes: Int {
+            if case .auditUpgradeGraph = self { return RuntimeAuditUpgradeGraph.maximumBytes }
+            return ProtectedServiceConfiguration.maximumBytes
         }
         var mode: mode_t {
             switch self {
@@ -138,6 +144,8 @@ public enum AdministrativeSetupPublication {
                 guard account.count == 16, intent.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .auditUpgradeMaterial(let id):
                 guard id.count == 16 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
+            case .auditUpgradeGraph(let id, let digest):
+                guard id.count == 16, digest.count == 32 else { throw AdministrativeSetupPublicationError.invalidArtifact }; return
             case .accountJob(let account, let role):
                 guard account.count == 16, role == .authority || role == .transport || role == .notificationGateway else {
                     throw AdministrativeSetupPublicationError.invalidArtifact
@@ -152,7 +160,7 @@ public enum AdministrativeSetupPublication {
     static func publish(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t,
                         verify: () throws -> Void = {}, didStage: (Stage) throws -> Void = { _ in }) throws -> AdministrativeSetupPublicationResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
-              bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+              bytes.count <= file.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         try file.validate()
         let name = file.name, fileOwner = file.fileOwner(processOwner: owner)
         let publish: (Int32) throws -> AdministrativeSetupPublicationResult = { parent in
@@ -369,7 +377,7 @@ public enum AdministrativeSetupPublication {
     static func validateRetained(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t,
                                  verify: () throws -> Void = {}) throws {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
-              bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+              bytes.count <= file.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         try file.validate(); try verify()
         if file.requiresSharedDirectory { try directory.withSharedDirectory { _ in try match(bytes, file: file, directory: directory, owner: owner) } }
         else { try match(bytes, file: file, directory: directory, owner: owner) }
@@ -418,8 +426,13 @@ public enum AdministrativeSetupPublication {
 
     private static func match(_ bytes: Data, file: File, directory: ProtectedSetupDirectory, owner: uid_t) throws {
         try directory.validate()
-        let retained = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: file.name,
-            owner: file.fileOwner(processOwner: owner), privateFile: file.mode == 0o600, ancestorOwner: owner)
+        let retained: Data
+        if case .auditUpgradeGraph(let id, let digest) = file {
+            retained = try ProtectedServiceConfiguration.readAuditGraph(anchor: directory.path, intentID: id, contentDigest: digest, owner: owner)
+        } else {
+            retained = try ProtectedServiceConfiguration.read(anchor: directory.path, relativePath: file.name,
+                owner: file.fileOwner(processOwner: owner), privateFile: file.mode == 0o600, ancestorOwner: owner)
+        }
         guard retained == bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
         try directory.withDirectory { parent in
             let fd = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)

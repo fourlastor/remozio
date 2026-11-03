@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -287,8 +287,22 @@ public final class PreparationIntentStore {
                 guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
                 try requireRuntimeAuditUpgradeScope(record.intent); return record
             }
+            let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
+            if schema >= 13 {
+                auditGraphs = try statement("SELECT account,content FROM runtime_audit_graph_v1 ORDER BY account,content") { row in
+                    var records: [RuntimeAuditUpgradeGraphRecord] = []
+                    while try step(row) == SQLITE_ROW {
+                        guard records.count < 64,
+                              let record = try loadRuntimeAuditGraph(accountID: blob(row, column: 0, maximum: 16), contentDigest: blob(row, column: 1, maximum: 32)) else {
+                            throw PreparationStoreError.corruptRecord
+                        }
+                        records.append(record)
+                    }
+                    return records
+                }
+            } else { auditGraphs = [] }
             try identity(macID)
-            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades)
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs)
         }
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
@@ -842,6 +856,136 @@ public final class PreparationIntentStore {
         let current = try loadRuntimePreparation(accountID: intent.source.services.accountID)
         guard current.configurationPublished, current.reference == intent.source else { throw RuntimePreparationError.changedScope }
     }
+    func runtimeAuditGraph(accountID: Data, contentDigest: Data) throws -> RuntimeAuditUpgradeGraphRecord? {
+        guard accountID.count == 16, contentDigest.count == 32 else { throw RuntimePreparationError.invalidRecord }
+        return try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 13 else { return nil }
+            return try loadRuntimeAuditGraph(accountID: accountID, contentDigest: contentDigest)
+        }
+    }
+    // The public reference and private recovery bytes commit together, before any external graph file is published.
+    func retainRuntimeAuditGraph(_ graph: RuntimeAuditUpgradeGraph, installedRelease: SignedReleaseEvidence,
+                                currentPolicy: AuthorityCodePolicy) throws -> RuntimeAuditUpgradeGraphRecord {
+        try graph.requireOwner(getuid())
+        try RuntimeAuditUpgradeGraphRecord.validateCapabilities(installedRelease, policy: currentPolicy)
+        try RuntimeAuditUpgradeRecord.validatePreparation(graph.upgrade.intent, release: installedRelease, policy: currentPolicy)
+        return try transaction(write: true) {
+            try identity(macID); try requireRuntimeAuditGraphSource(graph)
+            let schema = try scalar("PRAGMA user_version"), account = graph.upgrade.intent.source.services.accountID
+            if schema >= 13, let existing = try loadRuntimeAuditGraph(accountID: account, contentDigest: graph.digest) {
+                try existing.validate(graph)
+                guard try loadRuntimeAuditGraphBytes(existing) == graph.bytes else { throw PreparationStoreError.corruptRecord }
+                return existing
+            }
+            if schema == 12 {
+                try exec("CREATE TABLE runtime_audit_graph_v1(account BLOB NOT NULL CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),content BLOB NOT NULL CHECK(length(content)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 28672),PRIMARY KEY(account,content)) STRICT, WITHOUT ROWID")
+                try exec("CREATE TABLE runtime_audit_graph_chunks_v1(account BLOB NOT NULL CHECK(length(account)=16),content BLOB NOT NULL CHECK(length(content)=32),part INTEGER NOT NULL CHECK(part BETWEEN 0 AND 511),bytes BLOB NOT NULL CHECK(length(bytes) BETWEEN 1 AND 16384),PRIMARY KEY(account,content,part)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=13")
+            } else { guard schema == 13 else { throw PreparationStoreError.incompatibleStore } }
+            guard try scalar("SELECT COUNT(*) FROM runtime_audit_graph_v1") < 64 else { throw RuntimePreparationError.exhausted }
+            let record = try RuntimeAuditUpgradeGraphRecord(upgrade: graph.upgrade, contentDigest: graph.digest)
+            try statement("INSERT INTO runtime_audit_graph_v1 VALUES(?,?,?,?,?,?)") { row in
+                try bind(account, column: 1, row: row); try bind(graph.upgrade.intent.id, column: 2, row: row)
+                try bind(record.revision, column: 3, row: row); try bind(Int64(record.phase.rawValue), column: 4, row: row)
+                try bind(record.contentDigest, column: 5, row: row); try bind(record.encoded, column: 6, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+            for offset in stride(from: 0, to: graph.bytes.count, by: 16384) {
+                try statement("INSERT INTO runtime_audit_graph_chunks_v1 VALUES(?,?,?,?)") { row in
+                    try bind(account, column: 1, row: row); try bind(record.contentDigest, column: 2, row: row)
+                    try bind(Int64(offset / 16384), column: 3, row: row)
+                    try bind(graph.bytes.subdata(in: offset..<min(offset + 16384, graph.bytes.count)), column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                }
+            }
+            return record
+        }
+    }
+    func runtimeAuditGraphBytes(_ expected: RuntimeAuditUpgradeGraphRecord) throws -> Data {
+        try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 13,
+                  let current = try loadRuntimeAuditGraph(accountID: expected.upgrade.intent.source.services.accountID, contentDigest: expected.contentDigest),
+                  current == expected || (current.phase == .fileStored && current.upgrade == expected.upgrade) else { throw PreparationStoreError.staleRevision }
+            return try loadRuntimeAuditGraphBytes(current)
+        }
+    }
+    // The actual file is verified first. This is historical copy progress, independent of later settings changes.
+    func markRuntimeAuditGraphStored(_ expected: RuntimeAuditUpgradeGraphRecord, graph: RuntimeAuditUpgradeGraph,
+                                    installedRelease: SignedReleaseEvidence, currentPolicy: AuthorityCodePolicy) throws -> RuntimeAuditUpgradeGraphRecord {
+        try RuntimeAuditUpgradeGraphRecord.validateCapabilities(installedRelease, policy: currentPolicy)
+        try expected.validate(graph); try graph.requireOwner(getuid())
+        return try transaction(write: true) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 13,
+                  let current = try loadRuntimeAuditGraph(accountID: graph.upgrade.intent.source.services.accountID, contentDigest: graph.digest) else { throw RuntimePreparationError.incomplete }
+            try current.validate(graph)
+            guard try loadRuntimeAuditGraphBytes(current) == graph.bytes else { throw PreparationStoreError.corruptRecord }
+            if current.phase == .fileStored { return current }
+            guard current == expected else { throw PreparationStoreError.staleRevision }
+            let next = try RuntimeAuditUpgradeGraphRecord(upgrade: current.upgrade, contentDigest: current.contentDigest, phase: .fileStored)
+            try statement("UPDATE runtime_audit_graph_v1 SET revision=?,phase=2,record=? WHERE account=? AND content=? AND revision=? AND phase=1") { row in
+                try bind(next.revision, column: 1, row: row); try bind(next.encoded, column: 2, row: row)
+                try bind(current.upgrade.intent.source.services.accountID, column: 3, row: row); try bind(current.contentDigest, column: 4, row: row)
+                try bind(current.revision, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+            return next
+        }
+    }
+    private func loadRuntimeAuditGraphBytes(_ record: RuntimeAuditUpgradeGraphRecord) throws -> Data {
+        try statement("SELECT part,bytes FROM runtime_audit_graph_chunks_v1 WHERE account=? AND content=? ORDER BY part") { row in
+            try bind(record.upgrade.intent.source.services.accountID, column: 1, row: row); try bind(record.contentDigest, column: 2, row: row)
+            var bytes = Data(), part: Int64 = 0
+            while try step(row) == SQLITE_ROW {
+                guard part < 512, sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_int64(row, 0) == part else { throw PreparationStoreError.corruptRecord }
+                let chunk = try blob(row, column: 1, maximum: 16384)
+                guard !chunk.isEmpty, bytes.count == Int(part) * 16384,
+                      bytes.count + chunk.count <= RuntimeAuditUpgradeGraph.maximumBytes else { throw PreparationStoreError.corruptRecord }
+                bytes.append(chunk); part += 1
+            }
+            guard !bytes.isEmpty, Data(SHA256.hash(data: bytes)) == record.contentDigest else { throw PreparationStoreError.corruptRecord }
+            return bytes
+        }
+    }
+    private func requireRuntimeAuditGraphSource(_ graph: RuntimeAuditUpgradeGraph, verifyImport: Bool = true) throws {
+        let p = graph.snapshot.plan, account = p.sourceAccount.accountID
+        try requireRuntimeAuditUpgradeScope(graph.upgrade.intent); try requireAccountPreparation(p.sourceAccount)
+        guard try loadRuntimeAuditUpgrade(accountID: account) == graph.upgrade,
+              try loadInitialization(accountID: account) == p.sourceInitialization,
+              try loadInventoryRecord() == p.sourceInventory else { throw RuntimePreparationError.changedScope }
+        let foreground = try loadRuntimeActivation(accountID: account), gateway = try loadGatewayRuntimeActivation(accountID: account)
+        let settings = try scalar("PRAGMA user_version") >= 11 ? loadGatewaySettingsTransition(accountID: account) : .empty
+        guard try foreground.plan?.encoded == p.preparation.source.encoded, foreground.jobsRegistered == p.sourceJobsRegistered,
+              try loadGatewayPreparation(accountID: account).reference == p.sourceGateway.reference,
+              try loadGatewayJournalPreparation(accountID: account) == p.sourceGateway.journal,
+              try gateway.plan?.encoded == p.sourceGateway.activation.plan?.encoded,
+              gateway.filesPublished == p.sourceGateway.activation.filesPublished, gateway.jobRegistered == p.sourceGateway.activation.jobRegistered,
+              try settings.active?.encoded == p.sourceGateway.settings.active?.encoded,
+              try settings.pending?.encoded == p.sourceGateway.settings.pending?.encoded, settings.phase == p.sourceGateway.settings.phase else {
+            throw RuntimePreparationError.changedScope
+        }
+        if verifyImport {
+            let imports = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: p.sourceInventory.installationID)
+            guard imports?.records.first(where: { $0.accountID == account }) == p.sourceImport?.source else { throw RuntimePreparationError.changedScope }
+        }
+    }
+    private func loadRuntimeAuditGraph(accountID: Data, contentDigest: Data) throws -> RuntimeAuditUpgradeGraphRecord? {
+        try statement("SELECT attempt,revision,phase,content,record FROM runtime_audit_graph_v1 WHERE account=? AND content=?") { row in
+            try bind(accountID, column: 1, row: row); try bind(contentDigest, column: 2, row: row)
+            if try step(row) == SQLITE_DONE { return nil }
+            let bytes = try blob(row, column: 4, maximum: 28672), record = try RuntimeAuditUpgradeGraphRecord.decode(bytes)
+            guard record.upgrade.intent.source.services.accountID == accountID, record.upgrade.intent.source.services.macID == macID,
+                  try blob(row, column: 0, maximum: 16) == record.upgrade.intent.id,
+                  try blob(row, column: 1, maximum: 16) == record.revision,
+                  sqlite3_column_type(row, 2) == SQLITE_INTEGER, sqlite3_column_int64(row, 2) == Int64(record.phase.rawValue),
+                  try blob(row, column: 3, maximum: 32) == record.contentDigest, record.contentDigest == contentDigest,
+                  try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return record
+        }
+    }
+
     private func loadRuntimeAuditUpgrade(accountID: Data) throws -> RuntimeAuditUpgradeRecord? {
         try statement("SELECT attempt,revision,phase,digest,record FROM runtime_audit_upgrade_v1 WHERE account=?") { row in
             try bind(accountID, column: 1, row: row)
@@ -1391,20 +1535,6 @@ public final class PreparationIntentStore {
     }
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
-              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == version + 1 else {
-            throw PreparationStoreError.incompatibleStore
-        }
-        let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
-            var names: [String] = []
-            while try step(row) == SQLITE_ROW {
-                guard names.count < 13, sqlite3_column_type(row, 0) == SQLITE_TEXT,
-                      let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
-                      String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
-                names.append(String(cString: name))
-            }
-            return names
-        }
         var expected = ["installation_identity_v1", "preparation_intents_v1"]
         if version >= 2 { expected.append("installation_inventory_v1") }
         if version >= 3 { expected.append("authority_initialization_v1") }
@@ -1417,7 +1547,22 @@ public final class PreparationIntentStore {
         if version >= 10 { expected.append("gateway_runtime_activation_v1") }
         if version >= 11 { expected.append("gateway_settings_transition_v1") }
         if version >= 12 { expected.append("runtime_audit_upgrade_v1") }
+        if version >= 13 { expected += ["runtime_audit_graph_v1", "runtime_audit_graph_chunks_v1"] }
         expected.sort()
+        guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
+              try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
+            throw PreparationStoreError.incompatibleStore
+        }
+        let names = try statement("SELECT name,type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
+            var names: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard names.count < expected.count, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let name = sqlite3_column_text(row, 0), let type = sqlite3_column_text(row, 1),
+                      String(cString: type) == "table" else { throw PreparationStoreError.incompatibleStore }
+                names.append(String(cString: name))
+            }
+            return names
+        }
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }

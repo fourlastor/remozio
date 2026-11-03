@@ -27,7 +27,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         original = MANIFEST.declarations
         added = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
-                 'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record'}
+                 'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record',
+                 'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record'}
         def legacy(role):
             values = [dict(value) for value in original(role) if value[0] not in added]
             for value in values:
@@ -45,23 +46,27 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
 
     def test_audit_upgrade_record_has_only_its_storage_readers_and_setup_writer(self):
-        name = 'runtime.audit-upgrade-record'
+        names = {'runtime.audit-upgrade-record', 'runtime.audit-upgrade-graph',
+                 'runtime.audit-upgrade-graph-record'}
         for role, *_ in MANIFEST.COMPONENTS:
             formats = MANIFEST.declarations(role)
             by_name = {value[0]: value for value in formats}
             self.assertEqual(len(by_name), len(formats))
+            for name in names:
+                if role in (2, 8):
+                    self.assertEqual(by_name[name],
+                                     {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                else:
+                    self.assertNotIn(name, by_name)
             if role in (2, 8):
-                self.assertEqual(by_name[name], {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
                 preparation = by_name['authority.installation-preparation']
-                self.assertEqual(preparation[1], list(range(1, 13)))
-                self.assertEqual(preparation[2], list(range(1, 13)))
+                self.assertEqual(preparation[1], list(range(1, 14)))
+                self.assertEqual(preparation[2], list(range(1, 14)))
                 self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
-            else:
-                self.assertNotIn(name, by_name)
-            self.assertNotIn('runtime.audit-upgrade-graph', by_name)
-            self.assertNotIn('runtime.audit-upgrade-graph-record', by_name)
 
     def test_generated_manifests_retain_the_audit_record_within_the_existing_bounds(self):
+        names = {'runtime.audit-upgrade-record', 'runtime.audit-upgrade-graph',
+                 'runtime.audit-upgrade-graph-record'}
         for configuration in ('Debug', 'Release'):
             with self.subTest(configuration=configuration), \
                     patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
@@ -72,10 +77,11 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for component in root[5]:
                 formats = {value[0]: value for value in component[7]}
                 self.assertLessEqual(len(formats), 64)
-                self.assertEqual('runtime.audit-upgrade-record' in formats, component[0] in (2, 8))
+                self.assertEqual(names.intersection(formats), names if component[0] in (2, 8) else set())
                 if component[0] in (2, 8):
                     self.assertIn(12, formats['authority.installation-preparation'][1])
-                    self.assertNotIn(13, formats['authority.installation-preparation'][1])
+                    self.assertIn(13, formats['authority.installation-preparation'][1])
+                    self.assertNotIn(14, formats['authority.installation-preparation'][1])
                 for request in component[8]:
                     self.assertEqual(request[5], [])
             self.assertLessEqual(len(info['RemozioReleaseManifest']), 65536)
@@ -98,22 +104,19 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             self.assertTrue(all(value.startswith('dev.sebastiano.remozio.macos') for value in expected))
 
     def test_extended_capacity_selects_schema_and_keeps_explicit_request_features(self):
-        original = MANIFEST.declarations
         for count, version in [(32, 2), (33, 4), (64, 4), (65, 5), (128, 5)]:
             def declarations(role):
-                values = original(role)
-                if role == 2:
-                    values = [MANIFEST.format_declaration(f'capacity.{index}', [1])
-                              for index in range(count)]
-                return sorted(values, key=lambda value: value[0])
+                # Only this component controls the capacity boundary in this fixture.
+                return [MANIFEST.format_declaration(f'capacity.{index}', [1])
+                        for index in range(count)] if role == 2 else []
             with patch.object(MANIFEST, 'declarations', side_effect=declarations), \
                     patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
                     patch.object(MANIFEST, 'encode', wraps=MANIFEST.encode) as encode:
                 MANIFEST.generate(self.environment())
             root = encode.call_args_list[0].args[0]
             self.assertEqual(root[0], version)
-            self.assertEqual(len(next(component for component in root[5] if component[0] == 2)[7]), count)
             for component in root[5]:
+                self.assertEqual(len(component[7]), count if component[0] == 2 else 0)
                 for request in component[8]:
                     if version >= 3:
                         self.assertEqual(request[5], [])
@@ -225,7 +228,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3])
-        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 3: {1: 2}})
+        self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -235,7 +238,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+        self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
