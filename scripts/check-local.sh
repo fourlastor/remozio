@@ -18,6 +18,10 @@ else
     ./scripts/check-linux-protocol.sh
     ./scripts/check-linux-host.sh
     ./scripts/check-linux-pairing-peer.sh
+    # check-linux-pairing-peer.sh built this software-key pairing tool for the JVM loopback test.
+    REMOZIO_LINUX_PAIR_TOOL="${REMOZIO_SWIFT_WORK_DIR:-$PWD/.build/linux-swift}/pairing-peer/build/debug/remozio-linux-pair"
+    export REMOZIO_LINUX_PAIR_TOOL
+    set -- "$@" :phone-core:linuxPairToolTest
 fi
 ./gradlew "$@" :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug
 if [ "$host" = Darwin ]; then

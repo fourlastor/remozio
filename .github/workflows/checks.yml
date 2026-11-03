@@ -19,7 +19,7 @@ jobs:
   linux-protocol:
     name: Linux Swift protocol
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install pinned Swift toolchain
@@ -39,6 +39,20 @@ jobs:
       - run: ./scripts/check-linux-protocol.sh
       - run: ./scripts/check-linux-host.sh
       - run: ./scripts/check-linux-pairing-peer.sh
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Verify wrapper JAR
+        run: |
+          python3 - <<'PYTHON'
+          import hashlib
+          from pathlib import Path
+          actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
+          assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
+          PYTHON
+      - name: Pair the JVM phone client with the Linux software-key pairing tool
+        run: ./gradlew :phone-core:linuxPairToolTest
       - name: Prepare private native TPM simulator dependencies
         run: |
           sudo apt-get install --yes --no-install-recommends \

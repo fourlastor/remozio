@@ -117,6 +117,12 @@ inode replacement, ownership, write permissions and ACL grants. Its 46 controls 
 It is component evidence: it observes no root-owned or foreign-owned object and no real
 mount, and it selects no production path, identity or filesystem policy.
 
+The [`remozio-linux-pair` tool](../experiments/linux-pairing-peer/README.md#foreground-pairing-tool-remozio-linux-pair)
+runs its unit tests in `check-linux-pairing-peer.sh`, and `:phone-core:linuxPairToolTest` pairs the JVM phone
+client with the built binary over loopback TLS on Linux, in the local gate and in the Linux CI job. It is a
+foreground software-key experiment: no TPM, service, administrator consent or hardware biometric. A physical
+phone pairing and mDNS discovery with `avahi-publish` remain supervised checks.
+
 The [OS-capture experiment](experiments/linux-os-capture.md) also runs in
 `check-linux-host.sh`. It observes its own current Linux task and retained objects,
 round-trips raw paths and real UID/GID roles through schema 4, and refuses changed

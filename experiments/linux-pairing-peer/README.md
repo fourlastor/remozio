@@ -1,7 +1,8 @@
 # Linux pairing peer (experiment)
 
-Software keys only. The identity generator returns a P-256 key and certificate in DER buffers. This adapter does
-not persist the identity. Host key custody remains unqualified. The peer requires operator confirmation.
+Software keys only. The identity generator returns a P-256 key and certificate in DER buffers. The TLS adapter does
+not persist the identity; the `remozio-linux-pair` tool below does. Host key custody remains unqualified. The peer
+requires operator confirmation.
 Protected host service integration remains pending.
 
 This directory holds the M2.2 TLS adapter: a C shim over system OpenSSL 3 for the `remozio-pairing/1` channel.
@@ -86,3 +87,59 @@ never resets it.
 
 This module is part of the software-key experiment. It is not the protected host journal, and it gives no claim about
 host key custody.
+
+## Foreground pairing tool (`remozio-linux-pair`)
+
+**Experiment, software keys.** Every command prints `EXPERIMENT: software keys. Not the protected host service.`
+The tool is a foreground command that an operator runs and watches. It installs nothing, starts no service and
+does not claim the [Linux host contract](../../docs/linux-host-contract.md), which allows no software-key fallback.
+Any process of the same user can read its keys.
+
+```
+remozio-linux-pair [--state-dir DIR] init [--label LABEL]
+remozio-linux-pair [--state-dir DIR] invite
+remozio-linux-pair [--state-dir DIR] pair [--listen ADDRESS:PORT] [--no-advertise]
+remozio-linux-pair [--state-dir DIR] list
+```
+
+- **State.** `--state-dir`, else `$XDG_STATE_HOME/remozio-linux-pair`, else `~/.local/state/remozio-linux-pair`.
+  The identity (`identity.json`: random Mac and account IDs, a label, the transport and authority P-256 keys) lives
+  in the commit store's directory. It is read and written under the same `state.lock`, with the same no-follow,
+  owner and 0600 checks as `state.json`. `init` publishes it once: temporary file, `fsync`, a hard link that fails
+  if an identity exists, removal of the temporary name and an `fsync` of the directory. It never replaces an
+  identity and refuses a corrupt or partial one.
+- **Invitation.** `invite` prints the shared `remozio-pairing:v1:` text and fingerprint, and a terminal QR code
+  when `qrencode` is installed. The tool adds no QR dependency.
+- **TLS.** Each `pair` run presents the persisted transport key under a fresh certificate in the Mac
+  `TransportTLSCertificate` profile (`remozio_tls_issue_certificate`). The phone pins the key, not the certificate.
+- **Discovery.** `pair` advertises `_remozio-pairing._tcp` as `R-` plus the unpadded base64url Mac and account IDs,
+  the name the Android client looks for, through `avahi-publish` held for the life of the run. avahi renames a
+  service after a name collision, so the tool withdraws the advertisement instead. Without `avahi-publish` it
+  refuses to start unless `--no-advertise` is given. A loopback listener is never advertised. The listener is IPv4.
+- **Exchange.** One candidate at a time, in the order of `protocol/pairing-setup.md`: hello; one proposal whose
+  transport key must equal the TLS client key and whose scope must be this Mac and account; a transcript the tool
+  mints (fresh setup ID, challenge, enrollment tag and Mac offer with envelope version 1 and no request or audit
+  contracts; the phone's claims unchanged; the store's trust revision; a five-minute expiry); operator
+  confirmation; one proof; commit; one MAC_COMMIT receipt. A candidate that fails before it receives a
+  transcript never reaches the operator, and the tool keeps listening. Any later failure ends the run.
+- **Confirmation.** The terminal does not show the comparison code. The operator types the code the phone shows;
+  case, spaces and dashes are ignored. A match binds the SHA-256 digest of that exact transcript, and the commit
+  refuses any other transcript. Input that arrived before the transcript was sent is discarded. End of input, a
+  mismatch or the deadline confirms nothing. No option skips this step.
+- **Commit and receipt.** The receipt is signed only after `commit` returns normally. On `committedLate` or
+  `committedUnconfirmed` the tool sends no receipt and reports the enrolled state as unknown (exit 4). If the
+  receipt cannot be written after a good commit, nothing is retried (exit 3); `list` shows the enrollment.
+- **Deadlines.** The setup limit and the transcript lifetime are five minutes on `CLOCK_BOOTTIME`. They bound
+  network I/O, the operator prompt and the commit.
+
+**Evidence.** `LinuxPairAuthorityTests` cover identity persistence, concurrent `init`, an interrupted write,
+corrupt, symlinked and group-accessible state, the invitation and service-name formats, the TLS key, frame order,
+transport-key and scope refusal, code mismatch, end of input, a confirmation bound to another transcript, invalid
+proofs, expiry, a duplicate phone, a full store, an undelivered receipt and a late commit.
+`:phone-core:linuxPairToolTest` runs the Android protocol client (`PairingSetupChannel`) against the real binary on
+loopback with disposable software keys: it enrolls a phone and verifies the receipt, refuses a wrong code without a
+receipt or enrollment, and refuses a candidate whose transport claim differs from its TLS key while the right phone
+still pairs on the same run.
+
+**Not tested.** A physical phone, mDNS discovery through `avahi-daemon`, an IPv6 listener, an iPhone (the iOS app
+has no setup network client yet), host suspend during setup, and any key custody claim.

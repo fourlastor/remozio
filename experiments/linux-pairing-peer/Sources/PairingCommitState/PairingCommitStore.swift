@@ -25,6 +25,8 @@ public enum PairingCommitError: Error, Equatable {
     case committedUnconfirmed(revision: Data, errno: Int32)
     case unsafeDirectory
     case corruptState
+    /// `createIdentity` found an identity already in place. It never replaces one.
+    case identityExists
     case storage(operation: String, errno: Int32)
 }
 
@@ -54,6 +56,10 @@ public final class PairingCommitStore: Sendable {
     private static let stateName = "state.json"
     private static let temporaryName = "state.json.tmp"
     private static let lockName = "state.lock"
+    private static let identityName = "identity.json"
+    private static let identityTemporaryName = "identity.json.tmp"
+    /// Identity files are small; anything larger is refused as corrupt.
+    public static let maximumIdentityBytes = 16 * 1024
 
     private let directory: URL
     private let initialRevision: Data?
@@ -109,6 +115,26 @@ public final class PairingCommitStore: Sendable {
                 guard let transcript = try? PairingTranscript.decode(stored.transcript) else { throw PairingCommitError.corruptState }
                 return PairingEnrollmentSummary(phoneID: transcript.phone.scope.phoneID,
                     epoch: transcript.phone.scope.enrollmentEpoch, setupID: transcript.setupID)
+            }
+        }
+    }
+
+    /// The caller's opaque identity bytes, or nil when none was created. Read under the store lock with the same owner,
+    /// mode and no-follow checks as the state file.
+    public func identity() throws -> Data? {
+        try withLockedDirectory(deadline: nil, isCancelled: { false }) { handle in try handle.loadIdentity() }
+    }
+
+    /// Publishes identity bytes once, under the store lock: a fresh temporary file, `fsync`, a hard link to the final
+    /// name (which fails if one exists), removal of the temporary name and an `fsync` of the directory. A crash leaves
+    /// either no identity or the complete one. Throws `identityExists` instead of replacing an identity.
+    public func createIdentity(_ bytes: Data) throws {
+        guard !bytes.isEmpty, bytes.count <= Self.maximumIdentityBytes else { throw PairingCommitError.corruptState }
+        try withLockedDirectory(deadline: nil, isCancelled: { false }) { handle in
+            guard try handle.loadIdentity() == nil else { throw PairingCommitError.identityExists }
+            do { try handle.publishIdentity(bytes) }
+            catch let failure as DirectorySyncFailed {
+                throw PairingCommitError.storage(operation: "fsync directory", errno: failure.code)
             }
         }
     }
@@ -280,15 +306,31 @@ public final class PairingCommitStore: Sendable {
         }
 
         private func load() throws -> StoredState? {
-            let fd = openat(directoryFD, PairingCommitStore.stateName, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+            guard let bytes = try readFile(PairingCommitStore.stateName, maximumBytes: maximumBytes) else { return nil }
+            guard let state = try? JSONDecoder().decode(StoredState.self, from: bytes),
+                  state.format == 1, state.trustRevision.count == 16,
+                  state.consumedSetupIDs.allSatisfy({ $0.count == 16 }) else { throw PairingCommitError.corruptState }
+            return state
+        }
+
+        func loadIdentity() throws -> Data? {
+            guard let bytes = try readFile(PairingCommitStore.identityName, maximumBytes: PairingCommitStore.maximumIdentityBytes)
+            else { return nil }
+            guard !bytes.isEmpty else { throw PairingCommitError.corruptState }
+            return bytes
+        }
+
+        /// An owned, private, regular file read through no-follow and non-blocking opens. Nil when it does not exist.
+        private func readFile(_ name: String, maximumBytes: Int) throws -> Data? {
+            let fd = openat(directoryFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
             if fd < 0 {
                 if errno == ENOENT { return nil }
                 if errno == ELOOP { throw PairingCommitError.unsafeDirectory }
-                throw PairingCommitError.storage(operation: "open state", errno: errno)
+                throw PairingCommitError.storage(operation: "open \(name)", errno: errno)
             }
             defer { _ = Glibc.close(fd) }
             var info = stat()
-            guard fstat(fd, &info) == 0 else { throw PairingCommitError.storage(operation: "fstat state", errno: errno) }
+            guard fstat(fd, &info) == 0 else { throw PairingCommitError.storage(operation: "fstat \(name)", errno: errno) }
             guard info.st_uid == geteuid(), info.st_mode & 0o077 == 0, info.st_mode & S_IFMT == S_IFREG,
                   info.st_size <= maximumBytes else { throw PairingCommitError.corruptState }
             var bytes = [UInt8](repeating: 0, count: Int(info.st_size))
@@ -299,10 +341,42 @@ public final class PairingCommitStore: Sendable {
                 guard count > 0 else { throw PairingCommitError.corruptState }
                 offset += count
             }
-            guard let state = try? JSONDecoder().decode(StoredState.self, from: Data(bytes)),
-                  state.format == 1, state.trustRevision.count == 16,
-                  state.consumedSetupIDs.allSatisfy({ $0.count == 16 }) else { throw PairingCommitError.corruptState }
-            return state
+            return Data(bytes)
+        }
+
+        func publishIdentity(_ bytes: Data) throws {
+            let fd = try createTemporary(PairingCommitStore.identityTemporaryName, bytes: bytes)
+            defer { _ = Glibc.close(fd) }
+            guard sync(fd) == 0 else { throw PairingCommitError.storage(operation: "fsync identity", errno: errno) }
+            // linkat never replaces an existing name, unlike rename.
+            guard linkat(directoryFD, PairingCommitStore.identityTemporaryName, directoryFD, PairingCommitStore.identityName, 0) == 0 else {
+                if errno == EEXIST { throw PairingCommitError.identityExists }
+                throw PairingCommitError.storage(operation: "link identity", errno: errno)
+            }
+            guard unlinkat(directoryFD, PairingCommitStore.identityTemporaryName, 0) == 0 else {
+                throw PairingCommitError.storage(operation: "remove identity temporary", errno: errno)
+            }
+            guard sync(directoryFD) == 0 else { throw DirectorySyncFailed(code: errno) }
+        }
+
+        /// Drops any leftover temporary (a hard link would be truncated in place), then creates and fills it fresh.
+        private func createTemporary(_ name: String, bytes: Data) throws -> Int32 {
+            if unlinkat(directoryFD, name, 0) != 0, errno != ENOENT {
+                throw PairingCommitError.storage(operation: "remove old temporary", errno: errno)
+            }
+            let fd = openat(directoryFD, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { throw PairingCommitError.storage(operation: "create temporary", errno: errno) }
+            do {
+                guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod temporary", errno: errno) }
+                var offset = 0
+                while offset < bytes.count {
+                    let count = bytes.withUnsafeBytes { write(fd, $0.baseAddress! + offset, $0.count - offset) }
+                    if count < 0, errno == EINTR { continue }
+                    guard count > 0 else { throw PairingCommitError.storage(operation: "write temporary", errno: errno) }
+                    offset += count
+                }
+            } catch { _ = Glibc.close(fd); throw error }
+            return fd
         }
 
         /// Temporary file, fsync, rename, fsync of the directory. A crash hook runs before each step.
@@ -312,22 +386,8 @@ public final class PairingCommitStore: Sendable {
             let bytes = try encoder.encode(state)
             guard bytes.count <= maximumBytes else { throw PairingCommitError.stateFull }
             try crashHook?(.createTemporary)
-            // Drop any leftover (a hard link would be truncated in place), then create the file fresh.
-            if unlinkat(directoryFD, PairingCommitStore.temporaryName, 0) != 0, errno != ENOENT {
-                throw PairingCommitError.storage(operation: "remove old temporary", errno: errno)
-            }
-            let fd = openat(directoryFD, PairingCommitStore.temporaryName,
-                            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else { throw PairingCommitError.storage(operation: "create temporary", errno: errno) }
+            let fd = try createTemporary(PairingCommitStore.temporaryName, bytes: bytes)
             defer { _ = Glibc.close(fd) }
-            guard fchmod(fd, 0o600) == 0 else { throw PairingCommitError.storage(operation: "fchmod temporary", errno: errno) }
-            var offset = 0
-            while offset < bytes.count {
-                let count = bytes.withUnsafeBytes { write(fd, $0.baseAddress! + offset, $0.count - offset) }
-                if count < 0, errno == EINTR { continue }
-                guard count > 0 else { throw PairingCommitError.storage(operation: "write temporary", errno: errno) }
-                offset += count
-            }
             try crashHook?(.syncTemporary)
             guard sync(fd) == 0 else { throw PairingCommitError.storage(operation: "fsync temporary", errno: errno) }
             try crashHook?(.rename)

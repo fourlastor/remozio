@@ -411,23 +411,17 @@ void remozio_tls_connection_close(RemozioTLSConnection *connection) {
     free(connection);
 }
 
-RemozioTLSStatus remozio_tls_make_identity(const char *curve, int64_t not_before, int64_t not_after, uint8_t **cert_der,
-                                           size_t *cert_length, uint8_t **key_der, size_t *key_length) {
+/* Signs a self-signed leaf for key in the Mac TransportTLSCertificate profile. On failure *cert_der stays NULL. */
+static RemozioTLSStatus issue_certificate(EVP_PKEY *key, int64_t not_before, int64_t not_after, uint8_t **cert_der,
+                                          size_t *cert_length) {
     RemozioTLSStatus status = REMOZIO_TLS_INTERNAL;
-    EVP_PKEY *key = NULL;
-    X509 *certificate = NULL;
-    X509_NAME *name = NULL;
+    X509 *certificate = X509_new();
+    X509_NAME *name = X509_NAME_new();
     BIGNUM *serial = NULL;
     ASN1_INTEGER *serial_asn1 = NULL;
     ASN1_TIME *before = NULL, *after = NULL;
     unsigned char random_bytes[16];
-    if (!cert_der || !key_der || !cert_length || !key_length) return REMOZIO_TLS_INVALID_ARGUMENT;
-    *cert_der = NULL; *key_der = NULL; *cert_length = 0; *key_length = 0;
-    if (!curve || not_after <= not_before) return REMOZIO_TLS_INVALID_ARGUMENT;
-    key = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
-    certificate = X509_new();
-    name = X509_NAME_new();
-    if (!key || !certificate || !name || RAND_bytes(random_bytes, sizeof(random_bytes)) != 1) goto done;
+    if (!certificate || !name || RAND_bytes(random_bytes, sizeof(random_bytes)) != 1) goto done;
     random_bytes[0] = (random_bytes[0] & 0x7f) | 0x40; /* positive and never zero */
     serial = BN_bin2bn(random_bytes, sizeof(random_bytes), NULL);
     serial_asn1 = serial ? BN_to_ASN1_INTEGER(serial, NULL) : NULL;
@@ -452,17 +446,55 @@ RemozioTLSStatus remozio_tls_make_identity(const char *curve, int64_t not_before
     }
     if (!X509_sign(certificate, key, EVP_sha256())) goto done;
     int cert_size = i2d_X509(certificate, cert_der);
-    int key_size = i2d_PrivateKey(key, key_der);
-    if (cert_size <= 0 || key_size <= 0) goto done;
+    if (cert_size <= 0) goto done;
     *cert_length = (size_t)cert_size;
+    status = REMOZIO_TLS_OK;
+done:
+    if (status != REMOZIO_TLS_OK) { OPENSSL_free(*cert_der); *cert_der = NULL; *cert_length = 0; }
+    X509_free(certificate); X509_NAME_free(name); BN_free(serial);
+    ASN1_INTEGER_free(serial_asn1); ASN1_TIME_free(before); ASN1_TIME_free(after);
+    return status;
+}
+
+RemozioTLSStatus remozio_tls_make_identity(const char *curve, int64_t not_before, int64_t not_after, uint8_t **cert_der,
+                                           size_t *cert_length, uint8_t **key_der, size_t *key_length) {
+    RemozioTLSStatus status = REMOZIO_TLS_INTERNAL;
+    EVP_PKEY *key = NULL;
+    if (!cert_der || !key_der || !cert_length || !key_length) return REMOZIO_TLS_INVALID_ARGUMENT;
+    *cert_der = NULL; *key_der = NULL; *cert_length = 0; *key_length = 0;
+    if (!curve || not_after <= not_before) return REMOZIO_TLS_INVALID_ARGUMENT;
+    key = EVP_PKEY_Q_keygen(NULL, NULL, "EC", curve);
+    if (!key || issue_certificate(key, not_before, not_after, cert_der, cert_length) != REMOZIO_TLS_OK) goto done;
+    int key_size = i2d_PrivateKey(key, key_der);
+    if (key_size <= 0) goto done;
     *key_length = (size_t)key_size;
     status = REMOZIO_TLS_OK;
 done:
     if (status != REMOZIO_TLS_OK) {
         OPENSSL_free(*cert_der); OPENSSL_free(*key_der);
-        *cert_der = NULL; *key_der = NULL;
+        *cert_der = NULL; *key_der = NULL; *cert_length = 0; *key_length = 0;
     }
-    EVP_PKEY_free(key); X509_free(certificate); X509_NAME_free(name); BN_free(serial);
-    ASN1_INTEGER_free(serial_asn1); ASN1_TIME_free(before); ASN1_TIME_free(after);
+    EVP_PKEY_free(key);
+    return status;
+}
+
+RemozioTLSStatus remozio_tls_issue_certificate(const uint8_t *key_der, size_t key_length, int64_t not_before,
+                                               int64_t not_after, uint8_t **cert_der, size_t *cert_length) {
+    if (!cert_der || !cert_length) return REMOZIO_TLS_INVALID_ARGUMENT;
+    *cert_der = NULL; *cert_length = 0;
+    if (!key_der || key_length == 0 || key_length > 4096 || not_after <= not_before) return REMOZIO_TLS_INVALID_ARGUMENT;
+    const unsigned char *cursor = key_der;
+    EVP_PKEY *key = d2i_AutoPrivateKey(NULL, &cursor, (long)key_length);
+    RemozioTLSStatus status = REMOZIO_TLS_INVALID_ARGUMENT;
+    /* Only a whole P-256 private key is accepted; trailing bytes are refused. */
+    if (key && cursor == key_der + key_length && EVP_PKEY_is_a(key, "EC")) {
+        char group[32] = {0};
+        size_t group_length = 0;
+        if (EVP_PKEY_get_utf8_string_param(key, "group", group, sizeof(group), &group_length) == 1 &&
+            strcmp(group, "prime256v1") == 0) {
+            status = issue_certificate(key, not_before, not_after, cert_der, cert_length);
+        }
+    }
+    EVP_PKEY_free(key);
     return status;
 }
