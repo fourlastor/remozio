@@ -675,7 +675,7 @@ extension AuthorityJournal {
             commandExecutions[requestID] = execution
             commandActivity[requestID] = activity; transferredActivity = true
             startCommandCleanup(intervalMilliseconds: pollIntervalMilliseconds)
-            do { try execution.prepare(monitorPath: monitorPath, childPath: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask) }
+            do { try execution.prepare(monitorPath: monitorPath, childPath: childPath, preparationMilliseconds: preparationMilliseconds, fileCreationMask: fileCreationMask, releaseActivity: activity) }
             catch { execution.cancelBeforeRelease(); throw error }
             // The closure stays under this journal's lock and can only verify the same original controller.
             commandStreamChecks[requestID] = {

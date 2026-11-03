@@ -59,7 +59,7 @@ static int private_pipe(int ends[2]) {
     return error;
 }
 static int spawn_monitor(const char *path, const char *child, const void *frame, size_t count,
-    int input, int output, int error, int directory, int terminal, bool mapped, remozio_command_monitor_t **result) {
+    int input, int output, int error, int directory, int terminal, bool mapped, int activity, remozio_command_monitor_t **result) {
     if (!result) return EINVAL;
     *result = NULL;
     if (!path || path[0] != '/' || strnlen(path, PATH_MAX) >= PATH_MAX || !child || child[0] != '/' || strnlen(child, PATH_MAX) >= PATH_MAX) return EINVAL;
@@ -75,8 +75,15 @@ static int spawn_monitor(const char *path, const char *child, const void *frame,
         if (failure) { remozio_child_spec_close(&spec); return failure; }
     }
     uint32_t budget = spec.preparation_milliseconds; remozio_child_spec_close(&spec);
-    int descriptor_count = mapped ? 9 : 8;
-    int original[9] = {input, output, error, -1, directory, -1, -1, -1, terminal}, copies[9];
+    if (activity >= 0) {
+        struct stat held;
+        int flags = fcntl(activity, F_GETFL), private_flags = fcntl(activity, F_GETFD);
+        if (flags < 0 || private_flags < 0 || fstat(activity, &held)) return system_error();
+        if (!S_ISREG(held.st_mode) || held.st_size || held.st_nlink != 1 || held.st_uid != geteuid() ||
+            (held.st_mode & 07777) != 0600 || (flags & O_ACCMODE) != O_RDWR || !(private_flags & FD_CLOEXEC)) return EINVAL;
+    }
+    int descriptor_count = activity >= 0 ? 10 : mapped ? 9 : 8;
+    int original[10] = {input, output, error, -1, directory, -1, -1, -1, terminal, activity}, copies[10];
     int configuration[2] = {-1,-1}, status[2] = {-1,-1}, release[2] = {-1,-1}, control[2] = {-1,-1};
     for (int i = 0; i < descriptor_count; ++i) copies[i] = -1;
     remozio_command_monitor_t *monitor = calloc(1, sizeof(*monitor)); if (!monitor) return ENOMEM;
@@ -105,13 +112,14 @@ static int spawn_monitor(const char *path, const char *child, const void *frame,
     if ((failure = mark_private(monitor->configuration, true, true)) || (failure = mark_private(monitor->status, true, false)) ||
         (failure = mark_private(monitor->release, true, true)) || (failure = mark_private(monitor->control, true, true))) goto cleanup;
     original[3] = configuration[0]; original[5] = status[1]; original[6] = release[0]; original[7] = control[0];
-    for (int i = 0; i < descriptor_count; ++i) { copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128); if (copies[i] < 0) { failure = system_error(); goto cleanup; } }
+    for (int i = 0; i < descriptor_count; ++i) { if (i == 8 && !mapped) continue; copies[i] = fcntl(original[i], F_DUPFD_CLOEXEC, 128); if (copies[i] < 0) { failure = system_error(); goto cleanup; } }
     close_descriptor(&configuration[0]); close_descriptor(&status[1]); close_descriptor(&release[0]); close_descriptor(&control[0]);
     monitor->events = kqueue(); if (monitor->events < 0) { failure = system_error(); goto cleanup; }
     if ((failure = mark_private(monitor->events, false, false))) goto cleanup;
     posix_spawn_file_actions_t actions;
     if ((failure = posix_spawn_file_actions_init(&actions))) goto cleanup;
     for (int i = 0; i < descriptor_count; ++i) {
+        if (i == 8 && !mapped) continue;
         failure = posix_spawn_file_actions_adddup2(&actions, copies[i], i);
         if (failure) { posix_spawn_file_actions_destroy(&actions); goto cleanup; }
     }
@@ -121,7 +129,7 @@ static int spawn_monitor(const char *path, const char *child, const void *frame,
     failure = posix_spawnattr_setsigmask(&attributes, &empty);
     if (!failure) failure = posix_spawnattr_setsigdefault(&attributes, &defaults);
     if (!failure) failure = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETSID | POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
-    char *arguments[] = {(char *)path, "--monitor", (char *)child, NULL}, *environment[] = {NULL};
+    char *arguments[] = {(char *)path, activity >= 0 ? "--monitor-with-activity" : "--monitor", (char *)child, NULL}, *environment[] = {NULL};
     if (!failure) failure = posix_spawn(&monitor->state.monitor_pid, path, &actions, &attributes, arguments, environment);
     posix_spawnattr_destroy(&attributes); posix_spawn_file_actions_destroy(&actions);
     if (failure) goto cleanup;
@@ -139,11 +147,16 @@ cleanup:
 }
 int remozio_command_monitor_spawn(const char *path, const char *child, const void *frame, size_t count,
     int input, int output, int error, int directory, remozio_command_monitor_t **result) {
-    return spawn_monitor(path, child, frame, count, input, output, error, directory, -1, false, result);
+    return spawn_monitor(path, child, frame, count, input, output, error, directory, -1, false, -1, result);
 }
 int remozio_command_monitor_spawn_with_terminal(const char *path, const char *child, const void *frame, size_t count,
     int input, int output, int error, int directory, int terminal, remozio_command_monitor_t **result) {
-    return spawn_monitor(path, child, frame, count, input, output, error, directory, terminal, true, result);
+    return spawn_monitor(path, child, frame, count, input, output, error, directory, terminal, true, -1, result);
+}
+int remozio_command_monitor_spawn_with_activity(const char *path, const char *child, const void *frame, size_t count,
+    int input, int output, int error, int directory, int terminal, int activity, remozio_command_monitor_t **result) {
+    if (activity < 0) { if (result) *result = NULL; return EINVAL; }
+    return spawn_monitor(path, child, frame, count, input, output, error, directory, terminal, terminal >= 0, activity, result);
 }
 static int pump_configuration(remozio_command_monitor_t *monitor) {
     if (monitor->configuration < 0) return 0;

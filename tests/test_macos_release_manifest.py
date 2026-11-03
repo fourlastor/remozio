@@ -28,7 +28,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         added = {'authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
                  'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record',
-                 'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record'}
+                 'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'command.monitor-activity'}
         def legacy(role):
             values = [dict(value) for value in original(role) if value[0] not in added]
             for value in values:
@@ -85,6 +85,17 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 for request in component[8]:
                     self.assertEqual(request[5], [])
             self.assertLessEqual(len(info['RemozioReleaseManifest']), 65536)
+
+    def test_command_monitor_activity_has_only_the_authority_and_monitor_directions(self):
+        for role, *_ in MANIFEST.COMPONENTS:
+            formats = MANIFEST.declarations(role)
+            by_name = {value[0]: value for value in formats}
+            self.assertEqual(len(by_name), len(formats))
+            if role in (2, 12):
+                self.assertEqual(by_name['command.monitor-activity'],
+                                 {0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
+            else:
+                self.assertNotIn('command.monitor-activity', by_name)
 
     def test_manifest_component_ids_match_each_xcode_configuration(self):
         project = (ROOT / 'macos/app/Remozio.xcodeproj/project.pbxproj').read_text()

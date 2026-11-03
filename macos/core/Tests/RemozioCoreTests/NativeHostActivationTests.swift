@@ -59,6 +59,9 @@ enum NativeHostReleaseFixture {
                     formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
                 }
             }
+            for item in try CommandMonitorActivityContract.requirements where item.role == code.role {
+                formats.append(try .init(name: item.name, readers: item.readVersions, writers: item.writeVersions))
+            }
             let path: String
             switch code.role {
             case .app: path = "Contents/MacOS/Remozio"
