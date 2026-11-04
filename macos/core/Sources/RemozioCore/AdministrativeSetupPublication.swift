@@ -302,9 +302,30 @@ public enum AdministrativeSetupPublication {
             directory: directory, owner: owner, verify: verify, didStage: didStage)
     }
 
+    /// The retained graph selects the bytes. The caller must verify the live barrier and the durable phase.
+    static func replaceAuditUpgradeLeaf(_ graph: RuntimeAuditUpgradeGraph, key: String,
+                                       directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,
+                                       didStage: (Stage) throws -> Void = { _ in }) throws -> GatewayRuntimeSettingsFileResult {
+        try graph.requireOwner(owner)
+        guard let leaf = graph.snapshot.leaves.first(where: { $0.entry.key == key }),
+              let target = leaf.target, leaf.source != target,
+              leaf.entry.file.fileOwner(processOwner: owner) == owner, leaf.entry.file.groupID == nil else {
+            throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        if leaf.source == nil {
+            return try publish(target, file: leaf.entry.file, directory: directory, owner: owner, verify: verify,
+                didStage: didStage) == .created ? .created : .retained
+        }
+        guard let metadata = leaf.metadata else { throw AdministrativeSetupPublicationError.invalidArtifact }
+        return try replaceSettingsRecord(target, expected: leaf.source, file: leaf.entry.file, directory: directory,
+            owner: owner, verify: verify, didStage: didStage,
+            expectedIdentity: .init(device: metadata.device, inode: metadata.inode))
+    }
+
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
-                                              didStage: (Stage) throws -> Void) throws -> GatewayRuntimeSettingsFileResult {
+                                              didStage: (Stage) throws -> Void,
+                                              expectedIdentity: ProtectedStorageLease.DirectoryIdentity? = nil) throws -> GatewayRuntimeSettingsFileResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         guard let expected else {
@@ -328,6 +349,13 @@ public enum AdministrativeSetupPublication {
             let old = openat(parent, file.name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
             guard old >= 0 else { throw JournalLeaseError.system(errno) }
             defer { _ = Darwin.close(old) }
+            func requireSourceIdentity() throws {
+                guard let expectedIdentity else { return }
+                var held = stat()
+                guard fstat(old, &held) == 0 else { throw JournalLeaseError.system(errno) }
+                guard held.st_dev == expectedIdentity.device, held.st_ino == expectedIdentity.inode else { throw JournalLeaseError.identityChanged }
+            }
+            try requireSourceIdentity()
             try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
             let staging = ".remozio-settings-" + UUID().uuidString
             let fd = openat(parent, staging, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
@@ -362,8 +390,10 @@ public enum AdministrativeSetupPublication {
             try didStage(.staged); try verify(); try directory.validate()
             try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner, mode: file.mode, group: nil)
             try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
+            try requireSourceIdentity()
             guard renameatx_np(parent, staging, parent, file.name, UInt32(RENAME_SWAP)) == 0 else { throw JournalLeaseError.system(errno) }
             exchanged = true
+            try requireSourceIdentity()
             try validateNamedFile(fd: old, parent: parent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)
             try validateNamedFile(fd: fd, parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
             try didStage(.published)
