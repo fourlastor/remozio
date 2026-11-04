@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -432,6 +433,44 @@ class BuildCacheTests(unittest.TestCase):
                 path.write_text('native build setting'); self.track(path)
                 self.assertNotEqual(before, CACHE.settings_inventory(CACHE.capture_inputs(self.root)))
                 path.unlink()
+
+    def test_xcode_phase_input_scripts_keep_settings_but_stay_in_the_content_key(self):
+        for name, mode in CACHE.XCODE_PHASE_INPUT_MODES.items():
+            with self.subTest(name=name):
+                path = self.root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('first'); path.chmod(mode); self.track(path)
+                before = CACHE.capture_inputs(self.root)
+                path.write_text('second'); self.track(path)
+                after = CACHE.capture_inputs(self.root)
+                self.assertEqual(CACHE.settings_inventory(before), CACHE.settings_inventory(after))
+                self.assertNotEqual(CACHE.content_inventory(before), CACHE.content_inventory(after))
+                result = CACHE.restore_inputs(self.root, before)
+                self.assertFalse(result['requires_clean_build'])
+                self.assertEqual(result['changed'], 1)
+                for other in (mode | 0o111, 'symlink'):
+                    path.unlink()
+                    if other == 'symlink':
+                        path.symlink_to(self.source)
+                    else:
+                        path.write_text('second'); path.chmod(other)
+                    self.track(path)
+                    self.assertNotEqual(CACHE.settings_inventory(after), CACHE.settings_inventory(CACHE.capture_inputs(self.root)))
+                path.unlink(); self.track(path)
+
+    @unittest.skipUnless((CACHE.ROOT / '.git').exists(), 'needs the repository checkout')
+    def test_xcode_phase_input_scripts_remain_declared_phase_inputs(self):
+        # An exempt script that stopped being a declared phase input could change
+        # cached output without a new compatibility identity; fail instead.
+        result = subprocess.run(['git', 'ls-files', '-s', '--', *CACHE.XCODE_PHASE_INPUT_MODES],
+                                cwd=CACHE.ROOT, check=True, capture_output=True, text=True)
+        tracked = {line.split('\t', 1)[1]: int(line.split()[0], 8) & 0o7777 for line in result.stdout.splitlines()}
+        self.assertEqual(tracked, CACHE.XCODE_PHASE_INPUT_MODES)
+        project = (CACHE.ROOT / 'macos/app/Remozio.xcodeproj/project.pbxproj').read_text()
+        phases = re.findall(r'isa = PBXShellScriptBuildPhase;.*?inputPaths = \((.*?)\);', project)
+        for name in CACHE.XCODE_PHASE_INPUT_MODES:
+            with self.subTest(name=name):
+                self.assertTrue(any(f'"$(SRCROOT)/../../{name}"' in inputs for inputs in phases))
 
     def test_linux_old_new_kind_and_mode_classification_remains_conservative(self):
         names = ('scripts/check-linux-host.sh', 'experiments/linux-native-tpm-tls/Package.swift')
