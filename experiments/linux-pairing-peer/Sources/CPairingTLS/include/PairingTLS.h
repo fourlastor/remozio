@@ -40,6 +40,10 @@ int64_t remozio_tls_now_ms(void);
 RemozioTLSStatus remozio_tls_make_identity(const char *curve, int64_t not_before, int64_t not_after,
                                            uint8_t **cert_der, size_t *cert_length,
                                            uint8_t **key_der, size_t *key_length);
+/* The same leaf profile for an existing P-256 private key (DER, SEC1 or PKCS#8), so a persisted key can be
+ * presented under a fresh certificate. Refuses another curve or trailing bytes. */
+RemozioTLSStatus remozio_tls_issue_certificate(const uint8_t *key_der, size_t key_length, int64_t not_before,
+                                               int64_t not_after, uint8_t **cert_der, size_t *cert_length);
 void remozio_tls_free(void *pointer);
 
 /* Server context: TLS 1.3 only, exactly the pairing ALPN, no tickets, no early data, no session cache,

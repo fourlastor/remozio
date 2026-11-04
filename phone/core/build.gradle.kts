@@ -35,7 +35,22 @@ tasks.withType<Test>().configureEach {
     systemProperty("remozio.test.commandCapture", capture.asFile.absolutePath)
 }
 
-tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class", "**/TLSInteropTest.class", "**/PairingSetupInteropTest.class") }
+tasks.test { exclude("**/ApprovalFlowTest.class", "**/AuditFlowTest.class", "**/HPKEInteropTest.class", "**/TLSInteropTest.class", "**/PairingSetupInteropTest.class", "**/LinuxPairToolLoopbackTest.class") }
+
+// Linux only: pairs the JVM phone client with the software-key remozio-linux-pair experiment over loopback.
+// scripts/check-linux-pairing-peer.sh builds the binary; REMOZIO_LINUX_PAIR_TOOL overrides its path.
+tasks.register<Test>("linuxPairToolTest") {
+    description = "Pairs the JVM phone client with the Linux software-key pairing tool over loopback TLS."
+    group = "verification"
+    dependsOn(tasks.testClasses)
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter { includeTestsMatching("dev.remozio.phone.crypto.LinuxPairToolLoopbackTest") }
+    val tool = providers.environmentVariable("REMOZIO_LINUX_PAIR_TOOL").map { file(it) }.orElse(
+        rootProject.layout.projectDirectory.file(".build/linux-swift/pairing-peer/build/debug/remozio-linux-pair").asFile)
+    inputs.file(tool)
+    systemProperty("remozio.test.linuxPairTool", tool.get().absolutePath)
+}
 
 tasks.register<Test>("approvalFlowTest") {
     description = "Runs synthetic Swift and Kotlin approval and audit peers on a Mac."

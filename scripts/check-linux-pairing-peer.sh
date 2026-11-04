@@ -17,9 +17,12 @@ work_dir="$work_root/pairing-peer"
 mkdir -p "$work_dir/module-cache"
 export CLANG_MODULE_CACHE_PATH="$work_dir/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$work_dir/module-cache"
-swift test --package-path experiments/linux-pairing-peer \
+set -- --package-path experiments/linux-pairing-peer \
     --cache-path "$work_dir/cache" \
     --config-path "$work_dir/config" \
     --security-path "$work_dir/security" \
     --scratch-path "$work_dir/build" \
     --disable-keychain --disable-netrc --force-resolved-versions
+swift test "$@"
+# The JVM loopback test (:phone-core:linuxPairToolTest) runs this binary from $work_dir/build/debug.
+swift build "$@" --product remozio-linux-pair

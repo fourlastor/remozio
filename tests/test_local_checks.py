@@ -41,7 +41,7 @@ class LocalChecksTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["./scripts/check.sh"], ["./scripts/check-linux-protocol.sh"],
                                  ["./scripts/check-linux-host.sh"], ["./scripts/check-linux-pairing-peer.sh"],
-                                 ["./gradlew", *COMMON_TASKS, *ANDROID_TASKS]])
+                                 ["./gradlew", *COMMON_TASKS, ":phone-core:linuxPairToolTest", *ANDROID_TASKS]])
 
     def test_mac_builds_peers_before_running_all_interoperability_checks(self):
         result, calls = self.run_gate("Darwin")

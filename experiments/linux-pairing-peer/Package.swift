@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "CPairingTLS", targets: ["CPairingTLS"]),
         .library(name: "PairingCommitState", targets: ["PairingCommitState"]),
+        .executable(name: "remozio-linux-pair", targets: ["remozio-linux-pair"]),
     ],
     dependencies: [
         .package(path: "../../protocol/swift"),
@@ -21,6 +22,21 @@ let package = Package(
         // Durable commit state machine. No network and no TLS: it takes a decoded transcript and a proof.
         .target(name: "CPairingFiles"),
         .target(name: "PairingCommitState", dependencies: ["CPairingFiles", .product(name: "RemozioProtocol", package: "swift")]),
+        // The foreground pairing tool's authority role. It stores software keys beside the commit state.
+        .target(name: "LinuxPairAuthority", dependencies: [
+            "CPairingTLS", "PairingCommitState",
+            .product(name: "RemozioProtocol", package: "swift"),
+            .product(name: "Crypto", package: "swift-crypto"),
+        ]),
+        .executableTarget(name: "remozio-linux-pair", dependencies: [
+            "CPairingTLS", "LinuxPairAuthority", "PairingCommitState",
+            .product(name: "RemozioProtocol", package: "swift"),
+        ], swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "LinuxPairAuthorityTests", dependencies: [
+            "LinuxPairAuthority", "PairingCommitState", "CPairingTLS",
+            .product(name: "RemozioProtocol", package: "swift"),
+            .product(name: "Crypto", package: "swift-crypto"),
+        ], swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "PairingCommitStateTests", dependencies: [
             "PairingCommitState", "CPairingFiles",
             .product(name: "RemozioProtocol", package: "swift"),
