@@ -7,6 +7,7 @@ public final class ContinuityStore {
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try lease.directoryIdentities()
     }
+    let readOnlyForCutover: Bool
     private let lease: ProtectedContinuityLease
     private var db: OpaquePointer?
     private var unavailable = false
@@ -27,14 +28,16 @@ public final class ContinuityStore {
             excludingDirectory: excludingDirectory), macID: macID, accountID: accountID, initialize: nil)
     }
 
-    init(lease: ProtectedContinuityLease, macID: Data, accountID: Data, initialize: ContinuityCheckpoint?) throws {
+    init(lease: ProtectedContinuityLease, macID: Data, accountID: Data, initialize: ContinuityCheckpoint?, readOnlyForCutover: Bool = false) throws {
+        self.readOnlyForCutover = readOnlyForCutover
         self.lease = lease; self.macID = macID; self.accountID = accountID
         do {
-            guard macID.count == 16, accountID.count == 16 else { throw ContinuityStoreError.wrongScope }
+            guard (!readOnlyForCutover || initialize == nil), macID.count == 16, accountID.count == 16 else { throw ContinuityStoreError.wrongScope }
             try lease.validate()
+            if readOnlyForCutover { try CutoverSQLitePreflight.validate(path: lease.databasePath, validateLease: lease.validate) }
             var connection: OpaquePointer?
             let result = sqlite3_open_v2(lease.databasePath, &connection,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+                (readOnlyForCutover ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
             db = connection
             guard result == SQLITE_OK, let connection else { throw ContinuityStoreError.storage(result) }
             guard sqlite3_compileoption_used("OMIT_LOAD_EXTENSION") == 1,
@@ -48,7 +51,8 @@ public final class ContinuityStore {
                 guard try scalar("PRAGMA application_id") == 0x524D5A43,
                       [1, 2, 3, 4].contains(try scalar("PRAGMA user_version")) else { throw ContinuityStoreError.incompatibleStore }
             }
-            try exec("PRAGMA journal_mode=DELETE")
+            if readOnlyForCutover { try exec("PRAGMA query_only=ON") }
+            else { try exec("PRAGMA journal_mode=DELETE") }
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
             guard try scalar("PRAGMA synchronous") == 3, try scalar("PRAGMA fullfsync") == 1,
@@ -316,7 +320,7 @@ public final class ContinuityStore {
     }
     private func transaction<T>(write: Bool, _ body: () throws -> T) throws -> T {
         guard db != nil else { throw ContinuityStoreError.closed }
-        guard !unavailable else { throw ContinuityStoreError.unavailable }
+        guard !unavailable, !write || !readOnlyForCutover else { throw ContinuityStoreError.unavailable }
         do { try lease.validate() } catch { unavailable = true; throw error }
         try exec(write ? "BEGIN IMMEDIATE" : "BEGIN")
         do {

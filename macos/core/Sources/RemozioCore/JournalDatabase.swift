@@ -14,6 +14,7 @@ public final class JournalDatabase {
     func directoryIdentities() throws -> [ProtectedStorageLease.DirectoryIdentity] {
         try lease.directoryIdentities()
     }
+    let readOnlyForCutover: Bool
     private let lease: ProtectedJournalLease
     private var db: OpaquePointer?
     private var tables: AuditJournalTables?
@@ -52,12 +53,13 @@ public final class JournalDatabase {
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
          maximumCommandSubmissions: Int = 1_000_000, initialAuthority: AuthorityJournalInitialization? = nil,
-         didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }) throws {
-        self.lease = lease
+         didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }, readOnlyForCutover: Bool = false) throws {
+        self.lease = lease; self.readOnlyForCutover = readOnlyForCutover
         self.recordLimits = recordLimits
         self.descriptorLimits = descriptorLimits
         do {
-            guard macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
+            guard !readOnlyForCutover || (!initialize && migrateFromVersion == nil && initialAuthority == nil),
+                  macID.count == 16, accountID.count == 16, busyMilliseconds <= 60_000,
                   maximumConsumptions > 0, maximumConsumptions <= Int(Int32.max),
                   maximumCommandSubmissions > 0, maximumCommandSubmissions <= Int(Int32.max), !(initialize && migrateFromVersion != nil),
                   migrateFromVersion == nil || migrateFromVersion == 1 || migrateFromVersion == 2 || migrateFromVersion == 3 || migrateFromVersion == 4 || migrateFromVersion == 5 || migrateFromVersion == 6 || migrateFromVersion == 7 || migrateFromVersion == 8 || migrateFromVersion == 9 || migrateFromVersion == 10 || migrateFromVersion == 11,
@@ -71,8 +73,9 @@ public final class JournalDatabase {
                 }
             }
             try lease.validate()
+            if readOnlyForCutover { try CutoverSQLitePreflight.validate(path: lease.databasePath, validateLease: lease.validate) }
             var connection: OpaquePointer?
-            let rc = sqlite3_open_v2(lease.databasePath, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+            let rc = sqlite3_open_v2(lease.databasePath, &connection, (readOnlyForCutover ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE) | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
             db = connection
             guard rc == SQLITE_OK, let connection else { throw JournalDatabaseError.storage(rc) }
             try lease.validate()
@@ -84,7 +87,8 @@ public final class JournalDatabase {
             try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmptyStore() }
             else { try validateIdentity(macID: macID, accountID: accountID, version: migrateFromVersion) }
-            try exec("PRAGMA journal_mode=DELETE")
+            if readOnlyForCutover { try exec("PRAGMA query_only=ON") }
+            else { try exec("PRAGMA journal_mode=DELETE") }
             try exec("PRAGMA synchronous=EXTRA")
             try exec("PRAGMA fullfsync=ON")
             guard try text("PRAGMA journal_mode") == "delete", try integer("PRAGMA synchronous") == 3,
@@ -144,6 +148,7 @@ public final class JournalDatabase {
     private func transaction<T>(write: Bool, _ body: (JournalTransaction) throws -> T) throws -> T {
         guard db != nil else { throw JournalDatabaseError.closed }
         guard !unavailable else { throw JournalDatabaseError.unavailable }
+        guard !write || !readOnlyForCutover else { throw JournalDatabaseError.readOnly }
         guard active == nil else { throw JournalDatabaseError.transactionActive }
         try validateLease()
         try exec(write ? "BEGIN IMMEDIATE" : "BEGIN")

@@ -150,7 +150,7 @@ final class GatewayJournalSetupNativeModelTests: XCTestCase {
                 .init(path: job.path, program: job.executablePath, arguments: mode == 3 ? [job.executablePath, "--configuration", "/other.cbor"] : job.arguments,
                     kind: "LaunchDaemon", userName: mode == 1 ? "root" : job.userName, groupName: job.userName,
                     endpoints: mode == 2 ? [configuration.intent.configuration.serviceName] : job.machServices,
-                    properties: mode == 4 ? ["runatload"] : mode == 5 ? ["keepalive"] : [])
+                    properties: mode == 4 ? ["runatload"] : mode == 5 ? ["keepalive"] : [], processID: nil)
             }
             XCTAssertTrue(observation(0).matches(job))
             for mode in 1...5 { XCTAssertFalse(observation(mode).matches(job)) }

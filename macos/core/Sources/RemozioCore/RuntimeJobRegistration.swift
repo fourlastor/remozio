@@ -11,6 +11,7 @@ struct LaunchdJobObservation {
     let groupName: String?
     let endpoints: Set<String>
     let properties: Set<String>
+    let processID: pid_t?
     static func decode(_ bytes: Data, target: String) throws -> Self {
         guard bytes.count <= 65_536, let text = String(data: bytes, encoding: .utf8), !text.utf8.contains(0) else { throw RuntimeActivationError.unavailable }
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
@@ -55,7 +56,7 @@ struct LaunchdJobObservation {
                 guard !sawArguments else { throw RuntimeActivationError.unavailable }
                 inArguments = true; sawArguments = true; continue
             }
-            for key in ["path", "program", "type", "username", "group", "properties"] where line.hasPrefix("\t" + key + " = ") {
+            for key in ["path", "program", "type", "username", "group", "properties", "pid"] where line.hasPrefix("\t" + key + " = ") {
                 guard fields[key] == nil else { throw RuntimeActivationError.unavailable }
                 let value = String(line.dropFirst(key.count + 4))
                 guard !value.isEmpty, value.utf8.count < 4096, !value.contains("\r"), !value.contains("\t") else { throw RuntimeActivationError.unavailable }
@@ -65,9 +66,14 @@ struct LaunchdJobObservation {
         guard !inArguments, !inEndpoints, endpointName == nil, sawArguments, sawEndpoints, let path = fields["path"], let program = fields["program"], let kind = fields["type"] else {
             throw RuntimeActivationError.unavailable
         }
+        var processID: pid_t?
+        if let value = fields["pid"] {
+            guard let parsed = pid_t(value), parsed > 1, value == String(parsed) else { throw RuntimeActivationError.unavailable }
+            processID = parsed
+        }
         return .init(path: path, program: program, arguments: arguments, kind: kind,
             userName: fields["username"], groupName: fields["group"], endpoints: endpoints,
-            properties: Set((fields["properties"] ?? "").components(separatedBy: " | ")))
+            properties: Set((fields["properties"] ?? "").components(separatedBy: " | ")), processID: processID)
     }
     func matches(_ job: InstalledAccountJobManifest) -> Bool {
         let effectiveUser = userName ?? "root"
@@ -80,19 +86,20 @@ struct LaunchdJobObservation {
 
 /// No stop, remove, replacement or blanket launchctl command is exposed here.
 enum RuntimeJobRegistration {
-    enum Observation { case absent, matching, conflicting }
+    enum Observation: Equatable { case absent, matching, conflicting }
     static func ensure(_ job: InstalledAccountJobManifest, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let target = "system/" + job.declaration.label
-        try reconcile(verifyCurrent: verifyCurrent, inspect: {
-            let result = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["print", target])
-            if result.exitCode == 113, let error = String(data: result.errorOutput, encoding: .utf8),
-               error.contains("Could not find service \"" + job.declaration.label + "\"") { return .absent }
-            guard result.exitCode == 0 else { throw RuntimeActivationError.unavailable }
-            return try LaunchdJobObservation.decode(result.output, target: target).matches(job) ? .matching : .conflicting
-        }, bootstrap: {
+        try reconcile(verifyCurrent: verifyCurrent, inspect: { try inspect(job) }, bootstrap: {
             _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
         })
+    }
+    static func inspect(_ job: InstalledAccountJobManifest) throws -> Observation {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let target = "system/" + job.declaration.label
+        let result = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["print", target])
+        if RuntimeJobStopSession.isExactAbsence(result, label: job.declaration.label) { return .absent }
+        guard result.exitCode == 0, result.errorOutput.isEmpty else { throw RuntimeActivationError.unavailable }
+        return try LaunchdJobObservation.decode(result.output, target: target).matches(job) ? .matching : .conflicting
     }
     // Sequencing fixtures do not prove system-domain admission or the loaded process's identity.
     static func reconcile(verifyCurrent: () throws -> Void, inspect: () throws -> Observation,
