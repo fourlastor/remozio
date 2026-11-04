@@ -59,10 +59,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
@@ -151,12 +154,15 @@ internal fun RemozioNavigation(destination: Int, onDestination: (Int) -> Unit, c
     val icons = listOf(R.drawable.ic_requests, R.drawable.ic_macs, R.drawable.ic_audit, R.drawable.ic_settings)
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val expanded = maxWidth >= 600.dp
+        val texts = labels.map { stringResource(it) }
+        val weights = navigationItemWeights(texts, maxWidth)
         Scaffold(bottomBar = {
             if (!expanded) NavigationBar {
                 labels.indices.forEach { index -> NavigationBarItem(
                     selected = destination == index, onClick = { onDestination(index) },
                     icon = { Icon(painterResource(icons[index]), contentDescription = null) },
-                    label = { Text(stringResource(labels[index])) },
+                    label = { Text(texts[index]) },
+                    modifier = Modifier.weight(weights[index]),
                 ) }
             }
         }) { insets ->
@@ -175,6 +181,32 @@ internal fun RemozioNavigation(destination: Int, onDestination: (Int) -> Unit, c
         }
     }
 
+}
+
+/** The space Material's NavigationBar leaves between its items. */
+private val NavigationBarItemSpacing = 8.dp
+
+/**
+ * Material's equal item widths, unless an equal share would break a label inside a word at the current font scale.
+ * Then each item is weighted by its label's single-line width, or by its longest word when single lines do not fit.
+ * The caller's weight replaces the item's own equal weight. Labels keep their text and the user's font scale.
+ */
+@Composable
+private fun navigationItemWeights(texts: List<String>, width: Dp): List<Float> {
+    val measurer = rememberTextMeasurer()
+    val style = MaterialTheme.typography.labelMedium
+    val density = LocalDensity.current
+    return remember(texts, style, density, width) {
+        fun measure(text: String) = measurer.measure(text, style, softWrap = false).size.width.toFloat()
+        val lines = texts.map(::measure)
+        val words = texts.map { text -> text.split(' ').maxOf(::measure) }
+        val room = with(density) { (width - NavigationBarItemSpacing * (texts.size - 1)).toPx() }
+        when {
+            words.all { it <= room / texts.size } -> List(texts.size) { 1f }
+            lines.sum() <= room -> lines
+            else -> words
+        }.map { it.coerceAtLeast(1f) }
+    }
 }
 
 @Composable
