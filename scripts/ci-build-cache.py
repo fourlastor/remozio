@@ -173,6 +173,19 @@ def discovery_paths(inputs):
                     and entry['kind'] == 'file' and entry['mode'] & 0o7111 == 0)}
 
 
+def package_source_file(name, entry):
+    # SwiftPM lists a target's Sources/ and Tests/ directories each time it plans a
+    # build, so adding, removing or renaming an ordinary Swift file there replans
+    # without a clean build. scripts/check-swift-cache.py proves it with stages
+    # that add, rename and remove one. Resource folders are copied as directories,
+    # so they and every other path stay conservative. Xcode projects list their
+    # files in project.pbxproj, which already partitions the compatibility identity.
+    parts = PurePosixPath(name).parts
+    return (entry['kind'] == 'file' and entry['mode'] & 0o7111 == 0 and name.endswith('.swift')
+            and ('Sources' in parts[:-1] or 'Tests' in parts[:-1])
+            and not {'Fixtures', 'Resources'} & set(parts[:-1]))
+
+
 def restore_inputs(root, inputs):
     """Restore only identical regular files. Timestamp collisions require a cold build."""
     if type(inputs) is not dict:
@@ -189,8 +202,12 @@ def restore_inputs(root, inputs):
     current = capture_inputs(root)
     counts = {'restored': 0, 'changed': 0, 'missing': len(inputs.keys() - current.keys()),
               'requires_clean_build': False}
-    # Changes to the file set can escape timestamp-based directory discovery.
-    if discovery_paths(current) != discovery_paths(inputs):
+    # Changes to the file set can escape timestamp-based directory discovery,
+    # except for ordinary Swift files in package Sources/ and Tests/ directories.
+    added = discovery_paths(current) - discovery_paths(inputs)
+    removed = discovery_paths(inputs) - discovery_paths(current)
+    if (not all(package_source_file(name, current[name]) for name in added)
+            or not all(package_source_file(name, inputs[name]) for name in removed)):
         counts['requires_clean_build'] = True
     for name, now in current.items():
         old = inputs.get(name)

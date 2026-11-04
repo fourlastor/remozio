@@ -282,10 +282,56 @@ def experiment(output, report):
         report["stages"]["changed"] = changed_stage
         require(changed_stage["frontendCompileCommands"] > 0,
                 "changed: source recompilation was not observed")
+
+        # Package Swift files added, renamed and removed against the outputs that
+        # were built from the preceding inventory, as a PR restores main's cache.
+        # The renamed file keeps its function name with a new value, so a stale
+        # object from the old path would fail to link or return the old value.
+        report["sourceSetRestores"] = {}
+        extra, extra_test = Path("Sources/CacheValue/Extra.swift"), Path("Tests/CacheValueTests/ExtraTests.swift")
+        moved = Path("Sources/CacheValue/Moved.swift")
+        base = source.read_text()
+        require("{ 3 }" in base, "source-set: unexpected starting source")
+
+        def source_set_stage(name, previous_inputs, mutate, expected, extra_test_expected):
+            mutate()
+            command([git, "add", "-A", "--", "Sources", "Tests"], cwd=fixture, env=env)
+            restore = helper.restore_inputs(fixture, previous_inputs)
+            report["sourceSetRestores"][name] = restore
+            require(not restore.get("requires_clean_build"),
+                    f"{name}: package Swift file-set change required a clean build: {restore}")
+            stage = run_stage(name, fixture, output, swift, env, expected)
+            report["stages"][name] = stage
+            require(stage["frontendCompileCommands"] > 0, f"{name}: changed sources were not recompiled")
+            ran_extra = "CACHE-SMOKE-EXTRA-TEST" in Path(stage["logs"][1]).read_text()
+            require(ran_extra == extra_test_expected,
+                    f"{name}: the added test {'did not run' if extra_test_expected else 'still ran after removal'}")
+            return helper.capture_inputs(fixture)
+
+        def add():
+            (fixture / extra).write_text("func extraValue() -> Int { 40 }\n")
+            (fixture / extra_test).write_text(
+                'import XCTest\nfinal class ExtraTests: XCTestCase {\n'
+                '    func testExtraRuns() { print("CACHE-SMOKE-EXTRA-TEST") }\n}\n')
+            source.write_text(base.replace("{ 3 }", "{ 3 + extraValue() }"))
+
+        def rename():
+            command([git, "mv", "--", str(extra), str(moved)], cwd=fixture, env=env)
+            (fixture / moved).write_text("func extraValue() -> Int { 50 }\n")
+
+        def remove():
+            command([git, "rm", "-qf", "--", str(moved), str(extra_test)], cwd=fixture, env=env)
+            source.write_text(base)
+
+        source_set_inputs = helper.capture_inputs(fixture)
+        source_set_inputs = source_set_stage("source-add", source_set_inputs, add, 43, True)
+        source_set_inputs = source_set_stage("source-rename", source_set_inputs, rename, 53, True)
+        source_set_stage("source-remove", source_set_inputs, remove, 3, False)
         report["passed"] = True
         report["limits"] = ["disposable dependency-free Swift package on the recorded host",
                             "no Xcode DerivedData reuse or timing improvement claim",
-                            "every stage executes both the test and executable"]
+                            "every stage executes both the test and executable",
+                            "source-set stages cover SwiftPM discovery of package Swift files only"]
 
 
 def main():

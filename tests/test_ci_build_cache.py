@@ -97,6 +97,55 @@ class BuildCacheTests(unittest.TestCase):
                     self.track(other)
                 self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
 
+    def test_package_swift_sources_can_be_added_removed_or_renamed_without_discovery(self):
+        existing = self.root / 'pkg/Sources/Lib/Existing.swift'
+        existing.parent.mkdir(parents=True)
+        existing.write_text('let existing = 1\n')
+        self.track(existing)
+        for change in ('added-source', 'added-test', 'removed', 'renamed'):
+            with self.subTest(change=change):
+                captured = CACHE.capture_inputs(self.root)
+                if change == 'added-source':
+                    path = self.root / 'pkg/Sources/Lib/New.swift'
+                elif change == 'added-test':
+                    path = self.root / 'pkg/Tests/LibTests/NewTests.swift'
+                if change.startswith('added'):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text('let added = 2\n')
+                    self.track(path)
+                elif change == 'removed':
+                    subprocess.run(['git', '-C', str(self.root), 'rm', '-qf', '--', 'pkg/Sources/Lib/New.swift'], check=True)
+                else:
+                    subprocess.run(['git', '-C', str(self.root), 'mv', '--', 'pkg/Tests/LibTests/NewTests.swift',
+                                    'pkg/Tests/LibTests/Renamed.swift'], check=True)
+                result = CACHE.restore_inputs(self.root, captured)
+                self.assertFalse(result['requires_clean_build'])
+                self.assertEqual(self.source.stat().st_mtime_ns, captured['source with spaces.swift']['mtime_ns'])
+
+    def test_other_package_file_set_changes_still_require_discovery(self):
+        for name, mode in (('pkg/Sources/Lib/Fixtures/Sample.swift', 0o644), ('pkg/Tests/LibTests/Resources/Sample.swift', 0o644),
+                           ('pkg/Sources/CLib/shim.c', 0o644), ('pkg/Sources/Lib/Data.json', 0o644),
+                           ('pkg/Sources/Lib/Tool.swift', 0o755), ('pkg/Package.swift', 0o644), ('Sources.swift', 0o644)):
+            for change in ('added', 'removed'):
+                with self.subTest(name=name, change=change):
+                    path = self.root / name
+                    if change == 'removed':
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text('// input\n')
+                        path.chmod(mode)
+                        self.track(path)
+                    captured = CACHE.capture_inputs(self.root)
+                    if change == 'added':
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text('// input\n')
+                        path.chmod(mode)
+                        self.track(path)
+                    else:
+                        subprocess.run(['git', '-C', str(self.root), 'rm', '-qf', '--', name], check=True)
+                    self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+                    if change == 'added':
+                        subprocess.run(['git', '-C', str(self.root), 'rm', '-qf', '--', name], check=True)
+
     def test_documentation_changes_retain_outputs_and_full_inventory(self):
         doc = self.root / 'docs/experiments/nested/report.md'
         doc.parent.mkdir(parents=True)
@@ -352,18 +401,21 @@ class BuildCacheTests(unittest.TestCase):
         names = ('scripts/run-linux-new-experiment.py',
                  'experiments/linux-new/Package.swift',
                  'experiments/linux-native-tpm-tls/Package.resolved',
-                 'experiments/linux-native-tpm-tls/Sources/NativeTPMProbe/Unexpected.swift',
                  'experiments/linux-storage-lease/future.c',
-                 'protocol/swift/Sources/RemozioProtocol/LinuxCapture.swift',
-                 'host/shared-core/Sources/RemozioHostCore/LinuxAdapter.swift',
                  'scripts/generate-linux-capture-fixtures.py')
-        for name in names:
+        # A new Swift file in a package's Sources/ replans without a clean build wherever it lives; the Linux-only
+        # exemption is not what admits it.
+        sources = ('experiments/linux-native-tpm-tls/Sources/NativeTPMProbe/Unexpected.swift',
+                   'protocol/swift/Sources/RemozioProtocol/LinuxCapture.swift',
+                   'host/shared-core/Sources/RemozioHostCore/LinuxAdapter.swift')
+        for name in names + sources:
             with self.subTest(name=name):
                 captured = CACHE.capture_inputs(self.root)
                 path = self.root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text('new tracked input'); path.chmod(0o644); self.track(path)
-                self.assertTrue(CACHE.restore_inputs(self.root, captured)['requires_clean_build'])
+                self.assertEqual(CACHE.restore_inputs(self.root, captured)['requires_clean_build'], name in names)
+                self.assertNotIn(name, CACHE.LINUX_ONLY_INPUT_MODES)
                 path.unlink()
 
     def test_mac_scripts_workflows_and_shared_manifests_partition_settings(self):
