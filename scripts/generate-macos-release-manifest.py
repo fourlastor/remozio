@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the app Info.plist input from signed helper products, before app signing."""
+"""Generate the app Info.plist input from signed helper products, before app signing (cache trial edit)."""
 import os
 import importlib.util
 from pathlib import Path
