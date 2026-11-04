@@ -144,8 +144,11 @@ remozio_tls_context_free(client)
 let bootElapsed = endBoot - startBoot, monotonicElapsed = endMonotonic - startMonotonic
 let suspended = bootElapsed - monotonicElapsed
 let deadlineMs = waitSeconds * 1000
-// Evidence that the deadline expired while suspended and the read ended promptly after resume.
-let spanned = suspended >= 10_000 && monotonicElapsed < deadlineMs && (resumeBoot.map { $0 >= deadline } ?? false)
+// The heartbeat's largest jump is the suspension: it began at resumeBoot - jump and ended at resumeBoot. Whether it
+// spanned the deadline depends only on those two points, not on awake time before the read returned, so a read that
+// wrongly waits out its remaining awake time after resume is still spanned and fails the post-resume check below.
+let suspendedAt = resumeBoot.map { $0 - jump }
+let spanned = jump >= 10_000 && (suspendedAt.map { $0 < deadline } ?? false) && (resumeBoot.map { $0 >= deadline } ?? false)
 let afterResume = resumeBoot.map { endBoot - $0 }
 let verdict: String
 if status != REMOZIO_TLS_TIMEOUT || bootElapsed < deadlineMs { verdict = "failed" }
@@ -176,6 +179,7 @@ let evidence: [String: Any] = [
     "realtimeElapsedMs": endReal - startReal,
     "suspendedMs": suspended,
     "largestHeartbeatJumpMs": jump,
+    "suspensionStartedBeforeDeadline": suspendedAt.map { $0 < deadline } as Any,
     "resumeAfterDeadline": resumeBoot.map { $0 >= deadline } as Any,
     "readEndedAfterResumeMs": afterResume as Any,
     "deadlineExpiredDuringSuspend": spanned,

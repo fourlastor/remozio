@@ -73,10 +73,11 @@ so the deadline passes during the suspension. A heartbeat thread finds the resum
 The JSON records the clock readings, the read status and the kernel release; no host name, address, key or
 certificate. The verdict is:
 
-- `passed` (exit 0): the read timed out, at least 10 s of suspension separated the two clocks, the deadline fell
-  inside the suspension (less than the wait elapsed on `CLOCK_MONOTONIC`), and the read ended within 5 s of resume;
-- `inconclusive` (exit 3): the read timed out, but the suspension did not span the deadline. Run it again;
-- `failed` (exit 1): any other status, an early return, or a read that ended more than 5 s after resume.
+- `passed` (exit 0): the read timed out, a suspension of at least 10 s began before the deadline and ended after it,
+  and the read ended within 5 s of resume;
+- `inconclusive` (exit 3): the read timed out, but no suspension spanned the deadline. Run it again;
+- `failed` (exit 1): any other status, an early return, or a read that ended more than 5 s after a spanning resume.
+  A read that waits out its remaining awake time after resume fails here, whatever its total awake time.
 
 It covers a read deadline only. The handshake uses the same wait but is capped at 60 s. One run is evidence for that
 host, kernel and sleep state only. Until an attended run passes, host suspend is not established
