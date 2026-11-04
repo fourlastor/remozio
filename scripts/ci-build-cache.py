@@ -32,6 +32,21 @@ CACHE_PATHS = {
 # product. Unknown new paths and unexpected file types/modes remain conservative.
 # Re-audit if a Mac build starts consuming one; workflow/build-script changes
 # continue to partition the compatibility identity.
+# Exact scripts that cached Mac builds consume only as declared inputs of an Xcode
+# shell phase in macos/app, or as Python loaded fresh on every run. They define
+# no compiler command, so editing one keeps the compatibility identity. They stay
+# in the content key, manifest, timestamp and save-stability checks: a changed
+# script keeps its checkout timestamp, so Xcode's dependency analysis reruns the
+# phase. tests/test_ci_build_cache.py requires each to remain a declared input.
+#   generate-macos-release-manifest.py: "Generate Signed Release Metadata" phase
+#     (dependency-analysed); run-macos-release-signing-experiment.py imports it.
+#   cloudflared_artifact.py: the same phase loads it, an alwaysOutOfDate phase
+#     runs it, and check-macos-app.py imports it.
+XCODE_PHASE_INPUT_MODES = {
+    'scripts/cloudflared_artifact.py': 0o644,
+    'scripts/generate-macos-release-manifest.py': 0o644,
+}
+
 LINUX_ONLY_INPUT_MODES = {
     'experiments/linux-approval-command/Package.resolved': 0o644,
     'experiments/linux-approval-command/Package.swift': 0o644,
@@ -222,11 +237,17 @@ def restore_inputs(root, inputs):
     return counts
 
 
+def xcode_phase_input(name, entry):
+    return (name in XCODE_PHASE_INPUT_MODES and entry['kind'] == 'file'
+            and entry['mode'] == XCODE_PHASE_INPUT_MODES[name])
+
+
 def settings_inventory(inputs):
     # Changed commands, package graphs, lockfiles, Xcode settings, or cache code
     # start a new compatibility namespace, including fallback restores.
     return content_inventory({name: entry for name, entry in inputs.items()
-        if not linux_only_input(name, entry) and (name.startswith(('scripts/', '.github/workflows/'))
+        if not linux_only_input(name, entry) and not xcode_phase_input(name, entry)
+        and (name.startswith(('scripts/', '.github/workflows/'))
         or Path(name).name in ('Package.swift', 'Package.resolved')
         or '.xcodeproj/' in name or '.xcworkspace/' in name or name.endswith('.xcconfig'))})
 
