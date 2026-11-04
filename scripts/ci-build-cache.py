@@ -77,6 +77,7 @@ LINUX_ONLY_INPUT_MODES = {
     'experiments/linux-pairing-peer/Sources/LinuxPairAuthority/PairingIdentity.swift': 0o644,
     'experiments/linux-pairing-peer/Sources/LinuxPairAuthority/TLSPairingStream.swift': 0o644,
     'experiments/linux-pairing-peer/Sources/remozio-linux-pair/main.swift': 0o644,
+    'experiments/linux-pairing-peer/Sources/remozio-tls-suspend-probe/main.swift': 0o644,
     'experiments/linux-pairing-peer/Tests/LinuxPairAuthorityTests/PairingAuthoritySessionTests.swift': 0o644,
     'experiments/linux-pairing-peer/Tests/LinuxPairAuthorityTests/PairingIdentityTests.swift': 0o644,
     'experiments/linux-pairing-peer/Tests/LinuxPairingTLSTests/PairingTLSTests.swift': 0o644,

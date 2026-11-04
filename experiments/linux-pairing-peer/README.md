@@ -51,9 +51,37 @@ It is not part of the adapter. With it, the tests show:
 
 The tests also cover wrong ALPN, TLS 1.2, missing, wrong-curve, expired and not-yet-valid client and server
 certificates, a silent peer, cancellation during handshake and read, a stalled write, peer close and descriptor
-leaks. They inspect the timer clock, absolute arming, handshake cap and descriptor cleanup through
-`/proc/self/fdinfo`. An actual host suspend/resume test remains pending in
-[issue 496](https://github.com/rock3r/remozio/issues/496).
+leaks. Every rejection case, including both directions of the post-handshake rejection, closes both outcomes and
+requires the process to hold exactly the descriptors it held before. They inspect the timer clock, absolute arming,
+handshake cap and descriptor cleanup through `/proc/self/fdinfo`.
+
+### Attended host suspend probe (`remozio-tls-suspend-probe`)
+
+The tests show that each wait arms an absolute `CLOCK_BOOTTIME` timer. They do not suspend the host. That needs an
+operator, so the check script builds this probe and never runs it.
+
+The probe completes one loopback handshake, then waits in a server read on a silent peer with a deadline on
+`CLOCK_BOOTTIME`. The operator suspends the host before the printed time and resumes it after the second printed time,
+so the deadline passes during the suspension. A heartbeat thread finds the resume from the jump between
+`CLOCK_BOOTTIME` and `CLOCK_MONOTONIC`.
+
+```sh
+./scripts/check-linux-pairing-peer.sh
+.build/linux-swift/pairing-peer/build/debug/remozio-tls-suspend-probe --wait-seconds 120 --output suspend-probe.json
+```
+
+The JSON records the clock readings, the read status and the kernel release; no host name, address, key or
+certificate. The verdict is:
+
+- `passed` (exit 0): the read timed out, a suspension of at least 10 s began before the deadline and ended after it,
+  and the read ended within 5 s of resume;
+- `inconclusive` (exit 3): the read timed out, but no suspension spanned the deadline. Run it again;
+- `failed` (exit 1): any other status, an early return, or a read that ended more than 5 s after a spanning resume.
+  A read that waits out its remaining awake time after resume fails here, whatever its total awake time.
+
+It covers a read deadline only. The handshake uses the same wait but is capped at 60 s. One run is evidence for that
+host, kernel and sleep state only. Until an attended run passes, host suspend is not established
+([issue 496](https://github.com/rock3r/remozio/issues/496)).
 
 ## Durable commit state (`PairingCommitState`)
 

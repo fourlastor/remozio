@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "CPairingTLS", targets: ["CPairingTLS"]),
         .library(name: "PairingCommitState", targets: ["PairingCommitState"]),
         .executable(name: "remozio-linux-pair", targets: ["remozio-linux-pair"]),
+        .executable(name: "remozio-tls-suspend-probe", targets: ["remozio-tls-suspend-probe"]),
     ],
     dependencies: [
         .package(path: "../../protocol/swift"),
@@ -32,6 +33,9 @@ let package = Package(
             "CPairingTLS", "LinuxPairAuthority", "PairingCommitState",
             .product(name: "RemozioProtocol", package: "swift"),
         ], swiftSettings: [.swiftLanguageMode(.v5)]),
+        // Attended evidence only: a read deadline across a real host suspend. CI builds it and never runs it.
+        .executableTarget(name: "remozio-tls-suspend-probe", dependencies: ["CPairingTLS"],
+                          swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "LinuxPairAuthorityTests", dependencies: [
             "LinuxPairAuthority", "PairingCommitState", "CPairingTLS",
             .product(name: "RemozioProtocol", package: "swift"),
