@@ -21,6 +21,6 @@
       "LICENSE"
     ]
   },
-  "hung_check_minutes": 80,
+  "hung_check_minutes": 110,
   "max_session_minutes": 120
 }
