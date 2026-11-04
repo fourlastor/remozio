@@ -176,6 +176,66 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    /// The exported endpoint must mint this authorization on its authenticated invocation, before task dispatch.
+    /// Recovery checks the account independently; normal setup continues to enforce its startup fence.
+    func acquireAuditUpgradeScope(authorization: SetupAuditUpgradeAuthorization) throws -> SetupAuditUpgradeScope {
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        return try lock.withLock {
+            guard !closed, !closing, getpid() == processID, asynchronousWork.isIdle else { throw AdministrativeSetupError.unavailable }
+            try authorization.validate()
+            let reply = try setupReplyWork.admit()
+            let admission: SetupOwnerAsyncWork.Token
+            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            do {
+                let values = try machines.use { machine -> (AccountPreparationIntent, InstallationInventory, AuthorityInitializationIntent) in
+                    let inventory = try currentInventory(machine)
+                    guard let account = try machine.accountPreparation(ownerUID: authorization.callerUID),
+                          account.ownerUID == authorization.callerUID, account.storagePrepared,
+                          account.macID == inventory.macID, account.installationID == inventory.installationID,
+                          account.releaseDigest == inventory.releaseDigest,
+                          let policy = accountCodePolicy, try account.initialAuthority.codePolicy.bytes == policy.bytes,
+                          let initialization = try machine.initialization(accountID: account.accountID), initialization.complete else {
+                        throw AdministrativeSetupError.wrongAccount
+                    }
+                    try LocalAccountDirectory.validateOwnership(lookupAccount(authorization.callerUID),
+                        uid: authorization.callerUID, directoryID: account.directoryID)
+                    try machine.validateAccountPreparation(account)
+                    return (account, inventory, initialization)
+                }
+                let (account, inventory, initialization) = values
+                func verify() throws {
+                    try self.lock.withLock {
+                        guard !self.closed, !self.closing, getpid() == self.processID,
+                              self.asynchronousWork.permits(admission), self.setupReplyWork.permits(reply) else {
+                            throw AdministrativeSetupError.unavailable
+                        }
+                        try authorization.validate(); try self.releaseActivity?.validate()
+                        try self.verifyHost(inventory)
+                        try LocalAccountDirectory.validateOwnership(self.lookupAccount(authorization.callerUID),
+                            uid: authorization.callerUID, directoryID: account.directoryID)
+                    }
+                }
+                try verify()
+                return SetupAuditUpgradeScope(account: account, inventory: inventory, initialization: initialization,
+                    authorization: authorization, verifyLease: verify, access: { body in
+                        try self.lock.withLock {
+                            try verify()
+                            try self.machines.use { machine in
+                                guard let current = try machine.inventory(), current.installationID == inventory.installationID,
+                                      current.macID == inventory.macID, current.releaseDigest == inventory.releaseDigest,
+                                      current.bundlePath == inventory.bundlePath,
+                                      try machine.accountPreparation(ownerUID: authorization.callerUID) == account,
+                                      try machine.initialization(accountID: account.accountID) == initialization else {
+                                    throw AdministrativeSetupError.changedInstallation
+                                }
+                                try verify(); try body(machine); try verify()
+                            }
+                        }
+                    }, closeAdmission: { admission.close(); reply.close() })
+            } catch { admission.close(); reply.close(); throw error }
+        }
+    }
+
     private func withMachine<Value>(admission: SetupOwnerAsyncWork.Token? = nil,
                                     _ body: (PreparationIntentStore) throws -> Value) throws -> Value {
         try lock.withLock {
