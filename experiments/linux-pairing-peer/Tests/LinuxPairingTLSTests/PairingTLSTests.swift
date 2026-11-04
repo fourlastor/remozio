@@ -92,6 +92,18 @@ final class PairingTLSTests: XCTestCase {
         return remozio_tls_client_context_new(&options, nil, 0, nil, 0)!
     }
 
+    /// Runs one rejection case, then closes every connection it returned and requires the process to hold exactly the
+    /// descriptors it held before. Each case closes both handshake outcomes, whichever side rejected.
+    private func assertDescriptorsBalanced(_ label: String = "", file: StaticString = #filePath, line: UInt = #line,
+                                           _ body: () -> [Outcome]) {
+        let before = openDescriptors()
+        for outcome in body() {
+            remozio_tls_connection_close(outcome.connection)
+            outcome.connection = nil
+        }
+        XCTAssertEqual(openDescriptors(), before, "descriptors after \(label)", file: file, line: line)
+    }
+
     /// Runs the server half on a queue and the client half here; returns (server, client).
     private func handshake(server: OpaquePointer, client: OpaquePointer, serverMs: Int64 = 5000, clientMs: Int64 = 5000,
                            serverCancel: Int32 = -1, drainMs: Int64 = 300) -> (Outcome, Outcome) {
@@ -240,10 +252,12 @@ final class PairingTLSTests: XCTestCase {
             return clientContext(.make(), options: options)
         }
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, c) = handshake(server: server, client: client)
-        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-        XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
-        XCTAssertNil(s.connection)
+        assertDescriptorsBalanced("wrong ALPN") {
+            let (s, c) = handshake(server: server, client: client)
+            XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+            XCTAssertNil(s.connection)
+            return [s, c]
+        }
     }
 
     func testMissingALPNIsRejected() {
@@ -252,9 +266,11 @@ final class PairingTLSTests: XCTestCase {
         options.offer_no_alpn = 1
         let client = clientContext(.make(), options: options)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, c) = handshake(server: server, client: client)
-        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-        XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+        assertDescriptorsBalanced("missing ALPN") {
+            let (s, c) = handshake(server: server, client: client)
+            XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+            return [s, c]
+        }
     }
 
     func testTLS12ClientIsRejected() {
@@ -264,27 +280,33 @@ final class PairingTLSTests: XCTestCase {
         options.max_version = 0x0303
         let client = clientContext(.make(), options: options)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, c) = handshake(server: server, client: client)
-        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-        XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+        assertDescriptorsBalanced("TLS 1.2") {
+            let (s, c) = handshake(server: server, client: client)
+            XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+            return [s, c]
+        }
     }
 
     func testMissingClientCertificateIsRejected() {
         let server = serverContext(.make())
         let client = clientContext(nil)
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, c) = handshake(server: server, client: client)
-        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-        XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+        assertDescriptorsBalanced("missing client certificate") {
+            let (s, c) = handshake(server: server, client: client)
+            XCTAssertEqual(s.status, REMOZIO_TLS_HANDSHAKE_FAILED)
+            return [s, c]
+        }
     }
 
     func testNonP256ClientCertificateIsRejected() {
         let server = serverContext(.make())
         let client = clientContext(.make(curve: "P-384"))
         defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-        let (s, c) = handshake(server: server, client: client)
-        defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-        XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+        assertDescriptorsBalanced("P-384 client") {
+            let (s, c) = handshake(server: server, client: client)
+            XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            return [s, c]
+        }
     }
 
     func testExpiredAndNotYetValidClientCertificatesAreRejected() {
@@ -293,9 +315,11 @@ final class PairingTLSTests: XCTestCase {
             let server = serverContext(.make())
             let client = clientContext(.make(before: before, after: after))
             defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-            let (s, c) = handshake(server: server, client: client)
-            defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-            XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            assertDescriptorsBalanced("client validity \(before)...\(after)") {
+                let (s, c) = handshake(server: server, client: client)
+                XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+                return [s, c]
+            }
         }
     }
 
@@ -309,10 +333,12 @@ final class PairingTLSTests: XCTestCase {
         for identity in identities {
             let server = serverContext(identity), client = clientContext(.make())
             defer { remozio_tls_context_free(server); remozio_tls_context_free(client) }
-            let (s, c) = handshake(server: server, client: client)
-            defer { remozio_tls_connection_close(s.connection); remozio_tls_connection_close(c.connection) }
-            XCTAssertEqual(c.status, REMOZIO_TLS_PEER_CERTIFICATE)
-            XCTAssertNil(c.connection)
+            assertDescriptorsBalanced("invalid server certificate") {
+                let (s, c) = handshake(server: server, client: client)
+                XCTAssertEqual(c.status, REMOZIO_TLS_PEER_CERTIFICATE)
+                XCTAssertNil(c.connection)
+                return [s, c]
+            }
         }
     }
 
@@ -539,16 +565,20 @@ final class PairingTLSTests: XCTestCase {
         for sameName in [false, true] {
             let issued = Identity.issued(sameName: sameName)
             let server = serverContext(.make()), client = clientContext(issued)
-            let (s, c) = handshake(server: server, client: client)
-            XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE, "client leaf, sameName \(sameName)")
-            XCTAssertNil(s.connection)
-            remozio_tls_connection_close(c.connection)
+            assertDescriptorsBalanced("issued client leaf, sameName \(sameName)") {
+                let (s, c) = handshake(server: server, client: client)
+                XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE, "client leaf, sameName \(sameName)")
+                XCTAssertNil(s.connection)
+                return [s, c]
+            }
 
             let issuedServer = serverContext(issued), plainClient = clientContext(.make())
-            let (s2, c2) = handshake(server: issuedServer, client: plainClient)
-            XCTAssertEqual(c2.status, REMOZIO_TLS_PEER_CERTIFICATE, "server leaf, sameName \(sameName)")
-            XCTAssertNil(c2.connection)
-            remozio_tls_connection_close(s2.connection)
+            assertDescriptorsBalanced("issued server leaf, sameName \(sameName)") {
+                let (s2, c2) = handshake(server: issuedServer, client: plainClient)
+                XCTAssertEqual(c2.status, REMOZIO_TLS_PEER_CERTIFICATE, "server leaf, sameName \(sameName)")
+                XCTAssertNil(c2.connection)
+                return [s2, c2]
+            }
             for context in [server, client, issuedServer, plainClient] { remozio_tls_context_free(context) }
         }
     }
@@ -561,11 +591,17 @@ final class PairingTLSTests: XCTestCase {
             remozio_tls_context_free(server); remozio_tls_context_free(client)
             remozio_test_context_free(chainedClient); remozio_test_context_free(chainedServer)
         }
-        let (s, _, session) = rawClient(chainedClient, against: server)
-        remozio_test_session_free(session)
-        XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
-        let (_, c) = adapterClient(client, against: chainedServer)
-        XCTAssertEqual(c.status, REMOZIO_TLS_PEER_CERTIFICATE)
+        assertDescriptorsBalanced("chained raw client") {
+            let (s, c, session) = rawClient(chainedClient, against: server)
+            remozio_test_session_free(session)
+            XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            return [s, c]
+        }
+        assertDescriptorsBalanced("chained raw server") {
+            let (s, c) = adapterClient(client, against: chainedServer)
+            XCTAssertEqual(c.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            return [s, c]
+        }
     }
 
     func testALPNListsWithExtraProtocolsAreRejected() {
@@ -579,11 +615,14 @@ final class PairingTLSTests: XCTestCase {
         ]
         for (names, expected) in cases {
             let rawClientContext = rawContext(server: false, .make(), alpn: alpnWire(names))
-            let (s, c, session) = rawClient(rawClientContext, against: server)
-            remozio_test_session_free(session)
-            remozio_test_context_free(rawClientContext)
-            XCTAssertEqual(s.status, expected, "\(names)")
-            XCTAssertEqual(c.status == REMOZIO_TLS_OK, expected == REMOZIO_TLS_OK, "\(names)")
+            defer { remozio_test_context_free(rawClientContext) }
+            assertDescriptorsBalanced("ALPN \(names)") {
+                let (s, c, session) = rawClient(rawClientContext, against: server)
+                remozio_test_session_free(session)
+                XCTAssertEqual(s.status, expected, "\(names)")
+                XCTAssertEqual(c.status == REMOZIO_TLS_OK, expected == REMOZIO_TLS_OK, "\(names)")
+                return [s, c]
+            }
         }
     }
 
@@ -592,20 +631,24 @@ final class PairingTLSTests: XCTestCase {
         // judges the server's. Either rejection closes the transport without an alert, so the rejected side first
         // sees an accepted connection, then CLOSED. Accept/connect success is local acceptance only.
         let server = serverContext(.make()), wrongCurveClient = clientContext(.make(curve: "P-384"))
-        let (s, c) = handshake(server: server, client: wrongCurveClient, drainMs: 5000)
-        XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
-        XCTAssertEqual(c.status, REMOZIO_TLS_OK)
-        XCTAssertEqual(c.firstRead, REMOZIO_TLS_CLOSED)
-        remozio_tls_connection_close(c.connection)
+        assertDescriptorsBalanced("server rejects after the client finished") {
+            let (s, c) = handshake(server: server, client: wrongCurveClient, drainMs: 5000)
+            XCTAssertEqual(s.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            XCTAssertEqual(c.status, REMOZIO_TLS_OK)
+            XCTAssertEqual(c.firstRead, REMOZIO_TLS_CLOSED)
+            return [s, c]
+        }
 
         let wrongCurveServer = serverContext(.make(curve: "P-384")), client = clientContext(.make())
-        let (s2, c2) = handshake(server: wrongCurveServer, client: client)
-        XCTAssertEqual(c2.status, REMOZIO_TLS_PEER_CERTIFICATE)
-        XCTAssertEqual(s2.status, REMOZIO_TLS_OK)
-        if let connection = s2.connection {
-            var byte: UInt8 = 0, count = 0
-            XCTAssertEqual(remozio_tls_read(connection, &byte, 1, -1, deadline(5000), &count), REMOZIO_TLS_CLOSED)
-            remozio_tls_connection_close(connection)
+        assertDescriptorsBalanced("client rejects after the server accepted") {
+            let (s2, c2) = handshake(server: wrongCurveServer, client: client)
+            XCTAssertEqual(c2.status, REMOZIO_TLS_PEER_CERTIFICATE)
+            XCTAssertEqual(s2.status, REMOZIO_TLS_OK)
+            if let connection = s2.connection {
+                var byte: UInt8 = 0, count = 0
+                XCTAssertEqual(remozio_tls_read(connection, &byte, 1, -1, deadline(5000), &count), REMOZIO_TLS_CLOSED)
+            }
+            return [s2, c2]
         }
         for context in [server, wrongCurveClient, wrongCurveServer, client] { remozio_tls_context_free(context) }
     }

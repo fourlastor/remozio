@@ -26,3 +26,5 @@ set -- --package-path experiments/linux-pairing-peer \
 swift test "$@"
 # The JVM loopback test (:phone-core:linuxPairToolTest) runs this binary from $work_dir/build/debug.
 swift build "$@" --product remozio-linux-pair
+# Built so CI compiles it; run it only in an attended session (experiments/linux-pairing-peer/README.md).
+swift build "$@" --product remozio-tls-suspend-probe
