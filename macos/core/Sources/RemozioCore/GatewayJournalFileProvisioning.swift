@@ -160,7 +160,7 @@ enum GatewayJournalFileProvisioning {
         }
         return Result(identity: identity, created: false)
     }
-    private static func inspect(parent: Int32, name: String, directory: Int32, writer: Int32, database: Int32,
+    static func inspect(parent: Int32, name: String, directory: Int32, writer: Int32, database: Int32,
                                 serviceUID: uid_t, serviceGID: gid_t, processOwner: uid_t, requireEmpty: Bool) throws -> GatewayJournalFileIdentity {
         let d = try metadata(directory, parent: parent, name: name, directory: true, owner: serviceUID, group: serviceGID, ancestor: processOwner)
         let w = try metadata(writer, parent: directory, name: writerName, directory: false, owner: serviceUID, group: serviceGID, ancestor: processOwner)

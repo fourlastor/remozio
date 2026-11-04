@@ -70,6 +70,21 @@ final class RuntimeJobRegistrationTests: XCTestCase {
             XCTAssertFalse(try LaunchdJobObservation.decode(Data(changed.utf8), target: target).matches(job))
         }
     }
+    func testProcessPIDIsOptionalCanonicalAndNeverConfersExitEvidence() throws {
+        let job = try job(), original = output(job), target = "system/" + job.declaration.label
+        XCTAssertNil(try LaunchdJobObservation.decode(Data(original.utf8), target: target).processID)
+        let withPID = original.replacingOccurrences(of: "\tstate = waiting", with: "\tstate = running\n\tpid = 123")
+        let observed = try LaunchdJobObservation.decode(Data(withPID.utf8), target: target)
+        XCTAssertEqual(observed.processID, 123); XCTAssertTrue(observed.matches(job))
+        XCTAssertEqual(try RuntimeJobStopSession.classify(.init(exitCode: 0, output: Data(withPID.utf8), errorOutput: Data()), job: job), .matching(123))
+        XCTAssertEqual(try RuntimeJobStopSession.classify(.init(exitCode: 0, output: Data(original.utf8), errorOutput: Data()), job: job), .matching(nil))
+        let conflicting = withPID.replacingOccurrences(of: "program = " + job.executablePath, with: "program = /usr/bin/true")
+        XCTAssertEqual(try RuntimeJobStopSession.classify(.init(exitCode: 0, output: Data(conflicting.utf8), errorOutput: Data()), job: job), .conflicting)
+        for value in ["0", "1", "-1", "+123", "0123", "2147483648", "not-a-pid"] {
+            XCTAssertThrowsError(try LaunchdJobObservation.decode(Data(withPID.replacingOccurrences(of: "pid = 123", with: "pid = " + value).utf8), target: target))
+        }
+        XCTAssertThrowsError(try LaunchdJobObservation.decode(Data(withPID.replacingOccurrences(of: "\tpid = 123", with: "\tpid = 123\n\tpid = 456").utf8), target: target))
+    }
     func testMatchingRegistrationDoesNotBootstrapOrMutateTheExistingJob() throws {
         var checks = 0
         try RuntimeJobRegistration.reconcile(verifyCurrent: { checks += 1 }, inspect: { .matching },
