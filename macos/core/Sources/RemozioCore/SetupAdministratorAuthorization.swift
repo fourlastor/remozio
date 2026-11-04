@@ -95,6 +95,11 @@ enum SetupAdministratorNative {
         }
     }
     static func validate(externalForm: Data) throws {
+        let reference = try importCurrentRights(externalForm: externalForm)
+        _ = AuthorizationFree(reference, [])
+    }
+    /// Imports only existing rights. The caller owns the reference and must not persist the external form.
+    static func importCurrentRights(externalForm: Data) throws -> AuthorizationRef {
         guard externalForm.count == MemoryLayout<AuthorizationExternalForm>.size else {
             throw SetupAdministratorAuthorizationError.invalidExternalForm
         }
@@ -104,10 +109,10 @@ enum SetupAdministratorNative {
         var reference: AuthorizationRef?
         try status(AuthorizationCreateFromExternalForm(&form, &reference))
         guard let reference else { throw SetupAdministratorAuthorizationError.invalidExternalForm }
-        defer { _ = AuthorizationFree(reference, []) }
-        // No interaction, extension, partial rights or preauthorization in the helper.
-        try copyRights(reference, flags: [])
-        try validatePolicy()
+        do {
+            // No interaction, extension, partial rights or preauthorization in the helper.
+            try copyRights(reference, flags: []); try validatePolicy(); return reference
+        } catch { _ = AuthorizationFree(reference, []); throw error }
     }
     static func validatePolicy() throws {
         var definition: CFDictionary?
