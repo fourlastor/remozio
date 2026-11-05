@@ -27,11 +27,15 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let auditUpgrades: [RuntimeAuditUpgradeRecord]
         let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
         let auditCutovers: [RuntimeAuditUpgradeCutoverRecord]
+        /// Canonical update admission registration bytes at schema 16 and later, so a registration change makes earlier inputs stale.
+        let updateAdmissionRegistration: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
-             auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = []) {
+             auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
+             updateAdmissionRegistration: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
+            self.updateAdmissionRegistration = updateAdmissionRegistration
         }
     }
     let inputs: Inputs
@@ -51,6 +55,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         if inputs.schemaVersion >= 15 {
             for item in try UpdateSchedulingCandidateRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 16 {
+            for item in try UpdateAdmissionRegistrationRecord.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
