@@ -53,6 +53,11 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
         self.entries = entries.sorted { $0.role.rawValue < $1.role.rawValue }
     }
 
+    /// Keeps the retained format while preparing changed values. The owner must separately validate a policy successor.
+    func retainingFormat(with entries: [AuthorityCodeEntry]) throws -> Self {
+        try .init(entries: entries, formatVersion: formatVersion)
+    }
+
     func requireSuccessor(of previous: Self) throws {
         guard formatVersion >= previous.formatVersion else { throw AuthorityCodePolicyError.rollback }
         for old in previous.entries {
