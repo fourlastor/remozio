@@ -14,6 +14,7 @@ import kotlinx.cinterop.value
 import platform.CoreCrypto.CC_SHA256
 import platform.CoreCrypto.CC_SHA256_DIGEST_LENGTH
 import platform.CoreFoundation.CFDataCreate
+import platform.CoreFoundation.CFDataRef
 import platform.CoreFoundation.CFDictionaryAddValue
 import platform.CoreFoundation.CFDictionaryCreateMutable
 import platform.CoreFoundation.CFNumberCreate
@@ -22,11 +23,14 @@ import platform.CoreFoundation.kCFNumberIntType
 import platform.CoreFoundation.kCFTypeDictionaryKeyCallBacks
 import platform.CoreFoundation.kCFTypeDictionaryValueCallBacks
 import platform.Security.SecKeyCreateWithData
+import platform.Security.SecKeyRef
+import platform.Security.SecKeyVerifySignature
 import platform.Security.kSecAttrKeyClass
 import platform.Security.kSecAttrKeyClassPublic
 import platform.Security.kSecAttrKeySizeInBits
 import platform.Security.kSecAttrKeyType
 import platform.Security.kSecAttrKeyTypeECSECPrimeRandom
+import platform.Security.kSecKeyAlgorithmECDSASignatureMessageX962SHA256
 import platform.posix.uint8_tVar
 
 internal actual fun sha256(input: ByteArray): ByteArray {
@@ -43,25 +47,45 @@ internal actual fun sha256(input: ByteArray): ByteArray {
 /** Security imports the point with corecrypto, which rejects coordinates at or above p and off-curve points. */
 internal actual fun pairingPoint(bytes: ByteArray) {
     require(bytes.size == 65 && bytes[0] == 4.toByte())
-    val accepted = memScoped {
-        // A failed allocation rejects the point instead of passing null to Security or CFRelease.
-        val data = bytes.usePinned { CFDataCreate(null, it.addressOf(0).reinterpret(), bytes.size.toLong()) }
-        val size = alloc<IntVar>().apply { value = 256 }
-        val bits = CFNumberCreate(null, kCFNumberIntType, size.ptr)
-        val attributes = CFDictionaryCreateMutable(null, 3, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)
-        val key = if (data != null && bits != null && attributes != null) {
-            CFDictionaryAddValue(attributes, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom)
-            CFDictionaryAddValue(attributes, kSecAttrKeyClass, kSecAttrKeyClassPublic)
-            CFDictionaryAddValue(attributes, kSecAttrKeySizeInBits, bits)
-            SecKeyCreateWithData(data, attributes, null)
-        } else {
-            null
-        }
-        key?.let { CFRelease(it) }
-        attributes?.let { CFRelease(it) }; bits?.let { CFRelease(it) }; data?.let { CFRelease(it) }
-        key != null
+    val key = p256PublicKey(bytes)
+    require(key != null)
+    CFRelease(key)
+}
+
+/** Returns a retained key that the caller releases, or null when Security rejects the point. */
+private fun p256PublicKey(bytes: ByteArray): SecKeyRef? = memScoped {
+    // A failed allocation rejects the point instead of passing null to Security or CFRelease.
+    val data = cfData(bytes)
+    val size = alloc<IntVar>().apply { value = 256 }
+    val bits = CFNumberCreate(null, kCFNumberIntType, size.ptr)
+    val attributes = CFDictionaryCreateMutable(null, 3, kCFTypeDictionaryKeyCallBacks.ptr, kCFTypeDictionaryValueCallBacks.ptr)
+    val key = if (data != null && bits != null && attributes != null) {
+        CFDictionaryAddValue(attributes, kSecAttrKeyType, kSecAttrKeyTypeECSECPrimeRandom)
+        CFDictionaryAddValue(attributes, kSecAttrKeyClass, kSecAttrKeyClassPublic)
+        CFDictionaryAddValue(attributes, kSecAttrKeySizeInBits, bits)
+        SecKeyCreateWithData(data, attributes, null)
+    } else {
+        null
     }
-    require(accepted)
+    attributes?.let { CFRelease(it) }; bits?.let { CFRelease(it) }; data?.let { CFRelease(it) }
+    key
+}
+
+private fun cfData(bytes: ByteArray): CFDataRef? =
+    if (bytes.isEmpty()) CFDataCreate(null, null, 0)
+    else bytes.usePinned { CFDataCreate(null, it.addressOf(0).reinterpret(), bytes.size.toLong()) }
+
+/** Any Security failure, including a point it rejects, is a failed verification and never an exception. */
+internal actual fun verifyP256Der(derSignature: ByteArray, publicKey: ByteArray, input: ByteArray): Boolean {
+    val key = p256PublicKey(publicKey) ?: return false
+    val message = cfData(input)
+    val signature = cfData(derSignature)
+    try {
+        if (message == null || signature == null) return false
+        return SecKeyVerifySignature(key, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, message, signature, null)
+    } finally {
+        CFRelease(key); message?.let { CFRelease(it) }; signature?.let { CFRelease(it) }
+    }
 }
 
 // Native has no mutable view of these classes, so a MutableList or MutableMap cast fails. Every view and

@@ -1,7 +1,17 @@
 package dev.remozio.protocol
 
 import java.math.BigInteger
+import java.security.AlgorithmParameters
+import java.security.InvalidKeyException
+import java.security.KeyFactory
 import java.security.MessageDigest
+import java.security.Signature
+import java.security.SignatureException
+import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.ECPoint
+import java.security.spec.ECPublicKeySpec
+import java.security.spec.InvalidKeySpecException
 import java.util.Collections
 
 internal actual fun sha256(input: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(input)
@@ -17,3 +27,24 @@ internal actual fun pairingPoint(bytes: ByteArray) {
 internal actual fun <T> readOnlySnapshot(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
 internal actual fun <T> readOnlySnapshot(values: Set<T>): Set<T> = Collections.unmodifiableSet(LinkedHashSet(values))
 internal actual fun <K, V> readOnlySnapshot(values: Map<K, V>): Map<K, V> = Collections.unmodifiableMap(LinkedHashMap(values))
+
+internal actual fun verifyP256Der(derSignature: ByteArray, publicKey: ByteArray, input: ByteArray): Boolean {
+    val parameters = AlgorithmParameters.getInstance("EC").apply { init(ECGenParameterSpec("secp256r1")) }
+        .getParameterSpec(ECParameterSpec::class.java)
+    val x = BigInteger(1, publicKey.copyOfRange(1, 33))
+    val y = BigInteger(1, publicKey.copyOfRange(33, 65))
+    return try {
+        val key = KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(ECPoint(x, y), parameters))
+        Signature.getInstance("SHA256withECDSA").run {
+            initVerify(key)
+            update(input)
+            verify(derSignature)
+        }
+    } catch (_: InvalidKeySpecException) {
+        false
+    } catch (_: InvalidKeyException) {
+        false
+    } catch (_: SignatureException) {
+        false
+    }
+}
