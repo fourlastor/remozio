@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -212,106 +212,107 @@ public final class PreparationIntentStore {
     }
 
     func retainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
-        try transaction(write: false) {
-            try identity(macID)
-            let schema = try scalar("PRAGMA user_version")
-            let inventory = try schema >= 2 ? loadInventoryRecord() : nil
-            let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
-            guard schema >= 6 else {
-                guard sharedImport?.records.allSatisfy({ $0.runCredential == nil }) ?? true else { throw PreparationStoreError.corruptRecord }
-                return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [], sharedImport: sharedImport)
+        try transaction(write: false) { try loadRetainedRuntimeCompatibilityInputs() }
+    }
+    private func loadRetainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+        try identity(macID)
+        let schema = try scalar("PRAGMA user_version")
+        let inventory = try schema >= 2 ? loadInventoryRecord() : nil
+        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
+        guard schema >= 6 else {
+            guard sharedImport?.records.allSatisfy({ $0.runCredential == nil }) ?? true else { throw PreparationStoreError.corruptRecord }
+            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [], sharedImport: sharedImport)
+        }
+        func accounts(_ sql: String) throws -> [Data] {
+            try statement(sql) { row in
+                var result: [Data] = []
+                while try step(row) == SQLITE_ROW {
+                    guard result.count < 64 else { throw PreparationStoreError.corruptRecord }
+                    result.append(try blob(row, column: 0, maximum: 16))
+                }
+                return result
             }
-            func accounts(_ sql: String) throws -> [Data] {
-                try statement(sql) { row in
-                    var result: [Data] = []
-                    while try step(row) == SQLITE_ROW {
-                        guard result.count < 64 else { throw PreparationStoreError.corruptRecord }
-                        result.append(try blob(row, column: 0, maximum: 16))
-                    }
-                    return result
+        }
+        let ids = try accounts("SELECT account FROM runtime_preparation_v1 ORDER BY account")
+        let activated = try schema >= 7 ? accounts("SELECT account FROM runtime_activation_v1 ORDER BY account") : []
+        guard activated.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
+        var values: [RuntimeReleaseCompatibilitySnapshot.Runtime] = []
+        for id in ids {
+            let state = try loadRuntimePreparation(accountID: id)
+            guard let reference = state.reference else { throw PreparationStoreError.corruptRecord }
+            try requireRuntimeMaterialScope(reference)
+            var record: Data?, registered = false
+            if activated.contains(id) {
+                let activation = try loadRuntimeActivation(accountID: id)
+                guard let plan = activation.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
+                try requireRuntimeActivationScope(plan)
+                if activation.jobsRegistered {
+                    guard let inventory, try plan.enrolledInventory(inventory) == inventory else { throw PreparationStoreError.corruptRecord }
+                }
+                record = try plan.encoded; registered = activation.jobsRegistered
+            }
+            values.append(.init(reference: reference, configurationPublished: state.configurationPublished,
+                activationRecord: record, jobsRegistered: registered))
+        }
+        for record in sharedImport?.records ?? [] {
+            if let retained = record.runCredential {
+                guard let runtime = values.first(where: { $0.reference.services.accountID == record.accountID }),
+                      runtime.configurationPublished, retained.reference.runtime == runtime.reference else {
+                    throw PreparationStoreError.corruptRecord
                 }
             }
-            let ids = try accounts("SELECT account FROM runtime_preparation_v1 ORDER BY account")
-            let activated = try schema >= 7 ? accounts("SELECT account FROM runtime_activation_v1 ORDER BY account") : []
-            guard activated.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
-            var values: [RuntimeReleaseCompatibilitySnapshot.Runtime] = []
-            for id in ids {
-                let state = try loadRuntimePreparation(accountID: id)
-                guard let reference = state.reference else { throw PreparationStoreError.corruptRecord }
-                try requireRuntimeMaterialScope(reference)
-                var record: Data?, registered = false
-                if activated.contains(id) {
-                    let activation = try loadRuntimeActivation(accountID: id)
-                    guard let plan = activation.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
-                    try requireRuntimeActivationScope(plan)
-                    if activation.jobsRegistered {
-                        guard let inventory, try plan.enrolledInventory(inventory) == inventory else { throw PreparationStoreError.corruptRecord }
-                    }
-                    record = try plan.encoded; registered = activation.jobsRegistered
-                }
-                values.append(.init(reference: reference, configurationPublished: state.configurationPublished,
-                    activationRecord: record, jobsRegistered: registered))
+        }
+        let gatewayIDs = try schema >= 10 ? accounts("SELECT account FROM gateway_runtime_activation_v1 ORDER BY account") : []
+        let settingsIDs = try schema >= 11 ? accounts("SELECT account FROM gateway_settings_transition_v1 ORDER BY account") : []
+        guard gatewayIDs.allSatisfy({ activated.contains($0) }), settingsIDs.allSatisfy({ gatewayIDs.contains($0) }) else {
+            throw PreparationStoreError.corruptRecord
+        }
+        var gateways: [RuntimeReleaseCompatibilitySnapshot.Gateway] = []
+        for id in gatewayIDs {
+            let state = try loadGatewayRuntimeActivation(accountID: id)
+            guard let plan = state.plan else { throw PreparationStoreError.corruptRecord }
+            let scope = try requireGatewayRuntimeActivationScope(plan)
+            if state.jobRegistered {
+                let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
+                guard try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw PreparationStoreError.corruptRecord }
             }
-            for record in sharedImport?.records ?? [] {
-                if let retained = record.runCredential {
-                    guard let runtime = values.first(where: { $0.reference.services.accountID == record.accountID }),
-                          runtime.configurationPublished, retained.reference.runtime == runtime.reference else {
+            let settings = try schema >= 11 ? loadGatewaySettingsTransition(accountID: id) : .empty
+            if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision) }
+            gateways.append(.init(accountID: id, activationRecord: try plan.encoded,
+                configurationPublished: state.filesPublished, jobRegistered: state.jobRegistered,
+                activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
+                settingsPhase: settings.phase?.rawValue))
+        }
+        let upgradeIDs = try schema >= 12 ? accounts("SELECT account FROM runtime_audit_upgrade_v1 ORDER BY account") : []
+        guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
+        let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
+            guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
+            try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true); return record
+        }
+        let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
+        if schema >= 13 {
+            auditGraphs = try statement("SELECT account,content FROM runtime_audit_graph_v1 ORDER BY account,content") { row in
+                var records: [RuntimeAuditUpgradeGraphRecord] = []
+                while try step(row) == SQLITE_ROW {
+                    guard records.count < 64,
+                          let record = try loadRuntimeAuditGraph(accountID: blob(row, column: 0, maximum: 16), contentDigest: blob(row, column: 1, maximum: 32)) else {
                         throw PreparationStoreError.corruptRecord
                     }
+                    records.append(record)
                 }
+                return records
             }
-            let gatewayIDs = try schema >= 10 ? accounts("SELECT account FROM gateway_runtime_activation_v1 ORDER BY account") : []
-            let settingsIDs = try schema >= 11 ? accounts("SELECT account FROM gateway_settings_transition_v1 ORDER BY account") : []
-            guard gatewayIDs.allSatisfy({ activated.contains($0) }), settingsIDs.allSatisfy({ gatewayIDs.contains($0) }) else {
-                throw PreparationStoreError.corruptRecord
+        } else { auditGraphs = [] }
+        let auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = try schema >= 14 ? accounts("SELECT account FROM runtime_audit_cutover_v1 ORDER BY account").map { id in
+            guard let record = try loadRuntimeAuditCutover(accountID: id) else { throw PreparationStoreError.corruptRecord }
+            let runtime = try loadRuntimePreparation(accountID: id), intent = record.graph.upgrade.intent
+            guard runtime.configurationPublished, runtime.reference == (record.phase == .metadataCommitted ? intent.target : intent.source) else {
+                throw RuntimePreparationError.changedScope
             }
-            var gateways: [RuntimeReleaseCompatibilitySnapshot.Gateway] = []
-            for id in gatewayIDs {
-                let state = try loadGatewayRuntimeActivation(accountID: id)
-                guard let plan = state.plan else { throw PreparationStoreError.corruptRecord }
-                let scope = try requireGatewayRuntimeActivationScope(plan)
-                if state.jobRegistered {
-                    let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
-                    guard try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw PreparationStoreError.corruptRecord }
-                }
-                let settings = try schema >= 11 ? loadGatewaySettingsTransition(accountID: id) : .empty
-                if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision) }
-                gateways.append(.init(accountID: id, activationRecord: try plan.encoded,
-                    configurationPublished: state.filesPublished, jobRegistered: state.jobRegistered,
-                    activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
-                    settingsPhase: settings.phase?.rawValue))
-            }
-            let upgradeIDs = try schema >= 12 ? accounts("SELECT account FROM runtime_audit_upgrade_v1 ORDER BY account") : []
-            guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
-            let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
-                guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
-                try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true); return record
-            }
-            let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
-            if schema >= 13 {
-                auditGraphs = try statement("SELECT account,content FROM runtime_audit_graph_v1 ORDER BY account,content") { row in
-                    var records: [RuntimeAuditUpgradeGraphRecord] = []
-                    while try step(row) == SQLITE_ROW {
-                        guard records.count < 64,
-                              let record = try loadRuntimeAuditGraph(accountID: blob(row, column: 0, maximum: 16), contentDigest: blob(row, column: 1, maximum: 32)) else {
-                            throw PreparationStoreError.corruptRecord
-                        }
-                        records.append(record)
-                    }
-                    return records
-                }
-            } else { auditGraphs = [] }
-            let auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = try schema >= 14 ? accounts("SELECT account FROM runtime_audit_cutover_v1 ORDER BY account").map { id in
-                guard let record = try loadRuntimeAuditCutover(accountID: id) else { throw PreparationStoreError.corruptRecord }
-                let runtime = try loadRuntimePreparation(accountID: id), intent = record.graph.upgrade.intent
-                guard runtime.configurationPublished, runtime.reference == (record.phase == .metadataCommitted ? intent.target : intent.source) else {
-                    throw RuntimePreparationError.changedScope
-                }
-                return record
-            } : []
-            try identity(macID)
-            return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers)
-        }
+            return record
+        } : []
+        try identity(macID)
+        return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -897,7 +898,7 @@ public final class PreparationIntentStore {
                 try exec("CREATE TABLE runtime_audit_graph_v1(account BLOB NOT NULL CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),content BLOB NOT NULL CHECK(length(content)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 28672),PRIMARY KEY(account,content)) STRICT, WITHOUT ROWID")
                 try exec("CREATE TABLE runtime_audit_graph_chunks_v1(account BLOB NOT NULL CHECK(length(account)=16),content BLOB NOT NULL CHECK(length(content)=32),part INTEGER NOT NULL CHECK(part BETWEEN 0 AND 511),bytes BLOB NOT NULL CHECK(length(bytes) BETWEEN 1 AND 16384),PRIMARY KEY(account,content,part)) STRICT, WITHOUT ROWID")
                 try exec("PRAGMA user_version=13")
-            } else { guard (13...14).contains(schema) else { throw PreparationStoreError.incompatibleStore } }
+            } else { guard (13...15).contains(schema) else { throw PreparationStoreError.incompatibleStore } }
             guard try scalar("SELECT COUNT(*) FROM runtime_audit_graph_v1") < 64 else { throw RuntimePreparationError.exhausted }
             let record = try RuntimeAuditUpgradeGraphRecord(upgrade: graph.upgrade, contentDigest: graph.digest)
             try statement("INSERT INTO runtime_audit_graph_v1 VALUES(?,?,?,?,?,?)") { row in
@@ -1773,6 +1774,10 @@ public final class PreparationIntentStore {
             guard previous.revision == expectedRevision else { throw PreparationStoreError.staleRevision }
             guard previous.phase != .abandoned,
                   phase == .abandoned || previous.phase == .intent else { throw PreparationStoreError.invalidTransition }
+            if phase == .abandoned, try scalar("PRAGMA user_version") >= 15,
+               let current = try loadUpdateCandidate(), current.selected, current.preparation.id == id {
+                throw PreparationStoreError.invalidTransition
+            }
             let value = try PreparationIntentRecord(id: id, revision: UUID(), parent: previous.parent,
                 ancestry: previous.ancestry, phase: phase, copyIdentity: identity ?? previous.copyIdentity,
                 copyDigest: digest ?? previous.copyDigest)
@@ -1786,6 +1791,148 @@ public final class PreparationIntentStore {
             return value
         }
     }
+    /// Explicit storage upgrade. The caller first verifies the installed reader declarations.
+    func upgradeUpdateCandidateStorage(expectedInstalledReleaseDigest: Data) throws {
+        try transaction(write: true) {
+            try identity(macID)
+            var version = try scalar("PRAGMA user_version")
+            guard version >= 6 else { throw RuntimePreparationError.incomplete }
+            guard expectedInstalledReleaseDigest.count == 32, let inventory = try loadInventoryRecord(),
+                  inventory.releaseDigest == expectedInstalledReleaseDigest else { throw RuntimePreparationError.changedScope }
+            if version >= 15 { _ = try loadUpdateCandidate(); return }
+            _ = try loadAll()
+            if version < 12 { try upgradeAuditPreparationStorage(); version = try scalar("PRAGMA user_version") }
+            if version == 12 {
+                try exec("CREATE TABLE runtime_audit_graph_v1(account BLOB NOT NULL CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),content BLOB NOT NULL CHECK(length(content)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 28672),PRIMARY KEY(account,content)) STRICT, WITHOUT ROWID")
+                try exec("CREATE TABLE runtime_audit_graph_chunks_v1(account BLOB NOT NULL CHECK(length(account)=16),content BLOB NOT NULL CHECK(length(content)=32),part INTEGER NOT NULL CHECK(part BETWEEN 0 AND 511),bytes BLOB NOT NULL CHECK(length(bytes) BETWEEN 1 AND 16384),PRIMARY KEY(account,content,part)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=13"); version = 13
+            }
+            if version == 13 {
+                try exec("CREATE TABLE runtime_audit_cutover_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),content BLOB NOT NULL CHECK(length(content)=32),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase BETWEEN 1 AND 4),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 30720)) STRICT, WITHOUT ROWID")
+                try exec("PRAGMA user_version=14"); version = 14
+            }
+            guard version == 14 else { throw PreparationStoreError.incompatibleStore }
+            try exec("CREATE TABLE update_scheduling_candidate_v1(id INTEGER PRIMARY KEY CHECK(id=1),generation BLOB NOT NULL CHECK(length(generation)=8),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 32768)) STRICT")
+            try exec("PRAGMA user_version=15")
+            try identity(macID)
+        }
+    }
+    func updateCandidate() throws -> UpdateSchedulingCandidateRecord? {
+        try transaction(write: false) {
+            try identity(macID)
+            return try scalar("PRAGMA user_version") >= 15 ? loadUpdateCandidate() : nil
+        }
+    }
+    func selectUpdateCandidate(preparation: PreparationIntentRecord, runtime: RuntimeReleaseCompatibilitySnapshot.Inputs,
+                               replacing expected: UpdateSchedulingCandidateRecord?) throws -> UpdateSchedulingCandidateRecord {
+        try transaction(write: true) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 15 else { throw PreparationStoreError.incompatibleStore }
+            guard try loadRetainedRuntimeCompatibilityInputs() == runtime,
+                  let inventory = try loadInventoryRecord(), inventory.macID == macID,
+                  preparation.phase == .copyRecorded,
+                  try loadAll().first(where: { $0.id == preparation.id }) == preparation else {
+                throw RuntimePreparationError.changedScope
+            }
+            let previous = try loadUpdateCandidate()
+            guard previous == expected else { throw PreparationStoreError.staleRevision }
+            if let previous, previous.selected, previous.preparation == preparation,
+               previous.inventoryRevision == inventory.revision, previous.installationID == inventory.installationID {
+                return previous
+            }
+            guard previous?.generation != UInt64.max else { throw RuntimePreparationError.exhausted }
+            let value = try UpdateSchedulingCandidateRecord(macID: macID, installationID: inventory.installationID,
+                inventoryRevision: inventory.revision, preparation: preparation, generation: (previous?.generation ?? 0) + 1)
+            try writeUpdateCandidate(value, replacing: previous)
+            return value
+        }
+    }
+    /// The callback cannot retain machine authority after this synchronous boundary ends.
+    func withSelectedUpdateCandidate<Value>(_ expected: UpdateSchedulingCandidateRecord,
+        runtime: RuntimeReleaseCompatibilitySnapshot.Inputs, _ body: () throws -> Value) throws -> Value {
+        try withValidatedUpdateCandidate(expected, runtime: runtime) { _ in try body() }
+    }
+
+    /// Holds the sole machine writer while the account owner commits. Callbacks cannot await or reenter this store.
+    func withValidatedUpdateCandidate<Value>(_ expected: UpdateSchedulingCandidateRecord,
+        runtime: RuntimeReleaseCompatibilitySnapshot.Inputs, _ body: (_ validate: @escaping () throws -> Void) throws -> Value) throws -> Value {
+        try transaction(write: false) {
+            var scopeActive = true
+            let processID = getpid()
+            defer { scopeActive = false }
+            let requireCurrent: () throws -> Void = { [weak self] in
+                guard scopeActive, getpid() == processID, let self else { throw UpdateSchedulingCandidateLeaseError.expired }
+                try self.lease.validate()
+                try self.identity(self.macID)
+                guard try self.scalar("PRAGMA user_version") >= 15, expected.selected,
+                      try self.loadUpdateCandidate() == expected,
+                      try self.loadRetainedRuntimeCompatibilityInputs() == runtime,
+                      let inventory = try self.loadInventoryRecord(), expected.macID == self.macID,
+                      expected.installationID == inventory.installationID, expected.inventoryRevision == inventory.revision,
+                      try self.loadAll().first(where: { $0.id == expected.preparation.id }) == expected.preparation else {
+                    throw PreparationStoreError.staleRevision
+                }
+            }
+            try requireCurrent()
+            let value = try body(requireCurrent)
+            try requireCurrent()
+            return value
+        }
+    }
+    /// Withdraws a candidate only. It does not cancel a drain, restore admission or undo activation.
+    func retireUpdateCandidate(_ expected: UpdateSchedulingCandidateRecord) throws -> UpdateSchedulingCandidateRecord {
+        try transaction(write: true) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 15, try loadUpdateCandidate() == expected else {
+                throw PreparationStoreError.staleRevision
+            }
+            if !expected.selected { return expected }
+            let value = try UpdateSchedulingCandidateRecord(macID: expected.macID, installationID: expected.installationID,
+                inventoryRevision: expected.inventoryRevision, preparation: expected.preparation,
+                generation: expected.generation, selected: false)
+            try writeUpdateCandidate(value, replacing: expected)
+            return value
+        }
+    }
+    private func writeUpdateCandidate(_ value: UpdateSchedulingCandidateRecord,
+                                      replacing old: UpdateSchedulingCandidateRecord?) throws {
+        if let old {
+            try statement("UPDATE update_scheduling_candidate_v1 SET generation=?,revision=?,record=? WHERE id=1 AND revision=?") { row in
+                try bind(candidateGeneration(value.generation), column: 1, row: row)
+                try bind(bytes(value.revision), column: 2, row: row); try bind(value.encoded, column: 3, row: row)
+                try bind(bytes(old.revision), column: 4, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        } else {
+            try statement("INSERT INTO update_scheduling_candidate_v1 VALUES(1,?,?,?)") { row in
+                try bind(candidateGeneration(value.generation), column: 1, row: row)
+                try bind(bytes(value.revision), column: 2, row: row); try bind(value.encoded, column: 3, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+    }
+    private func loadUpdateCandidate() throws -> UpdateSchedulingCandidateRecord? {
+        try statement("SELECT id,generation,revision,record FROM update_scheduling_candidate_v1") { row in
+            guard try step(row) == SQLITE_ROW else { return nil }
+            guard sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_int64(row, 0) == 1 else {
+                throw PreparationStoreError.corruptRecord
+            }
+            let generation = try blob(row, column: 1, maximum: 8)
+            let revision = try blob(row, column: 2, maximum: 16)
+            let record = try blob(row, column: 3, maximum: UpdateSchedulingCandidateRecord.maximumBytes)
+            let value = try UpdateSchedulingCandidateRecord.decode(record)
+            guard generation.count == 8, generation == candidateGeneration(value.generation),
+                  revision == bytes(value.revision), value.macID == macID, try step(row) == SQLITE_DONE else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value
+        }
+    }
+    private func candidateGeneration(_ value: UInt64) -> Data {
+        var bytes = value.bigEndian
+        return withUnsafeBytes(of: &bytes) { Data($0) }
+    }
+
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
         var expected = ["installation_identity_v1", "preparation_intents_v1"]
@@ -1802,6 +1949,7 @@ public final class PreparationIntentStore {
         if version >= 12 { expected.append("runtime_audit_upgrade_v1") }
         if version >= 13 { expected += ["runtime_audit_graph_v1", "runtime_audit_graph_chunks_v1"] }
         if version >= 14 { expected.append("runtime_audit_cutover_v1") }
+        if version >= 15 { expected.append("update_scheduling_candidate_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

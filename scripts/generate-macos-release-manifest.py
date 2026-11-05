@@ -43,13 +43,15 @@ def declarations(role):
         6: [('gateway.service-config', [1, 2]), ('gateway.wake-endpoint-config', [1]), ('gateway.wake-signer-config', [1])],
         8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             ('setup.audit-upgrade-progress', [1]), ('authority.code-policy', [1, 2, 3]),
-            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]),
+            ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
             ('authority.journal', [12, 13, 14, 15, 16])],
         11: [('command.child-frame', [1, 2])],
         12: [('command.monitor-frame', [2]), ('command.child-frame', [1, 2])],
     }
     values = [format_declaration(name, versions, {1: 2} if name == 'authority.installation-inventory' else None)
               for name, versions in names[role]]
+    if role in (2, 8):
+        values.append(format_declaration('authority.update-scheduling-candidate', [1]))
     if role == 1:
         values.append({0: 'setup.portable', 1: [1, 2, 3, 4], 2: [], 3: {}})
     if role == 8:
@@ -59,7 +61,7 @@ def declarations(role):
             values.append(format_declaration(name, versions))
     if role == 2:
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
-        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14], {1: 2}))
+        values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], {1: 2}))
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
     if role in (2, 12):
         values.append({0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
