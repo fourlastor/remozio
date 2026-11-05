@@ -49,6 +49,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     writeVersions: current.writeVersions.union(writes))
             } else { formats.append(try .init(role: role, name: name, readVersions: reads, writeVersions: writes)) }
         }
+        if inputs.schemaVersion >= 15 {
+            for item in try UpdateSchedulingCandidateRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
         if native {
             for item in try CommandMonitorActivityContract.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
