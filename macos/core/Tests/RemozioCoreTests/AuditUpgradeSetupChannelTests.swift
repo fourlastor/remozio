@@ -149,6 +149,32 @@ final class AuditUpgradeSetupChannelTests: XCTestCase, @unchecked Sendable {
         driver.deliver(.progress(try result.bytes)); let actual = try await first.value; XCTAssertEqual(actual, result)
         XCTAssertEqual(driver.state.withLock { $0.history }, ["hello", "perform"])
     }
+    func testCallsQueuedAsTheMutationReplyArrivesCannotSendOrReadRights() async throws {
+        let value = try progress(), result = try value.observing(.waitingForActivity)
+        // The reply and the queued calls race for the actor. The order varies between rounds, so the test repeats it.
+        // In every order the connection stays one-shot: no second mutation, no read and no second form.
+        for _ in 0..<100 {
+            let driver = Driver()
+            let channel = AuditUpgradeSetupChannel(driver: driver, expected: value, operationTimeoutMilliseconds: 2000)
+            try await channel.start(); driver.state.withLock { $0.hold = true }
+            let first = Task { try await channel.perform(value, authorization: self.form) }
+            try await until { driver.state.withLock { $0.held != nil } }
+            driver.deliver(.progress(try result.bytes))
+            let second = Task { try await channel.perform(value, readAuthorization: { driver.state.withLock { $0.forms += 1 }; return self.form }) }
+            let read = Task { try await channel.progress() }
+            let actual = try await first.value; XCTAssertEqual(actual, result)
+            do { _ = try await second.value; XCTFail("Second mutation") } catch {
+                let failure = error as? AdministrativeSetupChannelError
+                XCTAssertTrue(failure == .busy || failure == .closed, "\(error)")
+            }
+            do { _ = try await read.value; XCTFail("Read after mutation") } catch {
+                let failure = error as? AdministrativeSetupChannelError
+                XCTAssertTrue(failure == .busy || failure == .closed, "\(error)")
+            }
+            XCTAssertEqual(driver.state.withLock { $0.forms }, 0)
+            XCTAssertEqual(driver.state.withLock { $0.history }, ["hello", "perform"])
+        }
+    }
     func testTimeoutClosesTheMutationAndFreshRecoveryReadNeverReplaysIt() async throws {
         let value = try progress(), driver = Driver()
         let channel = AuditUpgradeSetupChannel(driver: driver, expected: value, operationTimeoutMilliseconds: 15)

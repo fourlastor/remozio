@@ -69,6 +69,9 @@ public actor AuditUpgradeSetupChannel {
     private var pending: (UUID, CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
     private var refused = false
+    /// Set when a mutation starts and never cleared. `pending` alone is not enough: it is cleared before the suspended
+    /// `perform` resumes, and actor reentrancy could let another call send in that gap.
+    private var mutationReserved = false
 
     /// The peer policy must come from verified installed release metadata.
     public init(serviceName: String, rootPolicy: XPCPeerPolicy, ownerUID: uid_t, expected: SetupAuditUpgradeProgress? = nil,
@@ -109,6 +112,7 @@ public actor AuditUpgradeSetupChannel {
     /// A refused, dropped or expired read throws `AuditUpgradeSetupChannelError.progressUnavailable`. The upgrade state is then unknown.
     public func progress() async throws -> SetupAuditUpgradeProgress? {
         guard state == .open else { close(); throw AdministrativeSetupChannelError.closed }
+        guard !mutationReserved else { throw AdministrativeSetupChannelError.busy }
         do {
             guard case .progress(let reply) = try await invoke(.progress) else { throw AdministrativeSetupChannelError.invalidMessage }
             // The endpoint answers nil when it refuses the read, for example while maintenance holds the daemon.
@@ -132,7 +136,8 @@ public actor AuditUpgradeSetupChannel {
     public func perform(_ expected: SetupAuditUpgradeProgress,
                         readAuthorization: @Sendable () throws -> Data) async throws -> SetupAuditUpgradeProgress {
         guard state == .open else { throw AdministrativeSetupChannelError.closed }
-        guard pending == nil else { throw AdministrativeSetupChannelError.busy }
+        guard pending == nil, !mutationReserved else { throw AdministrativeSetupChannelError.busy }
+        mutationReserved = true
         do {
             guard let scope, expected.runtime.ownerUID == ownerUID else { throw AdministrativeSetupChannelError.invalidMessage }
             try expected.validateScope(of: scope)

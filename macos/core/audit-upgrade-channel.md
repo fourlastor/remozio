@@ -26,6 +26,10 @@ It rejects oversized, malformed and inappropriate progress states.
 Each connection allows one mutation result. Then it closes.
 This prevents reuse while the server finishes cleanup after its reply.
 A busy call cannot replace an active continuation or export another authorization form.
+The first mutation reserves the connection before it reads the authorization form, and the reservation is never cleared.
+The channel does not use the pending reply as its only guard. The actor clears that reply before the suspended mutation resumes.
+Without the reservation, a call queued in that gap could read another form and send a second mutation.
+While the reservation is set, another mutation or a progress read reports a busy call and sends nothing.
 Timeout, cancellation, disconnection and malformed replies close the transport.
 They never repeat a mutation.
 
@@ -72,7 +76,7 @@ The maintenance interface does not accept an older handshake as a fallback.
 ## Verification limits
 
 Logical channel fixtures cover peer and account changes, full scope changes, request bounds,
-cancellation, late replies, timeouts, busy calls, recovery without replay,
+cancellation, late replies, timeouts, busy calls, calls queued as a mutation reply arrives, recovery without replay,
 and refused, dropped or expired reads.
 An anonymous Foundation XPC fixture runs the real channel against the combined exported interface.
 It covers authorization import on the exported invocation, an owned cutover and fresh recovery reads.
