@@ -65,6 +65,35 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
     }
+    /// The installed app and setup components must both declare setup version 11 and progress codec 1.
+    func auditUpgradeChannel(expected: SetupAuditUpgradeProgress? = nil, timeoutMilliseconds: UInt64 = 60_000,
+                             operationTimeoutMilliseconds: UInt64 = 60_000) throws -> AuditUpgradeSetupChannel {
+        var channel: AuditUpgradeSetupChannel?
+        let state = try perform(registering: false) { release in
+            let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild, .setupController]
+            let policy = try AuthorityCodePolicy(entries: roles.map { role in
+                guard let component = release.manifest.components.first(where: { $0.role == role }),
+                      let team = component.teamID, let hash = release.codeDirectoryHashes[role] else {
+                    throw SetupRegistrationError.wrongRelease
+                }
+                return try .init(role: component.role, teamID: team, identifier: component.identifier,
+                    installedGeneration: component.generation, minimumGeneration: component.generation,
+                    codeDirectoryHash: hash, active: true)
+            })
+            try SetupAuditUpgradeLocalContract.validate(release, policy: policy)
+            guard let component = release.manifest.components.first(where: { $0.role == .setupController }),
+                  let team = component.teamID, let hash = release.codeDirectoryHashes[.setupController] else {
+                throw SetupRegistrationError.wrongRelease
+            }
+            let root = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
+                approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
+            channel = try AuditUpgradeSetupChannel(serviceName: AdministrativeSetupConfiguration.serviceName,
+                rootPolicy: root, ownerUID: getuid(), expected: expected, timeoutMilliseconds: timeoutMilliseconds,
+                operationTimeoutMilliseconds: operationTimeoutMilliseconds)
+        }
+        guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
+        return channel
+    }
     private func perform(registering: Bool, onVerified: ((SignedReleaseEvidence) throws -> Void)? = nil) throws -> MacSetupServiceState {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupRegistrationError.wrongProcess }
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
@@ -185,6 +214,13 @@ public final class MacSetupServiceControls {
 public enum MacAccountSetupConnection {
     public static func openPortableImport(preferRecovery: Bool = false) async throws -> PortableSetupImportChannel {
         try await NativeMacSetupServiceDriver().portableImportChannel(preferRecovery: preferRecovery)
+    }
+
+    /// Opening a maintenance channel never registers or starts services. The caller must call `start()`.
+    public static func openAuditUpgrade(expected: SetupAuditUpgradeProgress? = nil, timeoutMilliseconds: UInt64 = 60_000,
+                                        operationTimeoutMilliseconds: UInt64 = 60_000) async throws -> AuditUpgradeSetupChannel {
+        try await NativeMacSetupServiceDriver().auditUpgradeChannel(expected: expected, timeoutMilliseconds: timeoutMilliseconds,
+            operationTimeoutMilliseconds: operationTimeoutMilliseconds)
     }
 
     public static func open(serviceAccounts: Bool = false, runtime: Bool = false, activation: Bool = false, gateway: Bool = false, gatewayActivation: Bool = false, gatewaySettings: Bool = false, gatewayOperationTimeoutMilliseconds: UInt64 = 60_000) async throws -> AdministrativeSetupChannel {

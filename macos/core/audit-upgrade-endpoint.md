@@ -13,7 +13,7 @@ The app component and the setup component must both declare version 11 and the p
 The release must also pass the complete cutover capability checks.
 The release generator declares both formats for these two components only.
 It keeps the earlier setup versions 1 to 10.
-The app channel that opens this interface is a separate change.
+The app opens this interface with `AuditUpgradeSetupChannel`. See `audit-upgrade-channel.md`.
 
 The endpoint authenticates each exported invocation with its existing peer guard.
 It checks the size of the expected progress and decodes it before it imports authorization.
@@ -60,5 +60,6 @@ Objective-C interface construction checks the old and the combined selector sets
 
 These checks do not qualify native administrator rights, native peer signatures
 or installed launchd behaviour.
-No anonymous XPC test is part of this change; it needs the app channel.
+Anonymous XPC tests drive this endpoint through the app channel with ordinary-user fixtures and fake rights.
+`audit-upgrade-channel.md` describes them.
 No service installation, production credential access or physical phone test happens here.
