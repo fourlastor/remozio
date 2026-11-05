@@ -14,6 +14,12 @@ enum NativeHostReleaseFixture {
             var formats: [ReleaseFormat] = []
             let planVersions: Set<UInt64> = phoneAudit ? [1, 2, 3, 4] : phoneRouting ? [1, 2, 3] : [1, 2]
             let materialVersions: Set<UInt64> = auditDelivery ? [1, 2, 3] : [1, 2]
+            // Audit-capable releases also declare the local maintenance interface and its progress codec.
+            if auditDelivery, [.app, .setupController].contains(code.role) {
+                formats.append(try .init(name: AdministrativeSetupInterface.formatName, readers: AdministrativeSetupInterface.supportedVersions,
+                    writers: AdministrativeSetupInterface.supportedVersions))
+                formats.append(try .init(name: SetupAuditUpgradeProgress.formatName, readers: [1], writers: [1]))
+            }
             if [.authority, .setupController].contains(code.role) {
                 formats.append(try .init(name: RuntimeActivationPlan.formatName, readers: planVersions, writers: code.role == .setupController ? planVersions : []))
                 formats.append(try .init(name: RuntimePreparationMaterial.formatName, readers: materialVersions, writers: code.role == .setupController ? materialVersions : []))

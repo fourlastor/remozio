@@ -29,7 +29,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
                  'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record',
                  'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record',
-                 'runtime.audit-upgrade-startup-fence', 'command.monitor-activity'}
+                 'runtime.audit-upgrade-startup-fence', 'command.monitor-activity', 'setup.audit-upgrade-progress'}
         def legacy(role):
             values = [dict(value) for value in original(role) if value[0] not in added]
             for value in values:
@@ -39,6 +39,9 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'runtime.activation-plan':
                     value[1] = [1, 2]
                     value[2] = [1, 2] if role == 8 else []
+                if value[0] == 'setup.local-ipc':
+                    value[1] = list(range(1, 11))
+                    value[2] = list(range(1, 11))
             return values
         with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
                 patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
@@ -259,7 +262,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), ([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)), list(range(1, 12))))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
         for role in (4, 5, 6, 11, 12):
@@ -402,13 +405,22 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertIn(9, declarations['setup.local-ipc'][1])
                 self.assertIn(10, declarations['setup.local-ipc'][1])
 
-    def test_portable_import_recovery_capability_ten_keeps_every_existing_setup_version(self):
+    def test_audit_upgrade_capability_eleven_keeps_every_existing_setup_version(self):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (1, 8):
-                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 11))))
+                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 12))))
+                self.assertEqual(declarations['setup.audit-upgrade-progress'],
+                                 MANIFEST.format_declaration('setup.audit-upgrade-progress', [1]))
             else:
                 self.assertNotIn('setup.local-ipc', declarations)
+
+    def test_audit_upgrade_progress_is_local_to_the_app_and_setup_owner(self):
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role not in (1, 8):
+                self.assertNotIn('setup.audit-upgrade-progress', declarations)
+            self.assertLessEqual(len(declarations), 64)
 
     def test_import_retained_records_have_only_the_setup_owner_and_keep_the_manifest_bound(self):
         records = {'setup.shared-import-journal': [2], 'setup.shared-import-relay-plan': [1],

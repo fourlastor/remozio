@@ -14,7 +14,8 @@ public enum AdministrativeSetupInterface {
     public static let gatewaySettingsVersion: UInt64 = 8
     public static let portableImportVersion: UInt64 = 9
     public static let portableImportRecoveryVersion: UInt64 = 10
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion]
+    public static let auditUpgradeVersion: UInt64 = 11
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion, auditUpgradeVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.
@@ -59,13 +60,15 @@ public enum AdministrativeSetupInterface {
 
 /// One authenticated local app connection. A shared owner serializes every machine-store operation.
 /// The listener must enforce this peer policy, retain the connection and activate it only after construction succeeds.
-public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetupXPCProtocol, @unchecked Sendable {
+public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetupMaintenanceXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let owner: SetupAccountOwner
     private let verify: () throws -> uid_t
     private let authorize: (Data) throws -> Void
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
+    private let auditUpgradeOperations: SetupAuditUpgradeEndpointOperations?
+    private var auditUpgradeReady = false
     private var ready = false
     private var enrollmentReady = false
     private var serviceAccountsReady = false
@@ -78,6 +81,8 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     private var portableImportRecoveryReady = false
     private var asynchronousID: UUID?
     private var asynchronousTask: Task<Void, Never>?
+    private var auditUpgradeTask: Task<Void, Never>?
+    private var auditUpgradeReplyID: UUID?
     private var closed = false
     private var busy = false
 
@@ -89,12 +94,15 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         }
         _ = try peerPolicy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: peerPolicy)
+        // Retained maintenance cleanup runs before normal owner admission. It never resumes an upgrade or starts services.
+        _ = owner.retryAuditUpgradeCleanup()
         try owner.verifyCurrent()
         self.init(owner: owner, verify: { try invocation.verifyInvocation().userID },
             authorize: { try SetupAdministratorAuthorization.validate(externalForm: $0, invocation: invocation) },
-            invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake)
+            invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
+            auditUpgradeOperations: try .native(owner: owner, invocation: invocation))
         peerPolicy.configure(connection)
-        connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupXPCProtocol.self)
+        connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupMaintenanceXPCProtocol.self)
         connection.exportedObject = self
         connection.interruptionHandler = { [weak self] in self?.close() }
         connection.invalidationHandler = { [weak self] in self?.close() }
@@ -102,16 +110,110 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,
          authorize: @escaping (Data) throws -> Void, invalidate: @escaping () -> Void,
-         onHandshake: @escaping @Sendable () -> Void = {}) {
+         onHandshake: @escaping @Sendable () -> Void = {}, auditUpgradeOperations: SetupAuditUpgradeEndpointOperations? = nil) {
+        self.auditUpgradeOperations = auditUpgradeOperations
         self.owner = owner; self.verify = verify; self.authorize = authorize; self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     public func close() {
-        let changed = lock.withLock { () -> (Bool, Task<Void, Never>?) in
-            if closed { return (false, nil) }; closed = true; ready = false; return (true, asynchronousTask)
+        let changed = lock.withLock { () -> (Bool, [Task<Void, Never>]) in
+            if closed { return (false, []) }; closed = true; ready = false
+            return (true, [asynchronousTask, auditUpgradeTask].compactMap { $0 })
         }
-        changed.1?.cancel()
+        for task in changed.1 { task.cancel() }
         if changed.0 { invalidate() }
     }
+
+    public func auditUpgradeHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try operation(handshake: true) { _ in
+                guard let auditUpgradeOperations else { throw AdministrativeSetupError.unavailable }
+                try auditUpgradeOperations.requireRelease(); try owner.verifyCurrent()
+                ready = true; auditUpgradeReady = true
+            }
+            defer { completed.activity?.close() }
+            onHandshake(); send { reply(SetupAuditUpgradeLocalContract.version) }
+        } catch { close(); reply(0) }
+    }
+    public func auditUpgradeProgress(reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try operation { uid in
+                guard auditUpgradeReady else { throw AdministrativeSetupError.unavailable }
+                return try owner.auditUpgradeProgress(callerUID: uid).map { try $0.bytes } ?? Data()
+            }
+            defer { completed.activity?.close() }; send { reply(completed.value) }
+        } catch { close(); reply(nil) }
+    }
+    public func performAuditUpgrade(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let uid = try verify()
+            let reservation = try lock.withLock { () -> (id: UUID, expected: SetupAuditUpgradeProgress, grant: SetupAuditUpgradeAuthorization) in
+                guard !closed, !busy, ready, auditUpgradeReady, let auditUpgradeOperations,
+                      expected.count <= SetupAuditUpgradeProgress.maximumBytes,
+                      authorization.count == MemoryLayout<AuthorizationExternalForm>.size else { throw AdministrativeSetupError.unavailable }
+                let progress = try SetupAuditUpgradeProgress.decode(expected)
+                guard progress.runtime.ownerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                // Import rights on this exported invocation. The external form never crosses task dispatch.
+                let grant = try auditUpgradeOperations.importAuthorization(authorization)
+                do {
+                    guard grant.callerUID == uid else { throw AdministrativeSetupError.wrongAccount }
+                    try grant.validate()
+                    let id = UUID(); busy = true; asynchronousID = id
+                    return (id, progress, grant)
+                } catch { grant.close(); throw error }
+            }
+            lock.withLock {
+                guard !closed, asynchronousID == reservation.id else {
+                    reservation.grant.close(); busy = false; asynchronousID = nil; return
+                }
+                auditUpgradeTask = Task { [self, reservation, reply] in
+                    var failed = false
+                    do {
+                        try Task.checkCancellation()
+                        try await owner.performAuditUpgradeWork(authorization: reservation.grant) { [self, reservation] cancellation in
+                            try cancellation.check()
+                            guard let auditUpgradeOperations else { throw AdministrativeSetupError.unavailable }
+                            let invocation = try auditUpgradeOperations.openInvocation(reservation.expected, reservation.grant)
+                            // Cleanup starts after the reply callback returns. Failed cleanup stays with the setup owner.
+                            defer { _ = owner.settleAuditUpgradeInvocation(invocation) }
+                            do {
+                                try invocation.run { bytes in
+                                    try cancellation.check()
+                                    try replyAuditUpgrade(reservation.id, bytes, reply: reply)
+                                }
+                            } catch {
+                                // A failure reply is also sent while the invocation still holds the setup reservation.
+                                try? replyAuditUpgrade(reservation.id, nil, reply: reply)
+                                throw error
+                            }
+                        }
+                    } catch { failed = true }
+                    // Cleanup and the actual reply finish before the connection drops its invocation or grant.
+                    reservation.grant.close()
+                    let terminate = lock.withLock { () -> Bool in
+                        guard asynchronousID == reservation.id else { return false }
+                        if failed, !closed, auditUpgradeReplyID != reservation.id { reply(nil) }
+                        asynchronousID = nil; auditUpgradeTask = nil; auditUpgradeReplyID = nil; busy = false
+                        if failed, !closed { closed = true; ready = false; return true }
+                        return false
+                    }
+                    if terminate { invalidate() }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+    /// Sends at most one reply for this maintenance reservation. The caller still holds the invocation and its setup scope.
+    private func replyAuditUpgrade(_ id: UUID, _ bytes: Data?, reply: @Sendable (Data?) -> Void) throws {
+        try lock.withLock {
+            guard !closed, asynchronousID == id, auditUpgradeReplyID != id else { throw CancellationError() }
+            auditUpgradeReplyID = id
+            reply(bytes)
+        }
+    }
+    func waitForAuditUpgradeWork() async {
+        let task = lock.withLock { auditUpgradeTask }
+        if let task { await task.value }
+    }
+
     public func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             let completed = try operation(handshake: true) { _ in

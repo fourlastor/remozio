@@ -34,6 +34,13 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let local = try XCTUnwrap(component.formats.first { $0.name == "setup.local-ipc" })
                 XCTAssertEqual(local.readers, AdministrativeSetupInterface.supportedVersions)
                 XCTAssertEqual(local.writers, AdministrativeSetupInterface.supportedVersions)
+                let progress = try XCTUnwrap(component.formats.first { $0.name == SetupAuditUpgradeProgress.formatName })
+                XCTAssertEqual(progress.readers, SetupAuditUpgradeProgress.supportedVersions)
+                XCTAssertEqual(progress.writers, SetupAuditUpgradeProgress.supportedVersions)
+                XCTAssertTrue(progress.migrations.isEmpty)
+            }
+            for component in evidence.manifest.components where ![AuthorityCodeRole.app, .setupController].contains(component.role) {
+                XCTAssertNil(component.formats.first { $0.name == SetupAuditUpgradeProgress.formatName })
             }
             let authority = try XCTUnwrap(evidence.manifest.components.first { $0.role == .authority })
             func formats(_ name: String) throws -> ReleaseFormat { try XCTUnwrap(authority.formats.first { $0.name == name }) }
