@@ -15,4 +15,5 @@ internal actual fun pairingPoint(bytes: ByteArray) {
 }
 
 internal actual fun <T> readOnlySnapshot(values: List<T>): List<T> = Collections.unmodifiableList(ArrayList(values))
+internal actual fun <T> readOnlySnapshot(values: Set<T>): Set<T> = Collections.unmodifiableSet(LinkedHashSet(values))
 internal actual fun <K, V> readOnlySnapshot(values: Map<K, V>): Map<K, V> = Collections.unmodifiableMap(LinkedHashMap(values))

@@ -109,4 +109,5 @@ private class ReadOnlyMap<K, V>(private val delegate: Map<K, V>) : Map<K, V> by 
 }
 
 internal actual fun <T> readOnlySnapshot(values: List<T>): List<T> = ReadOnlyList(ArrayList(values))
+internal actual fun <T> readOnlySnapshot(values: Set<T>): Set<T> = ReadOnlySet(LinkedHashSet(values))
 internal actual fun <K, V> readOnlySnapshot(values: Map<K, V>): Map<K, V> = ReadOnlyMap(LinkedHashMap(values))
