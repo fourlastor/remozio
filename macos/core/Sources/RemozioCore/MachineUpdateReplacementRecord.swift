@@ -61,8 +61,11 @@ struct MachineUpdateReplacementRecord: Codable, Equatable, Sendable, CustomStrin
     }
     func requireScope(activation: MachineUpdateActivationRecord, inventory: InstallationInventory,
                       candidate: UpdateSchedulingCandidateRecord) throws {
-        guard activation.phase.irreversible, activationAttempt == activation.attemptID,
+        // Hash the supplied operands too: a changed candidate or inventory can keep the same paths and copy identity.
+        guard activation.phase.irreversible, activationAttempt == activation.attemptID, candidate.selected,
               candidateDigest == activation.candidateDigest, inventoryDigest == activation.inventoryDigest,
+              try candidateDigest == MachineUpdateActivationRecord.digest(candidate.encoded),
+              inventoryDigest == MachineUpdateActivationRecord.digest(inventory.canonicalBytes),
               admissionDigest == activation.admissionDigest,
               installedParent + "/" + installedName == inventory.bundlePath,
               preparedParent == candidate.preparation.parent, preparedAncestry == candidate.preparation.ancestry,

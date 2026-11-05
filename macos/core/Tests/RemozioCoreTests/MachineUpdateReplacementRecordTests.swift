@@ -110,6 +110,24 @@ final class MachineUpdateReplacementRecordTests: XCTestCase {
         XCTAssertEqual(changed.revision, f.inventory.revision)
         XCTAssertThrowsError(try f.record(inventory: changed))
     }
+    func testScopeChecksRejectChangedOperandsThatKeepTheSameCopyAndPath() throws {
+        let f = try Fixture(), record = try f.record()
+        let candidates = try [f.changedCandidate(), f.changedCandidate(generation: f.candidate.generation + 1), f.changedCandidate(selected: false)]
+        for candidate in candidates {
+            XCTAssertEqual(candidate.preparation, f.candidate.preparation)
+            XCTAssertThrowsError(try record.requireScope(activation: f.started, inventory: f.inventory, candidate: candidate)) {
+                XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding)
+            }
+        }
+        let inventory = try f.changedInventory()
+        XCTAssertEqual(inventory.bundlePath, f.inventory.bundlePath)
+        XCTAssertThrowsError(try record.requireScope(activation: f.started, inventory: inventory, candidate: f.candidate)) {
+            XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding)
+        }
+        let observed = try record.observingSwap()
+        XCTAssertThrowsError(try observed.requireScope(activation: f.started, inventory: inventory, candidate: f.candidate))
+        try observed.requireScope(activation: f.started, inventory: f.inventory, candidate: f.candidate)
+    }
     func testASecondActivationAttemptCannotReuseTheOperands() throws {
         let f = try Fixture(), record = try f.record()
         let other = try MachineUpdateActivationRecord(candidate: f.candidate, inventory: f.inventory, admission: f.admission)
