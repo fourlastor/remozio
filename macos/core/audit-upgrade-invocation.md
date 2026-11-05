@@ -2,7 +2,7 @@
 
 `SetupAuditUpgradeInvocation` connects the authenticated setup scope to the cutover operation.
 The exported maintenance method in the setup daemon uses this internal owner.
-The app channel and the app controls are not part of this change.
+The app reaches it through the [app channel](audit-upgrade-channel.md) and the [audit setup panel](audit-upgrade-app.md).
 
 ## Scoped observations
 

@@ -3,8 +3,8 @@
 Audit recovery needs administrator consent and an independent account check while the startup fence blocks normal setup.
 `SetupAuditUpgradeAuthorization` and `SetupAuditUpgradeScope` provide those prerequisites.
 `SetupAccountOwner.acquireAuditUpgradeScope` creates the scope.
-The maintenance endpoint, the client handshake, the progress codec and the operation owner are not part of this change.
-Later changes add them and use this scope.
+The maintenance endpoint imports authorization and opens this scope for the operation owner.
+The app uses the versioned maintenance channel for explicit audit upgrades.
 
 ```mermaid
 flowchart TD
@@ -71,7 +71,8 @@ This keeps the setup reservation and host placement until the live runtime resou
 
 The scope does not check this order itself.
 If the last reference to an open scope is dropped, its deinitializer releases the grant and both reservations.
-The invocation owner must therefore keep the scope, or the operation that holds it, until the operation, its reply and its cleanup have ended.
+The invocation owner keeps the scope and its operation until the reply and cleanup end.
+The setup owner retains failed cleanup until a later retry closes the live resources.
 
 ## Evidence and remaining work
 
