@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -313,8 +313,8 @@ public final class PreparationIntentStore {
         } : []
         try identity(macID)
         let admission = try schema >= 16 ? loadUpdateAdmissionRegistration()?.encoded : nil
-        return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
-            updateAdmissionRegistration: admission)
+        return try .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
+            updateAdmissionRegistration: admission, machineUpdateActivation: schema >= 17 ? loadMachineUpdateActivation()?.encoded : nil)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -2080,6 +2080,263 @@ public final class PreparationIntentStore {
         }
     }
 
+    func upgradeMachineUpdateActivationStorage(expectedInstalledReleaseDigest: Data) throws {
+        try transaction(write: true, activationWrite: true) {
+            try identity(macID)
+            guard let inventory = try loadInventoryRecord(), inventory.releaseDigest == expectedInstalledReleaseDigest else {
+                throw RuntimePreparationError.changedScope
+            }
+            let version = try scalar("PRAGMA user_version")
+            if version >= 17 { _ = try loadMachineUpdateActivation(); return }
+            guard version == 16 else { throw PreparationStoreError.incompatibleStore }
+            try exec("CREATE TABLE machine_update_activation_v1(id INTEGER PRIMARY KEY CHECK(id=1),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 4096)) STRICT")
+            try exec("PRAGMA user_version=17"); try identity(macID)
+        }
+    }
+
+    /// Reads the admission scope and phase together without upgrading or writing machine metadata.
+    func updateAdmissionState() throws -> MachineUpdateAdmissionState {
+        try transaction(write: false) {
+            try identity(macID)
+            let schema = try scalar("PRAGMA user_version")
+            return try .init(inventory: schema >= 2 ? loadInventoryRecord() : nil,
+                registration: schema >= 16 ? loadUpdateAdmissionRegistration() : nil,
+                activation: schema >= 17 ? loadMachineUpdateActivation() : nil)
+        }
+    }
+
+    func machineUpdateActivation() throws -> MachineUpdateActivationRecord? {
+        try transaction(write: false) {
+            try identity(macID)
+            return try scalar("PRAGMA user_version") >= 17 ? loadMachineUpdateActivation() : nil
+        }
+    }
+
+    /// Retains a phase only. The live file boundary and current copy validation remain separate requirements.
+    func beginMachineUpdateActivation(candidate: UpdateSchedulingCandidateRecord,
+        registration: UpdateAdmissionRegistrationRecord, runtime: RuntimeReleaseCompatibilitySnapshot.Inputs,
+        replacing previous: MachineUpdateActivationRecord?, directory: ReleaseDestinationLease,
+        drain: UpdateAdmissionDrain, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        try withoutActuallyEscaping(verifyCurrent) { verifyCurrent in
+            try drain.withClosedAdmission {
+                let verify = { try drain.validateMachineBoundary(directory: directory, expected: registration.machine); try verifyCurrent() }
+                let value = try transaction(write: true, activationWrite: true) {
+                    try identity(macID); try requireUpdateAdmissionDirectory(directory)
+                    guard try scalar("PRAGMA user_version") >= 17, try loadRetainedRuntimeCompatibilityInputs() == runtime,
+                          try loadMachineUpdateActivation() == previous,
+                          previous?.phase.blocksMachineWrites != true,
+                          try loadUpdateCandidate() == candidate, try loadUpdateAdmissionRegistration() == registration,
+                          try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation,
+                          let inventory = try loadInventoryRecord() else { throw PreparationStoreError.staleRevision }
+                    try verify()
+                    let value = try MachineUpdateActivationRecord(candidate: candidate, inventory: inventory, admission: registration)
+                    try writeMachineUpdateActivation(value, replacing: previous); try verify(); return value
+                }
+                return try finishMachineUpdateMutation(value, verify: verify)
+            }
+        }
+    }
+
+    func cancelMachineUpdateActivation(_ expected: MachineUpdateActivationRecord, directory: ReleaseDestinationLease,
+        drain: UpdateAdmissionDrain, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        _ = try expected.advancing(to: .cancelled)
+        return try drain.withClosedAdmission {
+            try advanceMachineUpdateActivation(expected, to: .cancelled, directory: directory, verify: {
+                try drain.validateMachineBoundary(directory: directory, expected: expected.machineAdmission); try verifyCurrent()
+            })
+        }
+    }
+
+    func cancelMachineUpdateActivation(_ expected: MachineUpdateActivationRecord, directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        _ = try expected.advancing(to: .cancelled)
+        return try quiescence.withExclusiveActivity { _ in
+            try advanceMachineUpdateActivation(expected, to: .cancelled, directory: directory, verify: {
+                try quiescence.validateMachineBoundary(directory: directory, expected: expected.machineAdmission); try verifyCurrent()
+            })
+        }
+    }
+
+    func machineUpdatePolicyPreflightSource(_ activation: MachineUpdateActivationRecord,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease) throws -> MachineUpdateRestartSource {
+        guard activation.phase == .draining else { throw MachineUpdateReplacementError.wrongPhase }
+        return try transaction(write: false) {
+            try requireUpdateAdmissionDirectory(directory)
+            let source = try loadMachineUpdatePolicyPreflightSource(activation)
+            try quiescence.validateMachineBoundary(directory: directory, expected: source.replacement.admission.machine)
+            return source
+        }
+    }
+    private func loadMachineUpdatePolicyPreflightSource(_ activation: MachineUpdateActivationRecord) throws -> MachineUpdateRestartSource {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") >= 17, try loadMachineUpdateActivation() == activation,
+              activation.phase == .draining || activation.phase == .activationStarted,
+              let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
+              let admission = try loadUpdateAdmissionRegistration() else { throw PreparationStoreError.staleRevision }
+        try activation.requireScope(candidate: candidate, inventory: inventory, admission: admission)
+        let runtime = try loadRetainedRuntimeCompatibilityInputs()
+        let context = MachineUpdateReplacementContext(activation: activation, inventory: inventory, candidate: candidate,
+            admission: admission, replacement: nil, runtime: runtime)
+        let accounts = try loadMachineUpdateAccounts(context)
+        // Schema17 cannot contain an installed-release archive. Later schema readers must load its exact history.
+        guard try scalar("PRAGMA user_version") == 17 else { throw PreparationStoreError.incompatibleStore }
+        let history: MachineUpdateProvisioningHistory? = nil
+        return .init(replacement: context, accounts: accounts, provisioningHistory: history)
+    }
+
+    /// Every new irreversible marker binds a live all-account policy preflight before replacement begins.
+    func markMachineUpdateActivationStarted(_ expected: MachineUpdateActivationRecord,
+        preflight: MachineUpdatePolicyPreflight, directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        guard preflight.source.replacement.activation == expected else { throw PreparationStoreError.staleRevision }
+        let next = try expected.starting(policyPreflightDigest: preflight.digest)
+        let nextSource = try preflight.source.replacingActivation(next)
+        return try quiescence.withExclusiveActivity { _ in
+            func external() throws {
+                try quiescence.validateMachineBoundary(directory: directory, expected: expected.machineAdmission)
+                try preflight.validateExternal(); try verifyCurrent()
+            }
+            let value = try transaction(write: true, activationWrite: true) {
+                try requireUpdateAdmissionDirectory(directory)
+                guard try loadMachineUpdatePolicyPreflightSource(expected) == preflight.source else { throw PreparationStoreError.staleRevision }
+                try external(); try writeMachineUpdateActivation(next, replacing: expected)
+                guard try loadMachineUpdatePolicyPreflightSource(next) == nextSource else { throw PreparationStoreError.staleRevision }
+                try external(); return next
+            }
+            return try finishMachineUpdateMutation(value, verify: {
+                guard try self.loadMachineUpdatePolicyPreflightSource(next) == nextSource else { throw PreparationStoreError.staleRevision }
+                try external()
+            })
+        }
+    }
+
+    func markMachineUpdateRestartChecking(_ expected: MachineUpdateActivationRecord, directory: ReleaseDestinationLease,
+        restart: UpdateRestartAdmissionLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        try restart.withClosedAdmission {
+            try advanceMachineUpdateActivation(expected, to: .restartChecking, directory: directory, verify: {
+                try restart.validateMachineBoundary(directory: directory, expected: expected.machineAdmission); try verifyCurrent()
+            })
+        }
+    }
+
+    private func advanceMachineUpdateActivation(_ expected: MachineUpdateActivationRecord, to phase: MachineUpdateActivationRecord.Phase,
+        directory: ReleaseDestinationLease, verify: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        let next = try expected.advancing(to: phase)
+        let result = try transaction(write: true, activationWrite: true) {
+            try identity(macID); try requireUpdateAdmissionDirectory(directory)
+            guard try scalar("PRAGMA user_version") >= 17, try loadMachineUpdateActivation() == expected else {
+                throw PreparationStoreError.staleRevision
+            }
+            try verify(); try writeMachineUpdateActivation(next, replacing: expected); try verify(); return next
+        }
+        return try finishMachineUpdateMutation(result, verify: verify)
+    }
+
+    private func finishMachineUpdateMutation(_ expected: MachineUpdateActivationRecord,
+        verify: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        do {
+            return try transaction(write: false) {
+                guard try loadMachineUpdateActivation() == expected else { throw PreparationStoreError.staleRevision }
+                try verify(); return expected
+            }
+        } catch { unavailable = true; shutdown(); throw error }
+    }
+
+    private func loadMachineUpdateActivationRecord() throws -> MachineUpdateActivationRecord? {
+        try statement("SELECT id,revision,record FROM machine_update_activation_v1 ORDER BY id") { row in
+            let rc = try step(row); if rc == SQLITE_DONE { return nil }
+            guard sqlite3_column_type(row, 0) == SQLITE_INTEGER, sqlite3_column_int64(row, 0) == 1 else {
+                throw PreparationStoreError.corruptRecord
+            }
+            let record = try blob(row, column: 2, maximum: MachineUpdateActivationRecord.maximumBytes)
+            let value = try MachineUpdateActivationRecord.decode(record)
+            guard value.macID == macID, try blob(row, column: 1, maximum: 16) == bytes(value.revision),
+                  try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return value
+        }
+    }
+
+    private func loadMachineUpdateActivation() throws -> MachineUpdateActivationRecord? {
+        guard let value = try loadMachineUpdateActivationRecord() else { return nil }
+        // Stable-state readers and their schema writer must qualify this marker before the store can accept it.
+        guard value.phase != .finishing, value.phase != .completed else { throw PreparationStoreError.incompatibleStore }
+        if value.phase.blocksMachineWrites {
+            guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
+                  let admission = try loadUpdateAdmissionRegistration(),
+                  try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
+                throw PreparationStoreError.corruptRecord
+            }
+            do {
+                try value.requireScope(candidate: candidate, inventory: inventory, admission: admission)
+            } catch { throw PreparationStoreError.corruptRecord }
+        }
+        return value
+    }
+
+    private func writeMachineUpdateActivation(_ value: MachineUpdateActivationRecord,
+        replacing previous: MachineUpdateActivationRecord?) throws {
+        guard value.phase != .finishing, value.phase != .completed else { throw PreparationStoreError.invalidTransition }
+        if let previous {
+            try statement("UPDATE machine_update_activation_v1 SET revision=?,record=? WHERE id=1 AND revision=?") { row in
+                try bind(bytes(value.revision), column: 1, row: row); try bind(value.encoded, column: 2, row: row)
+                try bind(bytes(previous.revision), column: 3, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        } else {
+            try statement("INSERT INTO machine_update_activation_v1 VALUES(1,?,?)") { row in
+                try bind(bytes(value.revision), column: 1, row: row); try bind(value.encoded, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+    }
+
+    private func loadMachineUpdateAccounts(_ context: MachineUpdateReplacementContext) throws -> [MachineUpdateRestartSource.Account] {
+        let reservations: [AccountPreparationIntent] = try statement("SELECT owner FROM account_preparation_v1 ORDER BY owner LIMIT 65") { row in
+            var values: [AccountPreparationIntent] = []
+            while try step(row) == SQLITE_ROW {
+                guard values.count < 64, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                      let owner = UInt32(exactly: sqlite3_column_int64(row, 0)),
+                      let account = try loadAccountPreparation(ownerUID: owner) else { throw PreparationStoreError.corruptRecord }
+                values.append(account)
+            }
+            return values
+        }
+        var owners = Dictionary(uniqueKeysWithValues: context.inventory.accounts.map { ($0.accountID, $0.ownerUID) })
+        for account in reservations {
+            guard account.macID == context.inventory.macID, account.installationID == context.inventory.installationID,
+                  owners[account.accountID] == nil || owners[account.accountID] == account.ownerUID,
+                  !owners.contains(where: { $0.key != account.accountID && $0.value == account.ownerUID }) else {
+                throw RuntimePreparationError.changedScope
+            }
+            owners[account.accountID] = account.ownerUID
+        }
+        let accounts = try owners.keys.sorted { $0.lexicographicallyPrecedes($1) }.map { id -> MachineUpdateRestartSource.Account in
+            let owner = owners[id]!
+            let preparation = reservations.first { $0.accountID == id }
+            let initial = try loadInitialization(accountID: id)
+            let services = try loadServiceAccountPlan(accountID: id)
+            if let initial {
+                guard initial.macID == macID, initial.accountID == id,
+                      initial.installationID == context.inventory.installationID else { throw RuntimePreparationError.changedScope }
+            }
+            if let preparation, let initial {
+                guard initial.releaseDigest == preparation.releaseDigest,
+                      initial.initializationBytes == preparation.initializationBytes else { throw RuntimePreparationError.changedScope }
+            }
+            if let plan = services.plan {
+                guard plan.macID == macID, plan.accountID == id, plan.ownerUID == owner,
+                      plan.installationID == context.inventory.installationID else { throw RuntimePreparationError.changedScope }
+                if let preparation { try plan.validate(account: preparation) }
+            }
+            return .init(accountID: id, ownerUID: owner, preparation: preparation, initialization: initial,
+                services: services.plan, servicesComplete: services.complete)
+        }
+        let ids = Set(accounts.map(\.accountID))
+        guard context.runtime.runtimes.allSatisfy({ ids.contains($0.reference.services.accountID) }),
+              context.runtime.gateways.allSatisfy({ ids.contains($0.accountID) }) else { throw RuntimePreparationError.changedScope }
+        return accounts
+    }
+
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
         var expected = ["installation_identity_v1", "preparation_intents_v1"]
@@ -2098,6 +2355,7 @@ public final class PreparationIntentStore {
         if version >= 14 { expected.append("runtime_audit_cutover_v1") }
         if version >= 15 { expected.append("update_scheduling_candidate_v1") }
         if version >= 16 { expected.append("update_admission_registration_v1") }
+        if version >= 17 { expected.append("machine_update_activation_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
@@ -2135,7 +2393,7 @@ public final class PreparationIntentStore {
             return result
         }
     }
-    private func transaction<T>(write: Bool, _ body: () throws -> T) throws -> T {
+    private func transaction<T>(write: Bool, activationWrite: Bool = false, _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
@@ -2147,6 +2405,10 @@ public final class PreparationIntentStore {
         }
         active = true; defer { active = false }
         do {
+            if write && !activationWrite, try scalar("PRAGMA user_version") >= 17,
+               try loadMachineUpdateActivation()?.phase.blocksMachineWrites == true {
+                throw PreparationStoreError.invalidTransition
+            }
             let value = try body()
             try lease.validate()
             do { try exec("COMMIT"); if write { try didCommit?() } } catch { unavailable = true; throw error }
