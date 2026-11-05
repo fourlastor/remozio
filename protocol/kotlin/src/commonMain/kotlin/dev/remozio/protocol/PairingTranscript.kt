@@ -1,7 +1,5 @@
 package dev.remozio.protocol
 
-import java.security.MessageDigest
-
 /** Public setup material only. Local aliases and credentials never belong in this transcript. */
 class PairingKey(keyID: ByteArray, publicKey: ByteArray) {
     val keyID = CborValue.Bytes(keyID)
@@ -40,7 +38,7 @@ class PairingTranscript(
         require(setupID.size == 16 && challenge.size == 32 && enrollmentTag.size == 32 && expectedTrustRevision.size == 16)
         require(phone.role == ChannelRole.PHONE && mac.role == ChannelRole.MAC && phone.scope == mac.scope && phone.nonce != mac.nonce)
         require(minimumEnvelopeVersion > 0uL && selectedEnvelopeVersion ==
-            CompatibilityPolicy.envelopeVersion(phone.envelopeVersions, mac.envelopeVersions, minimumEnvelopeVersion))
+            selectEnvelopeVersion(phone.envelopeVersions, mac.envelopeVersions, minimumEnvelopeVersion))
         require(expiresAtUnixMillis > issuedAtUnixMillis)
         pairingPoint(macAuthorityKey); pairingPoint(macTransportKey)
         val keys = listOf(transportKey, decisionKey, biometricKey)
@@ -60,7 +58,7 @@ class PairingTranscript(
         12uL to expectedTrustRevision, 13uL to CborValue.Unsigned(issuedAtUnixMillis),
         14uL to CborValue.Unsigned(expiresAtUnixMillis),
     )), LIMITS)
-    fun digest(): ByteArray = MessageDigest.getInstance("SHA-256").digest(signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
+    fun digest(): ByteArray = sha256(signingInput(PairingProofPurpose.PHONE_BIOMETRIC))
     /** Compare on independently authenticated setup surfaces. Signing still binds the complete transcript. */
     fun verificationCode(): String {
         val alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"

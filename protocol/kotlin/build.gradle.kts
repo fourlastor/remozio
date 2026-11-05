@@ -26,6 +26,9 @@ kotlin {
 val commonTestVectors = mapOf(
     "cborSubset" to "protocol/vectors/cbor-subset-v1.json",
     "pairingInvitation" to "protocol/vectors/pairing-invitation-v1.json",
+    "pairingReceipt" to "protocol/vectors/pairing-receipt-v1.json",
+    "pairingSetup" to "protocol/vectors/pairing-setup-v1.json",
+    "pairing" to "protocol/vectors/pairing-v1.json",
     "approvalSignatures" to "protocol/vectors/approval-signatures-v1.json",
 )
 val generateCommonTestVectors by tasks.registering {

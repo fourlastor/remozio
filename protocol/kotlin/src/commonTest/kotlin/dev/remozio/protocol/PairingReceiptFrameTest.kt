@@ -1,11 +1,10 @@
 package dev.remozio.protocol
 
-import java.io.File
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
 class PairingReceiptFrameTest {
-    private fun vectors() = Json.parseToJsonElement(File(System.getProperty("remozio.pairingReceiptVectors")).readText()).jsonObject
+    private fun vectors() = Json.parseToJsonElement(TestVectors.pairingReceipt).jsonObject
     private fun hex(value: String) = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     @Test fun sharedRecoveryVectorsAndMessageRoles() {
         val values = vectors()
