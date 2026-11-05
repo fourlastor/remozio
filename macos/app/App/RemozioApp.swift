@@ -32,6 +32,7 @@ struct RemozioApp: App {
                 LoginItemSettingsSection(controls: login)
                 PresenceSettingsSection(controls: presence)
                 CommandCallerSettingsForm()
+                AuditUpgradeSettingsSection()
                 GatewaySettingsSection()
             }
             .formStyle(.grouped)
@@ -94,6 +95,7 @@ private struct SetupOverview: View {
     let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
+    @State private var showingAuditUpgrade = false
     @State private var showingAccountSetup = {
         #if DEBUG
         CommandLine.arguments.contains("--preview-account-setup")
@@ -117,6 +119,7 @@ private struct SetupOverview: View {
                         SetupServiceSection(controls: setup)
                         if setup.state == .enabled {
                             Button("Set up command approvals…") { showingAccountSetup = true }
+                            Button("Audit history setup…") { showingAuditUpgrade = true }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -142,6 +145,7 @@ private struct SetupOverview: View {
             SetupFilePreview(setup: setup, accountPreparation: { AnyView(AccountSetupSheet(importingSetupFile: true)) })
         }
         .sheet(isPresented: $showingAccountSetup) { AccountSetupSheet() }
+        .sheet(isPresented: $showingAuditUpgrade) { AuditUpgradeSheet() }
     }
 }
 

@@ -7,12 +7,100 @@ import SwiftUI
 #if DEBUG
 @main
 struct RenderSetupPreview {
+    @MainActor static func renderAudit(output: URL, app: NSApplication) throws {
+        func progress(_ stage: SetupAuditUpgradeProgress.Stage) throws -> SetupAuditUpgradeProgress {
+            let limits = try CBORLimits(maxBytes: 2048, maxDepth: 2, maxItems: 64)
+            func id(_ byte: UInt8, _ count: Int = 16) -> CBORValue { .bytes(Data(repeating: byte, count: count)) }
+            let runtime = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: id(1), 2: id(2), 3: id(3),
+                4: id(4), 5: .unsigned(501), 6: id(5), 7: id(6), 8: .boolean(true)]), limits: limits)
+            return try .decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(runtime), 2: id(7),
+                3: id(8, 32), 4: id(9, 32), 5: .unsigned(stage.rawValue),
+                6: .array(stage == .registrationObserved ? [.unsigned(2), .unsigned(4)] : [])]), limits: limits))
+        }
+        let cases: [(String, SetupAuditUpgradeProgress.Stage?, MacAuditUpgradeActivity?, MacAuditUpgradeNotice?, Bool)] = [
+            ("ready", .ready, nil, nil, true), ("waiting", .waitingForQuiescence, nil, nil, true),
+            ("files", .filesChanging, nil, nil, true), ("committed", .metadataCommitted, nil, nil, true),
+            ("registered", .registrationObserved, nil, nil, false), ("current", .alreadyCurrent, nil, nil, false),
+            ("empty", nil, nil, nil, false), ("unknown", nil, nil, .outcomeUnknown, false),
+            ("unavailable", nil, nil, .progressUnavailable, false),
+            ("changed", nil, nil, .progressChanged, false), ("invalid-settings", nil, nil, .invalidSettings, false), ("failed-read", nil, nil, .refreshFailed, false),
+            ("running", .ready, .upgrading, nil, false), ("reading", nil, .refreshing, nil, false)
+        ]
+        for (label, stage, activity, notice, canUpgrade) in cases {
+            for dark in [false, true] {
+                let name = "audit-" + label + (dark ? "-dark" : "-light")
+                let value = try stage.map(progress)
+                let view = AuditUpgradeContent(progress: value, loaded: activity == nil && notice == nil,
+                    activity: activity, notice: notice, canUpgrade: canUpgrade, onRefresh: {}, onUpgrade: {}, onClose: {})
+                app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
+                host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: 560, height: 560)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = host; host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2)); host.displayIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+                try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
+                print(name + ": inert audit state; frame=\(host.frame); fitting=\(host.fittingSize)")
+            }
+        }
+    }
+    @MainActor static func renderAuditSizing(output: URL, app: NSApplication) throws {
+        let limits = try CBORLimits(maxBytes: 2048, maxDepth: 2, maxItems: 64), id = Data(repeating: 3, count: 16)
+        let runtime = try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(id), 2: .bytes(id), 3: .bytes(id),
+            4: .bytes(id), 5: .unsigned(501), 6: .bytes(id), 7: .bytes(id), 8: .boolean(true)]), limits: limits)
+        let value = try SetupAuditUpgradeProgress.decode(DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(runtime),
+            2: .bytes(id), 3: .bytes(Data(repeating: 4, count: 32)), 4: .bytes(Data(repeating: 5, count: 32)),
+            5: .unsigned(1), 6: .array([])]), limits: limits))
+        for (name, size, width, height) in [("audit-compact", DynamicTypeSize.large, 480.0, 440.0),
+                                          ("audit-large-text", .accessibility3, 560.0, 640.0)] {
+            let view = AuditUpgradeContent(progress: value, loaded: true, activity: nil, notice: nil, canUpgrade: true,
+                onRefresh: {}, onUpgrade: {}, onClose: {}, detailsExpanded: true)
+            app.appearance = NSAppearance(named: .aqua)
+            let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, .light).dynamicTypeSize(size))
+            host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: width, height: height)
+            let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = host; host.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+            guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+            host.cacheDisplay(in: host.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+            try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
+            print(name + ": inert audit sizing; frame=\(host.frame); fitting=\(host.fittingSize)")
+        }
+    }
+    @MainActor static func renderAuditWaits(output: URL, app: NSApplication) throws {
+        for invalid in [false, true] {
+            let domain = "dev.sebastiano.remozio.snapshot.audit-waits." + UUID().uuidString
+            guard let defaults = UserDefaults(suiteName: domain) else { fatalError("No preview defaults") }
+            defer { defaults.removePersistentDomain(forName: domain) }
+            defaults.set(invalid ? "0" : "2000", forKey: MacAuditUpgradeSettings.readTimeoutKey)
+            defaults.set("120000", forKey: MacAuditUpgradeSettings.operationTimeoutKey)
+            for dark in [false, true] {
+                let name = "audit-waits-" + (invalid ? "invalid" : "valid") + (dark ? "-dark" : "-light")
+                let view = Form { AuditUpgradeSettingsSection() }.formStyle(.grouped).defaultAppStorage(defaults)
+                app.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let host = NSHostingView(rootView: view.background(.background).environment(\.colorScheme, dark ? .dark : .light))
+                host.appearance = app.appearance; host.frame = NSRect(x: 0, y: 0, width: 560, height: 400)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = host; host.layoutSubtreeIfNeeded(); RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("No bitmap") }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("No PNG") }
+                try png.write(to: output.appendingPathComponent(name + ".png")); window.contentView = nil
+                print(name + ": owned synthetic settings, no live connection")
+            }
+        }
+    }
     @MainActor static func main() throws {
-        guard CommandLine.arguments.count == 2 else { fatalError("Supply a snapshot output directory") }
+        guard CommandLine.arguments.count == 2 || (CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--audit-only") else {
+            fatalError("Supply a snapshot output directory and optional --audit-only")
+        }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        if CommandLine.arguments.count == 3 { try renderAudit(output: output, app: app); try renderAuditSizing(output: output, app: app); try renderAuditWaits(output: output, app: app); return }
         let defaults = try SharedSetupDefaults(
             presence: PresenceConfiguration(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000),
             wake: GatewayWakePolicy(maximumEntries: 8, maximumAttempts: 2, minimumEnrollmentIntervalMillis: 1000, maximumLifetimeMillis: 60_000, maximumTTLSeconds: 60),

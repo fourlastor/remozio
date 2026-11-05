@@ -3,7 +3,7 @@
 `RuntimeAuditUpgradeOperation` owns the authenticated setup scope across graph preparation, cutover and registration recovery.
 It composes the existing native adapters.
 It keeps cleanup separate from privileged progress.
-A later maintenance endpoint and app channel will call this operation. They are not part of this change.
+The maintenance endpoint calls this operation through `SetupAuditUpgradeInvocation`. The app reaches the endpoint from its [audit setup panel](audit-upgrade-app.md).
 
 ```mermaid
 flowchart TD
@@ -90,5 +90,5 @@ They check that the activity token stays held until the machine writer closes.
 They also check cleanup failure retention and that the native factory refuses an ordinary identity before it uses the scope.
 
 Positive native preparation, launchd operations and installed recovery remain unqualified.
-The managed worker, invocation, maintenance endpoint, XPC request and app progress panel are separate later work.
+The [worker](audit-upgrade-worker.md), [invocation](audit-upgrade-invocation.md), [maintenance endpoint](audit-upgrade-endpoint.md), [app channel](audit-upgrade-channel.md) and [app panel](audit-upgrade-app.md) have their own documents.
 No installed service, production credential or physical device is used by these tests.

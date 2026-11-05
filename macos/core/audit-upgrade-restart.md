@@ -64,7 +64,7 @@ Native refusal tests run from ordinary identity before callbacks or job commands
 
 These tests do not qualify actual launchd registration, process health or a real interrupted update.
 Native job observation uses `RuntimeJobRegistration.inspect`, which comes with the native drain slice.
-In this slice no production caller invokes restart recovery.
-The upgrade operation and the authenticated maintenance endpoint that invoke it come in later slices.
+The upgrade operation and authenticated maintenance endpoint invoke restart recovery.
+The app uses the maintenance channel for explicit resume requests.
 Sparkle integration remains unfinished.
 Installed-service and physical-device checks remain deferred to the user's interactive session.
