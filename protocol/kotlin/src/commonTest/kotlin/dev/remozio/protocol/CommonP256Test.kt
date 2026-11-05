@@ -92,11 +92,10 @@ class CommonP256Test {
             assertFalse(P256Verification.verify(signature, byteArrayOf(4) + hex(fieldHex) + key.copyOfRange(33, 65), input))
             assertFalse(P256Verification.verify(signature, byteArrayOf(4) + key.copyOfRange(1, 33) + hex(fieldHex), input))
         }
-        val other = hex(vectors[1].getValue("publicKey").jsonPrimitive.content)
-        if (!other.contentEquals(hex(vectors[0].getValue("publicKey").jsonPrimitive.content))) {
-            assertFalse(P256Verification.verify(hex(vectors[0].getValue("signature").jsonPrimitive.content), other,
-                hex(vectors[0].getValue("input").jsonPrimitive.content)))
-        }
+        val first = hex(vectors[0].getValue("publicKey").jsonPrimitive.content)
+        val other = hex(vectors.map { it.getValue("publicKey").jsonPrimitive.content }.first { hex(it).contentEquals(first).not() })
+                assertFalse(P256Verification.verify(hex(vectors[0].getValue("signature").jsonPrimitive.content), other,
+            hex(vectors[0].getValue("input").jsonPrimitive.content)))
         assertEquals(65, hex(vectors[0].getValue("publicKey").jsonPrimitive.content).size)
     }
 }
