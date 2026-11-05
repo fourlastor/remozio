@@ -12,15 +12,19 @@ final class UpdateCandidateStorageFixture {
     let release: SignedReleaseEvidence
     let destination: ReleaseDestinationLease
     var policy: AuthorityCodePolicy { f.plan.host.codePolicy }
+    var mac: Data { f.f.mac }
+    var account: Data { f.account.accountID }
 
-    init(enable: Bool = true, enroll: Bool = true) throws {
+    init(enable: Bool = true, enroll: Bool = true, admission: Bool = false) throws {
         f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true, auditDelivery: true) { component in
             guard [.authority, .setupController].contains(component.role) else { return component }
+            let versions: Set<UInt64> = admission ? [15, 16] : [15]
             var formats = try component.formats.map { format in
                 guard format.name == "authority.installation-preparation" else { return format }
-                return try ReleaseFormat(name: format.name, readers: format.readers.union([15]), writers: format.writers.union([15]))
+                return try ReleaseFormat(name: format.name, readers: format.readers.union(versions), writers: format.writers.union(versions))
             }
             formats.append(try .init(name: UpdateSchedulingCandidateRecord.formatName, readers: [1], writers: [1]))
+            if admission { formats.append(try .init(name: UpdateAdmissionRegistrationRecord.formatName, readers: [1], writers: [1])) }
             return try .init(role: component.role, identifier: component.identifier, generation: component.generation,
                 relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
                 build: component.build, teamID: component.teamID, formats: formats)
@@ -61,6 +65,11 @@ final class UpdateCandidateStorageFixture {
         store = try f.f.open(hook: hook)
     }
     func sql(_ statement: String) throws { XCTAssertEqual(try f.f.sql(statement), Int64(SQLITE_OK)) }
+    func editedRelease(_ edit: (ReleaseComponent) throws -> ReleaseComponent) throws -> SignedReleaseEvidence {
+        try .init(manifest: .init(release: release.manifest.release, build: release.manifest.build,
+            components: release.manifest.components.map(edit), dependencies: release.manifest.dependencies),
+            codeDirectoryHashes: release.codeDirectoryHashes, dependencyCodeDirectoryHashes: release.dependencyCodeDirectoryHashes)
+    }
     func changedRelease(removing name: String) throws -> SignedReleaseEvidence {
         let components = try release.manifest.components.map { component in
             try ReleaseComponent(role: component.role, identifier: component.identifier, generation: component.generation,

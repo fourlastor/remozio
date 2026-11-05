@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -312,7 +312,9 @@ public final class PreparationIntentStore {
             return record
         } : []
         try identity(macID)
-        return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers)
+        let admission = try schema >= 16 ? loadUpdateAdmissionRegistration()?.encoded : nil
+        return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
+            updateAdmissionRegistration: admission)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -898,7 +900,7 @@ public final class PreparationIntentStore {
                 try exec("CREATE TABLE runtime_audit_graph_v1(account BLOB NOT NULL CHECK(length(account)=16),attempt BLOB NOT NULL CHECK(length(attempt)=16),revision BLOB NOT NULL UNIQUE CHECK(length(revision)=16),phase INTEGER NOT NULL CHECK(phase IN (1,2)),content BLOB NOT NULL CHECK(length(content)=32),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 28672),PRIMARY KEY(account,content)) STRICT, WITHOUT ROWID")
                 try exec("CREATE TABLE runtime_audit_graph_chunks_v1(account BLOB NOT NULL CHECK(length(account)=16),content BLOB NOT NULL CHECK(length(content)=32),part INTEGER NOT NULL CHECK(part BETWEEN 0 AND 511),bytes BLOB NOT NULL CHECK(length(bytes) BETWEEN 1 AND 16384),PRIMARY KEY(account,content,part)) STRICT, WITHOUT ROWID")
                 try exec("PRAGMA user_version=13")
-            } else { guard (13...15).contains(schema) else { throw PreparationStoreError.incompatibleStore } }
+            } else { guard (13...16).contains(schema) else { throw PreparationStoreError.incompatibleStore } }
             guard try scalar("SELECT COUNT(*) FROM runtime_audit_graph_v1") < 64 else { throw RuntimePreparationError.exhausted }
             let record = try RuntimeAuditUpgradeGraphRecord(upgrade: graph.upgrade, contentDigest: graph.digest)
             try statement("INSERT INTO runtime_audit_graph_v1 VALUES(?,?,?,?,?,?)") { row in
@@ -1933,6 +1935,151 @@ public final class PreparationIntentStore {
         return withUnsafeBytes(of: &bytes) { Data($0) }
     }
 
+    /// Explicit storage upgrade. It leaves the inventory, selected copy and existing work unchanged.
+    func upgradeUpdateAdmissionStorage(expectedInstalledReleaseDigest: Data) throws {
+        if try retainedRuntimeCompatibilityInputs().schemaVersion < 15 {
+            try upgradeUpdateCandidateStorage(expectedInstalledReleaseDigest: expectedInstalledReleaseDigest)
+        }
+        try transaction(write: true) {
+            try identity(macID)
+            guard let inventory = try loadInventoryRecord(), inventory.releaseDigest == expectedInstalledReleaseDigest else {
+                throw RuntimePreparationError.changedScope
+            }
+            let version = try scalar("PRAGMA user_version")
+            if version >= 16 { _ = try loadUpdateAdmissionRegistration(); return }
+            guard version == 15 else { throw PreparationStoreError.incompatibleStore }
+            _ = try loadAll(); _ = try loadUpdateCandidate()
+            try exec("CREATE TABLE update_admission_registration_v1(id INTEGER PRIMARY KEY CHECK(id=1),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 32768)) STRICT")
+            try exec("PRAGMA user_version=16"); try identity(macID)
+        }
+    }
+
+    func updateAdmissionRegistration() throws -> UpdateAdmissionRegistrationRecord? {
+        try transaction(write: false) {
+            try identity(macID)
+            return try scalar("PRAGMA user_version") >= 16 ? loadUpdateAdmissionRegistration() : nil
+        }
+    }
+
+    /// Stores exact references under the machine writer. The caller must validate the actual files before and after the write.
+    func retainUpdateAdmissionRegistration(_ value: UpdateAdmissionRegistrationRecord, replacing expected: UpdateAdmissionRegistrationRecord?,
+        runtime: RuntimeReleaseCompatibilitySnapshot.Inputs, verifyFiles: () throws -> Void) throws -> UpdateAdmissionRegistrationRecord {
+        try transaction(write: true) {
+            try retainUpdateAdmissionRegistrationInTransaction(value, replacing: expected, runtime: runtime, verifyFiles: verifyFiles)
+        }
+    }
+
+    func validateUpdateAdmissionDirectory(_ directory: ReleaseDestinationLease) throws {
+        try validateStorageLease(); try requireUpdateAdmissionDirectory(directory)
+    }
+
+    /// Retains the machine writer through provisioning, validation and commit. The scoped callback cannot outlive preparation.
+    func prepareUpdateAdmissionRegistration(directory: ReleaseDestinationLease, replacing expected: UpdateAdmissionRegistrationRecord?,
+        runtime: RuntimeReleaseCompatibilitySnapshot.Inputs,
+        prepare: (UpdateAdmissionRegistrationRecord?, _ validate: @escaping () throws -> Void) throws -> UpdateAdmissionRegistrationRecord,
+        verifyFiles: (UpdateAdmissionRegistrationRecord) throws -> Void) throws -> UpdateAdmissionRegistrationRecord {
+        let value = try transaction(write: true) {
+            try identity(macID); try requireUpdateAdmissionDirectory(directory)
+            guard try scalar("PRAGMA user_version") >= 16 else { throw PreparationStoreError.incompatibleStore }
+            guard try loadRetainedRuntimeCompatibilityInputs() == runtime,
+                  try loadUpdateAdmissionRegistration() == expected else { throw PreparationStoreError.staleRevision }
+            var preparing = true
+            let processID = getpid()
+            let validate: () throws -> Void = { [weak self] in
+                guard preparing, getpid() == processID, let self, self.active else { throw JournalLeaseError.invalidated }
+                try self.identity(self.macID); try self.requireUpdateAdmissionDirectory(directory)
+                guard try self.loadRetainedRuntimeCompatibilityInputs() == runtime,
+                      try self.loadUpdateAdmissionRegistration() == expected else { throw PreparationStoreError.staleRevision }
+            }
+            let prepared: UpdateAdmissionRegistrationRecord
+            do {
+                defer { preparing = false }
+                try validate(); prepared = try prepare(expected, validate); try validate()
+            }
+            return try retainUpdateAdmissionRegistrationInTransaction(prepared, replacing: expected, runtime: runtime) {
+                try self.requireUpdateAdmissionDirectory(directory); try verifyFiles(prepared)
+            }
+        }
+        do {
+            return try transaction(write: false) {
+                try identity(macID); try requireUpdateAdmissionDirectory(directory)
+                guard try loadUpdateAdmissionRegistration() == value else { throw PreparationStoreError.staleRevision }
+                try verifyFiles(value); try requireUpdateAdmissionDirectory(directory)
+                guard try loadUpdateAdmissionRegistration() == value else { throw PreparationStoreError.staleRevision }
+                return value
+            }
+        } catch {
+            unavailable = true; shutdown(); throw error
+        }
+    }
+
+    private func requireUpdateAdmissionDirectory(_ directory: ReleaseDestinationLease) throws {
+        try lease.validate()
+        guard let held = try lease.directoryIdentities().last,
+              let target = try directory.preparationAncestry().last,
+              UInt32(bitPattern: held.device) == target.device, held.inode == target.inode else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
+
+    private func retainUpdateAdmissionRegistrationInTransaction(_ value: UpdateAdmissionRegistrationRecord,
+        replacing expected: UpdateAdmissionRegistrationRecord?, runtime: RuntimeReleaseCompatibilitySnapshot.Inputs,
+        verifyFiles: () throws -> Void) throws -> UpdateAdmissionRegistrationRecord {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") >= 16 else { throw PreparationStoreError.incompatibleStore }
+        guard try loadRetainedRuntimeCompatibilityInputs() == runtime,
+              let inventory = try loadInventoryRecord(), value.macID == macID, value.installationID == inventory.installationID else {
+            throw RuntimePreparationError.changedScope
+        }
+        let previous = try loadUpdateAdmissionRegistration()
+        guard previous == expected else { throw PreparationStoreError.staleRevision }
+        _ = try value.encoded
+        if let previous {
+            guard value.machine == previous.machine,
+                  previous.accounts.allSatisfy({ value.accounts.contains($0) }),
+                  previous.designatedOwner == nil || value.designatedOwner == previous.designatedOwner else {
+                throw PreparationStoreError.invalidTransition
+            }
+        }
+        let added = value.accounts.filter { !(previous?.accounts.contains($0) ?? false) }
+        guard added.allSatisfy({ reference in inventory.accounts.contains { $0.accountID == reference.accountID } }),
+              value.designatedOwner == previous?.designatedOwner ||
+                inventory.accounts.contains(where: { $0.accountID == value.designatedOwner }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        try verifyFiles()
+        if value == previous { try verifyFiles(); return value }
+        guard value.revision != previous?.revision else { throw PreparationStoreError.staleRevision }
+        if let previous {
+            try statement("UPDATE update_admission_registration_v1 SET revision=?,record=? WHERE id=1 AND revision=?") { row in
+                try bind(bytes(value.revision), column: 1, row: row); try bind(value.encoded, column: 2, row: row)
+                try bind(bytes(previous.revision), column: 3, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        } else {
+            try statement("INSERT INTO update_admission_registration_v1 VALUES(1,?,?)") { row in
+                try bind(bytes(value.revision), column: 1, row: row); try bind(value.encoded, column: 2, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+        try verifyFiles(); return value
+    }
+
+    private func loadUpdateAdmissionRegistration() throws -> UpdateAdmissionRegistrationRecord? {
+        try statement("SELECT id,revision,record FROM update_admission_registration_v1 ORDER BY id") { row in
+            let result = try step(row)
+            if result == SQLITE_DONE { return nil }
+            guard result == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                  sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.corruptRecord }
+            let value = try UpdateAdmissionRegistrationRecord.decode(blob(row, column: 2, maximum: UpdateAdmissionRegistrationRecord.maximumBytes))
+            guard value.macID == macID, let inventory = try loadInventoryRecord(), value.installationID == inventory.installationID,
+                  try blob(row, column: 1, maximum: 16) == bytes(value.revision), try step(row) == SQLITE_DONE else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value
+        }
+    }
+
     private func identity(_ macID: Data) throws {
         let version = try scalar("PRAGMA user_version")
         var expected = ["installation_identity_v1", "preparation_intents_v1"]
@@ -1950,6 +2097,7 @@ public final class PreparationIntentStore {
         if version >= 13 { expected += ["runtime_audit_graph_v1", "runtime_audit_graph_chunks_v1"] }
         if version >= 14 { expected.append("runtime_audit_cutover_v1") }
         if version >= 15 { expected.append("update_scheduling_candidate_v1") }
+        if version >= 16 { expected.append("update_admission_registration_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

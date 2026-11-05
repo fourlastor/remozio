@@ -61,3 +61,18 @@ struct UpdateAdmissionRegistrationRecord: Codable, Equatable, Sendable, CustomSt
         }
     } }
 }
+
+/// Enables storage only after checking the installed readers. It does not provision files or select an update owner.
+enum UpdateAdmissionRegistrationStorage {
+    static func enable(installedRelease: SignedReleaseEvidence, policy: AuthorityCodePolicy, store: PreparationIntentStore) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try enableInLease(installedRelease: installedRelease, policy: policy, store: store)
+    }
+    static func enableInLease(installedRelease: SignedReleaseEvidence, policy: AuthorityCodePolicy, store: PreparationIntentStore) throws {
+        try UpdateSchedulingCandidateRecord.validateReaders(installedRelease, policy: policy)
+        try ReleaseCompatibilityPreflight.validate(installedRelease, policy: policy,
+            requirements: .init(formats: UpdateAdmissionRegistrationRecord.requirements, requests: []))
+        try RuntimeReleaseCompatibilitySnapshot.capture(machine: store).validate(installedRelease, policy: policy, machine: store)
+        try store.upgradeUpdateAdmissionStorage(expectedInstalledReleaseDigest: InstallationInventory.digest(installedRelease))
+    }
+}
