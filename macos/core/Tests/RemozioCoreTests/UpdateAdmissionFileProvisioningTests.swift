@@ -37,6 +37,27 @@ final class UpdateAdmissionFileProvisioningTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    func testClosingTheActivityBeforePublicationKeepsTheLockAndPublishesNothing() throws {
+        let f = try UpdateAdmissionProvisioningFixture(), barrier = try f.activity.open(), token = try barrier.acquireExclusive()
+        let directory = try f.directory(), lockPath = f.activity.directory.appendingPathComponent(ReleaseActivityBarrier.fileName).path
+        defer { token.close(); directory.close() }
+        var staged = false, lockHeldAfterClose: Bool?
+        XCTAssertThrowsError(try UpdateAdmissionFileProvisioning.prepare(directory: directory, owner: getuid(), accountID: f.account,
+            activity: token, mode: .createIfAbsent, expected: nil, verifyCurrent: {
+                guard staged, lockHeldAfterClose == nil else { return }
+                token.close()
+                let probe = Darwin.open(lockPath, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                defer { if probe >= 0 { _ = Darwin.close(probe) } }
+                lockHeldAfterClose = probe >= 0 && flock(probe, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK
+            }, didStage: { if case .staged = $0 { staged = true } })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+        XCTAssertEqual(lockHeldAfterClose, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try f.path(.machine)))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.activity.directory.path)
+            .filter { $0.hasPrefix(".remozio-update-admission-") }, [])
+        let next = try barrier.acquireExclusive(); next.close()
+    }
     func testCreatesDistinctPrivateFilesAndPinnedReopenDoesNotReplaceThem() throws {
         let f = try UpdateAdmissionProvisioningFixture(), result = try f.prepare()
         XCTAssertEqual(result.createdScopes, [.machine, .account(f.account)])

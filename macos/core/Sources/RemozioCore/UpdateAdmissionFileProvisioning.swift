@@ -34,10 +34,12 @@ enum UpdateAdmissionFileProvisioning {
         let processID = getpid()
         func verify() throws {
             guard getpid() == processID, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
-            try activity.validateExclusive(in: directory); try verifyCurrent(); try directory.validate()
+            // The caller check runs first, so a token it closes is detected before the next side effect.
+            try verifyCurrent(); try activity.validateExclusive(in: directory); try directory.validate()
         }
         try verify()
-        return try directory.withDirectory { parent in
+        // The loan keeps the exclusive lock through publication even if the token closes concurrently.
+        return try activity.withExclusiveLoan(in: directory) { try directory.withDirectory { parent in
             var identities: [UpdateAdmissionScope: PreparationFileIdentity] = [:], created = Set<UpdateAdmissionScope>()
             for scope in scopes {
                 let name = names[scope]!
@@ -92,7 +94,7 @@ enum UpdateAdmissionFileProvisioning {
             }
             guard identities[.machine] != identities[.account(accountID)] else { throw JournalLeaseError.identityChanged }
             try verify(); return .init(identities: identities, createdScopes: created)
-        }
+        } }
     }
 
     private static func inspect(_ fd: Int32, parent: Int32, name: String, owner: uid_t) throws -> PreparationFileIdentity {

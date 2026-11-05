@@ -110,6 +110,25 @@ final class UpdateAdmissionRegistrationProvisioningTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: try f.path(.machine)))
         XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 15)
     }
+    func testClosingTheActivityDuringPreparationPublishesAndRegistersNothing() throws {
+        let f = try BoundAdmissionRegistrationFixture(), owner = try f.activity(), token = try owner.acquireExclusive()
+        let directory = try f.directory()
+        defer { token.close(); directory.close() }
+        var staged = false
+        XCTAssertThrowsError(try UpdateAdmissionRegistrationProvisioning.prepareInLease(directory: directory, owner: getuid(),
+            macID: f.machine.mac, accountID: f.machine.account, activity: token, store: f.machine.store,
+            installedRelease: f.machine.release, policy: f.machine.policy, replacing: nil, openDirectory: f.directory,
+            verifyCurrent: { if staged { token.close() } }, didStage: { if case .staged = $0 { staged = true } })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+        // A lease error inside the writer retires the open store. A reopen shows that nothing was registered.
+        XCTAssertThrowsError(try f.machine.store.updateAdmissionRegistration()) {
+            XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
+        }
+        try f.machine.reopen(); XCTAssertNil(try f.machine.store.updateAdmissionRegistration())
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try f.path(.machine)))
+        let next = try owner.acquireExclusive(); next.close()
+    }
     func testFailureAfterPublishingOneFileLeavesNoRegistrationAndCanResumeSafely() throws {
         let f = try BoundAdmissionRegistrationFixture()
         XCTAssertThrowsError(try f.prepare(stage: { stage in if case .published(.machine) = stage { throw Fault.injected } }))

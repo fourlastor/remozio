@@ -51,7 +51,7 @@ enum UpdateAdmissionRegistrationProvisioning {
             designatedOwner = selected
         }
         func verify() throws {
-            try activity.validateExclusive(in: directory); try directory.validate(); try verifyCurrent()
+            try verifyCurrent(); try activity.validateExclusive(in: directory); try directory.validate()
         }
         func verifyFiles(_ value: UpdateAdmissionRegistrationRecord) throws {
             try verify()
@@ -69,7 +69,8 @@ enum UpdateAdmissionRegistrationProvisioning {
             }
             try verify()
         }
-        return try store.prepareUpdateAdmissionRegistration(directory: directory, replacing: expected, runtime: runtime,
+        // The loan keeps the exclusive lock through file publication, the commit and the post-commit file checks.
+        return try activity.withExclusiveLoan(in: directory) { try store.prepareUpdateAdmissionRegistration(directory: directory, replacing: expected, runtime: runtime,
             prepare: { previous, validateMachine in
                 try validateMachine(); try verify()
                 if let previous { try verifyFiles(previous) }
@@ -90,6 +91,6 @@ enum UpdateAdmissionRegistrationProvisioning {
                 }
                 return try .init(macID: macID, installationID: inventory.installationID, machine: machine,
                     accounts: accounts, designatedOwner: designatedOwner)
-            }, verifyFiles: verifyFiles)
+            }, verifyFiles: verifyFiles) }
     }
 }

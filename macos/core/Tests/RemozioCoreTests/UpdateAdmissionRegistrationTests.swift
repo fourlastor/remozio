@@ -89,6 +89,21 @@ final class UpdateAdmissionRegistrationTests: XCTestCase {
             verifyFiles: { XCTFail("Stale snapshot reached file verification") }))
         XCTAssertEqual(try f.store.updateAdmissionRegistration(), first)
     }
+    func testARegistrationChangeMakesEarlierInputsStaleForSelectionAndReleaseChecks() throws {
+        let f = try Fixture(admission: true); try enable(f)
+        let copy = try f.copy(), runtime = try f.store.retainedRuntimeCompatibilityInputs()
+        let snapshot = try RuntimeReleaseCompatibilitySnapshot.capture(machine: f.store)
+        try retain(f, record(f))
+        XCTAssertNotEqual(try f.store.retainedRuntimeCompatibilityInputs(), runtime)
+        XCTAssertThrowsError(try f.store.selectUpdateCandidate(preparation: copy, runtime: runtime, replacing: nil)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        XCTAssertNil(try f.store.updateCandidate())
+        XCTAssertThrowsError(try snapshot.requireCurrent(machine: f.store)) {
+            XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+        }
+        XCTAssertNoThrow(try f.select(copy))
+    }
     func testPinnedMachineAccountAndDesignatedOwnerCannotBeReplaced() throws {
         let f = try Fixture(admission: true); try enable(f); let first = try record(f, owner: f.account); try retain(f, first)
         let changedMachine = try record(f, owner: f.account, machine: .init(device: 1, inode: 3))

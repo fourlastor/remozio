@@ -160,6 +160,18 @@ public final class ReleaseActivityBarrier: @unchecked Sendable {
             }
         }
     }
+    /// Holds the exclusive kernel lock until `body` returns. Closing the lending token during `body` revokes its
+    /// validation, but the lock stays held, so no side effect inside `body` can run after the lock is released.
+    fileprivate func withExclusiveLoan<Value>(_ id: UUID, in target: ReleaseDestinationLease, _ body: () throws -> Value) throws -> Value {
+        try validate(id, in: target, expectedMode: .exclusive)
+        let loan = UUID()
+        try lock.withLock {
+            guard holders.contains(id), mode == .exclusive else { throw JournalLeaseError.invalidated }
+            holders.insert(loan)
+        }
+        defer { release(loan) }
+        return try body()
+    }
     fileprivate func release(_ id: UUID) {
         guard getpid() == processID else { return }
         lock.withLock {
@@ -215,6 +227,9 @@ final class ReleaseActivityToken: Sendable {
     func validateExclusive() throws { try barrier.validateExclusive(id) }
     func validateExclusive(in directory: ReleaseDestinationLease) throws { try barrier.validateExclusive(id, in: directory) }
     func validateShared(in directory: ReleaseDestinationLease) throws { try barrier.validateShared(id, in: directory) }
+    func withExclusiveLoan<Value>(in directory: ReleaseDestinationLease, _ body: () throws -> Value) throws -> Value {
+        try barrier.withExclusiveLoan(id, in: directory, body)
+    }
     func close() { barrier.release(id) }
     deinit { close() }
 }
