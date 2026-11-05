@@ -75,7 +75,7 @@ final class UpdateCandidateStorageFixture {
                 value = try MachineUpdatePolicyRead.readInLease(.init(anchor: f.f.root.path,
                     relativeDirectory: String(directory.dropFirst(f.f.root.path.count + 1)), owner: getuid()),
                     macID: initial.macID, accountID: initial.accountID)
-            } catch JournalLeaseError.system(let code) where code == ENOENT && !initial.complete { value = nil }
+            } catch JournalLeaseError.system(let code) where code == ENOENT && !initial.complete && initial.checkpoint == nil { value = nil }
             return .init(accountID: account.accountID, snapshot: value)
         }
     }

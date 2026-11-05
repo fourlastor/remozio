@@ -114,6 +114,23 @@ final class MachineUpdatePolicyPreflightTests: XCTestCase {
         XCTAssertEqual(try f.f.machine.store.accountPreparation(ownerUID: pending!.ownerUID), pending)
         XCTAssertNil(try f.f.machine.store.runtimePreparation(accountID: pending!.accountID).reference)
     }
+    func testACheckpointedInitializationWithoutAPolicyCannotProduceADigest() throws {
+        let f = try PolicyPreflightFixture(), source = try f.source()
+        let index = try XCTUnwrap(source.accounts.firstIndex { $0.initialization?.checkpoint != nil })
+        let account = source.accounts[index], initial = try XCTUnwrap(account.initialization)
+        // Setup was interrupted after the checkpoint was captured, and the journal is now missing.
+        let interrupted = try initial.advancing(checkpoint: XCTUnwrap(initial.checkpoint), complete: false)
+        var accounts = source.accounts
+        accounts[index] = .init(accountID: account.accountID, ownerUID: account.ownerUID, preparation: account.preparation,
+            initialization: interrupted, services: account.services, servicesComplete: account.servicesComplete)
+        let changed = MachineUpdateRestartSource(replacement: source.replacement, accounts: accounts, provisioningHistory: source.provisioningHistory)
+        let policies = try f.f.machine.policyCaptures(for: source).map { value in
+            value.accountID == account.accountID ? MachineUpdatePolicyCapture(accountID: value.accountID, snapshot: nil) : value
+        }
+        XCTAssertThrowsError(try MachineUpdatePolicyPreflight.policyDigest(source: changed, policies: policies)) {
+            XCTAssertEqual($0 as? AuthoritySelfValidationError, .unconfigured)
+        }
+    }
     func testAnotherAccountsHigherInstalledGenerationBlocksBeforeAnyExchange() throws {
         var second: AccountPreparationIntent?
         let f = try PolicyPreflightFixture(prepare: { second = try self.reserve($0, complete: true) })

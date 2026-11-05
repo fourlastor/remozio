@@ -28,6 +28,12 @@ final class UpdateActivationAdmission: Sendable {
         try activity.validate(); try admission.validate()
     }
 
+    /// Proves this coordinator holds the registered machine admission file before it acquires or transfers a drain.
+    func requireMachineAdmission(_ expected: PreparationFileIdentity) throws {
+        try admission.validate()
+        guard admission.expectedIdentity == expected else { throw RuntimePreparationError.changedScope }
+    }
+
     /// A busy automatic attempt leaves admission open and retains no activity token.
     func automatic() throws -> UpdateQuiescenceLease? {
         let exclusive: ReleaseActivityToken

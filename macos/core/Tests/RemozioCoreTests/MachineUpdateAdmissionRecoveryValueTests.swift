@@ -78,6 +78,17 @@ final class MachineUpdateAdmissionRecoveryValueTests: XCTestCase {
             XCTAssertThrowsError(try recovery.prepareAdmission()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
         }
     }
+    func testACoordinatorForAnotherMachineFileIsRefusedAndBothGatesStayOpen() throws {
+        let a = try Fixture(), b = try Fixture()
+        XCTAssertNotEqual(a.files.identity, b.files.identity)
+        a.snapshot.value = a.state(a.record)
+        let snapshot = a.snapshot
+        XCTAssertThrowsError(try MachineUpdateAdmissionRecovery(initial: snapshot.value, macID: a.inventory.macID,
+            installationID: a.inventory.installationID, accountID: a.account, coordinator: b.coordinator(),
+            readCurrent: { try snapshot.read() })) { XCTAssertEqual($0 as? RuntimePreparationError, .changedScope) }
+        let first = try a.files.open().acquireAdmission(); first.close()
+        let second = try b.files.open().acquireAdmission(); second.close()
+    }
     func testAnOpenSnapshotAllowsAdmissionWithoutRetainingAnyDrain() throws {
         let f = try Fixture(), recovery = try f.recovery(); defer { recovery.close() }
         let token = try f.boundary(recovery).acquireAdmission(); try token.validate(); token.close()

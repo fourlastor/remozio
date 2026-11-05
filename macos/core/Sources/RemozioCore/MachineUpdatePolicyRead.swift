@@ -9,7 +9,9 @@ enum MachineUpdatePolicyRead {
             guard let initial = account.initialization else { return .init(accountID: account.accountID, snapshot: nil) }
             let snapshot: AuthorityCodePolicySnapshot?
             do { snapshot = try readNative(initial) }
-            catch JournalLeaseError.system(let code) where code == ENOENT && !initial.complete { snapshot = nil }
+            // Only an initialization that never captured a checkpoint may lack its journal. A captured checkpoint proves
+            // the journal committed, so its loss must stop the preflight (AuthorityAccountInitialization.resume agrees).
+            catch JournalLeaseError.system(let code) where code == ENOENT && !initial.complete && initial.checkpoint == nil { snapshot = nil }
             return .init(accountID: account.accountID, snapshot: snapshot)
         }
     }

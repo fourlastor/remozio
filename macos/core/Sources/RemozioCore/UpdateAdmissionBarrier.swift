@@ -53,6 +53,9 @@ final class UpdateAdmissionBarrier: @unchecked Sendable {
         try lock.withLock { try validateLocked() }
     }
 
+    /// The exact file identity this barrier was opened for. `validate()` proves the held file still matches it.
+    var expectedIdentity: PreparationFileIdentity { expected }
+
     /// Checks the retained file without taking admission or drain ownership.
     func requireRegisteredIdentity(_ identity: PreparationFileIdentity, scope: UpdateAdmissionScope) throws {
         guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }

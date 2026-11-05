@@ -29,7 +29,8 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let auditCutovers: [RuntimeAuditUpgradeCutoverRecord]
         /// Canonical update admission registration bytes at schema 16 and later, so a registration change makes earlier inputs stale.
         let updateAdmissionRegistration: Data?
-        let machineUpdateActivation: Data?
+        /// Canonical machine update activation record bytes at schema 17 and later, so an activation change makes earlier inputs stale.
+        private(set) var machineUpdateActivation: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
@@ -37,6 +38,10 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
+        }
+        /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
+        func replacingMachineUpdateActivation(_ value: Data?) -> Self {
+            var copy = self; copy.machineUpdateActivation = value; return copy
         }
     }
     let inputs: Inputs

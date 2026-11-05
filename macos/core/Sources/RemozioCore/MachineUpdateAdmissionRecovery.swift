@@ -44,6 +44,7 @@ final class MachineUpdateAdmissionRecovery: @unchecked Sendable {
         guard let registration = initial.registration else { throw RuntimePreparationError.changedScope }
         self.macID = macID; self.installationID = installationID; self.accountID = accountID
         self.registration = registration; self.coordinator = coordinator; self.readCurrent = readCurrent
+        try coordinator.requireMachineAdmission(registration.machine)
         try withOperation { try reconcile(initial) }
     }
 
@@ -85,6 +86,7 @@ final class MachineUpdateAdmissionRecovery: @unchecked Sendable {
         try current.requireScope(macID: macID, installationID: installationID, accountID: accountID, expected: registration)
         if current.activation?.phase.blocksMachineWrites == true {
             if let retained = lock.withLock({ drain }) { try retained.withClosedAdmission {}; return }
+            try coordinator.requireMachineAdmission(registration.machine)
             let acquired: UpdateAdmissionDrain
             do { acquired = try coordinator.beginDrain() }
             catch UpdateAdmissionBarrierError.busy { return }

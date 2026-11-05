@@ -124,7 +124,9 @@ struct MachineUpdatePolicyPreflight {
             let value = policies.first { $0.accountID == account.accountID }!
             if value.snapshot != nil {
                 guard account.initialization != nil else { throw MachineUpdateActivationError.changedScope }
-            } else if account.initialization?.complete == true { throw AuthoritySelfValidationError.unconfigured }
+            } else if account.initialization?.complete == true || account.initialization?.checkpoint != nil {
+                throw AuthoritySelfValidationError.unconfigured
+            }
         }
     }
 
@@ -151,11 +153,8 @@ struct MachineUpdatePolicyPreflight {
 
 extension MachineUpdateRestartSource {
     func replacingActivation(_ activation: MachineUpdateActivationRecord) throws -> Self {
-        let c = replacement, r = c.runtime
-        let runtime = RuntimeReleaseCompatibilitySnapshot.Inputs(schemaVersion: r.schemaVersion, macID: r.macID,
-            inventory: r.inventory, runtimes: r.runtimes, gateways: r.gateways, sharedImport: r.sharedImport,
-            auditUpgrades: r.auditUpgrades, auditGraphs: r.auditGraphs, auditCutovers: r.auditCutovers,
-            updateAdmissionRegistration: r.updateAdmissionRegistration, machineUpdateActivation: try activation.encoded)
+        let c = replacement
+        let runtime = c.runtime.replacingMachineUpdateActivation(try activation.encoded)
         return .init(replacement: .init(activation: activation, inventory: c.inventory, candidate: c.candidate,
             admission: c.admission, replacement: c.replacement, runtime: runtime), accounts: accounts,
             provisioningHistory: provisioningHistory)
