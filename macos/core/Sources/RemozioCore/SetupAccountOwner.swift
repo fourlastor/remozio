@@ -61,6 +61,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let activationOperations: RuntimeActivationOperations
     private let asynchronousWork = SetupOwnerAsyncWork()
     private let setupReplyWork = SetupOwnerAsyncWork()
+    private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
+    private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
     private let gatewayActivationOperation: GatewaySetupActivationOperations?
     private let gatewaySettingsOperation: GatewaySetupSettingsOperations?
@@ -157,9 +159,19 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     func closeWhenIdle() async throws {
         lock.withLock { closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission() }
+        // A retained maintenance invocation keeps both admissions. Its cleanup needs no rights and no new connection,
+        // so shutdown retries it here until it settles. No other path releases that admission.
+        while !(auditUpgradeCleanup.retry() && asynchronousWork.isIdle && setupReplyWork.isIdle) {
+            await Self.pauseBeforeCleanupRetry()
+        }
         await setupReplyWork.waitUntilIdle()
         await asynchronousWork.waitUntilIdle()
         try close()
+    }
+    private static func pauseBeforeCleanupRetry() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(50)) { continuation.resume() }
+        }
     }
     func acquireSetupReplyAdmission() throws -> SetupOwnerAsyncWork.Token {
         try lock.withLock {
@@ -173,6 +185,60 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed, !closing else { throw AdministrativeSetupError.unavailable }
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
             return try releaseActivity?.acquireShared()
+        }
+    }
+
+    /// Capability discovery checks the installed signed release and never changes the account startup fence.
+    func requireAuditUpgradeSupport() throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try withMachine { machine in
+            let inventory = try currentInventory(machine)
+            guard let policy = accountCodePolicy, let app = policy.entries.first(where: { $0.role == .app && $0.active }) else {
+                throw AdministrativeSetupError.unavailable
+            }
+            let release = try SignedReleaseInspection.inspect(URL(fileURLWithPath: inventory.bundlePath),
+                teamID: app.teamID, appIdentifier: app.identifier)
+            try inventory.compareRelease(release)
+            try SetupAuditUpgradeLocalContract.validate(release, policy: policy)
+            _ = try currentInventory(machine)
+        }
+    }
+
+    /// Blocking maintenance uses the cancellation token of the authorization imported on the exported invocation.
+    func performAuditUpgradeWork<Value: Sendable>(authorization: SetupAuditUpgradeAuthorization,
+                                                 _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        return try await auditUpgradeExecutor.run(cancellation: authorization.cancellationToken, body)
+    }
+
+    /// The endpoint transfers failed cleanup here before releasing its invocation reference.
+    func settleAuditUpgradeInvocation(_ invocation: SetupAuditUpgradeInvocation) -> Bool {
+        guard getpid() == processID else { return false }
+        return auditUpgradeCleanup.settle(invocation)
+    }
+    func retryAuditUpgradeCleanup() -> Bool {
+        guard getpid() == processID else { return false }
+        return auditUpgradeCleanup.retry()
+    }
+
+    /// Recovery observations bypass only the account startup fence. Ordinary setup keeps its existing admission checks.
+    func auditUpgradeProgress(callerUID: uid_t) throws -> SetupAuditUpgradeProgress? {
+        try withMachine { machine in
+            let inventory = try currentInventory(machine)
+            guard let account = try machine.accountPreparation(ownerUID: callerUID) else { return nil }
+            guard account.ownerUID == callerUID, account.storagePrepared,
+                  account.macID == inventory.macID, account.installationID == inventory.installationID,
+                  account.releaseDigest == inventory.releaseDigest,
+                  let policy = accountCodePolicy, try account.initialAuthority.codePolicy.bytes == policy.bytes,
+                  let initialization = try machine.initialization(accountID: account.accountID), initialization.complete else {
+                throw AdministrativeSetupError.wrongAccount
+            }
+            try LocalAccountDirectory.validateOwnership(lookupAccount(callerUID), uid: callerUID, directoryID: account.directoryID)
+            try machine.validateAccountPreparation(account)
+            let progress = try SetupAuditUpgradeProgress.capture(machine: machine, account: account,
+                inventory: inventory, initialization: initialization)
+            _ = try currentInventory(machine)
+            return progress
         }
     }
 
