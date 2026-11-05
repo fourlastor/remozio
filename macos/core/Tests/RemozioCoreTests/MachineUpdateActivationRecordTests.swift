@@ -197,13 +197,29 @@ final class MachineUpdateActivationRecordTests: XCTestCase {
         XCTAssertThrowsError(try checking.advancing(to: .completed))
     }
 
+    func testANewAttemptCannotStartWithoutAPreflightDigest() throws {
+        let s = try scope()
+        XCTAssertThrowsError(try s.record.advancing(to: .activationStarted)) {
+            XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+        }
+        XCTAssertEqual(s.record.phase, .draining)
+    }
+
     func testLegacyRestartRecordCannotCreateAFinalizationProposal() throws {
         let s = try scope()
-        let legacy = try s.record.advancing(to: .activationStarted).advancing(to: .restartChecking)
+        // Canonical version 1 bytes written before the preflight digest existed.
+        let started = try MachineUpdateActivationRecord.decode(replaceJSON(s.record, key: "phase", value: 2))
+        XCTAssertEqual(started.phase, .activationStarted)
+        XCTAssertEqual(started.formatVersion, 1)
+        XCTAssertNil(started.policyPreflightDigest)
+        let legacy = try started.advancing(to: .restartChecking)
         XCTAssertEqual(legacy.formatVersion, 1)
         XCTAssertNil(legacy.policyPreflightDigest)
         XCTAssertThrowsError(try legacy.finalizing())
         XCTAssertEqual(try MachineUpdateActivationRecord.decode(legacy.encoded), legacy)
+        let decoded = try MachineUpdateActivationRecord.decode(replaceJSON(s.record, key: "phase", value: 3))
+        XCTAssertEqual(decoded.phase, .restartChecking)
+        XCTAssertThrowsError(try decoded.finalizing())
     }
 
     func testFinalizationRequiresTheExactRestartRecord() throws {

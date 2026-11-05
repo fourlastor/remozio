@@ -49,9 +49,11 @@ struct MachineUpdateActivationRecord: Codable, Equatable, Sendable, CustomString
         guard phase == .draining, policyPreflightDigest.count == 32 else { throw PreparationStoreError.invalidTransition }
         return Self(self, phase: .activationStarted, policyPreflightDigest: policyPreflightDigest)
     }
+    /// A new attempt starts only through `starting(policyPreflightDigest:)`. A decoded version 1 record that already
+    /// started can still move to restart checking.
     func advancing(to next: Phase) throws -> Self {
         switch (phase, next) {
-        case (.draining, .activationStarted), (.draining, .cancelled), (.activationStarted, .restartChecking): break
+        case (.draining, .cancelled), (.activationStarted, .restartChecking): break
         default:
             if next == .cancelled, phase.irreversible { throw MachineUpdateActivationError.tooLate }
             throw PreparationStoreError.invalidTransition
