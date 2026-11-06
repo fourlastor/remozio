@@ -44,6 +44,9 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'setup.local-ipc':
                     value[1] = list(range(1, 11))
                     value[2] = list(range(1, 11))
+                if value[0] == 'authority.command-host-config':
+                    value[1] = [1, 2, 3]
+                    value[2] = [1, 2, 3]
             return values
         with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
                 patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
@@ -294,7 +297,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(roles, {1, 2, 4, 5, 6, 8, 11, 12})
         declarations = {item[0]: item for item in MANIFEST.declarations(2)}
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
-        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3])
+        self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4])
         self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
@@ -351,14 +354,20 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             else:
                 self.assertNotIn('authority.gateway-settings-control', declarations)
 
-    def test_host_codec_three_is_declared_by_both_retained_settings_participants(self):
-        expected = MANIFEST.format_declaration('authority.command-host-config', [1, 2, 3])
+    def test_host_codec_four_is_declared_by_both_retained_settings_participants(self):
+        expected = MANIFEST.format_declaration('authority.command-host-config', [1, 2, 3, 4])
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
+
+    def test_no_component_declares_the_installed_readiness_service_yet(self):
+        # Host version 4 can name the readiness service only when the Authority also declares this format.
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0] for item in MANIFEST.declarations(role)}
+            self.assertNotIn('authority.installed-readiness', declarations)
 
     def test_companion_controls_and_fence_declare_only_the_current_participants(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)}

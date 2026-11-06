@@ -1,0 +1,190 @@
+import Darwin
+import Foundation
+import RemozioProtocol
+import XCTest
+@testable import RemozioCore
+
+final class InstalledAuthorityReadinessHostTests: XCTestCase {
+    private let limits = try! CBORLimits(maxBytes: 262144, maxDepth: 1, maxItems: 32)
+    private func fixture(readiness: Bool = true, host4: Bool = true,
+        missingWriter: AuthorityCodeRole? = nil) throws -> RuntimeActivationFixture {
+        try .init(nativeConsumerHosts: true, releaseEdit: { component in
+            var formats = try component.formats.map { format in
+                guard host4, format.name == "authority.command-host-config" else { return format }
+                return try ReleaseFormat(name: format.name, readers: format.readers.union([4]),
+                    writers: component.role == missingWriter ? format.writers : format.writers.union([4]),
+                    migrations: format.migrations)
+            }
+            if readiness, component.role == .authority {
+                formats.append(try .init(name: MachineUpdateAuthorityReadinessDeclaration.formatName,
+                    readers: [1], writers: [1]))
+            }
+            return try .init(role: component.role, identifier: component.identifier, generation: component.generation,
+                relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
+                build: component.build, teamID: component.teamID, formats: formats, requests: component.requests)
+        })
+    }
+    private func host(_ old: InstalledAuthorityCommandConfiguration,
+        placement: InstalledCommandJobPlacement? = nil, control: Bool? = nil, readiness: Bool? = nil) throws
+        -> InstalledAuthorityCommandConfiguration {
+        try .init(machineDirectory: old.machineDirectory, installationID: old.installationID,
+            releaseDigest: old.releaseDigest, codePolicy: old.codePolicy, command: old.command,
+            label: old.label, plistName: old.plistName, jobPlacement: placement ?? old.jobPlacement,
+            gatewaySettingsControlEnabled: control ?? old.gatewaySettingsControlEnabled,
+            installedReadinessEnabled: readiness ?? old.installedReadinessEnabled)
+    }
+    private func selected(_ f: RuntimeActivationFixture) throws -> InstalledAuthorityCommandConfiguration {
+        try f.plan.host.enablingInstalledReadiness(release: XCTUnwrap(f.nativeRelease))
+    }
+    private func fields(_ value: InstalledAuthorityCommandConfiguration) throws -> [UInt64: CBORValue] {
+        guard case .map(let fields) = try DeterministicCBOR.decode(value.canonicalBytes, limits: limits) else {
+            throw InstalledAuthorityCommandError.invalidConfiguration
+        }
+        return fields
+    }
+    private func encode(_ fields: [UInt64: CBORValue]) throws -> Data {
+        try DeterministicCBOR.encode(.map(fields), limits: limits)
+    }
+    func testLegacyVersionsRetainTheirExactOriginalEncoding() throws {
+        let f = try fixture()
+        for placement in [InstalledCommandJobPlacement.bundled, .systemAccount] {
+            let old = try host(f.plan.host, placement: placement, control: false, readiness: false)
+            var expected: [UInt64: CBORValue] = [0: .unsigned(placement.rawValue),
+                1: .text(old.machineDirectory), 2: .bytes(old.installationID), 3: .bytes(old.releaseDigest),
+                4: .bytes(try old.codePolicy.bytes), 5: .bytes(old.command.canonicalBytes),
+                6: .text(old.label), 7: .text(old.plistName)]
+            if placement == .systemAccount { expected[8] = .text("protected-system-account-v1") }
+            XCTAssertEqual(old.canonicalBytes, try encode(expected))
+            XCTAssertFalse(old.installedReadinessEnabled)
+            XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(old.canonicalBytes).canonicalBytes,
+                old.canonicalBytes)
+        }
+    }
+    func testGatewayControlRemainsVersionThreeUntilReadinessIsSelected() throws {
+        let f = try fixture(), value = f.plan.host
+        XCTAssertEqual(value.formatVersion, 3)
+        XCTAssertTrue(value.gatewaySettingsControlEnabled)
+        XCTAssertFalse(value.installedReadinessEnabled)
+        XCTAssertEqual(Set(try fields(value).keys), Set(UInt64(0)...9))
+    }
+    func testSelectedVersionFourRoundTripsTheExactReadinessService() throws {
+        let f = try fixture(), value = try selected(f)
+        XCTAssertEqual(value.formatVersion, 4)
+        XCTAssertTrue(value.installedReadinessEnabled)
+        XCTAssertEqual(value.jobPlacement, .systemAccount)
+        XCTAssertTrue(value.gatewaySettingsControlEnabled)
+        XCTAssertEqual(try fields(value)[10], .text(try MachineUpdateAuthorityReadinessDeclaration.serviceName(
+            accountID: value.command.accountID)))
+        XCTAssertEqual(Set(try fields(value).keys), Set(UInt64(0)...10))
+        XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(value.canonicalBytes).canonicalBytes,
+            value.canonicalBytes)
+    }
+    func testSelectionPreservesAllExistingHostAndCommandInputs() throws {
+        let f = try fixture(), before = f.plan.host, after = try selected(f)
+        XCTAssertEqual(after.machineDirectory, before.machineDirectory)
+        XCTAssertEqual(after.installationID, before.installationID)
+        XCTAssertEqual(after.releaseDigest, before.releaseDigest)
+        XCTAssertEqual(try after.codePolicy.bytes, try before.codePolicy.bytes)
+        XCTAssertEqual(after.command.canonicalBytes, before.command.canonicalBytes)
+        XCTAssertEqual(after.label, before.label)
+        XCTAssertEqual(after.plistName, before.plistName)
+        XCTAssertEqual(after.jobPlacement, before.jobPlacement)
+    }
+    func testReadinessRequiresProtectedSystemPlacementAndGatewayControl() throws {
+        let f = try fixture()
+        XCTAssertThrowsError(try host(f.plan.host, placement: .bundled, control: false, readiness: true))
+        XCTAssertThrowsError(try host(f.plan.host, placement: .systemAccount, control: false, readiness: true))
+        XCTAssertThrowsError(try host(f.plan.host, placement: .bundled, control: true, readiness: true))
+    }
+    func testSelectionRequiresAnExplicitSignedReadinessDeclaration() throws {
+        let f = try fixture(readiness: false)
+        XCTAssertThrowsError(try selected(f)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+        }
+    }
+    func testSelectionRequiresBothParticipantsToWriteHostVersionFour() throws {
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            let f = try fixture(missingWriter: role)
+            XCTAssertThrowsError(try selected(f)) {
+                XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+            }
+        }
+    }
+    func testSelectionRejectsAnotherSignedReleaseDigest() throws {
+        let f = try fixture(), value = f.plan.host
+        let other = try NativeHostReleaseFixture.make(policy: value.codePolicy)
+        XCTAssertNotEqual(try InstallationInventory.digest(other), value.releaseDigest)
+        XCTAssertThrowsError(try value.enablingInstalledReadiness(release: other)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+        }
+    }
+    func testTheReadinessServiceCannotBeSubstitutedInEncodedBytes() throws {
+        let f = try fixture(), value = try selected(f)
+        var changed = try fields(value)
+        changed[10] = .text(try MachineUpdateAuthorityReadinessDeclaration.serviceName(
+            accountID: Data(repeating: 255, count: 16)))
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(changed)))
+    }
+    func testMissingAndUnknownVersionFourFieldsAreRejected() throws {
+        let f = try fixture(), original = try fields(selected(f))
+        var missing = original; missing.removeValue(forKey: 10)
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(missing)))
+        var unknown = original; unknown[11] = .null
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(unknown)))
+    }
+    func testVersionFourRetainsBothExistingPlacementAndControlBindings() throws {
+        let f = try fixture(), original = try fields(selected(f))
+        for (key, value) in [(UInt64(8), CBORValue.text("bundled")),
+            (UInt64(9), CBORValue.text("dev.remozio.foreign.control"))] {
+            var changed = original; changed[key] = value
+            XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(changed)))
+        }
+    }
+    func testVersionChangesCannotReinterpretTheVersionFourPayload() throws {
+        let f = try fixture(), original = try fields(selected(f))
+        for version in [UInt64(0), 1, 2, 3, 5] {
+            var changed = original; changed[0] = .unsigned(version)
+            XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(changed)))
+        }
+    }
+    func testVersionThreeCannotCarryAnUndeclaredReadinessField() throws {
+        let f = try fixture()
+        var changed = try fields(f.plan.host)
+        changed[10] = .text(try MachineUpdateAuthorityReadinessDeclaration.serviceName(
+            accountID: f.account.accountID))
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.decode(encode(changed)))
+    }
+    func testGatewayControlSelectionPreservesRecordedReadiness() throws {
+        let f = try fixture(), value = try selected(f)
+        let repeated = try value.enablingGatewaySettingsControl(release: XCTUnwrap(f.nativeRelease))
+        XCTAssertTrue(repeated.installedReadinessEnabled)
+        XCTAssertEqual(repeated.canonicalBytes, value.canonicalBytes)
+    }
+    func testDecodedReadinessStillRequiresReleaseValidation() throws {
+        let f = try fixture(readiness: false)
+        let proposed = try host(f.plan.host, readiness: true)
+        let decoded = try InstalledAuthorityCommandConfiguration.decode(proposed.canonicalBytes)
+        XCTAssertTrue(decoded.installedReadinessEnabled)
+        XCTAssertThrowsError(try decoded.validateRelease(XCTUnwrap(f.nativeRelease), bundlePath: f.plan.bundlePath)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+        }
+    }
+    func testTheNativeLoaderRefusesAnOrdinaryOwnerBeforeOpeningAPath() throws {
+        guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner guard") }
+        XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.load(
+            path: "/nonexistent-remozio-readiness-host-fixture.cbor")) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+    }
+    func testDescriptionsDoNotExposeTheHostInputs() throws {
+        let f = try fixture(), value = try selected(f)
+        XCTAssertEqual(String(describing: value), "InstalledAuthorityCommandConfiguration(redacted)")
+    }
+    func testRepeatedSelectionLeavesTheOriginalValueUnchanged() throws {
+        let f = try fixture(), original = f.plan.host, before = f.plan.host.canonicalBytes
+        let one = try selected(f), two = try selected(f)
+        XCTAssertEqual(one.canonicalBytes, two.canonicalBytes)
+        XCTAssertEqual(original.canonicalBytes, before)
+        XCTAssertFalse(original.installedReadinessEnabled)
+    }
+}

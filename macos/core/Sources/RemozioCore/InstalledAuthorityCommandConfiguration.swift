@@ -10,10 +10,11 @@ public enum InstalledCommandJobPlacement: UInt64, Sendable { case bundled = 1, s
 
 /// Root-private host inputs. Parsing does not establish installation or execution authority.
 public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConvertible {
-    public static let supportedVersions: Set<UInt64> = [1, 2, 3]
+    public static let supportedVersions: Set<UInt64> = [1, 2, 3, 4]
     public static let executablePath = "Contents/Library/LaunchServices/RemozioAuthority"
     public let formatVersion: UInt64
     public let gatewaySettingsControlEnabled: Bool
+    public let installedReadinessEnabled: Bool
     public let jobPlacement: InstalledCommandJobPlacement
     public let machineDirectory: String
     public let installationID: Data
@@ -27,7 +28,8 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
 
     public init(machineDirectory: String, installationID: Data, releaseDigest: Data, codePolicy: AuthorityCodePolicy,
                 command: AuthorityCommandStartupConfiguration, label: String, plistName: String,
-                jobPlacement: InstalledCommandJobPlacement = .bundled, gatewaySettingsControlEnabled: Bool = false) throws {
+                jobPlacement: InstalledCommandJobPlacement = .bundled, gatewaySettingsControlEnabled: Bool = false,
+                installedReadinessEnabled: Bool = false) throws {
         let parts = machineDirectory.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         guard machineDirectory.hasPrefix("/"), machineDirectory.utf8.count < Int(PATH_MAX), !parts.isEmpty,
               parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && !$0.utf8.contains(0) && $0.utf8.count <= 255 }),
@@ -37,7 +39,8 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
               GatewayWakeEndpointConfiguration.validServiceName(plistName), plistName.hasSuffix(".plist") else {
             throw InstalledAuthorityCommandError.invalidConfiguration
         }
-        guard !gatewaySettingsControlEnabled || jobPlacement == .systemAccount else {
+        guard (!gatewaySettingsControlEnabled || jobPlacement == .systemAccount),
+              !installedReadinessEnabled || (jobPlacement == .systemAccount && gatewaySettingsControlEnabled) else {
             throw InstalledAuthorityCommandError.invalidConfiguration
         }
         let requiredRoles: [AuthorityCodeRole] = [.app, .authority, .commandFrontend, .commandMonitor, .commandChild, .transport, .notificationGateway]
@@ -68,8 +71,8 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
                 throw InstalledAuthorityCommandError.invalidConfiguration
             }
         }
-        formatVersion = gatewaySettingsControlEnabled ? 3 : jobPlacement.rawValue
-        self.gatewaySettingsControlEnabled = gatewaySettingsControlEnabled
+        formatVersion = installedReadinessEnabled ? 4 : gatewaySettingsControlEnabled ? 3 : jobPlacement.rawValue
+        self.gatewaySettingsControlEnabled = gatewaySettingsControlEnabled; self.installedReadinessEnabled = installedReadinessEnabled
         self.jobPlacement = jobPlacement
         self.machineDirectory = machineDirectory; self.installationID = installationID; self.releaseDigest = releaseDigest
         self.codePolicy = codePolicy; self.command = command; self.label = label; self.plistName = plistName
@@ -79,6 +82,9 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
         if jobPlacement == .systemAccount { fields[8] = .text("protected-system-account-v1") }
         if gatewaySettingsControlEnabled {
             fields[9] = .text(try RuntimePreparationPaths(accountID: command.accountID).gatewaySettingsControlService)
+        }
+        if installedReadinessEnabled {
+            fields[10] = .text(try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: command.accountID))
         }
         canonicalBytes = try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     }
@@ -90,14 +96,14 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
     }
     public static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), case .unsigned(let version) = f[0], supportedVersions.contains(version),
-              let placement = InstalledCommandJobPlacement(rawValue: version == 3 ? 2 : version),
-              Set(f.keys) == (version == 3 ? Set(UInt64(0)...9) : placement == .bundled ? Set(UInt64(0)...7) : Set(UInt64(0)...8)),
+              let placement = InstalledCommandJobPlacement(rawValue: version >= 3 ? 2 : version),
+              Set(f.keys) == (version == 4 ? Set(UInt64(0)...10) : version == 3 ? Set(UInt64(0)...9) : placement == .bundled ? Set(UInt64(0)...7) : Set(UInt64(0)...8)),
               placement == .bundled || f[8] == .text("protected-system-account-v1"), case .text(let directory) = f[1], case .bytes(let installation) = f[2],
               case .bytes(let digest) = f[3], case .bytes(let policy) = f[4], case .bytes(let command) = f[5],
               case .text(let label) = f[6], case .text(let plist) = f[7] else { throw InstalledAuthorityCommandError.invalidConfiguration }
         let value = try Self(machineDirectory: directory, installationID: installation, releaseDigest: digest,
             codePolicy: .decode(policy), command: .decode(command), label: label, plistName: plist, jobPlacement: placement,
-            gatewaySettingsControlEnabled: version == 3)
+            gatewaySettingsControlEnabled: version >= 3, installedReadinessEnabled: version == 4)
         guard value.canonicalBytes == bytes else { throw InstalledAuthorityCommandError.invalidConfiguration }; return value
     }
     /// Select the optional service only after both retained signed components declare its codecs.
@@ -107,9 +113,20 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
             throw InstalledAuthorityCommandError.wrongRelease
         }
         try validateGatewaySettingsRelease(release)
+        if installedReadinessEnabled { try MachineUpdateAuthorityReadinessDeclaration.validate(release, policy: codePolicy) }
         return try .init(machineDirectory: machineDirectory, installationID: installationID, releaseDigest: releaseDigest,
             codePolicy: codePolicy, command: command, label: label, plistName: plistName,
-            jobPlacement: jobPlacement, gatewaySettingsControlEnabled: true)
+            jobPlacement: jobPlacement, gatewaySettingsControlEnabled: true, installedReadinessEnabled: installedReadinessEnabled)
+    }
+    /// Selects metadata only. Publication must also retain the matching job manifest before registration can activate this service.
+    func enablingInstalledReadiness(release: SignedReleaseEvidence) throws -> Self {
+        guard jobPlacement == .systemAccount, gatewaySettingsControlEnabled,
+              try InstallationInventory.digest(release) == releaseDigest else { throw InstalledAuthorityCommandError.wrongRelease }
+        try validateGatewaySettingsRelease(release)
+        try MachineUpdateAuthorityReadinessDeclaration.validate(release, policy: codePolicy)
+        return try .init(machineDirectory: machineDirectory, installationID: installationID, releaseDigest: releaseDigest,
+            codePolicy: codePolicy, command: command, label: label, plistName: plistName,
+            jobPlacement: jobPlacement, gatewaySettingsControlEnabled: true, installedReadinessEnabled: true)
     }
     private func validateGatewaySettingsRelease(_ release: SignedReleaseEvidence) throws {
         guard let authority = codePolicy.entries.first(where: { $0.role == .authority && $0.active }),
@@ -150,6 +167,7 @@ public struct InstalledAuthorityCommandConfiguration: Sendable, CustomStringConv
         guard try InstallationInventory.digest(release) == releaseDigest else { throw InstalledAuthorityCommandError.wrongRelease }
         try ReleaseGenerationPreflight.validate(release, against: codePolicy)
         if gatewaySettingsControlEnabled { try validateGatewaySettingsRelease(release) }
+        if installedReadinessEnabled { try MachineUpdateAuthorityReadinessDeclaration.validate(release, policy: codePolicy) }
         for entry in codePolicy.entries where entry.active {
             guard let component = release.manifest.components.first(where: { $0.role == entry.role }),
                   component.generation == entry.installedGeneration, release.codeDirectoryHashes[entry.role] == entry.codeDirectoryHash else {
