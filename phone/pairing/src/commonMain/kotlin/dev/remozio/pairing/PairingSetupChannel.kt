@@ -111,22 +111,31 @@ class PairingSetupChannel private constructor(
     companion object {
         /** Opens the stream inside the channel's own scope, so one owner job covers the stream and the channel.
          * The caller authenticates the peer in [open] (pinned TLS with the pairing ALPN). The opener releases
-         * what it created if it throws. Only the restricted hello is read here: no proposal or enrollment action is sent. */
+         * what it created if it throws or is cancelled, and it must be cancellable. Only the restricted hello is read here: no proposal or enrollment action is sent. */
         suspend fun authenticate(parent: CoroutineScope, invitation: PairingInvitation, proposal: PairingPhoneProposal,
             timeoutMillis: Long = 300_000, open: suspend (CoroutineScope) -> PairingByteStream,
         ): PairingSetupChannel {
             val owner = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
             val scope = CoroutineScope(owner + Dispatchers.IO)
-            var opened: PairingByteStream? = null
+            var opening: Deferred<PairingByteStream>? = null
             var result: PairingSetupChannel? = null
             try {
-                opened = open(scope)
+                // The opener runs under the setup budget and under the parent: a stuck open can outlive neither.
+                require(timeoutMillis in 1..300_000)
+                val started = scope.async { open(scope) }
+                opening = started
+                val opened = withTimeout(timeoutMillis) { started.await() }
                 result = PairingSetupChannel(owner, scope, opened, invitation, proposal, timeoutMillis)
                 result.authenticate(); return result
             } catch (failure: Throwable) {
                 owner.cancel()
                 withContext(NonCancellable) {
-                    if (result != null) result.closeAndJoin() else opened?.let { it.close(); it.awaitClosed() }
+                    if (result != null) result.closeAndJoin() else opening?.let { started ->
+                        started.cancelAndJoin()
+                        // The opener may have finished just before the cancellation. Nobody else owns that stream.
+                        @OptIn(ExperimentalCoroutinesApi::class)
+                        if (started.getCompletionExceptionOrNull() == null) started.getCompleted().let { it.close(); it.awaitClosed() }
+                    }
                     owner.join()
                 }
                 throw failure

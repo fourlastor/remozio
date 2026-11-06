@@ -24,12 +24,28 @@ private val P256_SPKI_PREFIX = byteArrayOf(0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x
  * Only pinned TLS and the restricted hello are read here. No phone proposal or enrollment action is sent. */
 suspend fun PairingSetupChannel.Companion.authenticate(parent: CoroutineScope, carrier: EncryptedRecordTransport,
     localKeys: Array<KeyManager>, invitation: PairingInvitation, proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
-): PairingSetupChannel = authenticate(parent, invitation, proposal, timeoutMillis) { scope -> openPairingTLS(scope, carrier, localKeys, invitation) }
+): PairingSetupChannel = rejectBeforeTLS(carrier, invitation, proposal) {
+    authenticate(parent, invitation, proposal, timeoutMillis) { scope -> openPairingTLS(scope, carrier, localKeys, invitation) }
+}
 
 /** [authenticate], then the sole proposal and the transcript. */
 suspend fun PairingSetupChannel.Companion.connect(parent: CoroutineScope, carrier: EncryptedRecordTransport,
     localKeys: Array<KeyManager>, invitation: PairingInvitation, proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
-): PairingSetupChannel = connect(parent, invitation, proposal, timeoutMillis) { scope -> openPairingTLS(scope, carrier, localKeys, invitation) }
+): PairingSetupChannel = rejectBeforeTLS(carrier, invitation, proposal) {
+    connect(parent, invitation, proposal, timeoutMillis) { scope -> openPairingTLS(scope, carrier, localKeys, invitation) }
+}
+
+// A proposal for another Mac must fail before any handshake byte leaves the phone, and the caller's carrier must not leak.
+private suspend fun <T> rejectBeforeTLS(carrier: EncryptedRecordTransport, invitation: PairingInvitation,
+    proposal: PairingPhoneProposal, body: suspend () -> T,
+): T {
+    try { proposal.validateMacScope(invitation) }
+    catch (failure: Throwable) {
+        withContext(NonCancellable) { carrier.close(); carrier.awaitClosed() }
+        throw failure
+    }
+    return body()
+}
 
 // Releases whatever it created if it throws, because the caller never receives the stream.
 private suspend fun openPairingTLS(scope: CoroutineScope, carrier: EncryptedRecordTransport, localKeys: Array<KeyManager>,

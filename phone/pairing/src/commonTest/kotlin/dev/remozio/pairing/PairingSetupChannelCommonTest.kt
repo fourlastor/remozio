@@ -123,4 +123,23 @@ class PairingSetupChannelCommonTest {
         assertTrue(stream.sent.isEmpty())
         assertTrue(stream.closes >= 1)
     }
+
+    @Test fun aSuspendedOpenerIsStoppedByTheSetupBudget() = runBlocking {
+        val parent = SupervisorJob()
+        try {
+            assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), invitation, proposal, timeoutMillis = 50) { awaitCancellation() } }
+            assertEquals(0, parent.children.count { it.isActive })
+        } finally { parent.cancelAndJoin() }
+    }
+
+    @Test fun cancellingTheParentStopsASuspendedOpener() = runBlocking {
+        val parent = SupervisorJob()
+        val started = CompletableDeferred<Unit>()
+        val attempt = async(Dispatchers.Default) {
+            runCatching { PairingSetupChannel.authenticate(CoroutineScope(parent), invitation, proposal) { started.complete(Unit); awaitCancellation() } }
+        }
+        started.await(); parent.cancel()
+        assertTrue(withTimeout(2_000) { attempt.await() }.isFailure)
+        parent.join()
+    }
 }

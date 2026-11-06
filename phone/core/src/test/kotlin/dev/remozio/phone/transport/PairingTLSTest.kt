@@ -23,7 +23,8 @@ class PairingTLSTest {
         private val inbound = Channel<ByteArray?>(Channel.UNLIMITED)
         @Volatile var closes = 0
         @Volatile var joins = 0
-        override suspend fun send(ciphertext: ByteArray) {}
+        @Volatile var sends = 0
+        override suspend fun send(ciphertext: ByteArray) { sends++ }
         override suspend fun receive(): ByteArray? = inbound.receive()
         override suspend fun awaitClosed() { joins++ }
         override fun close() { closes++; inbound.trySend(null) }
@@ -38,7 +39,10 @@ class PairingTLSTest {
         val carrier = Carrier(); val parent = SupervisorJob()
         try {
             assertFails { PairingSetupChannel.connect(CoroutineScope(parent), carrier, arrayOf<KeyManager>(), other, proposal) }
+            val second = Carrier()
+            assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), second, arrayOf<KeyManager>(), other, proposal) }
+            assertTrue(second.closes >= 1 && second.joins >= 1 && second.sends == 0, "second closes=${second.closes} sends=${second.sends}")
         } finally { parent.cancelAndJoin() }
-        assertTrue(carrier.closes >= 1 && carrier.joins >= 1, "closes=${carrier.closes} joins=${carrier.joins}")
+        assertTrue(carrier.closes >= 1 && carrier.joins >= 1 && carrier.sends == 0, "closes=${carrier.closes} joins=${carrier.joins} sends=${carrier.sends}")
     }
 }
