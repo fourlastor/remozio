@@ -1,10 +1,9 @@
-package dev.remozio.phone.transport
+package dev.remozio.pairing
 
-import java.io.IOException
+import kotlinx.io.IOException
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.test.*
-import org.junit.Test
 import kotlin.test.*
 
 @OptIn(ExperimentalCoroutinesApi::class)

@@ -231,7 +231,7 @@ jobs:
           PYTHON
       - run: xcodebuild -version
       - name: Kotlin tests on the iOS simulator
-        run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
+        run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios

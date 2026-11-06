@@ -1,4 +1,4 @@
-package dev.remozio.phone.transport
+package dev.remozio.pairing
 
 import dev.remozio.protocol.*
 import java.io.ByteArrayOutputStream
@@ -40,7 +40,7 @@ class PairingSetupChannelTest {
     private fun wire(frame: PairingSetupFrame): ByteArray = frame.encode().let { ByteBuffer.allocate(it.size + 4).putInt(it.size).put(it).array() }
     private inner class Stream(val f: Fixture, val fragment: Int = 32768, val lostReceipt: Boolean = false,
         val wrongReceipt: Boolean = false, val omitTranscript: Boolean = false, val initial: ByteArray? = null,
-    ) : ApprovalByteStream {
+    ) : PairingByteStream {
         val output = ByteArrayOutputStream()
         val input = ArrayDeque<ByteArray>()
         val suspended = CompletableDeferred<Unit>()

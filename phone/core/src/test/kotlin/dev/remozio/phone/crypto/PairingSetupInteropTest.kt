@@ -1,5 +1,6 @@
 package dev.remozio.phone.crypto
 
+import dev.remozio.pairing.PairingSetupChannel
 import dev.remozio.phone.transport.*
 import dev.remozio.protocol.*
 import java.net.InetAddress

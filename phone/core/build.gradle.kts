@@ -7,6 +7,7 @@ kotlin { jvmToolchain(21) }
 
 dependencies {
     implementation(project(":protocol-kotlin"))
+    api(project(":phone-pairing"))
     testFixturesImplementation(project(":protocol-kotlin"))
     implementation("io.ktor:ktor-websockets:3.6.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
