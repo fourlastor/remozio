@@ -88,7 +88,7 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
         XCTAssertNoThrow(try decoded.validate(inventory: scopedInventory(), release: release(), bundlePath: bundle))
         let legacy = try config()
         XCTAssertEqual(try InstalledAuthorityCommandConfiguration.decode(legacy.canonicalBytes).jobPlacement, .bundled)
-        XCTAssertEqual(InstalledAuthorityCommandConfiguration.supportedVersions, [1, 2, 3])
+        XCTAssertEqual(InstalledAuthorityCommandConfiguration.supportedVersions, [1, 2, 3, 4])
         XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: nil), release: release(), bundlePath: bundle))
         XCTAssertThrowsError(try decoded.validate(inventory: scopedInventory(transportUID: 402), release: release(), bundlePath: bundle))
     }
