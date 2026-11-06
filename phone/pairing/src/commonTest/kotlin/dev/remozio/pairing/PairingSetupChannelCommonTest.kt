@@ -113,12 +113,21 @@ class PairingSetupChannelCommonTest {
         parent.cancelAndJoin()
     }
 
-    @Test fun aProposalForAnotherMacClosesTheOpenedStream() = runBlocking {
+    @Test fun aProposalForAnotherMacNeverCallsTheOpener() = runBlocking {
+        val other = PairingInvitation(ByteArray(16) { 0x55 }, ByteArray(16) { 0x66 }, "Other",
+            transcript.macAuthorityKey.copyBytes(), transcript.macTransportKey.copyBytes(), 1u)
+        val parent = SupervisorJob(); var opened = false
+        try { assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), other, proposal) { opened = true; error("unreachable") } } }
+        finally { parent.cancelAndJoin() }
+        assertFalse(opened)
+    }
+
+    @Test fun aProposalForAnotherMacClosesAnInjectedStream() = runBlocking {
         val stream = Stream(listOf(wire(frame("hello"))))
         val other = PairingInvitation(ByteArray(16) { 0x55 }, ByteArray(16) { 0x66 }, "Other",
             transcript.macAuthorityKey.copyBytes(), transcript.macTransportKey.copyBytes(), 1u)
         val parent = SupervisorJob()
-        try { assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), other, proposal) { stream } } }
+        try { assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), stream, other, proposal) } }
         finally { parent.cancelAndJoin() }
         assertTrue(stream.sent.isEmpty())
         assertTrue(stream.closes >= 1)
@@ -127,7 +136,7 @@ class PairingSetupChannelCommonTest {
     @Test fun aSuspendedOpenerIsStoppedByTheSetupBudget() = runBlocking {
         val parent = SupervisorJob()
         try {
-            assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), invitation, proposal, timeoutMillis = 50) { awaitCancellation() } }
+            assertFailsWith<IOException> { PairingSetupChannel.authenticate(CoroutineScope(parent), invitation, proposal, timeoutMillis = 50) { awaitCancellation() } }
             assertEquals(0, parent.children.count { it.isActive })
         } finally { parent.cancelAndJoin() }
     }

@@ -10,7 +10,9 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.take
 import kotlinx.io.IOException
 
-/** Own every opened candidate until transfer or joined cleanup, including cancellation at the winning boundary. */
+/** Own every opened candidate until transfer or joined cleanup, including cancellation at the winning boundary.
+ * [open] must release everything it created when it throws or is cancelled. [release] runs for every candidate
+ * that does not win, and for the winner if the caller is cancelled before the transfer. The caller owns the winner afterwards. */
 suspend fun <R, T : Any> firstAuthenticatedPairingRoute(routes: Flow<R>, timeoutMillis: Long,
     open: suspend (R) -> T, release: suspend (T) -> Unit,
 ): T = coroutineScope {

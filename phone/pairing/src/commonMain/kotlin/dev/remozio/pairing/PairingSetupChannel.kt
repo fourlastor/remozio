@@ -5,6 +5,7 @@ package dev.remozio.pairing
 import dev.remozio.protocol.*
 import kotlin.concurrent.atomics.AtomicBoolean
 import kotlin.concurrent.atomics.ExperimentalAtomicApi
+import kotlin.time.TimeSource
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.io.IOException
@@ -121,11 +122,18 @@ class PairingSetupChannel private constructor(
             var result: PairingSetupChannel? = null
             try {
                 // The opener runs under the setup budget and under the parent: a stuck open can outlive neither.
+                // Every platform rejects a foreign proposal before the opener can send a handshake byte.
                 require(timeoutMillis in 1..300_000)
+                proposal.validateMacScope(invitation)
+                require(selectEnvelopeVersion(setOf(1uL), proposal.phone.envelopeVersions, invitation.minimumEnvelopeVersion) == 1uL)
+                val mark = TimeSource.Monotonic.markNow()
                 val started = scope.async { open(scope) }
                 opening = started
-                val opened = withTimeout(timeoutMillis) { started.await() }
-                result = PairingSetupChannel(owner, scope, opened, invitation, proposal, timeoutMillis)
+                val opened = try { withTimeout(timeoutMillis) { started.await() } }
+                    catch (_: TimeoutCancellationException) { throw IOException("Pairing setup timed out") }
+                // One budget covers the open and the exchange.
+                val remaining = (timeoutMillis - mark.elapsedNow().inWholeMilliseconds).coerceAtLeast(1)
+                result = PairingSetupChannel(owner, scope, opened, invitation, proposal, remaining)
                 result.authenticate(); return result
             } catch (failure: Throwable) {
                 owner.cancel()
