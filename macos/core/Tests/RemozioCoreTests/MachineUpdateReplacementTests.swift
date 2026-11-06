@@ -637,6 +637,25 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testReleaseBindingRejectsAnObservedReplacementFromAnotherAttempt() throws {
+        let f = try Fixture(), other = try Fixture(); _ = try f.run(); _ = try other.run()
+        let source = try restartSource(f), foreign = try XCTUnwrap(restartSource(other).replacement.replacement)
+        XCTAssertEqual(foreign.phase, .observed); XCTAssertNotEqual(foreign.activationAttempt, f.activation.attemptID)
+        let context = source.replacement
+        let forged = MachineUpdateRestartSource(replacement: .init(activation: context.activation, inventory: context.inventory,
+            candidate: context.candidate, admission: context.admission, replacement: foreign, runtime: context.runtime),
+            accounts: source.accounts, provisioningHistory: source.provisioningHistory)
+        let policy = releasePolicySnapshot(f)
+        XCTAssertNoThrow(try releaseBinding(f, source: source, policy: policy))
+        XCTAssertThrowsError(try releaseBinding(f, source: forged, policy: policy)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        let binding = try releaseBinding(f, source: source, policy: policy)
+        XCTAssertThrowsError(try binding.requireSourceForPublication(forged, currentPolicy: policy, candidate: f.newRelease)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
     func testReleaseBindingRejectsAChangedPolicyRevisionBeforePublication() throws {
         let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
         let value = try releaseBinding(f, source: source, policy: policy)

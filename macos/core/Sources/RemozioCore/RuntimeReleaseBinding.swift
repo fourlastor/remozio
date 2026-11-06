@@ -28,7 +28,7 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
     init(accountID: Data, source: MachineUpdateRestartSource, candidate: SignedReleaseEvidence,
          policy: MachineUpdatePolicyPlan) throws {
         let context = source.replacement, inventory = context.inventory, activation = context.activation
-        guard activation.phase.irreversible, context.replacement?.phase == .observed,
+        guard activation.phase.irreversible, let replacement = context.replacement, replacement.phase == .observed,
               let account = source.accounts.first(where: { $0.accountID == accountID }),
               let runtime = context.runtime.runtimes.first(where: { $0.reference.services.accountID == accountID }),
               let preparation = account.preparation, preparation.storagePrepared,
@@ -40,6 +40,9 @@ struct RuntimeReleaseBinding: Codable, Equatable, Sendable, CustomStringConverti
             throw RuntimePreparationError.changedScope
         }
         try runtime.reference.validate(account: preparation, services: runtime.reference.services)
+        // The observed swap must belong to this activation and its operands, not only be in the observed phase.
+        do { try replacement.requireScope(activation: activation, inventory: inventory, candidate: context.candidate) }
+        catch { throw RuntimePreparationError.changedScope }
         try activation.requireScope(candidate: context.candidate, inventory: inventory, admission: context.admission)
         try policy.requireCandidate(candidate)
         guard try DurableReleasePreparation.digest(candidate) == activation.updateID else { throw RuntimePreparationError.changedScope }
