@@ -47,6 +47,9 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'authority.command-host-config':
                     value[1] = [1, 2, 3]
                     value[2] = [1, 2, 3]
+                if value[0] == 'authority.journal':
+                    value[1] = [12, 13, 14, 15, 16]
+                    value[2] = [12, 13, 14, 15, 16]
             return values
         with patch.object(MANIFEST, 'declarations', side_effect=legacy), \
                 patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)):
@@ -300,7 +303,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4])
         self.assertEqual(declarations['authority.installation-preparation'], {0: 'authority.installation-preparation', 1: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], 2: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], 3: {1: 2}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
-        self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16])
+        self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16, 17])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
         self.assertEqual(MANIFEST.declarations(12)[-1][1], [2])
 

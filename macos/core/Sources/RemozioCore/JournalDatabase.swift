@@ -24,6 +24,8 @@ public final class JournalDatabase {
     private var configuredGatewayPolicy: GatewayAuthorityPolicy?
     private var enrollment: EnrollmentJournal?
     private var routing: RoutingJournal?
+    private var updateScheduling: UpdateSchedulingJournal?
+    private var configuredUpdateSchedulingPolicy: UpdateSchedulingJournalPolicy?
     private let recordLimits: CBORLimits
     private let descriptorLimits: CBORLimits
     private var active: UUID?
@@ -53,6 +55,7 @@ public final class JournalDatabase {
          recordLimits: CBORLimits, descriptorLimits: CBORLimits, decisionLimits: CBORLimits,
          maximumConsumptions: Int, busyMilliseconds: UInt32, initialize: Bool, migrateFromVersion: Int64? = nil, gatewayPolicy: GatewayAuthorityPolicy? = nil, routingPolicy: RoutingJournalPolicy? = nil,
          maximumCommandSubmissions: Int = 1_000_000, initialAuthority: AuthorityJournalInitialization? = nil,
+         updateSchedulingPolicy: UpdateSchedulingJournalPolicy? = nil,
          didInitializeAuthority: (AuthorityJournalInitialization.Stage) throws -> Void = { _ in }, readOnlyForCutover: Bool = false) throws {
         self.lease = lease; self.readOnlyForCutover = readOnlyForCutover
         self.recordLimits = recordLimits
@@ -103,6 +106,7 @@ public final class JournalDatabase {
             commandReplay = try CommandSubmissionReplayJournal(connection: connection, macID: macID, accountID: accountID, maximumRows: maximumCommandSubmissions)
             enrollment = EnrollmentJournal(connection: connection, macID: macID, accountID: accountID)
             if let routingPolicy { routing = RoutingJournal(connection: connection, macID: macID, accountID: accountID, policy: routingPolicy) }
+            if let updateSchedulingPolicy { updateScheduling = UpdateSchedulingJournal(connection: connection, macID: macID, accountID: accountID, policy: updateSchedulingPolicy); configuredUpdateSchedulingPolicy = updateSchedulingPolicy }
             if let gatewayPolicy { gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: gatewayPolicy); configuredGatewayPolicy = gatewayPolicy }
             if initialize {
                 try create(macID: macID, accountID: accountID, tables: tables, consumption: consumption,
@@ -134,6 +138,22 @@ public final class JournalDatabase {
         }
         gateway = GatewayAuthorityJournal(connection: connection, macID: macID, accountID: accountID, policy: policy)
         configuredGatewayPolicy = policy
+        return true
+    }
+
+    /// Attach an explicit policy without replacing the live connection or upgrading storage.
+    @discardableResult
+    func enableUpdateSchedulingPolicy(_ policy: UpdateSchedulingJournalPolicy, macID: Data, accountID: Data) throws -> Bool {
+        guard let connection = db else { throw JournalDatabaseError.closed }
+        guard !unavailable else { throw JournalDatabaseError.unavailable }
+        guard active == nil else { throw JournalDatabaseError.transactionActive }
+        try validateLease(); try validateIdentity(macID: macID, accountID: accountID)
+        if let current = configuredUpdateSchedulingPolicy {
+            guard current.sameConfiguration(as: policy) else { throw UpdateSchedulingJournalError.invalidConfiguration }
+            return false
+        }
+        updateScheduling = UpdateSchedulingJournal(connection: connection, macID: macID, accountID: accountID, policy: policy)
+        configuredUpdateSchedulingPolicy = policy
         return true
     }
 
@@ -182,7 +202,7 @@ public final class JournalDatabase {
     fileprivate func storageSchemaVersion(_ token: UUID) throws -> UInt64 {
         _ = try access(token)
         let version = try integer("PRAGMA user_version")
-        guard (12...16).contains(version) else {
+        guard (12...17).contains(version) else {
             unavailable = true
             throw JournalDatabaseError.incompatibleStore
         }
@@ -285,6 +305,18 @@ public final class JournalDatabase {
         return routing
     }
 
+    fileprivate func updateSchedulingLedger(_ token: UUID) throws -> UpdateSchedulingJournal {
+        _ = try access(token)
+        guard let updateScheduling else { throw UpdateSchedulingJournalError.disabled }
+        return updateScheduling
+    }
+
+    fileprivate func retainedUpdateSchedulingIntentForAdmission(_ token: UUID) throws -> UpdateSchedulingIntent? {
+        _ = try access(token)
+        guard let db else { throw JournalDatabaseError.expiredTransaction }
+        return try UpdateSchedulingStateStorage.read(connection: db)
+    }
+
     private func validateLease() throws {
         do { try lease.validate() }
         catch { unavailable = true; throw error }
@@ -361,7 +393,7 @@ public final class JournalDatabase {
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
         let version = try integer("PRAGMA user_version")
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ version == $0 }) ?? (12...16).contains(version) else {
+              expectedVersion.map({ version == $0 }) ?? (12...17).contains(version) else {
             throw JournalDatabaseError.incompatibleStore
         }
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
@@ -401,6 +433,10 @@ public final class JournalDatabase {
         if version >= 13 { queries.append("SELECT id,revision,policy FROM main.authority_code_policy_v1 LIMIT 0") }
         if version >= 15 { queries.append("SELECT mac,account,submission,nonce,caller,capture FROM main.command_submissions_v1 LIMIT 0") }
         if version >= 16 { queries.append("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0") }
+        if version >= 17 {
+            queries += ["SELECT update_id,generation,revision,action FROM main.update_scheduling_state_v1 LIMIT 0",
+                        "SELECT operation,payload,trust,run,started,deadline,consumed FROM main.update_scheduling_operations_v1 LIMIT 0"]
+        }
         for query in queries {
             try statement(query) { guard sqlite3_step($0) == SQLITE_DONE else { throw JournalDatabaseError.incompatibleStore } }
         }
@@ -413,6 +449,7 @@ public final class JournalDatabase {
         gateway = nil
         enrollment = nil
         routing = nil
+        updateScheduling = nil
         if let db {
             // No statement, blob handle or raw connection can escape this owner.
             precondition(sqlite3_close(db) == SQLITE_OK, "Journal connection retained a private SQLite resource")
@@ -506,6 +543,90 @@ public final class JournalTransaction {
             if error as? CommandSubmissionReplayError == .corruptData || error as? AuthorityCodePolicyError == .corruptData { headMismatch = true }
             throw error
         }
+    }
+
+    private func withUpdateScheduling<T>(write: Bool, _ body: (UpdateSchedulingJournal) throws -> T) throws -> T {
+        do {
+            _ = try tables(write: write)
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try body(owner.updateSchedulingLedger(token))
+        } catch {
+            failed = true
+            if error as? UpdateSchedulingJournalError == .corruptData || error as? UpdateSchedulingJournalError == .invalidClock {
+                headMismatch = true
+            }
+            throw error
+        }
+    }
+
+    /// Explicit internal upgrade only. Commit through the checkpointed writer before publishing an offer.
+    func installUpdateSchedulingStorage() throws { try withUpdateScheduling(write: true) { try $0.install() } }
+    func updateSchedulingIntent() throws -> UpdateSchedulingIntent? { try withUpdateScheduling(write: false) { try $0.state() } }
+
+    func retainedUpdateSchedulingIntentForAdmission() throws -> UpdateSchedulingIntent? {
+        do {
+            _ = try tables()
+            let version = try storageSchemaVersion
+            if version < 17 { return nil }
+            guard version == 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
+            guard let owner else { throw JournalDatabaseError.expiredTransaction }
+            return try owner.retainedUpdateSchedulingIntentForAdmission(token)
+        } catch {
+            failed = true
+            if error as? UpdateSchedulingJournalError == .corruptData { headMismatch = true }
+            throw error
+        }
+    }
+
+    /// The host supplies one already verified inactive release. Phone callers cannot select or replace this identity.
+    func retainUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate, expected: UpdateSchedulingSnapshot?) throws -> UpdateSchedulingIntent {
+        try withUpdateScheduling(write: true) { try $0.offer(candidate: candidate, expected: expected) }
+    }
+    func issueUpdateSchedulingControl(candidate: LiveUpdateSchedulingCandidate, action: UpdateSchedulingAction, expected: UpdateSchedulingSnapshot,
+                                      binding: AuthorityPeerBinding, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> UpdateSchedulingControl {
+        try requireDirectApprovalBinding(binding)
+        let trust = try requestDeliveryTrust()
+        return try withUpdateScheduling(write: true) {
+            try $0.issue(candidate: candidate, action: action, expected: expected, binding: binding, trust: trust, wall: nowUnixMillis, now: now)
+        }
+    }
+
+    func issuedUpdateSchedulingChallenge(candidate: LiveUpdateSchedulingCandidate, canonicalControl: Data,
+        binding: AuthorityPeerBinding, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> RetainedUpdateSchedulingChallenge {
+        try requireDirectApprovalBinding(binding)
+        let trust = try requestDeliveryTrust()
+        return try withUpdateScheduling(write: false) {
+            try $0.issuedChallenge(candidate: candidate, payload: canonicalControl, binding: binding,
+                trust: trust, wall: nowUnixMillis, now: now)
+        }
+    }
+
+    /// Verifies an unconsumed control without modifying the journal. The commit repeats these checks.
+    func verifyUpdateSchedulingControl(candidate: LiveUpdateSchedulingCandidate, canonicalControl: Data, signature: Data,
+        binding: AuthorityPeerBinding, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> RetainedUpdateSchedulingChallenge {
+        try requireDirectApprovalBinding(binding)
+        let trust = try requestDeliveryTrust()
+        return try withUpdateScheduling(write: false) {
+            _ = try $0.verify(candidate: candidate, payload: canonicalControl, signature: signature, binding: binding,
+                trust: trust, wall: nowUnixMillis, now: now)
+            return try $0.issuedChallenge(candidate: candidate, payload: canonicalControl, binding: binding,
+                trust: trust, wall: nowUnixMillis, now: now)
+        }
+    }
+
+    /// Commits a one-use scheduling intent only. Admission and activation remain separate serialized gates.
+    func consumeUpdateSchedulingControl(candidate: LiveUpdateSchedulingCandidate, canonicalControl: Data, signature: Data, binding: AuthorityPeerBinding,
+                                        nowUnixMillis: UInt64, now: AuthorityMoment) throws -> UpdateSchedulingIntent {
+        try requireDirectApprovalBinding(binding)
+        let trust = try requestDeliveryTrust()
+        return try withUpdateScheduling(write: true) {
+            try $0.apply(candidate: candidate, payload: canonicalControl, signature: signature, binding: binding, trust: trust, wall: nowUnixMillis, now: now)
+        }
+    }
+
+    /// Historical consumption only. This revision cannot authorize another scheduling transition or dispatch.
+    func consumedUpdateSchedulingRevision(operationID: Data) throws -> UInt64? {
+        try withUpdateScheduling(write: false) { try $0.consumedRevision(operationID: operationID) }
     }
 
     func historyRecovery(epoch: Data) throws -> HistoryRecoveryIntent? {

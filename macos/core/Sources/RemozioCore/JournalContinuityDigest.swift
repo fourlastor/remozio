@@ -30,13 +30,14 @@ enum JournalContinuityDigest {
         }
         var version: Int64?
         try rows(db, "PRAGMA main.user_version") { version = sqlite3_column_int64($0, 0) }
-        guard let version, (12...16).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+        guard let version, (12...17).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         let authorityTables = Self.authorityTables + (version >= 13 ? ["authority_code_policy_v1"] : [])
             + (version >= 15 ? ["command_submissions_v1"] : [])
             + (version >= 16 ? ["gateway_submission_outbox_v1"] : [])
+            + (version >= 17 ? ["update_scheduling_state_v1", "update_scheduling_operations_v1"] : [])
         let ledgerTables = Self.ledgerTables + (version >= 14 ? ["history_recoveries_v1"] : [])
         guard tables == Set(authorityTables + ledgerTables) else { throw JournalDatabaseError.incompatibleStore }
-        return try JournalContinuityDigests(authority: digest(db, tables: authorityTables, domain: "authority", schema: version >= 16 ? 16 : (version >= 15 ? 15 : min(version, 13))),
+        return try JournalContinuityDigests(authority: digest(db, tables: authorityTables, domain: "authority", schema: version >= 17 ? 17 : (version >= 16 ? 16 : (version >= 15 ? 15 : min(version, 13)))),
                                             ledger: digest(db, tables: ledgerTables, domain: "ledger"))
     }
 

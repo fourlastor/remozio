@@ -44,7 +44,7 @@ Compiled library support does not make a GUI adapter, tunnel, or bridge executab
 Each format declares separate, exact reader and writer sets, plus explicit migration edges.
 A set such as `{2, 5}` does not include versions 3 or 4.
 Storage migration declarations do not authorize migration or erase retained generation floors.
-The journal accepts schemas 12 through 16. Its explicit legacy migration maps schemas 1 through 11 to 12.
+The journal accepts schemas 12 through 17. Its explicit legacy migration maps schemas 1 through 11 to 12.
 The authority declares preparation-store schemas 1 and 2 as `authority.installation-preparation`, with explicit migration from 1 to 2.
 It also declares schema 1 reader and writer support for `authority.installation-inventory`.
 The [inventory record](macos-installation-inventory.md) grants no registration or activation authority.

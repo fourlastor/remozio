@@ -44,7 +44,7 @@ def declarations(role):
         8: [('setup.service-config', [1]), ('setup.local-ipc', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]),
             ('setup.audit-upgrade-progress', [1]), ('authority.code-policy', [1, 2, 3]),
             ('authority.installation-inventory', [1, 2]), ('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]),
-            ('authority.journal', [12, 13, 14, 15, 16])],
+            ('authority.journal', [12, 13, 14, 15, 16, 17])],
         11: [('command.child-frame', [1, 2])],
         12: [('command.monitor-frame', [2]), ('command.child-frame', [1, 2])],
     }
@@ -65,7 +65,7 @@ def declarations(role):
     if role == 2:
         values.append(format_declaration('authority.installation-inventory', [1, 2], {1: 2}))
         values.append(format_declaration('authority.installation-preparation', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18], {1: 2}))
-        values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16], {v: 12 for v in range(1, 12)}))
+        values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16, 17], {v: 12 for v in range(1, 12)}))
     if role in (2, 12):
         values.append({0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     # Recovery fences include the retained settings revision and selected commit.
