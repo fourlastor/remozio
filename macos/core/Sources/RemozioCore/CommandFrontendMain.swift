@@ -62,14 +62,7 @@ public enum CommandFrontendMain {
         } catch is CommandFrontendCallerSettingsError {
             log("Invalid command settings. Check Remozio Settings."); return .status(EX_CONFIG)
         } catch let error as CommandCallerReadinessError {
-            switch error {
-            case .deadlineExceeded:
-                log("The authority did not become ready within the configured wait."); return .status(EX_TEMPFAIL)
-            case .invalidConfiguration:
-                log("Invalid command readiness settings."); return .status(EX_CONFIG)
-            case .clockMovedBackwards:
-                log("The command caller clock failed."); return .status(EX_OSERR)
-            }
+            return readinessExit(error, report: log)
         } catch is CommandFrontendConfigurationError {
             log("Protected Remozio installation metadata is unavailable or invalid."); return .status(EX_CONFIG)
         } catch {
@@ -117,12 +110,8 @@ public enum CommandFrontendMain {
                     try terminal?.restore()
                     try runtime.suspend(waitMilliseconds: settings.foregroundRetryMilliseconds)
                 }
-            }, onStatus: { status in
-                switch status {
-                case .connecting: log("Waiting for the command authority.")
-                case .waiting: log("The authority is busy. Waiting before a fresh submission.")
-                }
-            }, refreshAuthorityPolicy: { try configuration.reloadAuthorityPolicy(path: configurationPath) }, currentJobQueries: true)
+            }, onStatus: { log(readinessStatusMessage($0)) },
+            refreshAuthorityPolicy: { try configuration.reloadAuthorityPolicy(path: configurationPath) }, currentJobQueries: true)
         switch response {
         case .result(let result): return admissionExit(result)
         case .admitted(let session):
@@ -300,6 +289,44 @@ public enum CommandFrontendMain {
         case .admitted: return .status(EX_SOFTWARE)
         }
     }
+    static func readinessStatusMessage(_ status: CommandCallerReadinessStatus) -> String {
+        switch status {
+        case .connecting: return "Waiting for the command authority."
+        case .waiting(let reason):
+            guard let busy = readinessBusyStatus(reason) else {
+                return "The authority is busy. Waiting before a fresh submission."
+            }
+            return busy.label + ". Waiting before a fresh submission."
+        }
+    }
+
+    static func readinessExit(_ error: CommandCallerReadinessError,
+                              report: (String) -> Void) -> CommandFrontendExit {
+        switch error {
+        case .deadlineExceeded(let reason):
+            if let reason, let busy = readinessBusyStatus(reason) {
+                report("Last state: " + busy.label + ". The configured wait ended before admission.")
+                return .status(busy.status)
+            }
+            report("The authority did not become ready within the configured wait.")
+            return .status(EX_TEMPFAIL)
+        case .invalidConfiguration:
+            report("Invalid command readiness settings."); return .status(EX_CONFIG)
+        case .clockMovedBackwards:
+            report("The command caller clock failed."); return .status(EX_OSERR)
+        }
+    }
+
+    private static func readinessBusyStatus(_ reason: CommandAdmissionRejectionReason) -> (label: String, status: Int32)? {
+        switch reason {
+        case .updateInstalling: return ("Update installing", 80)
+        case .authorityStarting: return ("Mac authority starting", 81)
+        case .updateWaiting: return ("Update waiting", 82)
+        case .storageUnavailable: return ("Storage unavailable", 83)
+        default: return nil
+        }
+    }
+
     private static func log(_ value: String) {
         let bytes = Data((value + "\n").utf8)
         bytes.withUnsafeBytes { buffer in
