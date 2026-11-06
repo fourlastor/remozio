@@ -8,4 +8,5 @@ internal expect fun pairingPoint(bytes: ByteArray)
 
 /** A copy that callers cannot mutate, even through a MutableList or MutableMap cast. */
 internal expect fun <T> readOnlySnapshot(values: List<T>): List<T>
+internal expect fun <T> readOnlySnapshot(values: Set<T>): Set<T>
 internal expect fun <K, V> readOnlySnapshot(values: Map<K, V>): Map<K, V>
