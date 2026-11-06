@@ -846,15 +846,10 @@ final class GatewayAuthorityJournal {
             [entry.operationID, uint(entry.revision), candidate, entry.canonicalPayload, entry.signature, entry.registrationToken.map { Data($0.utf8) }]) { try done($0) }
     }
 
-    /// Protected setup only. The host must commit the new authority digest to its continuity boundary before activation.
-    func installSubmissionHistory(identity: GatewayRegistrationIdentity) throws {
-        try scope(identity); _ = try head(identity)
+    /// Creates dormant storage. The caller owns the schema version and continuity checkpoint.
+    static func createSubmissionHistoryStorage(connection db: OpaquePointer) throws {
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
-        let version = try submissionSchemaVersion()
-        guard version == 15 || version == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
-        guard try CodePolicyJournal(connection: db).read() != nil else { throw GatewayAuthorityError.unconfigured }
-        if version == 15 {
-            let result = sqlite3_exec(db, """
+        let result = sqlite3_exec(db, """
                 CREATE TABLE main.gateway_submission_outbox_v1(
                     operation BLOB PRIMARY KEY CHECK(length(operation)=16), revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
                     kind INTEGER NOT NULL CHECK(kind IN (4,5)), credential BLOB NOT NULL CHECK(length(credential)=16),
@@ -862,8 +857,20 @@ final class GatewayAuthorityJournal {
                     run BLOB NOT NULL CHECK(length(run)=16), started BLOB NOT NULL CHECK(length(started)=8),
                     deadline BLOB NOT NULL CHECK(length(deadline)=8)
                 ) STRICT, WITHOUT ROWID;
-                PRAGMA main.user_version=16;
                 """, nil, nil, nil)
+        guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+    }
+
+    /// Protected setup only. The host must commit the new authority digest to its continuity boundary before activation.
+    func installSubmissionHistory(identity: GatewayRegistrationIdentity) throws {
+        try scope(identity); _ = try head(identity)
+        guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
+        let version = try submissionSchemaVersion()
+        guard version == 15 || version == 16 || version == 17 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try CodePolicyJournal(connection: db).read() != nil else { throw GatewayAuthorityError.unconfigured }
+        if version == 15 {
+            try Self.createSubmissionHistoryStorage(connection: db)
+            let result = sqlite3_exec(db, "PRAGMA main.user_version=16", nil, nil, nil)
             guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
         }
         try statement("SELECT operation,revision,kind,credential,payload,signature,run,started,deadline FROM main.gateway_submission_outbox_v1 LIMIT 0", []) {
@@ -892,7 +899,7 @@ final class GatewayAuthorityJournal {
                                  wall: UInt64, now: AuthorityMoment, sign: (GatewaySubmissionControl) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try scope(identity); try clock(now); try requireHead(expectedHead, identity: identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try submissionSchemaVersion() == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...17).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         guard credential.count == 16 else { throw GatewayAuthorityError.wrongScope }
         let (expiry, overflow) = wall.addingReportingOverflow(policy.candidateLifetimeMillis)
         let (deadline, monoOverflow) = now.milliseconds.addingReportingOverflow(policy.candidateLifetimeMillis)
@@ -931,7 +938,7 @@ final class GatewayAuthorityJournal {
                            wall: UInt64, now: AuthorityMoment) throws -> GatewayAuthorityEnvelope? {
         try clock(now); _ = try head(identity)
         guard active else { throw GatewayAuthorityError.unavailableRegistration }
-        guard try submissionSchemaVersion() == 16 else { throw GatewayAuthorityError.unsupportedSubmissionControl }
+        guard try (16...17).contains(submissionSchemaVersion()) else { throw GatewayAuthorityError.unsupportedSubmissionControl }
         let entries = try submissionEntries(identity)
         guard let entry = entries.first(where: { $0.receipt.control.operationID == operationID }) else { return nil }
         let value = entry.receipt.control
@@ -1018,7 +1025,7 @@ final class GatewayAuthorityJournal {
         }
     }
 
-    func submissionHistoryInstalled() throws -> Bool { try submissionSchemaVersion() == 16 }
+    func submissionHistoryInstalled() throws -> Bool { try (16...17).contains(submissionSchemaVersion()) }
 
     private func submissionSchemaVersion() throws -> Int64 {
         try statement("PRAGMA main.user_version", []) { row in

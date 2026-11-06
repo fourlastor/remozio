@@ -8,7 +8,7 @@ final class CodePolicyJournal {
 
     func read() throws -> AuthorityCodePolicySnapshot? {
         let version = try schemaVersion()
-        guard (12...16).contains(version) else { throw JournalDatabaseError.incompatibleStore }
+        guard (12...17).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version == 12 { return nil }
         return try statement("SELECT id,revision,policy FROM main.authority_code_policy_v1") { row in
             // Version 13 is committed only with a complete policy. An absent row is not first-time setup.
