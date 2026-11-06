@@ -15,6 +15,7 @@ private final class MachineReplacementFixture {
     let directory: ReleaseDestinationLease
     let candidate: UpdateSchedulingCandidateRecord
     let activation: MachineUpdateActivationRecord
+    let policySnapshot: AuthorityCodePolicySnapshot
     let oldRelease: SignedReleaseEvidence
     let newRelease: SignedReleaseEvidence
     var quiet: UpdateQuiescenceLease
@@ -52,6 +53,8 @@ private final class MachineReplacementFixture {
             directory: directory, drain: drain, verifyCurrent: {})
         quiet = try XCTUnwrap(drain.acquireQuiescence())
         let preflight = try files.machine.policyPreflight(pending, directory: directory, quiet: quiet)
+        let account = files.machine.account
+        policySnapshot = try XCTUnwrap(preflight.policies.first { $0.accountID == account }?.snapshot)
         activation = try files.machine.store.markMachineUpdateActivationStarted(pending, preflight: preflight,
             directory: directory, quiescence: quiet, verifyCurrent: {})
     }
@@ -577,6 +580,148 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try assertForkRefuses(validate)
         }
         try f.assertBefore()
+    }
+
+    private func releasePolicySnapshot(_ f: Fixture) -> AuthorityCodePolicySnapshot {
+        f.policySnapshot
+    }
+
+    private func releaseBinding(_ f: Fixture, source: MachineUpdateRestartSource,
+                                policy: AuthorityCodePolicySnapshot) throws -> RuntimeReleaseBinding {
+        try .init(accountID: f.machine.account, source: source, candidate: f.newRelease,
+            policy: MachineUpdatePolicyPlan(source: policy, candidate: f.newRelease))
+    }
+
+    func testReleaseBindingKeepsHistoricalMaterialSeparateFromTheInstalledRelease() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let before = try f.machine.store.retainedRuntimeCompatibilityInputs(), reference = source.replacement.runtime.runtimes[0].reference
+        let bytes = try reference.encoded, value = try releaseBinding(f, source: source, policy: policy)
+        XCTAssertEqual(value.previousInstalledReleaseDigest, source.replacement.inventory.releaseDigest)
+        XCTAssertEqual(value.installedReleaseDigest, try InstallationInventory.digest(f.newRelease))
+        XCTAssertNotEqual(value.installedReleaseDigest, value.previousInstalledReleaseDigest)
+        XCTAssertEqual(try reference.encoded, bytes); XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs(), before)
+    }
+
+    func testReleaseBindingPinsTheAccountAttemptCandidateAndAdmission() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f)
+        let value = try releaseBinding(f, source: source, policy: releasePolicySnapshot(f))
+        XCTAssertEqual(value.accountID, f.machine.account); XCTAssertEqual(value.macID, f.activation.macID)
+        XCTAssertEqual(value.installationID, f.activation.installationID); XCTAssertEqual(value.activationAttempt, f.activation.attemptID)
+        XCTAssertEqual(value.candidateDigest, f.activation.candidateDigest); XCTAssertEqual(value.sourceInventoryDigest, f.activation.inventoryDigest)
+        XCTAssertEqual(value.admissionDigest, f.activation.admissionDigest); XCTAssertEqual(value.updateID, f.activation.updateID)
+    }
+
+    func testReleaseBindingIsDeterministicForTheSameRetainedSource() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let first = try releaseBinding(f, source: source, policy: policy), second = try releaseBinding(f, source: source, policy: policy)
+        XCTAssertEqual(first, second); XCTAssertEqual(try first.encoded, try second.encoded)
+        XCTAssertEqual(try RuntimeReleaseBinding.decode(first.encoded), first)
+    }
+
+    func testReleaseBindingRejectsAnAccountWithoutARetainedRuntime() throws {
+        var reserved: AccountPreparationIntent?
+        let f = try Fixture(beforeActivation: { reserved = try self.reserveRestartAccount($0) })
+        _ = try f.run(); let source = try restartSource(f), pending = try XCTUnwrap(reserved)
+        XCTAssertTrue(source.accounts.contains { $0.accountID == pending.accountID })
+        XCTAssertThrowsError(try RuntimeReleaseBinding(accountID: pending.accountID, source: source, candidate: f.newRelease,
+            policy: MachineUpdatePolicyPlan(source: releasePolicySnapshot(f), candidate: f.newRelease))) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRejectsAnUnrelatedAccountEvenWithTheSamePolicy() throws {
+        let f = try Fixture(), other = try Fixture(); _ = try f.run(); let source = try restartSource(f)
+        XCTAssertThrowsError(try RuntimeReleaseBinding(accountID: other.machine.account, source: source, candidate: f.newRelease,
+            policy: MachineUpdatePolicyPlan(source: releasePolicySnapshot(f), candidate: f.newRelease))) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRejectsAChangedPolicyRevisionBeforePublication() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let value = try releaseBinding(f, source: source, policy: policy)
+        let changed = AuthorityCodePolicySnapshot(revision: UUID(), policy: policy.policy, roleRevisions: policy.roleRevisions)
+        XCTAssertThrowsError(try value.requireSourceForPublication(source, currentPolicy: changed, candidate: f.newRelease)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRejectsAChangedRoleTokenBeforePublication() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let value = try releaseBinding(f, source: source, policy: policy); var tokens = policy.roleRevisions; tokens[.authority] = UUID()
+        let changed = AuthorityCodePolicySnapshot(revision: policy.revision, policy: policy.policy, roleRevisions: tokens)
+        XCTAssertThrowsError(try value.requireSourceForPublication(source, currentPolicy: changed, candidate: f.newRelease)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRejectsADifferentFreshSignedRelease() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let value = try releaseBinding(f, source: source, policy: policy)
+        XCTAssertThrowsError(try value.requireSourceForPublication(source, currentPolicy: policy, candidate: f.oldRelease)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRejectsAChangedHistoricalAccountOwner() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let value = try releaseBinding(f, source: source, policy: policy)
+        let changed = MachineUpdateRestartSource(replacement: source.replacement, accounts: source.accounts.map {
+            .init(accountID: $0.accountID, ownerUID: $0.ownerUID + 1, preparation: $0.preparation,
+                initialization: $0.initialization, services: $0.services, servicesComplete: $0.servicesComplete)
+        })
+        XCTAssertThrowsError(try value.requireSourceForPublication(changed, currentPolicy: policy, candidate: f.newRelease)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+    }
+
+    func testReleaseBindingRequiresAcknowledgedReplacementRecovery() throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .immediatelyAfterExchange { throw ReplacementFixtureError.injected } }))
+        let source = try restartSource(f); XCTAssertEqual(source.replacement.replacement?.phase, .prepared)
+        XCTAssertThrowsError(try releaseBinding(f, source: source, policy: releasePolicySnapshot(f))) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        try f.assertAfter()
+    }
+
+    func testReleaseBindingKeepsItsSourceAcrossTheLegalRestartPhaseTransition() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let value = try releaseBinding(f, source: source, policy: policy)
+        let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        let checking = try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})
+        let current = try f.machine.store.machineUpdateRestartSource(checking, directory: f.directory)
+        XCTAssertNoThrow(try value.requireSourceForPublication(current, currentPolicy: policy, candidate: f.newRelease))
+    }
+
+    func testReleaseBindingSeparatesStartupPolicyFromTheCompletionFloor() throws {
+        let f = try Fixture(); _ = try f.run(); let source = try restartSource(f), policy = releasePolicySnapshot(f)
+        let plan = try MachineUpdatePolicyPlan(source: policy, candidate: f.newRelease)
+        let value = try releaseBinding(f, source: source, policy: policy)
+        XCTAssertNoThrow(try value.requireStartupPolicy(plan.startupPolicy))
+        XCTAssertNoThrow(try value.requireCompletionPolicy(plan.completionPolicy))
+        XCTAssertThrowsError(try value.requireStartupPolicy(plan.completionPolicy))
+        XCTAssertThrowsError(try value.requireCompletionPolicy(plan.startupPolicy))
+    }
+
+    func testReleaseBindingRejectsNoncanonicalAndOversizedRecords() throws {
+        let f = try Fixture(); _ = try f.run(); let value = try releaseBinding(f, source: restartSource(f), policy: releasePolicySnapshot(f))
+        XCTAssertThrowsError(try RuntimeReleaseBinding.decode(value.encoded + Data([0x20])))
+        XCTAssertThrowsError(try RuntimeReleaseBinding.decode(Data(repeating: 0, count: RuntimeReleaseBinding.maximumBytes + 1)))
+    }
+
+    func testReleaseBindingRejectsAnAlteredIdentityLength() throws {
+        let f = try Fixture(); _ = try f.run(); let value = try releaseBinding(f, source: restartSource(f), policy: releasePolicySnapshot(f))
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: value.encoded) as? [String: Any])
+        fields["accountID"] = Data(repeating: 1, count: 15).base64EncodedString()
+        let bytes = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+        XCTAssertThrowsError(try RuntimeReleaseBinding.decode(bytes))
+    }
+
+    func testReleaseBindingDescriptionsRedactItsRetainedScope() throws {
+        let f = try Fixture(); _ = try f.run(); let value = try releaseBinding(f, source: restartSource(f), policy: releasePolicySnapshot(f))
+        XCTAssertEqual(value.description, "RuntimeReleaseBinding(redacted)"); XCTAssertEqual(value.debugDescription, value.description)
     }
 
 }
