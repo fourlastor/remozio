@@ -18,7 +18,9 @@ struct MachineUpdateReplacementObservation {
 }
 
 enum ProtectedMachineUpdateReplacement {
-    enum Stage { case bindingCommitted, immediatelyBeforeExchange, immediatelyAfterExchange }
+    /// Test injection points. `exchangedBeforeParentSync` follows the rename and precedes both parent syncs;
+    /// `parentsSynchronized` follows both syncs on every path that reaches the after layout, before the observed commit.
+    enum Stage { case bindingCommitted, immediatelyBeforeExchange, exchangedBeforeParentSync, parentsSynchronized, immediatelyAfterExchange }
     private enum Layout { case before, after }
 
     static func observe(activation: MachineUpdateActivationRecord, machineDirectory: ReleaseDestinationLease,
@@ -102,14 +104,20 @@ enum ProtectedMachineUpdateReplacement {
                     var current = initial
                     _ = try verify(binding, layout: current, context: context, snapshot: snapshot,
                         installed: installed, prepared: prepared, readPolicy: readPolicy, inspect: inspect, validate: validate)
-                    if current == .before {
+                    let exchanged = current == .before
+                    if exchanged {
                         try didStage(.immediatelyBeforeExchange)
                         _ = try verify(binding, layout: .before, context: context, snapshot: snapshot,
                             installed: installed, prepared: prepared, readPolicy: readPolicy, inspect: inspect, validate: validate)
                         try installed.exchangeMachineUpdateApplications(binding, prepared: prepared, validate: validate)
-                        try didStage(.immediatelyAfterExchange)
+                        try didStage(.exchangedBeforeParentSync)
                         current = .after
                     }
+                    // A visible after layout does not prove a durable rename: an earlier run may have stopped before
+                    // its syncs. Sync both parents on every path before the observed commit; a failure keeps the record prepared.
+                    try installed.synchronizeMachineUpdateParents(binding, prepared: prepared, validate: validate)
+                    try didStage(.parentsSynchronized)
+                    if exchanged { try didStage(.immediatelyAfterExchange) }
                     return try verify(binding, layout: current, context: context, snapshot: snapshot,
                         installed: installed, prepared: prepared, readPolicy: readPolicy, inspect: inspect, validate: validate)
                 }
@@ -167,6 +175,7 @@ enum ProtectedMachineUpdateReplacement {
 
 extension ReleaseDestinationLease {
     /// Exchanges both existing names atomically. No old bundle is deleted, restored or adopted on failure.
+    /// The caller syncs both parents with `synchronizeMachineUpdateParents` before it records the swap as observed.
     fileprivate func exchangeMachineUpdateApplications(_ binding: MachineUpdateReplacementRecord,
         prepared: ReleaseDestinationLease, validate: () throws -> Void) throws {
         try binding.requireParents(installed: self, prepared: prepared); try validate()
@@ -179,6 +188,21 @@ extension ReleaseDestinationLease {
                 try validate()
                 let result = renameatx_np(installedFD, binding.installedName, preparedFD, binding.preparedName, UInt32(RENAME_SWAP))
                 guard result == 0 else { throw MachineUpdateReplacementError.system(errno) }
+                try validate()
+            }
+        }
+    }
+
+    /// Syncs both parent directories of the after layout. It changes no name and checks the bound identities first.
+    fileprivate func synchronizeMachineUpdateParents(_ binding: MachineUpdateReplacementRecord,
+        prepared: ReleaseDestinationLease, validate: () throws -> Void) throws {
+        try binding.requireParents(installed: self, prepared: prepared); try validate()
+        try withDirectory { installedFD in
+            try prepared.withDirectory { preparedFD in
+                guard try preparationCopyIdentity(name: binding.installedName) == binding.preparedIdentity,
+                      try prepared.preparationCopyIdentity(name: binding.preparedName) == binding.previousIdentity else {
+                    throw MachineUpdateReplacementError.unknownOutcome
+                }
                 guard fsync(installedFD) == 0, fsync(preparedFD) == 0 else { throw MachineUpdateReplacementError.system(errno) }
                 try validate()
             }

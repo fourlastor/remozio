@@ -338,6 +338,34 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(result.record.phase, .observed); try f.assertAfter()
     }
 
+    func testRecoveryAfterAnUnsyncedExchangeSyncsBothParentsBeforeTheObservedCommit() throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .exchangedBeforeParentSync { throw ReplacementFixtureError.injected } }))
+        try f.assertAfter(); XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared)
+        try f.reopen(); var stages: [ProtectedMachineUpdateReplacement.Stage] = []
+        let result = try f.run(stage: { stages.append($0) })
+        XCTAssertEqual(stages, [.parentsSynchronized]); XCTAssertTrue(result.recoveredAfterExchange)
+        XCTAssertEqual(result.record.phase, .observed); try f.assertAfter()
+    }
+
+    func testAFailedRecoveredParentSyncKeepsThePreparedRecord() throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .exchangedBeforeParentSync { throw ReplacementFixtureError.injected } }))
+        try f.reopen()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .parentsSynchronized { throw ReplacementFixtureError.injected } }))
+        try f.assertAfter(); XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared)
+        try f.reopen(); let result = try f.run()
+        XCTAssertTrue(result.recoveredAfterExchange); XCTAssertEqual(result.record.phase, .observed); try f.assertAfter()
+    }
+
+    func testAFreshExchangeSyncsBothParentsBeforeItsAfterExchangeStage() throws {
+        let f = try Fixture(); var stages: [ProtectedMachineUpdateReplacement.Stage] = []
+        let result = try f.run(stage: { stages.append($0) })
+        XCTAssertEqual(stages, [.bindingCommitted, .immediatelyBeforeExchange, .exchangedBeforeParentSync,
+                                .parentsSynchronized, .immediatelyAfterExchange])
+        XCTAssertFalse(result.recoveredAfterExchange); XCTAssertEqual(result.record.phase, .observed)
+    }
+
     func testFailureBeforeExchangeRetainsBothOperandsForExplicitRecovery() throws {
         let f = try Fixture()
         XCTAssertThrowsError(try f.run(stage: { if $0 == .bindingCommitted { throw ReplacementFixtureError.injected } }))
