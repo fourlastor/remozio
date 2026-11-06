@@ -358,4 +358,205 @@ final class DurableReleasePreparationTests: XCTestCase {
             XCTAssertEqual(try store.records(), [abandoned])
         }
     }
+    private func schedulingSignature() throws -> SignedReleaseEvidence {
+        let app = try signature().manifest.components[0]
+        let authority = try ReleaseComponent(role: .authority, identifier: "dev.remozio.fixture.authority", generation: 4,
+            relativePath: "Contents/Library/LaunchServices/Authority", codeDirectoryHash: Data(repeating: 2, count: 20),
+            build: "4", teamID: "ABCDEFGHIJ", formats: [])
+        return .init(manifest: try .init(release: "0.1.0", build: "4", components: [app, authority]),
+            codeDirectoryHashes: [.app: Data(repeating: 1, count: 20), .authority: Data(repeating: 2, count: 20)])
+    }
+    private func schedulingPolicy(generation: UInt64 = 4) throws -> AuthorityCodePolicy {
+        try .init(entries: policy(generation: generation).entries + [.init(role: .authority, teamID: "ABCDEFGHIJ",
+            identifier: "dev.remozio.fixture.authority", installedGeneration: generation, minimumGeneration: generation,
+            codeDirectoryHash: Data(repeating: 2, count: 20), active: true)])
+    }
+    private func schedulingFixture(_ body: (Fixture, PreparationIntentStore, ReleaseDestinationLease,
+        PreparationIntentRecord, SignedReleaseEvidence, InstallationInventory) throws -> Void) throws {
+        try fixture { f in
+            let store = try f.store(initialize: true), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            try store.upgradeInventoryStorage()
+            let inventory = try InstallationInventory(macID: Data(repeating: 1, count: 16),
+                installationID: Data(repeating: 2, count: 16), revision: Data(repeating: 3, count: 16),
+                bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: Data(repeating: 4, count: 32),
+                accounts: [.init(accountID: Data(repeating: 5, count: 16), ownerUID: getuid())],
+                services: [.init(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
+                    label: "dev.remozio.fixture.authority", plistName: "dev.remozio.fixture.authority.plist", accountID: Data(repeating: 5, count: 16))])
+            let retained = try store.writeInventory(inventory, expectedRevision: nil), signed = try schedulingSignature()
+            let record = try recordedCopy(store, destination, signature: signed)
+            try body(f, store, destination, record, signed, retained)
+        }
+    }
+    private func schedulingCandidate(_ store: PreparationIntentStore, _ destination: ReleaseDestinationLease,
+        _ record: PreparationIntentRecord, _ signed: SignedReleaseEvidence) throws -> UpdateSchedulingPreparedRelease {
+        try .captureInLease(attemptID: record.id, macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 5, count: 16),
+            destination: destination, store: store, readPolicy: { try self.schedulingPolicy() }, inspect: { _, _, _ in signed })
+    }
+    private func validateScheduling(_ candidate: UpdateSchedulingPreparedRelease, _ store: PreparationIntentStore,
+        _ destination: ReleaseDestinationLease, _ signed: SignedReleaseEvidence) throws -> DurableInactiveCopyEvidence {
+        try candidate.validateInLease(macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 5, count: 16),
+            updateID: candidate.updateID, destination: destination, store: store,
+            readPolicy: { try self.schedulingPolicy() }, inspect: { _, _, _ in signed })
+    }
+    func testSchedulingPreparedReleaseReinspectsWithoutChangingMachineRecords() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            XCTAssertEqual(candidate.updateID, try DurableReleasePreparation.digest(signed))
+            var inspections = 0
+            let recovered = try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store, readPolicy: { try self.schedulingPolicy() },
+                inspect: { _, _, _ in inspections += 1; return signed })
+            XCTAssertEqual(recovered.attemptID, record.id); XCTAssertEqual(inspections, 1)
+            XCTAssertEqual(try store.records(), [record]); XCTAssertEqual(try store.inventory(), inventory)
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsOtherMacOrAccountBeforeInspection() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            for (mac, account) in [(Data(repeating: 9, count: 16), inventory.accounts[0].accountID),
+                (inventory.macID, Data(repeating: 9, count: 16)), (Data(), inventory.accounts[0].accountID)] {
+                XCTAssertThrowsError(try UpdateSchedulingPreparedRelease.captureInLease(attemptID: record.id,
+                    macID: mac, accountID: account, destination: destination, store: store, readPolicy: { try self.schedulingPolicy() },
+                    inspect: { _, _, _ in XCTFail("Wrong scope reached inspection"); return signed })) {
+                    XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .wrongScope)
+                }
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRequiresRetainedInventoryAndCompletedCopy() throws {
+        try fixture { f in
+            let store = try f.store(initialize: true), destination = try f.destination()
+            defer { try? store.close(); destination.close() }
+            let record = try recordedCopy(store, destination, signature: schedulingSignature())
+            XCTAssertThrowsError(try schedulingCandidate(store, destination, record, schedulingSignature()))
+        }
+        try schedulingFixture { _, store, destination, _, signed, _ in
+            let intent = try store.begin(parent: destination.path, ancestry: destination.preparationAncestry())
+            XCTAssertThrowsError(try schedulingCandidate(store, destination, intent, signed)) {
+                XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .changedPreparation)
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsMismatchedOfferAndCallerScope() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            for (mac, account, update) in [(Data(repeating: 9, count: 16), inventory.accounts[0].accountID, candidate.updateID),
+                (inventory.macID, Data(repeating: 9, count: 16), candidate.updateID),
+                (inventory.macID, inventory.accounts[0].accountID, Data(repeating: 9, count: 32))] {
+                XCTAssertThrowsError(try candidate.validateInLease(macID: mac, accountID: account, updateID: update,
+                    destination: destination, store: store, readPolicy: { try self.schedulingPolicy() },
+                    inspect: { _, _, _ in XCTFail("Mismatched offer reached inspection"); return signed }))
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsInventoryRevisionChanges() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            _ = try store.writeInventory(inventory, expectedRevision: inventory.revision)
+            XCTAssertThrowsError(try validateScheduling(candidate, store, destination, signed)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsChangedPolicyAndAbandonedRecord() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            XCTAssertThrowsError(try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store, readPolicy: { try self.schedulingPolicy(generation: 5) },
+                inspect: { _, _, _ in XCTFail("Changed policy reached inspection"); return signed })) {
+                XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .changedPolicy)
+            }
+            _ = try store.abandon(id: record.id, expectedRevision: record.revision)
+            XCTAssertThrowsError(try validateScheduling(candidate, store, destination, signed)) {
+                XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .changedPreparation)
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsReplacedCopyAndFreshSigningFailure() throws {
+        struct SigningFailure: Error {}
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            XCTAssertThrowsError(try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store, readPolicy: { try self.schedulingPolicy() },
+                inspect: { _, _, _ in throw SigningFailure() })) { XCTAssertTrue($0 is SigningFailure) }
+            let copy = URL(fileURLWithPath: destination.path).appendingPathComponent(record.bundleName)
+            try FileManager.default.moveItem(at: copy, to: copy.appendingPathExtension("saved"))
+            try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: false)
+            XCTAssertEqual(chmod(copy.path, 0o755), 0)
+            XCTAssertThrowsError(try validateScheduling(candidate, store, destination, signed)) {
+                guard case DurablePreparationError.destinationChanged = $0 else { return XCTFail("Wrong error: \($0)") }
+            }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsMachineChangesDuringInspection() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            XCTAssertThrowsError(try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store, readPolicy: { try self.schedulingPolicy() },
+                inspect: { _, _, _ in
+                    _ = try store.writeInventory(inventory, expectedRevision: inventory.revision)
+                    return signed
+                })) { XCTAssertEqual($0 as? RuntimeActivationError, .changedScope) }
+        }
+    }
+    func testSchedulingPreparedReleaseRejectsPolicyChangesDuringValidation() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            var reads = 0
+            XCTAssertThrowsError(try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store,
+                readPolicy: { reads += 1; return try self.schedulingPolicy(generation: reads == 1 ? 4 : 5) },
+                inspect: { _, _, _ in signed })) {
+                XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .changedPolicy)
+            }
+            XCTAssertEqual(reads, 2)
+        }
+    }
+    func testSchedulingPreparedReleaseRootEntryRejectsOrdinaryOwnerBeforeReadingPolicy() throws {
+        try schedulingFixture { _, store, destination, record, _, inventory in
+            XCTAssertThrowsError(try UpdateSchedulingPreparedRelease.capture(attemptID: record.id, macID: inventory.macID,
+                accountID: inventory.accounts[0].accountID, destination: destination, store: store,
+                readPolicy: { XCTFail("Ordinary caller read protected policy"); return try self.schedulingPolicy() })) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+        }
+    }
+
+    func testSchedulingPreparedReleaseChecksCopyAfterTheFinalPolicyCallback() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let candidate = try schedulingCandidate(store, destination, record, signed)
+            var reads = 0
+            XCTAssertThrowsError(try candidate.validateInLease(macID: inventory.macID, accountID: inventory.accounts[0].accountID,
+                updateID: candidate.updateID, destination: destination, store: store, readPolicy: {
+                    reads += 1
+                    if reads == 3 {
+                        let copy = URL(fileURLWithPath: destination.path).appendingPathComponent(record.bundleName)
+                        try FileManager.default.moveItem(at: copy, to: copy.appendingPathExtension("saved"))
+                        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: false)
+                        XCTAssertEqual(chmod(copy.path, 0o755), 0)
+                    }
+                    return try self.schedulingPolicy()
+                }, inspect: { _, _, _ in signed })) {
+                guard case DurablePreparationError.destinationChanged = $0 else { return XCTFail("Wrong error: \($0)") }
+            }
+            XCTAssertEqual(reads, 3)
+        }
+    }
+
+    func testSchedulingPreparedReleaseRequiresTheAccountsRegisteredAuthority() throws {
+        try schedulingFixture { _, store, destination, record, signed, inventory in
+            let second = Data(repeating: 6, count: 16)
+            let expanded = try InstallationInventory(macID: inventory.macID, installationID: inventory.installationID,
+                revision: inventory.revision, bundlePath: inventory.bundlePath, releaseDigest: inventory.releaseDigest,
+                accounts: inventory.accounts + [.init(accountID: second, ownerUID: getuid() + 1)], services: inventory.services)
+            _ = try store.writeInventory(expanded, expectedRevision: inventory.revision)
+            XCTAssertThrowsError(try UpdateSchedulingPreparedRelease.captureInLease(attemptID: record.id,
+                macID: inventory.macID, accountID: second, destination: destination, store: store,
+                readPolicy: { try self.schedulingPolicy() },
+                inspect: { _, _, _ in XCTFail("Unregistered authority reached inspection"); return signed })) {
+                XCTAssertEqual($0 as? UpdateSchedulingPreparedReleaseError, .wrongScope)
+            }
+        }
+    }
+
 }

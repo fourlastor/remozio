@@ -66,6 +66,16 @@ final class UpdateCandidateStorageFixture {
     func withCurrent<T>(_ record: UpdateSchedulingCandidateRecord, _ body: (_ validate: @escaping () throws -> Void) throws -> T) throws -> T {
         try store.withValidatedUpdateCandidate(record, runtime: store.retainedRuntimeCompatibilityInputs(), body)
     }
+    func binding(_ record: PreparationIntentRecord) throws -> UpdateSchedulingPreparedRelease {
+        try .captureInLease(attemptID: record.id, macID: mac, accountID: account, destination: destination,
+            store: store, readPolicy: { self.policy }, inspect: { _, _, _ in self.evidence(record) })
+    }
+    func withLiveCandidate<Value: Sendable>(_ record: UpdateSchedulingCandidateRecord,
+        _ body: (LiveUpdateSchedulingCandidate) throws -> Value) throws -> Value {
+        try binding(record.preparation).withCurrentCandidateLeaseInLease(macID: mac, accountID: account,
+            expected: record, destination: destination, store: store,
+            readPolicy: { self.policy }, inspect: { _, _, _ in self.evidence(record.preparation) }, body)
+    }
     func policyCaptures(for source: MachineUpdateRestartSource) throws -> [MachineUpdatePolicyCapture] {
         try source.accounts.map { account in
             guard let initial = account.initialization else { return .init(accountID: account.accountID, snapshot: nil) }
