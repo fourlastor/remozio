@@ -212,11 +212,14 @@ final class MachineUpdatePolicyPreflightTests: XCTestCase {
         }
         XCTAssertThrowsError(try MachineUpdatePolicyPreflight.requireRetained(proof.source.replacingActivation(committed), policies: changed))
     }
-    func testTheCommittedDigestIsRetainedThroughRestartChecking() throws {
+    // Restart checking needs an observed swap; MachineUpdateReplacementTests checks the digest through that transition.
+    func testTheCommittedDigestStaysWhenRestartCheckingIsRefusedBeforeASwap() throws {
         let f = try PolicyPreflightFixture(), proof = try f.capture(), started = try f.start(proof)
         let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
-        let next = try f.f.machine.store.markMachineUpdateRestartChecking(started, directory: f.directory, restart: restart, verifyCurrent: {})
-        XCTAssertEqual(next.formatVersion, 2); XCTAssertEqual(next.policyPreflightDigest, proof.digest)
+        XCTAssertThrowsError(try f.f.machine.store.markMachineUpdateRestartChecking(started, directory: f.directory,
+            restart: restart, verifyCurrent: {})) { XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition) }
+        let current = try XCTUnwrap(f.f.machine.store.machineUpdateActivation())
+        XCTAssertEqual(current.phase, .activationStarted); XCTAssertEqual(current.policyPreflightDigest, proof.digest)
     }
     func testMalformedOrCancelledVersionTwoMarkersAreRejected() throws {
         let f = try PolicyPreflightFixture(), proof = try f.capture(), started = try f.start(proof)

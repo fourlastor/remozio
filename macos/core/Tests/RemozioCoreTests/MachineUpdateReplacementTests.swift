@@ -453,6 +453,38 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertNil(try f.machine.store.machineUpdateReplacement()); try f.assertBefore()
     }
 
+    func testRestartCheckingIsRefusedWithoutAReplacementRecord() throws {
+        let f = try Fixture(); XCTAssertNil(try f.machine.store.machineUpdateReplacement())
+        let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        XCTAssertThrowsError(try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})) { XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition) }
+        XCTAssertEqual(try f.machine.store.machineUpdateActivation(), f.activation); try f.assertBefore()
+    }
+
+    func testRestartCheckingIsRefusedWhileTheReplacementIsOnlyPrepared() throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .bindingCommitted { throw ReplacementFixtureError.injected } }))
+        XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared)
+        try f.reopen(); let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        XCTAssertThrowsError(try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})) { XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition) }
+        XCTAssertEqual(try f.machine.store.machineUpdateActivation(), f.activation)
+        XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared); try f.assertBefore()
+    }
+
+    func testRestartCheckingAfterTheObservedSwapKeepsTheDigestAndClosedAdmission() throws {
+        let f = try Fixture(); XCTAssertEqual(try f.run().record.phase, .observed)
+        let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        let checking = try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})
+        XCTAssertEqual(checking.phase, .restartChecking)
+        XCTAssertEqual(checking.formatVersion, 2); XCTAssertEqual(checking.policyPreflightDigest, f.activation.policyPreflightDigest)
+        let health = try f.files.activity().acquireShared(); health.close()
+        let registration = try XCTUnwrap(f.machine.store.updateAdmissionRegistration())
+        XCTAssertThrowsError(try UpdateAdmissionBarrier(directory: f.files.directory(), owner: getuid(),
+            expected: registration.machine).acquireAdmission())
+    }
+
     func testForeignActivationRevisionCannotBindTheLocalOperands() throws {
         let f = try Fixture(), other = try Fixture()
         XCTAssertThrowsError(try ProtectedMachineUpdateReplacement.replaceOrRecoverInLease(activation: other.activation,
