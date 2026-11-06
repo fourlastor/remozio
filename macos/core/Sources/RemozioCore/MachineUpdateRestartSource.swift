@@ -47,4 +47,10 @@ struct MachineUpdateRestartSource: Equatable, CustomStringConvertible, CustomDeb
     }
 
 
+    static func capture(activation: MachineUpdateActivationRecord, machineDirectory: ReleaseDestinationLease,
+                        store: PreparationIntentStore) throws -> Self {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try store.machineUpdateRestartSource(activation, directory: machineDirectory)
+    }
+
 }
