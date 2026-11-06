@@ -67,13 +67,7 @@ enum UpdateSchedulingVerifier {
         guard control == retained.control else { throw UpdateSchedulingVerificationError.wrongChallenge }
         guard current.updateID == control.updateID, current.generation == control.expectedGeneration,
               current.revision == control.expectedRevision else { throw UpdateSchedulingVerificationError.staleSchedulingState }
-        guard now.epoch == retained.issuedAt.epoch, now.milliseconds >= retained.issuedAt.milliseconds else {
-            throw UpdateSchedulingVerificationError.invalidClock
-        }
-        guard now.milliseconds < retained.deadlineMilliseconds,
-              nowUnixMillis >= control.issuedAtUnixMillis, nowUnixMillis < control.expiresAtUnixMillis else {
-            throw UpdateSchedulingVerificationError.expired
-        }
+        try retained.requireLive(now: now, wall: nowUnixMillis)
         guard trust.approval.enrollments.contains(where: { $0.phoneID == control.phoneID && $0.active }),
               let enrollment = trust.enrollments.first(where: {
             $0.approval.phoneID == control.phoneID && $0.epoch == control.enrollmentEpoch && $0.approval.active

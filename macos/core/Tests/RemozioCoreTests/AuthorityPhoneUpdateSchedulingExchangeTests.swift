@@ -52,10 +52,55 @@ final class AuthorityPhoneUpdateSchedulingExchangeTests: XCTestCase {
             if index == 0 { XCTAssertNoThrow(try AuthorityPhoneUpdateSchedulingExchange.response(response, to: request, binding: peer)) }
             else { XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(response, to: request, binding: peer)) }
         }
-        let exhausted = PhoneUpdateSchedulingFrame.apply(queryNonce: nonce, canonicalControl: try control(peer, revision: .max), signature: Data(count: 64))
+        // A wrapped receipt for an exhausted revision cannot be encoded: revision 0 carries no action and no digest.
+        // The overflow guard in the exchange is a second barrier, and an unwrapped revision-0 status fails the digest check.
+        let exhaustedBytes = try control(peer, revision: .max), exhaustedDigest = Data(SHA256.hash(data: exhaustedBytes))
+        XCTAssertThrowsError(try UpdateSchedulingStatusResponse(scope: peer.scope, queryNonce: nonce, updateID: Data(repeating: 6, count: 32),
+            generation: 1, revision: 0, requestedAction: .deferUpdate, controlDigest: exhaustedDigest))
+        let exhausted = PhoneUpdateSchedulingFrame.apply(queryNonce: nonce, canonicalControl: exhaustedBytes, signature: Data(count: 64))
         let wrapped = try UpdateSchedulingStatusResponse(scope: peer.scope, queryNonce: nonce, updateID: Data(repeating: 6, count: 32),
             generation: 1, revision: 0, requestedAction: nil, controlDigest: nil).encode()
         XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(.stateResponse(queryNonce: nonce, canonicalPayload: wrapped,
             signature: Data(count: 64)), to: exhausted, binding: peer))
+    }
+    func testStatusReplyMustUseTheRequestNonceScopeAndNoControlDigest() throws {
+        let peer = try binding(), other = try binding(account: 9), request = query(), nonce = request.queryNonce
+        func reply(_ scope: ChannelScope, nonce replyNonce: Data, revision: UInt64 = 0, digest: Data? = nil) throws -> PhoneUpdateSchedulingFrame {
+            let payload = try UpdateSchedulingStatusResponse(scope: scope, queryNonce: replyNonce, updateID: Data(repeating: 6, count: 32),
+                generation: 1, revision: revision, requestedAction: revision == 0 ? nil : .deferUpdate, controlDigest: digest).encode()
+            return .stateResponse(queryNonce: replyNonce, canonicalPayload: payload, signature: Data(count: 64))
+        }
+        XCTAssertNoThrow(try AuthorityPhoneUpdateSchedulingExchange.response(reply(peer.scope, nonce: nonce), to: request, binding: peer))
+        XCTAssertNoThrow(try AuthorityPhoneUpdateSchedulingExchange.response(reply(peer.scope, nonce: nonce, revision: 1),
+            to: request, binding: peer))
+        XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(reply(other.scope, nonce: nonce), to: request, binding: peer))
+        XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(reply(peer.scope, nonce: nonce, revision: 1,
+            digest: Data(repeating: 11, count: 32)), to: request, binding: peer))
+        XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(reply(peer.scope, nonce: query(12).queryNonce),
+            to: request, binding: peer))
+    }
+    func testChallengeOrApplyNamingAnotherAccountIsRefused() throws {
+        let peer = try binding(), foreign = try binding(account: 9), nonce = query().queryNonce, bytes = try control(foreign)
+        let payload = try RootUpdateSchedulingChallenge(queryNonce: nonce, canonicalControl: bytes,
+            limits: AuthorityPhoneUpdateSchedulingExchange.limits).encode(limits: AuthorityPhoneUpdateSchedulingExchange.limits)
+        let response = PhoneUpdateSchedulingFrame.challengeResponse(queryNonce: nonce, canonicalPayload: payload, signature: Data(count: 64))
+        let request = PhoneUpdateSchedulingFrame.challenge(queryNonce: nonce, updateID: Data(repeating: 6, count: 32),
+            generation: 1, revision: 0, action: .deferUpdate)
+        XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(response, to: request, binding: peer))
+        XCTAssertNoThrow(try AuthorityPhoneUpdateSchedulingExchange.response(response, to: request, binding: foreign))
+        XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.request(.apply(queryNonce: nonce, canonicalControl: bytes,
+            signature: Data(count: 64)), binding: peer))
+    }
+    func testAFailureReplyPassesOnlyWithTheRequestNonce() throws {
+        let peer = try binding(), nonce = query().queryNonce, bytes = try control(peer)
+        let requests: [PhoneUpdateSchedulingFrame] = [.status(queryNonce: nonce),
+            .challenge(queryNonce: nonce, updateID: Data(repeating: 6, count: 32), generation: 1, revision: 0, action: .deferUpdate),
+            .apply(queryNonce: nonce, canonicalControl: bytes, signature: Data(count: 64))]
+        for request in requests {
+            XCTAssertNoThrow(try AuthorityPhoneUpdateSchedulingExchange.response(.failure(queryNonce: nonce, reason: .unavailable),
+                to: request, binding: peer))
+            XCTAssertThrowsError(try AuthorityPhoneUpdateSchedulingExchange.response(.failure(queryNonce: query(12).queryNonce,
+                reason: .unavailable), to: request, binding: peer))
+        }
     }
 }
