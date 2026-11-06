@@ -11,7 +11,7 @@ import dev.sebastiano.remozio.android.transport.CreatedTransportIdentity
 import dev.sebastiano.remozio.android.transport.LocalNetworkSettings
 import dev.sebastiano.remozio.android.transport.androidPairingRoutes
 import dev.remozio.phone.enrollment.*
-import dev.remozio.phone.transport.PairingSetupChannel
+import dev.remozio.pairing.PairingSetupChannel
 import dev.remozio.protocol.*
 import java.security.KeyStore
 import java.security.SecureRandom
