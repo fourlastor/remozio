@@ -31,13 +31,16 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let updateAdmissionRegistration: Data?
         /// Canonical machine update activation record bytes at schema 17 and later, so an activation change makes earlier inputs stale.
         private(set) var machineUpdateActivation: Data?
+        /// Canonical machine update replacement record bytes at schema 18 and later, so a replacement change makes earlier inputs stale.
+        let machineUpdateReplacement: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
-             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil) {
+             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
+            self.machineUpdateReplacement = machineUpdateReplacement
         }
         /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
         func replacingMachineUpdateActivation(_ value: Data?) -> Self {
@@ -76,6 +79,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         if let bytes = inputs.machineUpdateActivation, try MachineUpdateActivationRecord.decode(bytes).formatVersion == 2 {
             for item in try MachineUpdateActivationRecord.preflightRequirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 18 {
+            for item in try MachineUpdateReplacementRecord.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }

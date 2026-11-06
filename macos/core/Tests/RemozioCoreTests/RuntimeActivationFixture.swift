@@ -12,7 +12,7 @@ final class RuntimeActivationFixture {
     let material: RuntimePreparationMaterial
     let plan: RuntimeActivationPlan
     let nativeRelease: SignedReleaseEvidence?
-    init(firstServiceUID: UInt32 = 20000, nativeConsumerHosts: Bool = false,
+    init(firstServiceUID: UInt32 = 20000, nativeConsumerHosts: Bool = false, ownedInstalledBundle: Bool = false,
          phoneRouting: Bool = false, phoneAudit: Bool = false, auditDelivery: Bool = false,
          materialAuditDelivery: Bool? = nil,
          releaseEdit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws {
@@ -23,7 +23,7 @@ final class RuntimeActivationFixture {
         })
         nativeRelease = nativeConsumerHosts ? try NativeHostReleaseFixture.make(policy: policy,
             phoneRouting: phoneRouting, phoneAudit: phoneAudit, auditDelivery: auditDelivery, edit: releaseEdit) : nil
-        f = try .init(policy: policy, releaseDigest: nativeRelease.map { try InstallationInventory.digest($0) })
+        f = try .init(policy: policy, releaseDigest: nativeRelease.map { try InstallationInventory.digest($0) }, ownedInstalledBundle: ownedInstalledBundle)
         machine = try f.open(initialize: true)
         account = try f.resume(machine, f.begin(machine))
         services = try .init(account: account, planID: AccountPreparationIntent.randomID(), claims: [

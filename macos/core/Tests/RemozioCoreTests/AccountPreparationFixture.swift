@@ -11,12 +11,14 @@ final class AccountPreparationFixture {
     let root: URL
     let mac = Data(repeating: 1, count: 16)
     let release: Data
+    private let ownedInstalledBundle: Bool
     let identity = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
     // Public fixture pin only. This does not claim hardware key provisioning.
     let key = P256.Signing.PrivateKey().publicKey.x963Representation
     let policy: AuthorityCodePolicy
     let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
-    init(policy suppliedPolicy: AuthorityCodePolicy? = nil, releaseDigest: Data? = nil) throws {
+    init(policy suppliedPolicy: AuthorityCodePolicy? = nil, releaseDigest: Data? = nil, ownedInstalledBundle: Bool = false) throws {
+        self.ownedInstalledBundle = ownedInstalledBundle
         release = releaseDigest ?? Data(repeating: 8, count: 32)
         root = URL(fileURLWithPath: "/private/tmp/remozio-account-preparation-" + UUID().uuidString)
         if let suppliedPolicy { policy = suppliedPolicy }
@@ -40,7 +42,7 @@ final class AccountPreparationFixture {
         if initialize {
             try store.upgradeInventoryStorage()
             _ = try store.writeInventory(.init(macID: mac, installationID: Data(repeating: 5, count: 16),
-                revision: Data(repeating: 6, count: 16), bundlePath: "/Library/Remozio/Remozio.app", releaseDigest: release,
+                revision: Data(repeating: 6, count: 16), bundlePath: ownedInstalledBundle ? root.appendingPathComponent("Installed/Remozio.app").path : "/Library/Remozio/Remozio.app", releaseDigest: release,
                 accounts: [], services: [.init(role: .setupController, kind: .daemon, domainUID: nil, executionUID: 0,
                     label: AdministrativeSetupConfiguration.serviceName, plistName: AdministrativeSetupConfiguration.plistName)], formatVersion: 2),
                 expectedRevision: nil)

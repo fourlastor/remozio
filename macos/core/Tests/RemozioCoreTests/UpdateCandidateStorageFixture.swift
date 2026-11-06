@@ -16,10 +16,10 @@ final class UpdateCandidateStorageFixture {
     var mac: Data { f.f.mac }
     var account: Data { f.account.accountID }
 
-    init(enable: Bool = true, enroll: Bool = true, admission: Bool = false, activation: Bool = false) throws {
-        f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true, auditDelivery: true) { component in
+    init(enable: Bool = true, enroll: Bool = true, admission: Bool = false, activation: Bool = false, replacement: Bool = false, ownedInstalledBundle: Bool = false) throws {
+        f = try RuntimeActivationFixture(nativeConsumerHosts: true, ownedInstalledBundle: ownedInstalledBundle, phoneAudit: true, auditDelivery: true) { component in
             guard [.authority, .setupController].contains(component.role) else { return component }
-            let versions: Set<UInt64> = activation ? [15, 16, 17] : (admission ? [15, 16] : [15])
+            let versions: Set<UInt64> = replacement ? [15, 16, 17, 18] : (activation ? [15, 16, 17] : (admission ? [15, 16] : [15]))
             var formats = try component.formats.map { format in
                 guard format.name == "authority.installation-preparation" else { return format }
                 return try ReleaseFormat(name: format.name, readers: format.readers.union(versions), writers: format.writers.union(versions))
@@ -27,6 +27,7 @@ final class UpdateCandidateStorageFixture {
             formats.append(try .init(name: UpdateSchedulingCandidateRecord.formatName, readers: [1], writers: [1]))
             if admission { formats.append(try .init(name: UpdateAdmissionRegistrationRecord.formatName, readers: [1], writers: [1])) }
             if activation { formats.append(try .init(name: MachineUpdateActivationRecord.formatName, readers: [1, 2], writers: [1, 2])) }
+            if replacement { formats.append(try .init(name: MachineUpdateReplacementRecord.formatName, readers: [1], writers: [1])) }
             return try .init(role: component.role, identifier: component.identifier, generation: component.generation,
                 relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
                 build: component.build, teamID: component.teamID, formats: formats)
