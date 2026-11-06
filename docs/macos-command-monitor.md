@@ -49,6 +49,8 @@ The monitor reports prepared state before accepting Root's release byte.
 Only byte one permits an attempt at the target's private gate. The attempt is consumed before the native call and cannot be retried.
 The native owner still rechecks its own prepared state. A race can prevent a target release after Root has attempted its write.
 The [status protocol](macos-command-monitor-protocol.md) preserves that distinction.
+When the native owner proves that the byte was undelivered, because the target was already exiting or its release reader was gone, the monitor records no failure.
+It cancels a target whose reader is gone, skips later signal records for that target, and reports the actual reap. Root can then classify the command as failed before start instead of unknown.
 
 Control records use the same explicit private wire version. Every control has a consecutive sequence starting at one.
 Signal records contain only a valid signal number. Cancel records contain no signal. Neither record contains a PID or approval.

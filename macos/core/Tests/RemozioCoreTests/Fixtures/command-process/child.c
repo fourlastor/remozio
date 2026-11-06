@@ -76,6 +76,7 @@ int main(int argc, char **argv) {
         if(strstr(argv[0],"closed-release-child"))close(6);
         if(write(5,ready,12)!=12)return 70;
         if(strstr(argv[0],"closed-release-child")) {for(;;)pause();}
+        if(strstr(argv[0],"closed-status-child")) {close(5);for(;;)pause();}
         unsigned char release=0;if(exact(6,&release,1)||release!=1)return 70;close(6);
         if(strstr(argv[0],"late-fault-child")) {unsigned char extra=1;write(5,&extra,1);}
         execve(spec.executable,spec.arguments,spec.environment);

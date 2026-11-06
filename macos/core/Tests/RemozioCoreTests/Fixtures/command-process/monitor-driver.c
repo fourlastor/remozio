@@ -33,6 +33,7 @@ int main(int argc, char **argv) {
     bool bad_control = !strcmp(mode, "bad_control"), partial_control = !strcmp(mode, "partial_control"), replay = !strcmp(mode, "replayed_control");
     bool typed = !strcmp(mode, "typed_resume"), terminal = typed || !strcmp(mode, "pty_stop_resume");
     bool blocked_status = !strcmp(mode, "blocked_status"), broken_status = !strcmp(mode, "broken_status"), after_exec_cancel = !strcmp(mode, "cancel_after_exec");
+    bool closed_release = !strcmp(mode, "closed_release");
     bool stalled_config = !strcmp(mode, "stalled_configuration"), partial_config = !strcmp(mode, "partial_configuration"), malformed = !strcmp(mode, "malformed_configuration");
     bool expected_failure = before || bad_release || bad_control || partial_control || replay || stalled_config || partial_config || malformed || broken_status || !strcmp(mode, "exec_failure") || !strcmp(mode, "stalled_child") || !strcmp(mode, "malformed_child");
     FILE *file = fopen(argv[3], "rb"); if (!file) return 2;
@@ -172,7 +173,7 @@ int main(int argc, char **argv) {
     if ((normal_stop || terminal || stopped_cancel || replay) && !stop_seen) { failure = 28; goto cleanup; }
     if (!broken_status && stream.reaped) {
         int actual = (int)stream.latest.detail;
-        if (stopped_cancel || prepared_cancel || release_eof || bad_release || bad_control || partial_control || replay || after_exec_cancel || blocked_status || !strcmp(mode,"stalled_child") || !strcmp(mode,"malformed_child")) {
+        if (stopped_cancel || prepared_cancel || release_eof || closed_release || bad_release || bad_control || partial_control || replay || after_exec_cancel || blocked_status || !strcmp(mode,"stalled_child") || !strcmp(mode,"malformed_child")) {
             if (!(WIFSIGNALED(actual) && WTERMSIG(actual) == SIGKILL) && !(WIFEXITED(actual) && WEXITSTATUS(actual) == 70)) { failure = 29; goto cleanup; }
         } else if (typed) { if (!WIFSIGNALED(actual) || WTERMSIG(actual) != SIGTERM) { failure = 29; goto cleanup; } }
         else if (!strcmp(mode,"exec_failure")) { if (!WIFEXITED(actual) || WEXITSTATUS(actual) != 70) { failure = 29; goto cleanup; } }
