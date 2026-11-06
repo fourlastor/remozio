@@ -120,7 +120,6 @@ class PairingSetupChannel private constructor(
             var opened: PairingByteStream? = null
             var result: PairingSetupChannel? = null
             try {
-                proposal.validateMacScope(invitation)
                 opened = open(scope)
                 result = PairingSetupChannel(owner, scope, opened, invitation, proposal, timeoutMillis)
                 result.authenticate(); return result
@@ -146,8 +145,8 @@ class PairingSetupChannel private constructor(
             }
         }
 
-        /** Uses a stream the caller already owns. */
-        suspend fun authenticate(parent: CoroutineScope, stream: PairingByteStream, invitation: PairingInvitation,
+        // Injected streams cannot prove TLS peer identity or hardware key custody. Tests use them.
+        internal suspend fun authenticate(parent: CoroutineScope, stream: PairingByteStream, invitation: PairingInvitation,
             proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
         ): PairingSetupChannel {
             val owner = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
@@ -164,7 +163,6 @@ class PairingSetupChannel private constructor(
             }
         }
 
-        // An injected stream cannot prove TLS peer identity or hardware key custody. Tests use it.
         internal suspend fun connect(parent: CoroutineScope, stream: PairingByteStream, invitation: PairingInvitation,
             proposal: PairingPhoneProposal, timeoutMillis: Long = 300_000,
         ): PairingSetupChannel {

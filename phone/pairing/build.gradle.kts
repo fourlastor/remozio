@@ -42,5 +42,5 @@ val generatePairingTestVectors by tasks.registering {
     }
 }
 kotlin.sourceSets.commonTest { kotlin.srcDir(layout.buildDirectory.dir("generated/pairingTestVectors")) }
-tasks.matching { it.name.startsWith("compileTestKotlin") || it.name.startsWith("compileKotlin") && it.name.contains("Test") }
+tasks.matching { it.name.startsWith("compileTestKotlin") }
     .configureEach { dependsOn(generatePairingTestVectors) }

@@ -3,6 +3,7 @@ package dev.remozio.pairing
 import dev.remozio.protocol.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
+import kotlinx.io.IOException
 import kotlinx.serialization.json.*
 import kotlin.test.*
 
@@ -92,5 +93,34 @@ class PairingSetupChannelCommonTest {
             assertFails { channel.submitProof(ByteArray(32), ByteArray(64)) }
             assertEquals(before, stream.sent.size)
         } finally { channel.closeAndJoin(); parent.cancelAndJoin() }
+    }
+
+    @Test fun theOpenerPathStagesTheTranscriptInsideTheChannelScope() = runBlocking {
+        val stream = Stream(listOf(wire(frame("hello")), wire(transcriptFrame)))
+        val parent = SupervisorJob()
+        val channel = PairingSetupChannel.connect(CoroutineScope(parent), invitation, proposal) { stream }
+        try { assertContentEquals(transcript.encode(), channel.transcript.encode()) }
+        finally { channel.closeAndJoin(); parent.cancelAndJoin() }
+        assertEquals(1, stream.closes)
+    }
+
+    @Test fun anOpenerFailureLeavesNothingRunning() = runBlocking {
+        val parent = SupervisorJob()
+        assertFailsWith<IOException> {
+            PairingSetupChannel.authenticate(CoroutineScope(parent), invitation, proposal) { throw IOException("Synthetic open failure") }
+        }
+        assertEquals(0, parent.children.count { it.isActive })
+        parent.cancelAndJoin()
+    }
+
+    @Test fun aProposalForAnotherMacClosesTheOpenedStream() = runBlocking {
+        val stream = Stream(listOf(wire(frame("hello"))))
+        val other = PairingInvitation(ByteArray(16) { 0x55 }, ByteArray(16) { 0x66 }, "Other",
+            transcript.macAuthorityKey.copyBytes(), transcript.macTransportKey.copyBytes(), 1u)
+        val parent = SupervisorJob()
+        try { assertFails { PairingSetupChannel.authenticate(CoroutineScope(parent), other, proposal) { stream } } }
+        finally { parent.cancelAndJoin() }
+        assertTrue(stream.sent.isEmpty())
+        assertTrue(stream.closes >= 1)
     }
 }
