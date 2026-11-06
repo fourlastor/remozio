@@ -29,13 +29,19 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let auditCutovers: [RuntimeAuditUpgradeCutoverRecord]
         /// Canonical update admission registration bytes at schema 16 and later, so a registration change makes earlier inputs stale.
         let updateAdmissionRegistration: Data?
+        /// Canonical machine update activation record bytes at schema 17 and later, so an activation change makes earlier inputs stale.
+        private(set) var machineUpdateActivation: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
-             updateAdmissionRegistration: Data? = nil) {
+             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
-            self.updateAdmissionRegistration = updateAdmissionRegistration
+            self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
+        }
+        /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
+        func replacingMachineUpdateActivation(_ value: Data?) -> Self {
+            var copy = self; copy.machineUpdateActivation = value; return copy
         }
     }
     let inputs: Inputs
@@ -60,6 +66,16 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         if inputs.schemaVersion >= 16 {
             for item in try UpdateAdmissionRegistrationRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 17 {
+            for item in try MachineUpdateActivationRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if let bytes = inputs.machineUpdateActivation, try MachineUpdateActivationRecord.decode(bytes).formatVersion == 2 {
+            for item in try MachineUpdateActivationRecord.preflightRequirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
@@ -188,7 +204,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
     }
     /// Native placement, stopping services, migration and activation are separate operations.
     func validate(_ release: SignedReleaseEvidence, policy: AuthorityCodePolicy, machine: PreparationIntentStore) throws {
-        try requireCurrent(machine: machine)
+        try validate(release, policy: policy, verifyCurrent: { try requireCurrent(machine: machine) })
+    }
+    /// Validates the same requirements under a caller's scoped machine transaction.
+    func validate(_ release: SignedReleaseEvidence, policy: AuthorityCodePolicy, verifyCurrent: () throws -> Void) throws {
+        try verifyCurrent()
         try ReleaseCompatibilityPreflight.validate(release, policy: policy, requirements: requirements)
         if inputs.sharedImport != nil {
             guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath == AdministrativeSetupConfiguration.executablePath else {
@@ -207,6 +227,6 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 }
             }
         }
-        try requireCurrent(machine: machine)
+        try verifyCurrent()
     }
 }
