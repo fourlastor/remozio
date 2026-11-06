@@ -2186,6 +2186,7 @@ public final class PreparationIntentStore {
     }
 
     /// Every new irreversible marker binds a live all-account policy preflight before replacement begins.
+    /// Enable storage schema 18 first: at schema 17 a started attempt can neither swap nor reach restart checking, and it is too late to cancel.
     func markMachineUpdateActivationStarted(_ expected: MachineUpdateActivationRecord,
         preflight: MachineUpdatePolicyPreflight, directory: ReleaseDestinationLease,
         quiescence: UpdateQuiescenceLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
@@ -2214,21 +2215,28 @@ public final class PreparationIntentStore {
     func markMachineUpdateRestartChecking(_ expected: MachineUpdateActivationRecord, directory: ReleaseDestinationLease,
         restart: UpdateRestartAdmissionLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {
         try restart.withClosedAdmission {
-            try advanceMachineUpdateActivation(expected, to: .restartChecking, directory: directory, verify: {
+            // Restart checking follows the observed swap of this attempt. Without it the attempt could neither swap nor cancel.
+            try advanceMachineUpdateActivation(expected, to: .restartChecking, directory: directory, require: {
+                guard try self.scalar("PRAGMA user_version") >= 18, let replacement = try self.loadMachineUpdateReplacement(),
+                      replacement.phase == .observed, replacement.activationAttempt == expected.attemptID else {
+                    throw PreparationStoreError.invalidTransition
+                }
+            }, verify: {
                 try restart.validateMachineBoundary(directory: directory, expected: expected.machineAdmission); try verifyCurrent()
             })
         }
     }
 
     private func advanceMachineUpdateActivation(_ expected: MachineUpdateActivationRecord, to phase: MachineUpdateActivationRecord.Phase,
-        directory: ReleaseDestinationLease, verify: () throws -> Void) throws -> MachineUpdateActivationRecord {
+        directory: ReleaseDestinationLease, require: () throws -> Void = {},
+        verify: () throws -> Void) throws -> MachineUpdateActivationRecord {
         let next = try expected.advancing(to: phase)
         let result = try transaction(write: true, activationWrite: true) {
             try identity(macID); try requireUpdateAdmissionDirectory(directory)
             guard try scalar("PRAGMA user_version") >= 17, try loadMachineUpdateActivation() == expected else {
                 throw PreparationStoreError.staleRevision
             }
-            try verify(); try writeMachineUpdateActivation(next, replacing: expected); try verify(); return next
+            try require(); try verify(); try writeMachineUpdateActivation(next, replacing: expected); try verify(); return next
         }
         return try finishMachineUpdateMutation(result, verify: verify)
     }

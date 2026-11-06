@@ -141,14 +141,15 @@ final class MachineUpdateActivationTests: XCTestCase {
             quiescence: quiet, verifyCurrent: {})) { XCTAssertEqual($0 as? MachineUpdateActivationError, .tooLate) }
         XCTAssertEqual(try f.machine.store.machineUpdateActivation(), started)
     }
-    func testRestartPhaseKeepsClosedAdmissionWhileSharedHealthActivityIsPossible() throws {
+    // The positive restart transition needs an observed swap; MachineUpdateReplacementTests covers it.
+    func testRestartCheckingWithoutAReplacementKeepsTheStartedRecordAndClosedAdmission() throws {
         let f = try Fixture(), drain = try f.admission().beginDrain(), record = try f.begin(drain)
         let quiet = try XCTUnwrap(drain.acquireQuiescence()), started = try f.start(record, quiet)
         let restart = try quiet.releaseActivityForRestart(); defer { restart.close() }
         let directory = try f.files.directory(); defer { directory.close() }
-        let checking = try f.machine.store.markMachineUpdateRestartChecking(started, directory: directory,
-            restart: restart, verifyCurrent: {})
-        XCTAssertEqual(checking.phase, .restartChecking)
+        XCTAssertThrowsError(try f.machine.store.markMachineUpdateRestartChecking(started, directory: directory,
+            restart: restart, verifyCurrent: {})) { XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition) }
+        XCTAssertEqual(try f.machine.store.machineUpdateActivation(), started)
         let health = try f.files.activity().acquireShared(); health.close()
         XCTAssertThrowsError(try UpdateAdmissionBarrier(directory: f.files.directory(), owner: getuid(),
             expected: f.registration.machine).acquireAdmission())
