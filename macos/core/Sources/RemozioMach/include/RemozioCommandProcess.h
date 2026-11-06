@@ -13,6 +13,9 @@ typedef struct {
     uint64_t birth_seconds, birth_microseconds;
     bool configured, prepared, release_attempted, exec_observed, exit_observed, reaped;
     bool preparation_failed, status_closed, ownership_lost;
+    /* The single release proved that no byte reached the launcher: the prepared target was already exiting,
+     * or its release reader was gone. The launcher executes only after reading that byte. */
+    bool release_undelivered;
     int preparation_error, wait_status;
     /* Latest observed stop state. Stop records never consume the child exit result. */
     bool stopped;
@@ -44,7 +47,9 @@ int remozio_command_process_spawn_in_session_with_terminal(const char *path, con
 /* Nonblocking progress, including at most four owned stop/continue records per poll.
  * A private status EOF never establishes exec. Exit status is meaningful only after reaping. */
 int remozio_command_process_poll(remozio_command_process_t *process, remozio_command_process_observation_t *observation);
-/* Single attempt, including a failed write. Only the serialized authority dispatch owner may call this after its final checks. */
+/* Single attempt, including a failed write. Only the serialized authority dispatch owner may call this after its final checks.
+ * ESRCH: the prepared target was already exiting, so no attempt was made. EPIPE: the attempt is consumed but its
+ * reader was gone. Both set release_undelivered and leave no sticky fault; keep polling until actual reaping. */
 int remozio_command_process_release(remozio_command_process_t *process);
 /* The child leader stays owned and unreaped while signaling its process group. */
 int remozio_command_process_signal(remozio_command_process_t *process, int signal);

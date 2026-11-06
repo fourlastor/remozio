@@ -300,20 +300,28 @@ int remozio_command_process_poll(remozio_command_process_t *process, remozio_com
     *observation = process->state;
     return error;
 }
+static bool owned_exit_in_progress(remozio_command_process_t *process);
 int remozio_command_process_release(remozio_command_process_t *process) {
     if (!process) return EINVAL;
-    if (process->state.release_attempted) return EALREADY;
+    if (process->state.release_attempted || process->state.release_undelivered) return EALREADY;
     remozio_command_process_observation_t observation;
     int error = remozio_command_process_poll(process, &observation);
     if (error) return error;
-    if (process->cancelled || observation.reaped || observation.exit_observed || observation.preparation_failed || observation.status_closed) return ECANCELED;
+    if (process->cancelled || observation.preparation_failed) return ECANCELED;
+    /* A status EOF alone does not prove death. The kernel exit flag does, before NOTE_EXIT is posted. */
+    if (observation.prepared && (observation.reaped || observation.exit_observed || (observation.status_closed && owned_exit_in_progress(process)))) {
+        process->state.release_undelivered = true; close_descriptor(&process->release); return ESRCH;
+    }
+    if (observation.reaped || observation.exit_observed || observation.status_closed) return ECANCELED;
     if (!observation.configured || !observation.prepared) return EAGAIN;
     process->state.release_attempted = true;
     const unsigned char byte = 1;
     ssize_t written = write(process->release, &byte, 1);
     error = written == 1 ? 0 : written < 0 ? system_error() : EIO;
     close_descriptor(&process->release);
-    if (error) process->fault = error;
+    /* EPIPE writes nothing, so the launcher cannot execute. Other write failures stay sticky observation faults. */
+    if (error == EPIPE) process->state.release_undelivered = true;
+    else if (error) process->fault = error;
     return error;
 }
 int remozio_command_process_signal(remozio_command_process_t *process, int number) {

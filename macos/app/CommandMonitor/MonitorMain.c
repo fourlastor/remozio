@@ -154,6 +154,11 @@ static int pump_release(monitor_t *monitor) {
     int error = remozio_command_process_release(monitor->target);
     int observed_error = remozio_command_process_poll(monitor->target, &monitor->observed);
     if (observed_error) observe_failure(monitor, observed_error);
+    if ((error == ESRCH || error == EPIPE) && monitor->observed.release_undelivered) {
+        /* The launcher never received its byte, so it cannot execute. Report its actual retirement, not a monitor failure.
+         * A target whose reader is gone may still be alive; cancellation bounds its cleanup. */
+        return error == EPIPE ? remozio_command_process_cancel(monitor->target) : 0;
+    }
     return error;
 }
 static int pump_control(monitor_t *monitor) {
@@ -173,6 +178,8 @@ static int pump_control(monitor_t *monitor) {
             if (monitor->control_sequence == UINT64_MAX || record.sequence != monitor->control_sequence + 1) return EPROTO;
             monitor->control_sequence = record.sequence; monitor->control_used = 0;
             if (record.tag == REMOZIO_MONITOR_CANCEL) { monitor->cancelled = true; return 0; }
+            /* The owner may flush an early control after its own release. An undelivered target has nothing to signal. */
+            if (monitor->release_consumed && monitor->observed.release_undelivered) continue;
             if (!monitor->release_consumed || !monitor->observed.release_attempted || !monitor->target) return EPROTO;
             error = remozio_command_process_signal(monitor->target, (int)record.signal);
             if (error) return error;

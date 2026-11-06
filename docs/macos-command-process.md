@@ -96,6 +96,8 @@ A status EOF alone never proves exec or exit.
 
 Release requires a live, configured, prepared child with no fault or reported preparation failure.
 The release attempt is consumed before its one-byte write. A failed or interrupted write cannot be retried.
+Two results prove that the launcher never received its byte and cannot execute. `ESRCH` means the prepared child was already exiting, by reaping, `NOTE_EXIT`, or a status EOF with the kernel exit flag, so no attempt was made. `EPIPE` means the attempt found no release reader.
+Both set `release_undelivered`, leave no sticky fault and still require polling until actual reaping. A status EOF without kernel exit evidence, cancellation and preparation failure still return `ECANCELED`. Other write failures remain sticky faults.
 This single attempt is a process guard, not a replacement for durable authority consumption.
 The Root integration must verify the installed code, current elevation policy and original capture immediately before this call.
 No receipt, snapshot, caller-supplied PID or Boolean authorizes it.

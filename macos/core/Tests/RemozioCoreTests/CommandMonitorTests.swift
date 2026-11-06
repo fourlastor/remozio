@@ -68,6 +68,7 @@ final class CommandMonitorTests: XCTestCase {
     func testCancellationAfterPreparationNeverExecutes() throws { try run("prepared_cancel") }
     func testReleaseEOFNeverExecutes() throws { try run("release_eof") }
     func testMalformedReleaseCannotOpenTheTargetGate() throws { try run("bad_release") }
+    func testUndeliveredReleaseReportsTheRetiredTargetWithoutAFailure() throws { try run("closed_release", launcherName: "closed-release-child") }
     func testUnsupportedControlVersionCancelsWithoutExecution() throws { try run("bad_control") }
     func testPartialControlEOFRetainsFailureAndActualCleanup() throws { try run("partial_control") }
     func testReplayedControlCannotBecomeAnotherSignal() throws { try run("replayed_control") }

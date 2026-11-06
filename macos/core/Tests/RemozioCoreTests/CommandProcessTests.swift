@@ -216,6 +216,36 @@ final class CommandProcessTests: XCTestCase {
         XCTAssertEqual(remozio_command_process_release(process), EALREADY)
         XCTAssertEqual(pthread_sigmask(SIG_BLOCK, nil, &after), 0)
         XCTAssertEqual(before, after)
+        // No byte reached the launcher, so the failed write is not a sticky observation fault.
+        var observed = remozio_command_process_observation_t()
+        XCTAssertEqual(remozio_command_process_poll(process, &observed), 0)
+        XCTAssertTrue(observed.release_attempted); XCTAssertTrue(observed.release_undelivered); XCTAssertFalse(observed.exec_observed)
+        XCTAssertEqual(remozio_command_process_cancel(process), 0)
+        let ended = try until(process) { $0.reaped }
+        XCTAssertFalse(ended.exec_observed); XCTAssertEqual(ended.wait_status & 0x7f, SIGKILL)
+    }
+    func testPreparedTargetExitBeforeReleaseIsUndeliveredWithoutAFault() throws {
+        let resources = try Resources(directory: directory), process = try spawn(resources, frame: frame())
+        defer { retire(process) }
+        let prepared = try until(process) { $0.prepared }
+        XCTAssertEqual(kill(prepared.pid, SIGKILL), 0)
+        try until(process) { $0.exit_observed || $0.reaped }
+        XCTAssertEqual(remozio_command_process_release(process), ESRCH)
+        XCTAssertEqual(remozio_command_process_release(process), EALREADY)
+        let ended = try until(process) { $0.reaped }
+        XCTAssertTrue(ended.release_undelivered); XCTAssertFalse(ended.release_attempted); XCTAssertFalse(ended.exec_observed)
+        XCTAssertEqual(ended.wait_status & 0x7f, SIGKILL)
+    }
+    func testStatusEOFFromALiveLauncherKeepsTheCancelledRelease() throws {
+        try useLauncher("closed-status-child")
+        let resources = try Resources(directory: directory), process = try spawn(resources, frame: frame())
+        defer { retire(process) }
+        try until(process) { $0.prepared && $0.status_closed }
+        XCTAssertEqual(remozio_command_process_release(process), ECANCELED)
+        var observed = remozio_command_process_observation_t()
+        XCTAssertEqual(remozio_command_process_poll(process, &observed), 0)
+        XCTAssertFalse(observed.release_undelivered); XCTAssertFalse(observed.release_attempted)
+        XCTAssertFalse(observed.exit_observed); XCTAssertFalse(observed.reaped)
     }
     func testUnexpectedExternalReapRetiresPidOwnershipWithoutSignalingAgain() throws {
         let resources = try Resources(directory: directory), process = try spawn(resources, frame: frame(mode: "signal"))
