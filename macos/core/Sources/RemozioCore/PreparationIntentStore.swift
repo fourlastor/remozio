@@ -2186,6 +2186,7 @@ public final class PreparationIntentStore {
     }
 
     /// Every new irreversible marker binds a live all-account policy preflight before replacement begins.
+    /// Enable storage schema 18 first: at schema 17 a started attempt can neither swap nor reach restart checking, and it is too late to cancel.
     func markMachineUpdateActivationStarted(_ expected: MachineUpdateActivationRecord,
         preflight: MachineUpdatePolicyPreflight, directory: ReleaseDestinationLease,
         quiescence: UpdateQuiescenceLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateActivationRecord {

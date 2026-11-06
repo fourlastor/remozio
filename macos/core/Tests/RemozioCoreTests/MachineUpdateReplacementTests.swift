@@ -472,6 +472,27 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared); try f.assertBefore()
     }
 
+    func testRestartCheckingWaitsForTheRecoveredParentSyncAndObservedCommit() throws {
+        let f = try Fixture()
+        XCTAssertThrowsError(try f.run(stage: { if $0 == .exchangedBeforeParentSync { throw ReplacementFixtureError.injected } }))
+        try f.assertAfter(); XCTAssertEqual(try f.machine.store.machineUpdateReplacement()?.phase, .prepared)
+        try f.reopen()
+        do {
+            let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+            XCTAssertThrowsError(try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+                restart: restart, verifyCurrent: {})) { XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition) }
+        }
+        XCTAssertEqual(try f.machine.store.machineUpdateActivation(), f.activation)
+        try f.reopen(); var stages: [ProtectedMachineUpdateReplacement.Stage] = []
+        let result = try f.run(stage: { stages.append($0) })
+        XCTAssertEqual(stages, [.parentsSynchronized]); XCTAssertTrue(result.recoveredAfterExchange)
+        XCTAssertEqual(result.record.phase, .observed); try f.assertAfter()
+        let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        let checking = try f.machine.store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})
+        XCTAssertEqual(checking.phase, .restartChecking)
+    }
+
     func testRestartCheckingAfterTheObservedSwapKeepsTheDigestAndClosedAdmission() throws {
         let f = try Fixture(); XCTAssertEqual(try f.run().record.phase, .observed)
         let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
