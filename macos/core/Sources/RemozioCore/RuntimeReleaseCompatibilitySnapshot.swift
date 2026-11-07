@@ -198,6 +198,11 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     try include(record.role, record.name, record.readVersions, record.writeVersions)
                 }
             }
+            if plan?.phoneUpdateSchedulingVersion != nil {
+                for record in try PhoneUpdateSchedulingReleaseContract.requirements {
+                    try include(record.role, record.name, record.readVersions, record.writeVersions)
+                }
+            }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
             let version: UInt64 = control ? 3 : 2
             for role in [AuthorityCodeRole.authority, .setupController] {
