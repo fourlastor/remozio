@@ -288,6 +288,23 @@ final class UpdateSchedulingJournalTests: XCTestCase {
         rejects(.capacityExceeded) { try f.issue(.cancelDrain) }
         XCTAssertEqual(try f.commits.read { try $0.consumedUpdateSchedulingRevision(operationID: value.operationID) }, 1)
     }
+    func testCapacityReclaimsExpiredOperationsWithoutEnablingReplay() throws {
+        let f = try Fixture(maximum: 1); try f.install(); _ = try f.offer()
+        let accepted = try f.issue(.deferUpdate); _ = try f.consume(accepted)
+        for _ in 0..<1000 { _ = f.nextNow() }
+        let fresh = try f.issue(.cancelDrain)
+        rejects(.unavailableChallenge) { try f.consume(accepted) }
+        XCTAssertEqual(try f.consume(fresh).snapshot.revision, 2)
+    }
+    func testCapacityReclaimsAnUnusedChallengeFromAPreviousOwnerRun() throws {
+        let f = try Fixture(maximum: 1); try f.install(); _ = try f.offer()
+        let pending = try f.issue(.deferUpdate)
+        try f.reopen()
+        _ = try JournalCheckpointRecovery.reconcile(journal: f.db, continuity: f.store)
+        let fresh = try f.issue(.cancelDrain)
+        rejects(.unavailableChallenge) { try f.consume(pending) }
+        XCTAssertEqual(try f.consume(fresh).snapshot.revision, 1)
+    }
     func testReadOnlyEscapedAndSwallowedFailuresCannotCommit() throws {
         let f = try Fixture(); try f.install(); _ = try f.offer()
         let value = try f.issue(.deferUpdate), peer = try f.binding()

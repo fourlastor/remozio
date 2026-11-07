@@ -32,6 +32,27 @@ final class AuthorityUpdateAdmissionStartupTests: XCTestCase {
         let admitted = try selected.boundary.acquireAdmission(); try admitted.validate(); admitted.close()
         XCTAssertThrowsError(try selected.requireCurrent(machine: f.machine.store))
     }
+    func testValidationRejectsReplacedAdmissionFileAfterStartupWriterCloses() throws {
+        let f = try BoundAdmissionRegistrationFixture()
+        _ = try f.prepare()
+        let selected = try XCTUnwrap(capture(f))
+        try f.machine.store.close()
+        try selected.validate()
+        try f.replace(f.path(.account(f.machine.account)))
+        XCTAssertThrowsError(try selected.validate())
+    }
+    func testValidationRejectsClosedRecoveryAfterStartupWriterCloses() throws {
+        let f = try BoundAdmissionRegistrationFixture()
+        _ = try f.prepare()
+        let selected = try XCTUnwrap(capture(f))
+        try f.machine.store.close()
+        try selected.validate()
+        selected.recovery.close()
+        try selected.boundary.validate()
+        XCTAssertThrowsError(try selected.validate()) {
+            XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+        }
+    }
     func testAbsentRegistrationDoesNotOpenFilesOrMigrateStorage() throws {
         let f = try BoundAdmissionRegistrationFixture(enable: false), inventory = try XCTUnwrap(f.machine.store.inventory())
         XCTAssertNil(try AuthorityUpdateAdmissionStartup.capture(machine: f.machine.store, macID: f.machine.mac,

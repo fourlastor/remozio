@@ -13,12 +13,30 @@ extension AuthorityWakeService {
         reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
         onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in },
         reportExecution: @escaping @Sendable (AuthorityCommandAuthorizationNotice, Result<Void, any Error>) -> Void = { _, _ in }) throws -> AuthorityWakeService {
+        try openInstalled(configuration: configuration, takingRegisteredReceiveRight: takingRegisteredReceiveRight,
+            releaseActivity: releaseActivity, updateAdmission: nil, updateSchedulingFactory: nil,
+            reconcileExpired: reconcileExpired, onAdmission: onAdmission, reportReceiver: reportReceiver,
+            onCommandAuthorized: onCommandAuthorized, reportExecution: reportExecution)
+    }
+
+    static func openInstalled(configuration: AuthorityCommandStartupConfiguration,
+        takingRegisteredReceiveRight: @escaping @Sendable () throws -> mach_port_t,
+        releaseActivity: ReleaseActivityBarrier?,
+        updateAdmission: UpdateAdmissionBoundary?,
+        updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+        onAdmission: @escaping @Sendable (Result<IssuedRequestPayload, any Error>) -> Void = { _ in },
+        reportReceiver: @escaping @Sendable (AuthorityCommandReceiveWorker.Status) -> Void = { _ in },
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in },
+        reportExecution: @escaping @Sendable (AuthorityCommandAuthorizationNotice, Result<Void, any Error>) -> Void = { _, _ in }) throws -> AuthorityWakeService {
         let factory = try configuration.receiverFactory(takingRegisteredReceiveRight: takingRegisteredReceiveRight,
             onAdmission: onAdmission, report: reportReceiver)
         let executionFactory = try configuration.executionFactory(report: reportExecution)
-        return try open(configuration: configuration.presence, reconcileExpired: reconcileExpired,
+        return try openInstalledPresence(configuration: configuration.presence, updateSchedulingFactory: updateSchedulingFactory,
+            reconcileExpired: reconcileExpired,
             commandReceiverFactory: { journal, clock in
                 if let releaseActivity { try journal.attachReleaseActivityBarrier(releaseActivity) }
+                if let updateAdmission { try journal.attachUpdateAdmissionBoundary(updateAdmission) }
                 return try factory(journal, clock)
             }, commandExecutionFactory: executionFactory, onCommandAuthorized: onCommandAuthorized)
     }

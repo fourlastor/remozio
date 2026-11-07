@@ -112,11 +112,13 @@ final class UpdateSchedulingJournal {
         let expires = wall.addingReportingOverflow(policy.challengeLifetimeMillis)
         let deadline = now.milliseconds.addingReportingOverflow(policy.challengeLifetimeMillis)
         guard !expires.overflow, !deadline.overflow else { throw UpdateSchedulingJournalError.invalidClock }
-        let count = try statement("SELECT count(*) FROM main.update_scheduling_operations_v1", []) { row -> Int64 in
-            guard sqlite3_step(row) == SQLITE_ROW else { throw UpdateSchedulingJournalError.corruptData }
-            return sqlite3_column_int64(row, 0)
+        if try operationCount() >= policy.maximumOperations {
+            // Only the current run can accept a control, and its deadline is exclusive.
+            // A removed operation still cannot be applied without its retained challenge.
+            try statement("DELETE FROM main.update_scheduling_operations_v1 WHERE run<>? OR deadline<=?",
+                [bytes(run), uint(now.milliseconds)]) { try complete($0) }
+            guard try operationCount() < policy.maximumOperations else { throw UpdateSchedulingJournalError.capacityExceeded }
         }
-        guard count < policy.maximumOperations else { throw UpdateSchedulingJournalError.capacityExceeded }
         var challenge = Data(count: 32)
         guard challenge.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }) == errSecSuccess else {
             throw UpdateSchedulingJournalError.unavailableChallenge
@@ -206,6 +208,13 @@ final class UpdateSchedulingJournal {
         try candidate.requireCurrent(macID: mac, accountID: account)
         return try .init(snapshot: .init(updateID: current.snapshot.updateID, generation: current.snapshot.generation, revision: next),
             requestedAction: control.action)
+    }
+
+    private func operationCount() throws -> Int64 {
+        try statement("SELECT count(*) FROM main.update_scheduling_operations_v1", []) { row in
+            guard sqlite3_step(row) == SQLITE_ROW else { throw UpdateSchedulingJournalError.corruptData }
+            return sqlite3_column_int64(row, 0)
+        }
     }
 
     func consumedRevision(operationID: Data) throws -> UInt64? { try installed(); return try retained(operationID).consumed }
