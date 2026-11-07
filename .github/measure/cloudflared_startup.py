@@ -10,14 +10,13 @@ args = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network-
         "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
 results = []
 for run in range(runs):
-    tr, tw = os.pipe(); os.write(tw, token); os.close(tw)
-    cr, cw = os.pipe(); os.write(cw, b"{}\n"); os.close(cw)
-    os.dup2(tr, 4); os.dup2(cr, 5); os.close(tr); os.close(cr)
+    with open("/tmp/m-token", "wb") as f: f.write(token)
+    with open("/tmp/m-config", "wb") as f: f.write(b"{}\n")
     start = time.monotonic()
-    p = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                         pass_fds=(4, 5), cwd="/", start_new_session=True,
+    p = subprocess.Popen(["/bin/bash", "-c", 'exec "$@" 4</tmp/m-token 5</tmp/m-config', "bash", *args],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         cwd="/", start_new_session=True,
                          env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/var/empty", "LC_ALL": "C", "LANG": "C"})
-    os.close(4); os.close(5)
     lines, pending, ident, metrics = [], b"", None, None
     deadline = start + 70
     while time.monotonic() < deadline:
