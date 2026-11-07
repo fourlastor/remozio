@@ -58,6 +58,23 @@ final class RuntimeAuditUpgradeConfigurationTests: XCTestCase {
             XCTAssertEqual(try f.machine.runtimePreparation(accountID: f.account.accountID).reference, requested.source)
         }
     }
+    func testNativeUpgradeKeepsPhoneUpdateSchedulingSelectionAndFormatFive() throws {
+        for routing in [false, true] {
+            let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneRouting: routing,
+                phoneAudit: true, auditDelivery: true, phoneUpdateScheduling: true, materialAuditDelivery: false)
+            XCTAssertEqual(f.plan.formatVersion, 5); XCTAssertEqual(f.plan.phoneUpdateSchedulingVersion, 1)
+            let requested = try intent(f), next = try prepare(f.plan, f, intent: requested)
+            XCTAssertEqual(next.reference, requested.target)
+            XCTAssertEqual(next.phoneUpdateSchedulingVersion, 1); XCTAssertEqual(next.formatVersion, 5)
+            XCTAssertEqual(next.phoneRoutingVersion, f.plan.phoneRoutingVersion); XCTAssertEqual(next.phoneAuditVersion, 1)
+            guard case .map(let values) = try DeterministicCBOR.decode(next.encoded, limits: RuntimeActivationPlan.limits) else {
+                return XCTFail("Upgraded plan is not a map")
+            }
+            XCTAssertEqual(values[0], .unsigned(5)); XCTAssertEqual(values[8], .unsigned(1))
+            let decoded = try RuntimeActivationPlan.decode(next.encoded)
+            XCTAssertEqual(decoded.phoneUpdateSchedulingVersion, 1); XCTAssertEqual(try decoded.encoded, try next.encoded)
+        }
+    }
     func testNondefaultSettingsAndOptionalPushWakeAndRelaySurviveExactly() throws {
         let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneRouting: true,
             phoneAudit: true, auditDelivery: true, materialAuditDelivery: false)

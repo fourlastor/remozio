@@ -22,6 +22,9 @@ import RemozioProtocol
     /// Optional routing status and Away control. Negotiate before sending any enrollment binding.
     func phoneRoutingVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func phoneRouting(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void)
+    /// Negotiate update scheduling before sending an enrollment binding or scheduling control.
+    func phoneUpdateSchedulingVersion(reply: @escaping @Sendable (UInt64) -> Void)
+    func phoneUpdateScheduling(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void)
     /// Optional schema2 recovery. The version1 registration selector remains unchanged.
     func phonePushRecoveryVersion(reply: @escaping @Sendable (UInt64) -> Void)
     func phonePushRecovery(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -35,8 +38,8 @@ import RemozioProtocol
     func validatePeer(_ binding: Data, reply: @escaping @Sendable (Bool) -> Void)
 }
 
-public enum AuthorityXPCError: Error { case unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
-enum AuthorityXPCReply: Sendable { case routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
+public enum AuthorityXPCError: Error { case unsupportedPhoneUpdateScheduling, unsupportedPhoneRouting, unsupportedPhoneAudit, unsupportedPhonePushRecovery, unsupportedPhonePushRegistration, unsupportedPairingReceipt, unsupportedRequestExchange, unsupportedRequestDiscovery, unsupportedRequestDelivery, invalidConfiguration, invalidState, concurrentOperation, closed, failed, timedOut, invalidMessage }
+enum AuthorityXPCReply: Sendable { case updateSchedulingVersion(UInt64), updateScheduling(Data), routingVersion(UInt64), routing(Data), auditVersion(UInt64), audit(Data), recoveryVersion(UInt64), recovery(Data), registrationVersion(UInt64), registration(Data), receiptVersion(UInt64), receipt(Data), exchangeVersion(UInt64), exchange(Data), hello(UInt64), deliveryVersion(UInt64), discoveryVersion(UInt64), pendingRequests(Data), requestFrame(Data), snapshot(Data), validation(Bool), failed }
 protocol AuthorityXPCDriver: Sendable {
     func start(invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -50,6 +53,8 @@ protocol AuthorityXPCDriver: Sendable {
     func receipt(_ binding: Data, setupID: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func audit(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
+    func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func routing(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
     func recoveryVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void)
@@ -62,6 +67,8 @@ protocol AuthorityXPCDriver: Sendable {
 }
 
 extension AuthorityXPCDriver {
+    func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.updateSchedulingVersion(0)) }
+    func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func auditVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.auditVersion(0)) }
     func audit(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.failed) }
     func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) { reply(.routingVersion(0)) }
@@ -147,6 +154,14 @@ private final class NativeAuthorityXPC: AuthorityXPCDriver, @unchecked Sendable 
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.phoneAudit(binding, frame: frame) { [self] bytes in checked(bytes.map(AuthorityXPCReply.audit) ?? .failed, reply) }
     }
+    func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.phoneUpdateSchedulingVersion { [self] version in checked(.updateSchedulingVersion(version), reply) }
+    }
+    func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+        guard let proxy = proxy(reply) else { reply(.failed); return }
+        proxy.phoneUpdateScheduling(binding, frame: frame) { [self] bytes in checked(bytes.map(AuthorityXPCReply.updateScheduling) ?? .failed, reply) }
+    }
     func routingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
         guard let proxy = proxy(reply) else { reply(.failed); return }
         proxy.phoneRoutingVersion { [self] version in checked(.routingVersion(version), reply) }
@@ -198,7 +213,8 @@ public actor AuthorityXPCChannel {
     public static let maximumSnapshotBytes = 1_048_576
     public static let maximumBindingBytes = 4096
     private enum State { case new, opening, open, closed }
-    private enum Operation { case routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private enum Operation { case updateSchedulingVersion, updateScheduling, routingVersion, routing, auditVersion, audit, recoveryVersion, recovery, registrationVersion, registration, receiptVersion, receipt, exchangeVersion, exchange, hello, deliveryVersion, discoveryVersion, pendingRequests, requestFrame, snapshot, validation }
+    private var updateSchedulingVersion: UInt64?
     private var routingVersion: UInt64?
     private var auditVersion: UInt64?
     private var recoveryVersion: UInt64?
@@ -356,6 +372,35 @@ public actor AuthorityXPCChannel {
         } catch { finish(.invalidMessage); throw error }
     }
 
+    /// Negotiate separately before sending private update data.
+    public func requirePhoneUpdateSchedulingSupport() async throws {
+        try Task.checkCancellation()
+        guard state == .open, cancellation.ifActive({}) else { throw AuthorityXPCError.closed }
+        if updateSchedulingVersion == nil {
+            guard case .updateSchedulingVersion(let version) = try await perform(.updateSchedulingVersion) else {
+                throw AuthorityXPCError.invalidMessage
+            }
+            updateSchedulingVersion = version
+        }
+        try Task.checkCancellation()
+        guard state == .open, cancellation.ifActive({}) else { throw AuthorityXPCError.closed }
+        guard updateSchedulingVersion == 1 else { throw AuthorityXPCError.unsupportedPhoneUpdateScheduling }
+    }
+    /// A failed reply cannot authorize replay. Only the enrolled phone can accept the signed result.
+    public func phoneUpdateScheduling(binding: AuthorityPeerBinding, frame: PhoneUpdateSchedulingFrame) async throws -> PhoneUpdateSchedulingFrame {
+        try AuthorityPhoneUpdateSchedulingExchange.request(frame, binding: binding)
+        try await requirePhoneUpdateSchedulingSupport()
+        let encoded = try AuthorityTrustCodec.encodeBinding(binding)
+        guard case .updateScheduling(let bytes) = try await perform(.updateScheduling, binding: encoded, query: frame.encode()) else {
+            throw AuthorityXPCError.invalidMessage
+        }
+        do {
+            let result = try PhoneUpdateSchedulingFrame.decode(bytes)
+            try AuthorityPhoneUpdateSchedulingExchange.response(result, to: frame, binding: binding)
+            return result
+        } catch { finish(.invalidMessage); throw error }
+    }
+
     /// Negotiate separately so older authorities preserve their existing approval channel.
     public func requirePhoneRoutingSupport() async throws {
         try Task.checkCancellation()
@@ -461,6 +506,8 @@ public actor AuthorityXPCChannel {
                 }
                 guard cancellation.ifActive({
                     switch operation {
+                    case .updateSchedulingVersion: driver.updateSchedulingVersion(reply)
+                    case .updateScheduling: driver.updateScheduling(binding!, frame: query!, reply)
                     case .routingVersion: driver.routingVersion(reply)
                     case .routing: driver.routing(binding!, frame: query!, reply)
                     case .auditVersion: driver.auditVersion(reply)
@@ -497,6 +544,8 @@ public actor AuthorityXPCChannel {
         if case .failed = reply { finish(.failed); return }
         switch (current.operation, reply) {
         case (.hello, .hello(1)), (.validation, .validation), (.deliveryVersion, .deliveryVersion), (.discoveryVersion, .discoveryVersion): break
+        case (.updateSchedulingVersion, .updateSchedulingVersion): break
+        case (.updateScheduling, .updateScheduling(let bytes)) where !bytes.isEmpty && bytes.count <= PhoneUpdateSchedulingFrame.maximumBytes: break
         case (.routingVersion, .routingVersion): break
         case (.routing, .routing(let bytes)) where !bytes.isEmpty && bytes.count <= PhoneRoutingFrame.maximumBytes: break
         case (.auditVersion, .auditVersion): break

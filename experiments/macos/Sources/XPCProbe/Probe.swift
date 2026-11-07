@@ -139,6 +139,8 @@ final class ProbeService: NSObject, ProbeProtocol {
     }
     func phoneRoutingVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
     func phoneRouting(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    func phoneUpdateSchedulingVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
+    func phoneUpdateScheduling(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func phoneAuditVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(0) }
     func phoneAudit(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     func phonePushRecoveryVersion(reply: @escaping @Sendable (UInt64) -> Void) { reply(2) }
