@@ -4,12 +4,23 @@ import RemozioProtocol
 /// Immutable public bootstrap inputs. Decoding does not authenticate the publisher or start a backend.
 struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let version: UInt64 = 1
+    static let releaseBoundVersion: UInt64 = 2
+    static var releaseBoundFormatRequirements: [RetainedReleaseFormat] { get throws {
+        try [AuthorityCodeRole.authority, .transport, .notificationGateway, .setupController].map { role in
+            try .init(role: role, name: formatName, readVersions: [releaseBoundVersion],
+                writeVersions: role == .setupController ? [releaseBoundVersion] : [])
+        }
+    } }
     static let supportedVersions: Set<UInt64> = [version]
     static let formatName = "runtime.gateway-settings-consumer-host"
     let role: GatewaySettingsConsumerRole
     let runtime: RuntimeMaterialReference
     let bundlePath: String
     let codePolicy: AuthorityCodePolicy
+    let releaseBinding: RuntimeReleaseBinding?
+    let policyStage: RuntimeReleasePolicyStage?
+    var formatVersion: UInt64 { releaseBinding == nil ? Self.version : Self.releaseBoundVersion }
+    var installedReleaseDigest: Data { releaseBinding?.installedReleaseDigest ?? runtime.services.releaseDigest }
     var description: String { "GatewaySettingsConsumerHostConfiguration(redacted)" }
     var debugDescription: String { description }
     var consumerCode: AuthorityCodeEntry { codePolicy.entries.first { $0.role == role.codeRole && $0.active }! }
@@ -20,7 +31,8 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     var serviceName: String { get throws { try role.serviceName(accountID: runtime.services.accountID) } }
 
     init(role: GatewaySettingsConsumerRole, runtime: RuntimeMaterialReference, bundlePath: String,
-         codePolicy: AuthorityCodePolicy) throws {
+         codePolicy: AuthorityCodePolicy,
+         releaseBinding: RuntimeReleaseBinding? = nil, policyStage: RuntimeReleasePolicyStage? = nil) throws {
         let parts = bundlePath.dropFirst().split(separator: "/", omittingEmptySubsequences: false)
         let required: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .setupController]
         let codes = required.compactMap { role in codePolicy.entries.first { $0.role == role && $0.active } }
@@ -30,7 +42,15 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
               codes.count == required.count, Set(codes.map(\.teamID)).count == 1,
               Set(codes.map(\.identifier)).count == codes.count else { throw GatewayPreparationError.invalidRecord }
         try runtime.serviceActivity?.validate(services: runtime.services)
+        if let releaseBinding {
+            guard let policyStage else { throw GatewayPreparationError.invalidRecord }
+            try releaseBinding.requireHistoricalRuntime(runtime)
+            try releaseBinding.requirePolicy(codePolicy, stage: policyStage)
+        } else {
+            guard policyStage == nil else { throw GatewayPreparationError.invalidRecord }
+        }
         self.role = role; self.runtime = runtime; self.bundlePath = bundlePath; self.codePolicy = codePolicy
+        self.releaseBinding = releaseBinding; self.policyStage = policyStage
         _ = try encoded
     }
     /// Setup must compare these inputs with the current retained account and installation before publication.
@@ -43,7 +63,7 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     }
     /// Actual signature inspection and protected placement remain prerequisites for native startup.
     func validateRelease(_ release: SignedReleaseEvidence) throws {
-        guard try InstallationInventory.digest(release) == runtime.services.releaseDigest else { throw GatewayPreparationError.changedScope }
+        guard try InstallationInventory.digest(release) == installedReleaseDigest else { throw GatewayPreparationError.changedScope }
         try ReleaseGenerationPreflight.validate(release, against: codePolicy)
         for code in codePolicy.entries where code.active {
             guard let component = release.manifest.components.first(where: { $0.role == code.role }),
@@ -53,7 +73,7 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
         try GatewaySettingsConsumerReleaseValidation.validate(release, role: role, consumer: consumerCode, setup: setupCode)
         for code in [role.codeRole, .setupController] {
             guard let format = release.manifest.components.first(where: { $0.role == code })?.formats.first(where: { $0.name == Self.formatName }),
-                  format.readers.contains(Self.version), code != .setupController || format.writers.contains(Self.version) else {
+                  format.readers.contains(formatVersion), code != .setupController || format.writers.contains(formatVersion) else {
                 throw GatewayPreparationError.changedScope
             }
         }
@@ -78,17 +98,41 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
         try require(pairing.transportPolicy, role: .transport, uid: serviceUID)
     }
     var encoded: Data { get throws {
-        try DeterministicCBOR.encode(.map([0: .unsigned(Self.version), 1: .text("remozio-gateway-settings-consumer-host"),
-            2: .unsigned(role.rawValue), 3: .bytes(runtime.encoded), 4: .text(bundlePath), 5: .bytes(codePolicy.bytes)]), limits: Self.limits)
+        var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .text("remozio-gateway-settings-consumer-host"),
+            2: .unsigned(role.rawValue), 3: .bytes(try runtime.encoded), 4: .text(bundlePath), 5: .bytes(try codePolicy.bytes)]
+        if let releaseBinding, let policyStage {
+            fields[6] = .bytes(try releaseBinding.encoded)
+            fields[7] = .unsigned(policyStage.rawValue)
+        }
+        return try DeterministicCBOR.encode(.map(fields), limits: releaseBinding == nil ? Self.limits : Self.archiveLimits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
-              Set(fields.keys) == Set(UInt64(0)...5), fields[0] == .unsigned(Self.version),
+        try decode(bytes, allowReleaseBound: false)
+    }
+    static func decodeForReleaseArchive(_ bytes: Data) throws -> Self {
+        try decode(bytes, allowReleaseBound: true)
+    }
+    private static func decode(_ bytes: Data, allowReleaseBound: Bool) throws -> Self {
+        let allowed: Set<UInt64> = allowReleaseBound ? [version, releaseBoundVersion] : [version]
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: allowReleaseBound ? archiveLimits : limits),
+              case .unsigned(let selected) = fields[0], allowed.contains(selected),
+              Set(fields.keys) == Set(UInt64(0)...(selected == version ? 5 : 7)),
               fields[1] == .text("remozio-gateway-settings-consumer-host"), case .unsigned(let raw) = fields[2],
               let role = GatewaySettingsConsumerRole(rawValue: raw), case .bytes(let runtime) = fields[3],
               case .text(let path) = fields[4], case .bytes(let policy) = fields[5] else { throw GatewayPreparationError.invalidRecord }
-        let value = try Self(role: role, runtime: .decode(runtime), bundlePath: path, codePolicy: .decode(policy))
+        let binding: RuntimeReleaseBinding?
+        let stage: RuntimeReleasePolicyStage?
+        if selected == version {
+            binding = nil; stage = nil
+        } else {
+            guard case .bytes(let retained) = fields[6], case .unsigned(let rawStage) = fields[7],
+                  let selectedStage = RuntimeReleasePolicyStage(rawValue: rawStage) else { throw GatewayPreparationError.invalidRecord }
+            binding = try .decode(retained); stage = selectedStage
+        }
+        let value = try Self(role: role, runtime: .decode(runtime), bundlePath: path, codePolicy: .decode(policy),
+            releaseBinding: binding, policyStage: stage)
         guard try value.encoded == bytes else { throw GatewayPreparationError.invalidRecord }; return value
     }
     static let limits = try! CBORLimits(maxBytes: 32768, maxDepth: 1, maxItems: 13)
+    private static let archiveLimits = try! CBORLimits(maxBytes: 32768, maxDepth: 1, maxItems: 17)
 }

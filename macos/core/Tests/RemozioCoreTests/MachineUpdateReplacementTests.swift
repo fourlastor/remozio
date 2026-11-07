@@ -23,7 +23,8 @@ private final class MachineReplacementFixture {
     let newIdentity: PreparationFileIdentity
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
-    init(beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
+    init(configurationEpoch: Bool = false,
+         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true))
         try beforeActivation(files)
@@ -40,8 +41,23 @@ private final class MachineReplacementFixture {
         directory = try files.directory()
         XCTAssertEqual(try files.machine.store.inventory()?.bundlePath, app.path)
         newRelease = try files.machine.editedRelease { c in
-            try .init(role: c.role, identifier: c.identifier, generation: c.generation + 1, relativePath: c.relativePath,
-                codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: c.formats, requests: c.requests)
+            var formats = c.formats
+            if configurationEpoch {
+                let requiredFormats = try MachineUpdateConfigurationEpochRecord.requirements
+                    + MachineUpdateConfigurationEpochRecord.publicationRequirements
+                    + GatewaySettingsConsumerHostConfiguration.releaseBoundFormatRequirements
+                for required in requiredFormats where required.role == c.role {
+                    if let index = formats.firstIndex(where: { $0.name == required.name }) {
+                        let current = formats[index]
+                        formats[index] = try .init(name: current.name, readers: current.readers.union(required.readVersions),
+                            writers: current.writers.union(required.writeVersions))
+                    } else {
+                        formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
+                    }
+                }
+            }
+            return try .init(role: c.role, identifier: c.identifier, generation: c.generation + 1, relativePath: c.relativePath,
+                codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats, requests: c.requests)
         }
         candidate = try files.machine.select(files.machine.copy(release: newRelease))
         oldIdentity = try installed.preparationCopyIdentity(name: "Remozio.app")
@@ -643,6 +659,169 @@ final class MachineUpdateReplacementTests: XCTestCase {
                                 policy: AuthorityCodePolicySnapshot) throws -> RuntimeReleaseBinding {
         try .init(accountID: f.machine.account, source: source, candidate: f.newRelease,
             policy: MachineUpdatePolicyPlan(source: policy, candidate: f.newRelease))
+    }
+
+    func testConfigurationEpochMigrationIsExplicitAndIdempotent() throws {
+        let files = try BoundAdmissionRegistrationFixture(machine: UpdateCandidateStorageFixture(
+            admission: true, activation: true, replacement: true))
+        let machine = files.machine, release = machine.release
+        try MachineUpdateActivationStorage.enableInLease(installedRelease: release, policy: machine.policy, store: machine.store)
+        try MachineUpdateReplacementStorage.enableInLease(installedRelease: release, policy: machine.policy, store: machine.store)
+        XCTAssertNil(try machine.store.machineUpdateConfigurationEpoch())
+        XCTAssertEqual(try machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 18)
+        XCTAssertThrowsError(try MachineUpdateConfigurationEpochStorage.enableInLease(installedRelease: release,
+            policy: machine.policy, store: machine.store))
+        let digest = try InstallationInventory.digest(release)
+        XCTAssertThrowsError(try machine.store.upgradeMachineUpdateConfigurationEpochStorage(
+            expectedInstalledReleaseDigest: Data(repeating: 0, count: 32)))
+        XCTAssertEqual(try machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 18)
+        try machine.store.upgradeMachineUpdateConfigurationEpochStorage(expectedInstalledReleaseDigest: digest)
+        try machine.reopen()
+        try machine.store.upgradeMachineUpdateConfigurationEpochStorage(expectedInstalledReleaseDigest: digest)
+        XCTAssertEqual(try machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 19)
+        XCTAssertNil(try machine.store.machineUpdateConfigurationEpoch())
+    }
+
+    func testConfigurationEpochRejectsOrdinaryMigrationDuringAnActiveReplacement() throws {
+        let f = try Fixture(configurationEpoch: true)
+        XCTAssertThrowsError(try f.machine.store.upgradeMachineUpdateConfigurationEpochStorage(
+            expectedInstalledReleaseDigest: InstallationInventory.digest(f.oldRelease))) {
+            XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+        }
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 18)
+        XCTAssertNil(try f.machine.store.machineUpdateConfigurationEpoch())
+    }
+
+    private func retainFixtureConfigurationEpoch(_ f: Fixture) throws -> MachineUpdateConfigurationEpochRecord {
+        _ = try f.run()
+        let previous = try restartSource(f)
+        let source = try f.machine.store.upgradeConfigurationEpochForInstalledRecovery(expected: previous,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let accountID = f.machine.account
+        let account = try XCTUnwrap(source.accounts.first { $0.accountID == accountID })
+        let foreground = f.machine.f.plan
+        let bundle = try RuntimeConfigurationBundle.initial(account: XCTUnwrap(account.preparation),
+            initialization: XCTUnwrap(account.initialization), reference: foreground.reference, inventory: source.replacement.inventory)
+        let original = RuntimeReleaseConfigurationSource(host: foreground.host, transport: foreground.transport,
+            gateway: try XCTUnwrap(foreground.gatewaySettingsHost),
+            clients: .init(presence: bundle.presenceClient, pairing: bundle.pairingClient, frontend: bundle.frontendClient))
+        let policy = releasePolicySnapshot(f)
+        func plan(_ stage: RuntimeReleasePolicyStage) throws -> RuntimeReleaseConfigurationPlan {
+            try .init(accountID: accountID, source: source, currentPolicy: policy, candidate: f.newRelease,
+                host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients, stage: stage)
+        }
+        let startup = try plan(.startup), completion = try plan(.completion)
+        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup.gateway.encoded))
+        XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(startup.transport.canonicalBytes))
+        XCTAssertEqual(try RuntimeReleaseConfigurationPlan.decode(startup.encoded).encoded, try startup.encoded)
+        let record = try f.machine.store.retainMachineUpdateConfigurationEpoch(expected: source, candidate: f.newRelease,
+            policies: source.accounts.map { .init(accountID: $0.accountID, snapshot: $0.accountID == accountID ? policy : nil) },
+            configurations: [.init(source: original, startup: startup, completion: completion)],
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let archive = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+        XCTAssertEqual(archive.record, record)
+        XCTAssertEqual(try archive.configuration(accountID: accountID)?.startup.encoded, try startup.encoded)
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().machineUpdateConfigurationEpoch, try record.encoded)
+        return record
+    }
+
+    private func advanceFixtureConfigurationEpoch(_ f: Fixture, _ record: MachineUpdateConfigurationEpochRecord,
+        _ operation: MachineUpdatePublicationOperation) throws -> MachineUpdateConfigurationEpochRecord {
+        try f.machine.store.advanceMachineUpdatePublication(record, operation: operation, candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+    }
+
+    func testConfigurationEpochRetainsTheTypedArchiveAndAdvancesPublication() throws {
+        let f = try Fixture(configurationEpoch: true)
+        let record = try retainFixtureConfigurationEpoch(f)
+        let accountID = f.machine.account
+        let writing = try f.machine.store.advanceMachineUpdatePublication(record, operation: .begin, candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        XCTAssertNotEqual(writing.revision, record.revision)
+        XCTAssertEqual(try writing.publication?.state(accountID: accountID, file: .host), .pending)
+        XCTAssertThrowsError(try f.machine.store.advanceMachineUpdatePublication(record, operation: .begin, candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })) {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
+        XCTAssertEqual(try f.machine.store.machineUpdateConfigurationEpoch()?.record, writing)
+    }
+
+    func testConfigurationWriterRequiresWritingAndRetainsEveryPublishedFileOnReplay() throws {
+        let f = try Fixture(configurationEpoch: true)
+        var record = try advanceFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f), .begin)
+        XCTAssertEqual(chmod(f.files.root.path, 0o755), 0)
+        let directory = try ProtectedSetupDirectory(anchor: f.files.root.path, relativePath: "EpochConfiguration",
+            owner: getuid(), visibility: .sharedMetadata)
+        defer { directory.close() }
+        let accountID = f.machine.account
+        let owner = try XCTUnwrap(record.accounts.first { $0.accountID == accountID }).ownerUID
+        let initial = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+        let configuration = try XCTUnwrap(initial.configuration(accountID: accountID))
+        let files: [(MachineUpdatePublicationProgress.File, AdministrativeSetupPublication.File)] = [
+            (.host, .commandHost), (.transport, .transportConfiguration), (.gateway, .gatewaySettingsHost),
+            (.presence, .presenceClient(ownerUID: owner)), (.pairing, .pairingClient(ownerUID: owner)),
+            (.frontend, .frontendClient(ownerUID: owner)),
+        ]
+        for (file, name) in files {
+            let url = URL(fileURLWithPath: directory.path).appendingPathComponent(name.name)
+            let original = try configuration.bytes(file, target: false)
+            let target = try configuration.bytes(file, target: true)
+            // The fixture changes only the release-bound files; the client files keep their bytes.
+            if [.host, .transport, .gateway].contains(file) { XCTAssertNotEqual(original, target, "\(file)") } else { XCTAssertEqual(original, target, "\(file)") }
+            _ = try AdministrativeSetupPublication.publish(original, file: name, directory: directory, owner: getuid())
+            let pending = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+            XCTAssertThrowsError(try MachineUpdateConfigurationFiles.publishInLease(pending, accountID: accountID,
+                file: file, directory: directory, owner: getuid(), verify: { XCTFail("Pending write reached the verifier") })) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertEqual(try Data(contentsOf: url), original)
+            record = try advanceFixtureConfigurationEpoch(f, record, .prepare(accountID, file))
+            let writing = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+            XCTAssertEqual(try writing.record.publication?.state(accountID: accountID, file: file), .writing)
+            try MachineUpdateConfigurationFiles.publishInLease(writing, accountID: accountID, file: file,
+                directory: directory, owner: getuid(), verify: {})
+            XCTAssertEqual(try Data(contentsOf: url), target)
+            var first = stat(), replay = stat()
+            XCTAssertEqual(lstat(url.path, &first), 0)
+            try MachineUpdateConfigurationFiles.publishInLease(writing, accountID: accountID, file: file,
+                directory: directory, owner: getuid(), verify: {}, didStage: { _ in
+                    XCTFail("Replay staged another file")
+                })
+            XCTAssertEqual(lstat(url.path, &replay), 0)
+            XCTAssertEqual(replay.st_ino, first.st_ino)
+            record = try advanceFixtureConfigurationEpoch(f, record, .complete(accountID, file))
+            XCTAssertEqual(try f.machine.store.machineUpdateConfigurationEpoch()?.record.publication?.state(accountID: accountID, file: file), .published)
+        }
+        XCTAssertEqual(record.publication?.complete, true)
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)), Set(files.map { $0.1.name }))
+    }
+
+    func testConfigurationEpochRejectsATamperedSQLiteOperand() throws {
+        let f = try Fixture(configurationEpoch: true)
+        let record = try retainFixtureConfigurationEpoch(f)
+        XCTAssertEqual(try f.machine.store.machineUpdateConfigurationEpoch()?.record, record)
+        try f.machine.sql("UPDATE machine_update_configuration_epoch_v1 SET record=x'00' WHERE kind=1")
+        XCTAssertThrowsError(try f.machine.store.machineUpdateConfigurationEpoch()) {
+            XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+        }
+    }
+
+    func testConfigurationEpochRejectsAnIndependentMachineRowChange() throws {
+        let f = try Fixture(configurationEpoch: true, beforeActivation: { files in
+            _ = try files.machine.copy()
+        })
+        let record = try retainFixtureConfigurationEpoch(f)
+        let source = try restartSource(f)
+        let candidate = f.candidate.preparation.id.uuidString.replacingOccurrences(of: "-", with: "")
+        XCTAssertEqual(try f.machine.store.records().count, 2)
+        try f.machine.sql("DELETE FROM preparation_intents_v1 WHERE id!=x'\(candidate)'")
+        XCTAssertEqual(try f.machine.store.records().count, 1)
+        XCTAssertEqual(try restartSource(f), source)
+        XCTAssertEqual(try f.machine.store.machineUpdateConfigurationEpoch()?.record, record)
+        XCTAssertThrowsError(try f.machine.store.withCurrentMachineUpdateConfigurationEpoch(record,
+            directory: f.directory, quiescence: f.quiet) { _ in XCTFail("Changed machine rows reached the verifier") }) {
+            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+        }
     }
 
     func testReleaseBindingKeepsHistoricalMaterialSeparateFromTheInstalledRelease() throws {

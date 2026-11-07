@@ -62,6 +62,39 @@ final class AdministrativeSetupPublicationTests: XCTestCase {
         }
     }
 
+    func testUpdateConfigurationWriterRequiresTheRetainedSourceAndPreservesReplay() throws {
+        try fixture { f in
+            let file = AdministrativeSetupPublication.File.commandHost
+            let url = URL(fileURLWithPath: f.directory.path).appendingPathComponent(file.name)
+            let original = Data([1]), target = Data([2]), foreign = Data([3])
+            _ = try AdministrativeSetupPublication.publish(original, file: file, directory: f.directory, owner: getuid())
+            XCTAssertThrowsError(try AdministrativeSetupPublication.replaceMachineUpdateConfiguration(target,
+                expected: foreign, file: file, directory: f.directory, owner: getuid(), verify: {}, didStage: { _ in }))
+            XCTAssertEqual(try Data(contentsOf: url), original)
+
+            try AdministrativeSetupPublication.replaceMachineUpdateConfiguration(target, expected: original,
+                file: file, directory: f.directory, owner: getuid(), verify: {}, didStage: { _ in })
+            let replaced = try metadata(url)
+            XCTAssertEqual(try Data(contentsOf: url), target)
+            try AdministrativeSetupPublication.replaceMachineUpdateConfiguration(target, expected: original,
+                file: file, directory: f.directory, owner: getuid(), verify: {}, didStage: { _ in
+                    XCTFail("The retained target must not stage another file.")
+                })
+            XCTAssertEqual(try metadata(url).st_ino, replaced.st_ino)
+        }
+    }
+
+    func testUpdateConfigurationWriterRejectsFilesOutsideItsAllowlist() throws {
+        try fixture { f in
+            XCTAssertThrowsError(try AdministrativeSetupPublication.replaceMachineUpdateConfiguration(Data([2]),
+                expected: Data([1]), file: .gatewayConfiguration, directory: f.directory, owner: getuid(),
+                verify: { XCTFail("An unrelated file must not reach the owner check.") }, didStage: { _ in })) {
+                XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .invalidArtifact)
+            }
+            XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: f.directory.path), [])
+        }
+    }
+
     func testExistingLinksAndPublicPermissionsAreRefused() throws {
         for kind in 0...2 {
             try fixture { f in

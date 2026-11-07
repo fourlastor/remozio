@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -315,7 +315,8 @@ public final class PreparationIntentStore {
         let admission = try schema >= 16 ? loadUpdateAdmissionRegistration()?.encoded : nil
         return try .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
             updateAdmissionRegistration: admission, machineUpdateActivation: schema >= 17 ? loadMachineUpdateActivation()?.encoded : nil,
-            machineUpdateReplacement: schema >= 18 ? loadMachineUpdateReplacement()?.encoded : nil)
+            machineUpdateReplacement: schema >= 18 ? loadMachineUpdateReplacement()?.encoded : nil,
+            machineUpdateConfigurationEpoch: schema >= 19 ? loadMachineUpdateConfigurationEpoch()?.record.encoded : nil)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -2179,8 +2180,8 @@ public final class PreparationIntentStore {
         let context = MachineUpdateReplacementContext(activation: activation, inventory: inventory, candidate: candidate,
             admission: admission, replacement: nil, runtime: runtime)
         let accounts = try loadMachineUpdateAccounts(context)
-        // Neither admitted schema can contain an installed-release archive. Later readers must load its exact history.
-        guard try [Int64(17), 18].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        // These schemas cannot contain an installed-release archive. Later readers must load its exact history.
+        guard try [Int64(17), 18, 19].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -2361,6 +2362,274 @@ public final class PreparationIntentStore {
         }
     }
 
+    func upgradeMachineUpdateConfigurationEpochStorage(expectedInstalledReleaseDigest: Data) throws {
+        try transaction(write: true, activationWrite: true) {
+            try identity(macID)
+            guard let inventory = try loadInventoryRecord(), inventory.releaseDigest == expectedInstalledReleaseDigest else {
+                throw RuntimePreparationError.changedScope
+            }
+            let version = try scalar("PRAGMA user_version")
+            if version >= 19 { _ = try loadMachineUpdateConfigurationEpoch(); return }
+            guard version == 18 else { throw PreparationStoreError.incompatibleStore }
+            guard try loadMachineUpdateActivation()?.phase.blocksMachineWrites != true else { throw PreparationStoreError.invalidTransition }
+            try createConfigurationEpochStorage()
+        }
+    }
+
+    private func createConfigurationEpochStorage() throws {
+        try exec("CREATE TABLE machine_update_configuration_epoch_v1(kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 9),account BLOB NOT NULL CHECK(length(account)=CASE WHEN kind IN(0,5,6,7,8,9) THEN 1 ELSE 16 END),epoch BLOB NOT NULL CHECK(length(epoch)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 262400),PRIMARY KEY(kind,account)) STRICT")
+        try exec("PRAGMA user_version=19"); try identity(macID)
+    }
+
+    /// The selected installed candidate owns this irreversible migration. The old release need not advertise the new archive.
+    func upgradeConfigurationEpochForInstalledRecovery(expected: MachineUpdateRestartSource, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease,
+        verifyCurrent: () throws -> Void) throws -> MachineUpdateRestartSource {
+        try quiescence.withExclusiveActivity { _ in
+            try transaction(write: true, activationWrite: true) {
+                try identity(macID)
+                guard try loadMachineUpdateRestartSource(expected.replacement.activation) == expected,
+                      expected.replacement.activation.phase.irreversible, expected.replacement.replacement?.phase == .observed,
+                      try DurableReleasePreparation.digest(candidate) == expected.replacement.activation.updateID else {
+                    throw PreparationStoreError.staleRevision
+                }
+                try MachineUpdateConfigurationEpoch.requireArchiveFormats(candidate)
+                try requireUpdateAdmissionDirectory(directory)
+                try quiescence.validateMachineBoundary(directory: directory, expected: expected.replacement.admission.machine)
+                try verifyCurrent()
+                let schema = try scalar("PRAGMA user_version")
+                guard schema == 18 || schema == 19 else { throw PreparationStoreError.incompatibleStore }
+                if schema == 18 { try createConfigurationEpochStorage() }
+                try verifyCurrent()
+                try quiescence.validateMachineBoundary(directory: directory, expected: expected.replacement.admission.machine)
+            }
+            return try transaction(write: false) {
+                try verifyCurrent(); try requireUpdateAdmissionDirectory(directory)
+                let current = try loadMachineUpdateRestartSource(expected.replacement.activation)
+                guard current.accounts == expected.accounts, current.replacement.inventory == expected.replacement.inventory,
+                      current.replacement.candidate == expected.replacement.candidate, current.replacement.admission == expected.replacement.admission,
+                      current.replacement.replacement == expected.replacement.replacement else { throw PreparationStoreError.staleRevision }
+                try quiescence.validateMachineBoundary(directory: directory, expected: current.replacement.admission.machine)
+                try verifyCurrent(); return current
+            }
+        }
+    }
+
+    /// Reads retained bytes only. Callers must acquire fresh native and account capabilities before using them.
+    func machineUpdateConfigurationEpoch() throws -> MachineUpdateConfigurationEpoch.Archive? {
+        try transaction(write: false) {
+            try identity(macID)
+            return try scalar("PRAGMA user_version") >= 19 ? loadMachineUpdateConfigurationEpoch() : nil
+        }
+    }
+
+    func retainMachineUpdateConfigurationEpoch(expected: MachineUpdateRestartSource,
+        replacing previous: MachineUpdateConfigurationEpochRecord? = nil,
+        candidate: SignedReleaseEvidence, policies: [MachineUpdateConfigurationEpoch.PolicyCapture],
+        configurations: [MachineUpdateConfigurationEpoch.Configuration], directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease, verifyCurrent: () throws -> Void) throws -> MachineUpdateConfigurationEpochRecord {
+        try quiescence.withExclusiveActivity { _ in
+            let value = try transaction(write: true, activationWrite: true) {
+                try identity(macID)
+                guard try scalar("PRAGMA user_version") == 19,
+                      try loadMachineUpdateRestartSource(expected.replacement.activation) == expected else { throw PreparationStoreError.staleRevision }
+                try requireUpdateAdmissionDirectory(directory)
+                try quiescence.validateMachineBoundary(directory: directory, expected: expected.replacement.admission.machine)
+                try verifyCurrent()
+                let existing = try loadMachineUpdateConfigurationEpoch()
+                guard existing?.record == previous else { throw PreparationStoreError.staleRevision }
+                for policy in policies.compactMap(\.snapshot) {
+                    try ReleaseCompatibilityPreflight.validate(candidate, policy: policy.policy,
+                        requirements: .init(formats: MachineUpdateConfigurationEpochRecord.requirements, requests: []))
+                }
+                let record = try MachineUpdateConfigurationEpochRecord(id: previous?.id ?? UUID(), revision: previous?.revision ?? UUID(),
+                    source: expected, candidate: candidate, sourceMachineDigest: machineEpochSourceDigest(), policies: policies, configurations: configurations)
+                let provenance = try MachineUpdateConfigurationEpoch.provisioningHistory(source: expected, candidate: candidate)
+                let artifacts = try MachineUpdateConfigurationEpoch.artifacts(source: expected, policies: policies,
+                    configurations: configurations, provenance: provenance)
+                let archive = MachineUpdateConfigurationEpoch.Archive(record: record, artifacts: artifacts); try archive.validate()
+                if let existing {
+                    guard existing.record == record, existing.artifacts == artifacts else { throw PreparationStoreError.staleRevision }
+                } else {
+                    for item in [MachineUpdateConfigurationEpoch.Artifact(kind: 0, account: MachineUpdateConfigurationEpoch.global, bytes: try record.encoded)] + artifacts {
+                        try statement("INSERT INTO machine_update_configuration_epoch_v1 VALUES(?,?,?,?,?)") { row in
+                            try bind(item.kind, column: 1, row: row); try bind(item.account, column: 2, row: row)
+                            try bind(bytes(record.id), column: 3, row: row); try bind(bytes(record.revision), column: 4, row: row)
+                            try bind(item.bytes, column: 5, row: row)
+                            guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                        }
+                    }
+                }
+                try requireCurrentConfigurationEpoch(record, directory: directory, quiescence: quiescence)
+                try verifyCurrent(); return record
+            }
+            // Unknown commit acknowledgements leave the connection unavailable. Reopen and read the retained archive.
+            return try transaction(write: false) {
+                try requireCurrentConfigurationEpoch(value, directory: directory, quiescence: quiescence)
+                try verifyCurrent()
+                try requireCurrentConfigurationEpoch(value, directory: directory, quiescence: quiescence)
+                return value
+            }
+        }
+    }
+
+    /// The native owner verifies actual files against the proposed durable state before and after its commit.
+    func advanceMachineUpdatePublication(_ expected: MachineUpdateConfigurationEpochRecord,
+        operation: MachineUpdatePublicationOperation, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease, verifyCurrent: (MachineUpdateConfigurationEpochRecord) throws -> Void) throws -> MachineUpdateConfigurationEpochRecord {
+        try MachineUpdateConfigurationEpoch.requirePublicationFormats(candidate, provenance: expected.carriesProvenance)
+        guard try InstallationInventory.digest(candidate) == expected.installedReleaseDigest,
+              try DurableReleasePreparation.digest(candidate) == expected.updateID else { throw RuntimePreparationError.changedScope }
+        let next = try expected.applying(operation)
+        return try quiescence.withExclusiveActivity { _ in
+            let value = try transaction(write: true, activationWrite: true) {
+                try requireCurrentConfigurationEpoch(expected, directory: directory, quiescence: quiescence)
+                try verifyCurrent(expected); try verifyCurrent(next)
+                try statement("UPDATE machine_update_configuration_epoch_v1 SET revision=? WHERE epoch=?") { row in
+                    try bind(bytes(next.revision), column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == Int32(next.operands.count + 1) else { throw PreparationStoreError.staleRevision }
+                }
+                try statement("UPDATE machine_update_configuration_epoch_v1 SET record=? WHERE kind=0 AND epoch=? AND revision=?") { row in
+                    try bind(next.encoded, column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                    try bind(bytes(next.revision), column: 3, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                try requireCurrentConfigurationEpoch(next, directory: directory, quiescence: quiescence)
+                try verifyCurrent(next); return next
+            }
+            do {
+                return try transaction(write: false) {
+                    try requireCurrentConfigurationEpoch(value, directory: directory, quiescence: quiescence)
+                    try verifyCurrent(value); return value
+                }
+            } catch { unavailable = true; shutdown(); throw error }
+        }
+    }
+
+    /// The verifier expires when the callback returns. It holds neither native code identity nor an account journal lease.
+    func withCurrentMachineUpdateConfigurationEpoch<Value>(_ expected: MachineUpdateConfigurationEpochRecord,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease,
+        _ body: (_ validate: @escaping () throws -> Void) throws -> Value) throws -> Value {
+        try quiescence.withExclusiveActivity { _ in
+            try transaction(write: false) {
+                let processID = getpid()
+                var scopeActive = true; defer { scopeActive = false }
+                let validate: () throws -> Void = { [weak self] in
+                    guard scopeActive, getpid() == processID, let self else { throw JournalLeaseError.invalidated }
+                    try self.requireCurrentConfigurationEpoch(expected, directory: directory, quiescence: quiescence)
+                }
+                try validate(); let value = try body(validate); try validate(); return value
+            }
+        }
+    }
+
+    private func requireCurrentConfigurationEpoch(_ expected: MachineUpdateConfigurationEpochRecord,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease) throws {
+        let source = try requireCurrentConfigurationEpoch(expected, directory: directory)
+        try quiescence.validateMachineBoundary(directory: directory, expected: source.replacement.admission.machine)
+    }
+
+    private func requireCurrentConfigurationEpoch(_ expected: MachineUpdateConfigurationEpochRecord,
+        directory: ReleaseDestinationLease) throws -> MachineUpdateRestartSource {
+        try identity(macID); try requireUpdateAdmissionDirectory(directory)
+        guard try scalar("PRAGMA user_version") == 19, let epoch = try loadMachineUpdateConfigurationEpoch(), epoch.record == expected,
+              let activation = try loadMachineUpdateActivation(), activation.phase.irreversible else { throw PreparationStoreError.staleRevision }
+        let source = try loadMachineUpdateRestartSource(activation), context = source.replacement
+        guard try machineEpochSourceDigest() == expected.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
+        guard activation.attemptID == expected.activationAttempt, activation.updateID == expected.updateID,
+              activation.candidateDigest == expected.candidateDigest, activation.inventoryDigest == expected.inventoryDigest,
+              activation.admissionDigest == expected.admissionDigest, context.inventory.macID == expected.macID,
+              context.inventory.installationID == expected.installationID, context.replacement?.phase == .observed,
+              source.accounts.count == expected.accounts.count else { throw PreparationStoreError.staleRevision }
+        for account in expected.accounts {
+            guard try source.accountDigest(accountID: account.accountID) == account.sourceDigest else { throw PreparationStoreError.staleRevision }
+        }
+        return source
+    }
+
+    private func loadMachineUpdateConfigurationEpoch() throws -> MachineUpdateConfigurationEpoch.Archive? {
+        typealias Row = MachineUpdateConfigurationEpochRows.Row
+        let rows: [Row] = try statement("SELECT kind,account,epoch,revision,record FROM machine_update_configuration_epoch_v1 ORDER BY kind,account") { row in
+            var values: [Row] = []
+            while try step(row) == SQLITE_ROW {
+                guard values.count < 518, sqlite3_column_type(row, 0) == SQLITE_INTEGER else { throw PreparationStoreError.corruptRecord }
+                values.append(try Row(kind: sqlite3_column_int64(row, 0),
+                    account: blob(row, column: 1, maximum: 16), epoch: blob(row, column: 2, maximum: 16),
+                    revision: blob(row, column: 3, maximum: 16),
+                    payload: blob(row, column: 4, maximum: RuntimeReleaseConfigurationSource.maximumBytes)))
+            }
+            return values
+        }
+        guard let header = try MachineUpdateConfigurationEpochRows.decodeRecord(rows, macID: macID) else { return nil }
+        let artifacts = rows.dropFirst().map {
+            MachineUpdateConfigurationEpoch.Artifact(kind: $0.kind, account: $0.account, bytes: $0.payload)
+        }
+        let archive = MachineUpdateConfigurationEpoch.Archive(record: header, artifacts: artifacts)
+        try archive.validate()
+        return archive
+    }
+
+    private func machineEpochSourceDigest() throws -> Data {
+        try identity(macID)
+        let schema = try scalar("PRAGMA user_version")
+        guard schema == 19 else { throw PreparationStoreError.incompatibleStore }
+        let tables: [String] = try statement("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
+            var values: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard values.count < 21, let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
+                values.append(String(cString: name))
+            }
+            return values
+        }
+        var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochSource/v1\0".utf8))
+        hash.update(data: candidateGeneration(UInt64(schema)))
+        let inventory = try loadInventoryRecord()
+        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
+        hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
+        for table in tables where table != "machine_update_configuration_epoch_v1" && table != "machine_update_activation_v1" {
+            hash.update(data: try machineTableDigest(table))
+        }
+        return Data(hash.finalize())
+    }
+
+    private func machineTableDigest(_ table: String) throws -> Data {
+        guard !table.isEmpty, table.utf8.allSatisfy({ ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 }) else {
+            throw PreparationStoreError.corruptRecord
+        }
+        let cellLimit = 278528
+        let rows: [Data] = try statement("SELECT * FROM \(table)") { row in
+            var rows: [Data] = []
+            while try step(row) == SQLITE_ROW {
+                guard rows.count < 1_048_576 else { throw PreparationStoreError.capacity }
+                var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochRow/v1\0".utf8))
+                let count = sqlite3_column_count(row); hash.update(data: candidateGeneration(UInt64(count)))
+                for column in 0..<count {
+                    let type = sqlite3_column_type(row, column); hash.update(data: Data([UInt8(type)]))
+                    switch type {
+                    case SQLITE_NULL: break
+                    case SQLITE_INTEGER: hash.update(data: candidateGeneration(UInt64(bitPattern: sqlite3_column_int64(row, column))))
+                    case SQLITE_TEXT, SQLITE_BLOB:
+                        let size = sqlite3_column_bytes(row, column)
+                        guard size >= 0, size <= cellLimit else { throw PreparationStoreError.corruptRecord }
+                        hash.update(data: candidateGeneration(UInt64(size)))
+                        if size > 0 {
+                            guard let data = sqlite3_column_blob(row, column) else { throw PreparationStoreError.corruptRecord }
+                            hash.update(data: Data(bytes: data, count: Int(size)))
+                        }
+                    default: throw PreparationStoreError.corruptRecord
+                    }
+                }
+                rows.append(Data(hash.finalize()))
+            }
+            return rows.sorted { $0.lexicographicallyPrecedes($1) }
+        }
+        var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochTable/v1\0".utf8))
+        hash.update(data: candidateGeneration(UInt64(table.utf8.count))); hash.update(data: Data(table.utf8))
+        hash.update(data: candidateGeneration(UInt64(rows.count)))
+        for row in rows { hash.update(data: row) }
+        return Data(hash.finalize())
+    }
+
     func machineUpdateReplacement() throws -> MachineUpdateReplacementRecord? {
         try transaction(write: false) {
             try identity(macID)
@@ -2534,7 +2803,7 @@ public final class PreparationIntentStore {
         let context = try loadMachineUpdateReplacementContext(activation)
         guard context.replacement != nil else { throw MachineUpdateReplacementError.changedBinding }
         let accounts = try loadMachineUpdateAccounts(context)
-        guard try [Int64(17), 18].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        guard try [Int64(17), 18, 19].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -2559,6 +2828,7 @@ public final class PreparationIntentStore {
         if version >= 16 { expected.append("update_admission_registration_v1") }
         if version >= 17 { expected.append("machine_update_activation_v1") }
         if version >= 18 { expected.append("machine_update_replacement_v1") }
+        if version >= 19 { expected.append("machine_update_configuration_epoch_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

@@ -322,6 +322,18 @@ public enum AdministrativeSetupPublication {
             expectedIdentity: .init(device: metadata.device, inode: metadata.inode))
     }
 
+    /// The update scope has already retained the original and target bytes under closed machine admission.
+    static func replaceMachineUpdateConfiguration(_ bytes: Data, expected: Data, file: File,
+        directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,
+        didStage: (Stage) throws -> Void) throws {
+        switch file {
+        case .commandHost, .transportConfiguration, .gatewaySettingsHost, .presenceClient, .pairingClient, .frontendClient: break
+        default: throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        _ = try replaceSettingsRecord(bytes, expected: expected, file: file, directory: directory,
+            owner: owner, verify: verify, didStage: didStage)
+    }
+
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
                                               didStage: (Stage) throws -> Void,
