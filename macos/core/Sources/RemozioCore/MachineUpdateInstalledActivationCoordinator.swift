@@ -114,8 +114,9 @@ final class MachineUpdateInstalledActivationCoordinator<Commit: Sendable>: @unch
             settlement = task; return task
         }
         guard let task else { return }
-        do { try await task.value; lock.withLock { cleanupComplete = true; settlement = nil } }
-        catch { lock.withLock { settlement = nil }; throw error }
+        // Clear only the settlement this caller awaited. Another failed waiter must not drop a newer cleanup (issue #588).
+        do { try await task.value; lock.withLock { cleanupComplete = true; if settlement == task { settlement = nil } } }
+        catch { lock.withLock { if settlement == task { settlement = nil } }; throw error }
     }
     deinit {
         guard !cleanupComplete else { return }
