@@ -128,8 +128,10 @@ class RelayConnectorTest {
 
     @Test fun upgradeDeadlineAndCallerCancellationCloseTheNativeSocket(): Unit = runBlocking {
         for (cancelCaller in listOf(false, true)) RawPeer { socket, _ ->
-            // The HTTPS request arrives, but the relay never sends a response.
-            assertEquals(-1, socket.inputStream.read())
+            // The HTTPS request arrives, but the relay never sends a response. The connector closes TCP before TLS, so the
+            // peer sees either end of stream or a reset, depending on timing. A read timeout still fails: the socket stayed open.
+            val closed = runCatching { socket.inputStream.read() }
+            assertTrue(closed.getOrNull() == -1 || closed.exceptionOrNull() is java.net.SocketException, "Socket not closed: $closed")
         }.use { peer ->
             val owner = SupervisorJob()
             try {
