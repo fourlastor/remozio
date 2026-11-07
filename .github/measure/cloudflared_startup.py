@@ -9,6 +9,7 @@ args = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network-
         "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:7844",
         "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
 results = []
+os.makedirs('/tmp/measure', exist_ok=True)
 for run in range(runs):
     with open("/tmp/m-token", "wb") as f: f.write(token)
     with open("/tmp/m-config", "wb") as f: f.write(b"{}\n")
@@ -41,9 +42,11 @@ for run in range(runs):
     total = max(ident or 99, metrics or 99)
     results.append(total)
     slow = total > 5
-    print(json.dumps({"label": label, "run": run, "connectorID": ident and round(ident, 3),
-                      "metrics": metrics and round(metrics, 3), "exit": p.returncode,
-                      "lines": lines if slow or run == 0 else len(lines)}), flush=True)
+    record = {"label": label, "run": run, "connectorID": ident and round(ident, 3),
+              "metrics": metrics and round(metrics, 3), "exit": p.returncode, "count": len(lines)}
+    print(json.dumps(record), flush=True)
+    if slow or run == 0:
+        with open(f"/tmp/measure/{label}.jsonl", "a") as f: f.write(json.dumps({**record, "lines": lines}) + "\n")
 results.sort()
 print(json.dumps({"label": label, "runs": runs, "median": results[len(results)//2], "max": results[-1],
                   "over5s": sum(r > 5 for r in results), "over60s": sum(r > 60 for r in results)}), flush=True)

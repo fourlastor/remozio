@@ -31,3 +31,8 @@ jobs:
         run: scutil --dns | head -40; cat /etc/resolv.conf || true
       - name: Measure
         run: python3 .github/measure/cloudflared_startup.py /tmp/RemozioCloudflared 25 shard-${{ matrix.shard }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: measure-${{ matrix.shard }}
+          path: /tmp/measure/
