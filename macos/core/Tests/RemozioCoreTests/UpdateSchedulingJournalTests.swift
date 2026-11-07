@@ -253,7 +253,13 @@ final class UpdateSchedulingJournalTests: XCTestCase {
             let badPeer = try AuthorityPeerBinding(scope: f.binding().scope,
                 transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation, revision: f.binding().revision)
             XCTAssertThrowsError(try f.consume(value, signature: variant == 0 ? Data(repeating: 0, count: 64) : nil,
-                binding: variant == 1 ? badPeer : nil, wall: variant == 2 ? 999 : variant == 3 ? 2000 : 1500))
+                binding: variant == 1 ? badPeer : nil, wall: variant == 2 ? 999 : variant == 3 ? 2000 : 1500)) { error in
+                switch variant {
+                case 0: XCTAssertEqual(error as? UpdateSchedulingVerificationError, .invalidSignature)
+                case 1: XCTAssertEqual(error as? EnrollmentJournalError, .unavailableEnrollment)
+                default: XCTAssertEqual(error as? UpdateSchedulingVerificationError, .expired)
+                }
+            }
             XCTAssertFalse(f.commits.retired)
             XCTAssertNil(try f.commits.read { try $0.consumedUpdateSchedulingRevision(operationID: value.operationID) })
             XCTAssertEqual(try f.consume(value).snapshot.revision, 1)
