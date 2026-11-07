@@ -6,6 +6,32 @@ import XCTest
 @testable import RemozioCore
 
 final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
+    /// A loopback edge that completes TCP and never answers. With every outbound dial denied, the pinned vendor retried its
+    /// edge in a tight loop and in about one start in thirty never logged its metrics address within the 60-second budget
+    /// (#520). A connected but silent edge leaves it waiting on its TLS handshake instead, so discovery is prompt.
+    final class SilentEdge {
+        let port: UInt16
+        private let descriptor: Int32
+        init() throws {
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+            guard fd >= 0 else { throw RelayConnectorProcess.Failure.system(errno) }
+            var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            address.sin_family = sa_family_t(AF_INET); address.sin_addr.s_addr = inet_addr("127.0.0.1")
+            let bound = withUnsafePointer(to: &address) { value in
+                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+            }
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let loaded = withUnsafeMutablePointer(to: &address) { value in
+                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.getsockname(fd, $0, &length) }
+            }
+            // Connections wait in the backlog; nothing accepts or reads them.
+            guard Darwin.fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, bound == 0, loaded == 0, Darwin.listen(fd, 64) == 0 else {
+                let code = errno; _ = Darwin.close(fd); throw RelayConnectorProcess.Failure.system(code)
+            }
+            descriptor = fd; port = UInt16(bigEndian: address.sin_port)
+        }
+        deinit { _ = Darwin.close(descriptor) }
+    }
     final class Fixture: @unchecked Sendable {
         let files: ServiceReleaseActivityFixture
         let service: ServiceReleaseActivityBarrier
@@ -128,8 +154,11 @@ final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
         let f = try Fixture(), observed = expectation(description: "vendor metrics or completion")
         let observation = Mutex<RelayConnectorDiscovery?>(nil)
         let options = try RelayConnectorProcess.Options(startupMilliseconds: 60_000)
-        let arguments = ["-p", "(version 1)(allow default)(deny network-outbound)", vendor,
-            "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:7844",
+        let edge = try SilentEdge()
+        defer { withExtendedLifetime(edge) {} }
+        let profile = "(version 1)(allow default)(deny network-outbound)(allow network-outbound (remote ip \"localhost:\(edge.port)\"))"
+        let arguments = ["-p", profile, vendor,
+            "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:\(edge.port)",
             "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
         let process = try RelayConnectorProcess.startForFixture(executable: "/usr/bin/sandbox-exec", arguments: arguments,
             token: f.token, activity: f.service.acquireShared(), options: options) { event in
