@@ -165,6 +165,32 @@ public final class ApprovalRequestCoordinator {
         releaseActivity = barrier
     }
 
+    /// Attach before listeners start. Existing requests cannot acquire this boundary retroactively.
+    func attachUpdateAdmissionBarrier(_ barrier: UpdateAdmissionBarrier) throws {
+        try attachUpdateAdmissionBoundary(.init(machine: barrier))
+    }
+
+    func attachUpdateAdmissionBoundary(_ boundary: UpdateAdmissionBoundary) throws {
+        try running()
+        guard entries.isEmpty, releaseActivity != nil, updateAdmission == nil else { throw ApprovalCoordinatorError.invalidConfiguration }
+        guard boundary.accountID == nil || boundary.accountID == account else { throw ApprovalCoordinatorError.invalidConfiguration }
+        try boundary.validate(); updateAdmission = boundary
+        try restoreUpdateAdmissionDrain()
+    }
+
+    /// Only request creation uses this gate. Delivery, decisions, expiry, and existing execution retain their normal lifetime.
+    func acquireUpdateAdmission() throws -> UpdateAdmissionLease? {
+        guard let updateAdmission else { return nil }
+        try running()
+        return try updateAdmission.acquireAdmission()
+    }
+
+    /// Restore retained closure before listeners start. This read never enables a scheduling policy or migrates storage.
+    func restoreUpdateAdmissionDrain() throws {
+        let intent = try read { try $0.retainedUpdateSchedulingIntentForAdmission() }
+        try synchronizeUpdateAdmission(intent)
+    }
+
     private func holdUpdateDrain(for action: UpdateSchedulingAction?) throws {
         guard action == .installWhenCurrentWorkFinishes, let updateAdmission else { return }
         if let accountUpdateDrain { try accountUpdateDrain.validate() }
@@ -327,6 +353,7 @@ public final class ApprovalRequestCoordinator {
     private static func admissionRejection(_ error: Error) -> CommandAdmissionRejectionReason? {
         switch error {
         case ReleaseActivityError.busy: .updateInstalling
+        case UpdateAdmissionBarrierError.busy: .updateWaiting
         case ApprovalCoordinatorError.invalidDraft, IssuedRequestError.invalidTimes: .invalidRequest
         case ApprovalCoordinatorError.capacityExceeded, CommandSubmissionReplayError.capacityExceeded: .capacityExceeded
         case DecisionVerificationError.unsupportedContract, IssuedRequestError.unsupportedContract: .unsupported
@@ -363,6 +390,7 @@ public final class ApprovalRequestCoordinator {
             let retry: CommandAdmissionRetryClass
             switch rejection {
             case .updateInstalling: retry = .updateInstalling
+            case .updateWaiting: retry = .updateWaiting
             case .storageUnavailable: retry = .storageUnavailable
             default: retry = .never
             }
@@ -393,6 +421,8 @@ public final class ApprovalRequestCoordinator {
     private func admit(_ draft: ApprovalRequestDraft, command: RetainedCommandCapture?, now: AuthorityMoment,
                        receiptTimeMs: UInt64?) throws -> IssuedRequestPayload {
         try checkClock(now)
+        let admission = try acquireUpdateAdmission()
+        defer { admission?.close() }
         guard draft.firstObservedAt.epoch == clockEpoch, draft.firstObservedAt.milliseconds <= now.milliseconds,
               now.milliseconds < draft.deadlineMilliseconds,
               draft.observationID == nil || draft.observationID?.count == 16,

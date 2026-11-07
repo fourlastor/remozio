@@ -91,6 +91,106 @@ final class ApprovalRequestCoordinatorTests: XCTestCase {
         }
     }
 
+    func testCombinedAccountAdmissionPreservesExistingPublicAdapterRequests() throws {
+        for (kind, choice) in [(RequestKind.onePasswordAccess, ActionChoice.approveAccess),
+                               (.onePasswordUnlock, .unlockVault), (.littleSnitch, .allowOnce)] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true), gate = try UpdateAdmissionProvisioningFixture()
+            defer { try? db.close() }
+            let contract = try RequestContract(requestKind: kind, wireVersion: 1, schemaVersion: 1)
+            let capabilities = ContractCapabilities(contracts: [contract: []])
+            _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+            let writer = try db.write { try $0.createEpoch(descriptor(3)) }, requests = try owner(db, writer)
+            let files = try gate.prepare(account: id(2))
+            try requests.attachReleaseActivityBarrier(gate.activity.open())
+            try requests.attachUpdateAdmissionBoundary(.init(machine: gate.open(files, scope: .machine),
+                account: gate.open(files, scope: .account(id(2)))))
+            let actions = [CapturedAction(choice: choice, scope: .currentRequest), CapturedAction(choice: .decline, scope: .currentRequest)]
+            let observed = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]), actions: actions,
+                firstObservedAt: now(100), deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+            let request = try requests.admit(observed, now: now(), receiptTimeMs: nil)
+            let drain = try gate.open(files, scope: .account(id(2))).beginDrain(); defer { drain.close() }
+            XCTAssertThrowsError(try requests.admit(observed, now: now(), receiptTimeMs: nil)) {
+                XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+            }
+            XCTAssertThrowsError(try gate.activity.open().acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+            let presented = try requests.markPresented(requestID: request.requestID, now: now(120), receiptTimeMs: nil)
+            XCTAssertEqual(presented.phase, .presented); XCTAssertEqual(presented.deadlineMilliseconds, 200)
+            _ = try requests.expirePending(now: now(200), receiptTimeMs: nil)
+            XCTAssertEqual(try requests.state(requestID: request.requestID).phase, .expired)
+            let idle = try gate.activity.open().acquireExclusive(); idle.close()
+        }
+    }
+
+    func testCombinedAdmissionRejectsAForeignAccountScope() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), requests = try owner(db, writer)
+        defer { try? db.close() }
+        let gate = try UpdateAdmissionProvisioningFixture(), files = try gate.prepare()
+        try requests.attachReleaseActivityBarrier(gate.activity.open())
+        XCTAssertThrowsError(try requests.attachUpdateAdmissionBoundary(.init(machine: gate.open(files, scope: .machine),
+            account: gate.open(files, scope: .account(gate.account))))) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidConfiguration)
+        }
+    }
+
+    func testUpdateDrainBlocksPublicAdapterCreationButPreservesNormalPendingExpiry() throws {
+        for (kind, choice) in [(RequestKind.onePasswordAccess, ActionChoice.approveAccess),
+                               (.onePasswordUnlock, .unlockVault), (.littleSnitch, .allowOnce)] {
+            let fixture = try Fixture(), db = try open(fixture, initialize: true), gate = try UpdateAdmissionTestFixture()
+            defer { try? db.close() }
+            let contract = try RequestContract(requestKind: kind, wireVersion: 1, schemaVersion: 1)
+            let capabilities = ContractCapabilities(contracts: [contract: []])
+            _ = try db.write { try $0.configureApprovalAuthority(capabilities: capabilities, allowedContracts: [contract]) }
+            let writer = try db.write { try $0.createEpoch(descriptor(3)) }, requests = try owner(db, writer)
+            let updater = try gate.open(); try requests.attachReleaseActivityBarrier(gate.activity.open()); try requests.attachUpdateAdmissionBarrier(gate.open())
+            let actions = [CapturedAction(choice: choice, scope: .currentRequest), CapturedAction(choice: .decline, scope: .currentRequest)]
+            let observed = ApprovalRequestDraft(contract: contract, requiredFeatures: [], capture: Data([0xa0]), actions: actions,
+                firstObservedAt: now(100), deadlineMilliseconds: 200, createdUnixMilliseconds: 1000, expiresUnixMilliseconds: 1100)
+            let drain = try updater.beginDrain()
+            XCTAssertThrowsError(try requests.admit(observed, now: now(), receiptTimeMs: nil)) {
+                XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+            }
+            XCTAssertTrue(try events(db, writer).isEmpty)
+            drain.close()
+            let request = try requests.admit(observed, now: now(), receiptTimeMs: nil)
+            XCTAssertEqual(request.permittedActions, actions)
+            let again = try updater.beginDrain(); defer { again.close() }
+            let presented = try requests.markPresented(requestID: request.requestID, now: now(120), receiptTimeMs: nil)
+            XCTAssertEqual(presented.phase, .presented); XCTAssertEqual(presented.deadlineMilliseconds, 200)
+            _ = try requests.expirePending(now: now(200), receiptTimeMs: nil)
+            XCTAssertEqual(try requests.state(requestID: request.requestID).phase, .expired)
+        }
+    }
+
+    func testUpdateAdmissionAttachmentRejectsReplacementAndRetroactiveOwnership() throws {
+        let fixture = try Fixture(), authority = try journalOwner(fixture), gate = try UpdateAdmissionTestFixture()
+        try authority.attachReleaseActivityBarrier(gate.activity.open())
+        try authority.attachUpdateAdmissionBarrier(gate.open())
+        XCTAssertThrowsError(try authority.attachUpdateAdmissionBarrier(gate.open())) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidConfiguration)
+        }
+        let otherFixture = try Fixture(), other = try journalOwner(otherFixture), draft = try draft(), at = now()
+        try other.attachReleaseActivityBarrier(gate.activity.open())
+        let request = try other.withRequests { try $0.admitFixture(draft, now: at, receiptTimeMs: nil) }
+        XCTAssertThrowsError(try other.attachUpdateAdmissionBarrier(gate.open())) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidConfiguration)
+        }
+        let id = request.requestID
+        XCTAssertEqual(try other.withRequests { try $0.state(requestID: id).phase }, .queued)
+    }
+
+    func testUpdateAdmissionCannotAttachWithoutExistingLiveWorkOwnership() throws {
+        let fixture = try Fixture(), (db, writer) = try setup(fixture), requests = try owner(db, writer), gate = try UpdateAdmissionTestFixture()
+        defer { try? db.close() }
+        XCTAssertThrowsError(try requests.attachUpdateAdmissionBarrier(gate.open())) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidConfiguration)
+        }
+        let otherFixture = try Fixture(), authority = try journalOwner(otherFixture)
+        XCTAssertThrowsError(try authority.attachUpdateAdmissionBarrier(gate.open())) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .invalidConfiguration)
+        }
+        try requests.attachReleaseActivityBarrier(gate.activity.open()); try requests.attachUpdateAdmissionBarrier(gate.open())
+    }
+
     func testPublicGenericNonCommandAdmissionPreservesExistingActions() throws {
         for (kind, choice) in [(RequestKind.onePasswordAccess, ActionChoice.approveAccess),
                                (.onePasswordUnlock, .unlockVault), (.littleSnitch, .allowOnce)] {

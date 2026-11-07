@@ -141,6 +141,19 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Optional installed capability. The host validates machine provisioning before attaching, before listeners start.
+    func attachUpdateAdmissionBarrier(_ barrier: UpdateAdmissionBarrier) throws {
+        try attachUpdateAdmissionBoundary(.init(machine: barrier))
+    }
+
+    func attachUpdateAdmissionBoundary(_ boundary: UpdateAdmissionBoundary) throws {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard releaseActivity != nil, commandExecutions.isEmpty, let requests else { throw ApprovalCoordinatorError.invalidConfiguration }
+            try requests.attachUpdateAdmissionBoundary(boundary)
+        }
+    }
+
     /// Pairing and management work use the installed authority's existing machine barrier.
     /// The optional result belongs only to raw component fixtures without an installed registration.
     func acquireReleaseActivity() throws -> ReleaseActivityToken? {
@@ -351,10 +364,20 @@ public final class AuthorityJournal: @unchecked Sendable {
         defer { requestOperationActive = false }
         do { try checkCancellation() }
         catch { try? attempt.send(.uncertain(.admissionRejected)); attempt.close(); throw error }
-        guard requests != nil else {
+        guard let admissionOwner = requests else {
             try? attempt.send(commandRefusal(profile: profile, submission: submission, reason: .authorityStarting))
             attempt.close(); throw CommandAdmissionControllerError.refused(.authorityStarting)
         }
+        let admission: UpdateAdmissionLease?
+        do { admission = try admissionOwner.acquireUpdateAdmission() }
+        catch {
+            let reason: CommandAdmissionRejectionReason? = error as? UpdateAdmissionBarrierError == .busy ? .updateWaiting : nil
+            try? attempt.send(commandRefusal(profile: profile, submission: submission, reason: reason))
+            attempt.close()
+            if let reason { throw CommandAdmissionControllerError.refused(reason) }
+            throw error
+        }
+        defer { admission?.close() }
         let resolution: CommandAdmissionResolution
         do { resolution = try resolve(attempt.submission) }
         catch { try? attempt.send(.uncertain(.admissionRejected)); attempt.close(); throw error }
