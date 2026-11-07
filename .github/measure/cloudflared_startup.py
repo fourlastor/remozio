@@ -11,6 +11,11 @@ import socket, threading
 edge = "127.0.0.1:7844"
 if variant in ("loopback", "hold", "close"):
     profile += '(allow network-outbound (remote ip "localhost:*"))'
+if variant == "backlog":
+    listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(64)
+    port = listener.getsockname()[1]
+    edge = f"127.0.0.1:{port}"
+    profile += f'(allow network-outbound (remote ip "localhost:{port}"))'
 if variant in ("hold", "close"):
     listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(64)
     edge = f"127.0.0.1:{listener.getsockname()[1]}"
