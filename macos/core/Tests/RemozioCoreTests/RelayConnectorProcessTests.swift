@@ -13,24 +13,24 @@ final class RelayConnectorProcessTests: XCTestCase, @unchecked Sendable {
         let port: UInt16
         private let descriptor: Int32
         init() throws {
-            let fd = socket(AF_INET, SOCK_STREAM, 0)
+            let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
             guard fd >= 0 else { throw RelayConnectorProcess.Failure.system(errno) }
             var address = sockaddr_in(); address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
             address.sin_family = sa_family_t(AF_INET); address.sin_addr.s_addr = inet_addr("127.0.0.1")
             let bound = withUnsafePointer(to: &address) { value in
-                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
             }
             var length = socklen_t(MemoryLayout<sockaddr_in>.size)
             let loaded = withUnsafeMutablePointer(to: &address) { value in
-                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+                value.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.getsockname(fd, $0, &length) }
             }
             // Connections wait in the backlog; nothing accepts or reads them.
-            guard fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, bound == 0, loaded == 0, listen(fd, 64) == 0 else {
-                let code = errno; close(fd); throw RelayConnectorProcess.Failure.system(code)
+            guard Darwin.fcntl(fd, F_SETFD, FD_CLOEXEC) == 0, bound == 0, loaded == 0, Darwin.listen(fd, 64) == 0 else {
+                let code = errno; _ = Darwin.close(fd); throw RelayConnectorProcess.Failure.system(code)
             }
             descriptor = fd; port = UInt16(bigEndian: address.sin_port)
         }
-        deinit { close(descriptor) }
+        deinit { _ = Darwin.close(descriptor) }
     }
     final class Fixture: @unchecked Sendable {
         let files: ServiceReleaseActivityFixture
