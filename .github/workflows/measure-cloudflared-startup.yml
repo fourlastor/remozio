@@ -1,0 +1,33 @@
+name: Measure cloudflared startup (#520)
+on:
+  workflow_dispatch:
+  push:
+    branches: [measure/cloudflared-startup-520]
+permissions:
+  contents: read
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    runs-on: macos-26
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the pinned connector
+        run: |
+          python3 - <<'PY'
+          import sys; sys.path.insert(0, 'scripts')
+          import cloudflared_artifact as c, urllib.request, pathlib
+          value = c.pin()
+          data = urllib.request.urlopen(c.archive_url(value)).read()
+          binary = c.binary_from_archive(data, value)
+          path = pathlib.Path('/tmp/RemozioCloudflared'); path.write_bytes(binary); path.chmod(0o755)
+          PY
+      - name: Resolver state
+        run: scutil --dns | head -40; cat /etc/resolv.conf || true
+      - name: Measure
+        run: python3 .github/measure/cloudflared_startup.py /tmp/RemozioCloudflared 25 shard-${{ matrix.shard }}
