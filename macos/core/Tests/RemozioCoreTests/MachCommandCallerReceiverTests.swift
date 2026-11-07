@@ -509,6 +509,156 @@ final class MachCommandCallerReceiverTests: XCTestCase {
             checkCancellation: checkCancellation)
     }
 
+    func testUpdateDrainRefusesBeforeCaptureAndKeepsTheOriginalInputUnread() throws {
+        for checkpointed in [false, true] {
+            let f = try CommandRequestFixture(checkpointed: checkpointed, owned: true), gate = try UpdateAdmissionTestFixture()
+            let updater = try gate.open(), drain = try updater.beginDrain(), authority = try XCTUnwrap(f.authority)
+            try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open())
+            defer { drain.close() }
+            let reply = try Endpoint()
+            var descriptors: [Int32] = [-1, -1]
+            XCTAssertEqual(pipe(&descriptors), 0); defer { for fd in descriptors { Darwin.close(fd) } }
+            XCTAssertEqual(Darwin.write(descriptors[1], "raw", 3), 3)
+            let (attempt, submission, profile) = try admissionAttempt(reply: reply, executable: "/missing-before-capture", descriptor: descriptors[0])
+            let before = try f.auditRecordCount
+            XCTAssertThrowsError(try authority.admitCommandAttempt(attempt, expression: selfExpression(),
+                resolve: { _ in XCTFail("Drain called the capture resolver"); return .refuse(.policyRejected) },
+                draft: { _ in XCTFail("Drain captured a command"); throw ApprovalCoordinatorError.invalidDraft },
+                now: { XCTFail("Drain requested a capture clock"); return f.now() }, receiptTimeMs: nil)) {
+                XCTAssertEqual($0 as? CommandAdmissionControllerError, .refused(.updateWaiting))
+            }
+            XCTAssertEqual(try typedOutcome(reply, submission: submission, profile: profile), .notAdmitted(.updateWaiting, .updateWaiting))
+            XCTAssertNil(try f.reservation(submission.binding.id)); XCTAssertEqual(try f.auditRecordCount, before)
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+            var pending = pollfd(fd: descriptors[0], events: Int16(POLLIN), revents: 0)
+            guard poll(&pending, 1, 1000) == 1 else { return XCTFail("Blocked admission consumed original input") }
+            var bytes = [UInt8](repeating: 0, count: 3)
+            XCTAssertEqual(Darwin.read(descriptors[0], &bytes, 3), 3); XCTAssertEqual(Data(bytes), Data("raw".utf8))
+            drain.close()
+            let freshReply = try Endpoint(), (fresh, original, selected) = try admissionAttempt(reply: freshReply)
+            let request = try admitAttempt(fresh, fixture: f)
+            guard case .admitted(let admitted) = try typedOutcome(freshReply, submission: original, profile: selected) else { return XCTFail() }
+            XCTAssertEqual(admitted.requestID, request.requestID)
+        }
+    }
+
+    func testUpdateAdmissionLeaseCoversResolutionDraftAndCommitButNotExistingDecisions() throws {
+        for checkpointed in [false, true] {
+            let f = try CommandRequestFixture(checkpointed: checkpointed, owned: true), gate = try UpdateAdmissionTestFixture()
+            let updater = try gate.open(), authority = try XCTUnwrap(f.authority), context = try admissionContext()
+            try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open())
+            let reply = try Endpoint(), (attempt, original, profile) = try admissionAttempt(reply: reply)
+            let request = try authority.admitCommandAttempt(attempt, expression: selfExpression(), resolve: { _ in
+                XCTAssertThrowsError(try updater.beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+                return .capture(context)
+            }, draft: { capture in
+                XCTAssertThrowsError(try updater.beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+                return self.admissionDraft(capture, fixture: f)
+            }, now: {
+                XCTAssertThrowsError(try updater.beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+                return f.now()
+            }, receiptTimeMs: nil)
+            guard case .admitted(let admitted) = try typedOutcome(reply, submission: original, profile: profile) else { return XCTFail() }
+            XCTAssertEqual(admitted.requestID, request.requestID)
+            let drain = try updater.beginDrain(); defer { drain.close() }
+            let installer = try gate.activity.open()
+            XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
+            let id = request.requestID, at = f.now(120)
+            let body = try DecisionPayload(macID: request.macID, accountID: request.accountID, requestID: id,
+                requestDigest: request.requestDigest(bodyLimits: f.limits, signingLimits: f.limits), challenge: request.challenge,
+                phoneID: Data(repeating: 5, count: 16), keyID: Data(repeating: 7, count: 16),
+                action: request.permittedActions.first { $0.choice == .decline }!).encode(limits: f.limits)
+            let signature = try f.decision.signature(for: SigningInput.make(wireVersion: 1, messageType: .decision, purpose: .cancellation,
+                canonicalPayload: body, payloadLimits: f.limits, inputLimits: f.limits)).rawRepresentation
+            let receipt = try authority.withRequests { requests in
+                try requests.consume(canonicalDecision: body, signature: signature, authenticatedPhoneID: Data(repeating: 5, count: 16),
+                    authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16), now: at, receiptTimeMs: nil)
+            }
+            XCTAssertEqual(receipt.event.outcome, .noDispatch)
+            XCTAssertEqual(try authority.withRequests { try $0.state(requestID: id).phase }, .declined)
+            try drain.validate()
+            let quiet = try installer.acquireExclusive(); quiet.close()
+        }
+    }
+
+    func testUpdateDrainCannotContradictHistoricalSubmissionOrNonceOwnership() throws {
+        for checkpointed in [false, true] {
+            for reuseNonce in [false, true] {
+                let f = try CommandRequestFixture(checkpointed: checkpointed, owned: true), gate = try UpdateAdmissionTestFixture()
+                let updater = try gate.open(), authority = try XCTUnwrap(f.authority)
+                try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open())
+                let originalReply = try Endpoint(), (first, original, selected) = try admissionAttempt(reply: originalReply)
+                let request = try admitAttempt(first, fixture: f)
+                _ = try typedOutcome(originalReply, submission: original, profile: selected)
+                let id = request.requestID, at = f.now(120)
+                try authority.withRequests { requests in
+                    _ = try requests.retirePending(requestID: id, reason: .cancelled, now: at, receiptTimeMs: nil)
+                    try requests.forgetTerminal(requestID: id)
+                }
+                let drain = try updater.beginDrain(); defer { drain.close() }
+                let binding = CapturedSubmission(id: reuseNonce ? Data(repeating: 88, count: 16) : original.binding.id,
+                    nonce: reuseNonce ? original.binding.nonce : Data(repeating: 89, count: 32), callerBinding: assemblyBinding)
+                let reply = try Endpoint(), (duplicate, changed, profile) = try admissionAttempt(reply: reply, binding: binding)
+                let before = try f.auditRecordCount
+                XCTAssertThrowsError(try admitAttempt(duplicate, fixture: f))
+                XCTAssertEqual(try typedOutcome(reply, submission: changed, profile: profile), .uncertain(.duplicateSubmission))
+                XCTAssertEqual(try f.auditRecordCount, before); XCTAssertEqual(try sendReferences(reply.port), 1)
+            }
+        }
+    }
+
+    func testUpdateDrainAbsenceReadFailureCannotGrantAutomaticRetry() throws {
+        for checkpointed in [false, true] {
+            let f = try CommandRequestFixture(checkpointed: checkpointed, owned: true), gate = try UpdateAdmissionTestFixture()
+            let updater = try gate.open(), authority = try XCTUnwrap(f.authority)
+            try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open())
+            let drain = try updater.beginDrain(); defer { drain.close() }
+            let reply = try Endpoint(), (attempt, original, profile) = try admissionAttempt(reply: reply)
+            try f.sql("DROP TABLE command_submissions_v1")
+            XCTAssertThrowsError(try admitAttempt(attempt, fixture: f))
+            XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .uncertain(.storageFailure))
+            XCTAssertEqual(try sendReferences(reply.port), 1)
+        }
+    }
+
+    func testUpdateDrainFinalAdmissionRefusalClosesCapturedObjectsWithTheExactRetryClass() throws {
+        for checkpointed in [false, true] {
+            for owned in [false, true] {
+                let f = try CommandRequestFixture(checkpointed: checkpointed, owned: owned), gate = try UpdateAdmissionTestFixture()
+                let updater = try gate.open()
+                if let authority = f.authority { try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open()) }
+                else { try f.requests.attachReleaseActivityBarrier(gate.activity.open()); try f.requests.attachUpdateAdmissionBarrier(gate.open()) }
+                let reply = try Endpoint(), (command, original, profile) = try typedRequestCommand(reply: reply)
+                let drain = try updater.beginDrain(); defer { drain.close() }
+                let before = try f.auditRecordCount
+                XCTAssertThrowsError(try owned ? admitOwnedCommand(command, fixture: f) : admitCommand(command, fixture: f)) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+                XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .notAdmitted(.updateWaiting, .updateWaiting))
+                XCTAssertNil(try f.reservation(original.binding.id)); XCTAssertEqual(try f.auditRecordCount, before)
+                XCTAssertThrowsError(try command.withBorrowedInputDescriptor { _ in () })
+                XCTAssertEqual(try sendReferences(reply.port), 1)
+            }
+        }
+    }
+
+    func testUpdateWaitingErrorsFromCallbacksCannotForgeAnAdmissionRefusal() throws {
+        for checkpointed in [false, true] {
+            let f = try CommandRequestFixture(checkpointed: checkpointed, owned: true), gate = try UpdateAdmissionTestFixture()
+            let updater = try gate.open(), authority = try XCTUnwrap(f.authority)
+            try authority.attachReleaseActivityBarrier(gate.activity.open()); try authority.attachUpdateAdmissionBarrier(gate.open())
+            let reply = try Endpoint(), (attempt, original, profile) = try admissionAttempt(reply: reply)
+            XCTAssertThrowsError(try authority.admitCommandAttempt(attempt, expression: selfExpression(),
+                resolve: { _ in throw UpdateAdmissionBarrierError.busy },
+                draft: { _ in XCTFail(); throw ApprovalCoordinatorError.invalidDraft }, now: { f.now() }, receiptTimeMs: nil))
+            XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .uncertain(.admissionRejected))
+            let drain = try updater.beginDrain(); drain.close()
+        }
+        let f = try CommandRequestFixture(), reply = try Endpoint(), (command, original, profile) = try typedRequestCommand(reply: reply)
+        XCTAssertThrowsError(try admitCommand(command, fixture: f, checkCancellation: { throw UpdateAdmissionBarrierError.busy }))
+        XCTAssertEqual(try typedOutcome(reply, submission: original, profile: profile), .uncertain(.admissionRejected))
+    }
+
     func testAdmissionAttemptAuthenticatesBeforeCaptureAndPreservesUnreadInputOnAdmission() throws {
         for checkpointed in [false, true] {
             let fixture = try CommandRequestFixture(checkpointed: checkpointed, owned: true), reply = try Endpoint()
