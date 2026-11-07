@@ -14,29 +14,32 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         let transport: TransportPairingStartupConfiguration
         let phoneRoutingVersion: UInt64?
         let phoneAuditVersion: UInt64?
+        let phoneUpdateSchedulingVersion: UInt64?
         let consumerHosts: GatewaySettingsNativeHostPlan?
         let authorityJob: InstalledAccountJobManifest
         let transportJob: InstalledAccountJobManifest
         @inline(never)
         init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
              transport: TransportPairingStartupConfiguration, phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?,
-             consumerHosts: GatewaySettingsNativeHostPlan?, authorityJob: InstalledAccountJobManifest,
-             transportJob: InstalledAccountJobManifest) {
+             phoneUpdateSchedulingVersion: UInt64?, consumerHosts: GatewaySettingsNativeHostPlan?,
+             authorityJob: InstalledAccountJobManifest, transportJob: InstalledAccountJobManifest) {
             self.reference = reference; self.bundlePath = bundlePath; self.host = host; self.transport = transport
             self.phoneRoutingVersion = phoneRoutingVersion; self.phoneAuditVersion = phoneAuditVersion
+            self.phoneUpdateSchedulingVersion = phoneUpdateSchedulingVersion
             self.consumerHosts = consumerHosts; self.authorityJob = authorityJob; self.transportJob = transportJob
         }
     }
     private let storage: Storage
     static let formatName = "runtime.activation-plan"
-    static let supportedVersions: Set<UInt64> = [1, 2, 3, 4]
+    static let supportedVersions: Set<UInt64> = [1, 2, 3, 4, 5]
     var reference: RuntimeMaterialReference { storage.reference }
     var bundlePath: String { storage.bundlePath }
     var host: InstalledAuthorityCommandConfiguration { storage.host }
     var transport: TransportPairingStartupConfiguration { storage.transport }
     var phoneRoutingVersion: UInt64? { storage.phoneRoutingVersion }
     var phoneAuditVersion: UInt64? { storage.phoneAuditVersion }
-    var formatVersion: UInt64 { phoneAuditVersion != nil ? 4 : phoneRoutingVersion != nil ? 3 : consumerHosts == nil ? 1 : 2 }
+    var phoneUpdateSchedulingVersion: UInt64? { storage.phoneUpdateSchedulingVersion }
+    var formatVersion: UInt64 { phoneUpdateSchedulingVersion != nil ? 5 : phoneAuditVersion != nil ? 4 : phoneRoutingVersion != nil ? 3 : consumerHosts == nil ? 1 : 2 }
     var consumerHosts: GatewaySettingsNativeHostPlan? { storage.consumerHosts }
     var gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? { consumerHosts?.gateway }
     var authorityJob: InstalledAccountJobManifest { storage.authorityJob }
@@ -62,7 +65,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: inventory.bundlePath,
                 policy: host.codePolicy).validateRelease(gatewaySettingsRelease)
         }
-        let phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?
+        let phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?, phoneUpdateSchedulingVersion: UInt64?
         if let release = gatewaySettingsRelease {
             phoneRoutingVersion = try PhoneRoutingReleaseContract.selectedVersion(in: release, policy: host.codePolicy,
                 nativeHosts: reference.serviceActivity != nil,
@@ -70,14 +73,18 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             phoneAuditVersion = try PhoneAuditReleaseContract.selectedVersion(in: release, policy: host.codePolicy,
                 nativeHosts: reference.serviceActivity != nil,
                 maximumPayloadBytes: host.command.presence.wake.request.service.maximumPayloadBytes)
-        } else { phoneRoutingVersion = nil; phoneAuditVersion = nil }
+            phoneUpdateSchedulingVersion = try PhoneUpdateSchedulingReleaseContract.selectedVersion(in: release, policy: host.codePolicy,
+                nativeHosts: reference.serviceActivity != nil,
+                maximumPayloadBytes: host.command.presence.wake.request.service.maximumPayloadBytes)
+        } else { phoneRoutingVersion = nil; phoneAuditVersion = nil; phoneUpdateSchedulingVersion = nil }
         if reference.auditDeliveryVersion != nil {
             guard let gatewaySettingsRelease else { throw RuntimeActivationError.incomplete }
             try PhoneAuditReleaseContract.validateDelivery(gatewaySettingsRelease, policy: host.codePolicy)
         }
         try self.init(reference: reference, bundlePath: inventory.bundlePath, host: host,
             transport: bundle.transport, gatewaySettingsHost: bundle.gatewaySettingsHost,
-            phoneRoutingVersion: phoneRoutingVersion, phoneAuditVersion: phoneAuditVersion)
+            phoneRoutingVersion: phoneRoutingVersion, phoneAuditVersion: phoneAuditVersion,
+            phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
         try validate(account: account, reference: reference)
     }
     /// The native file verifier uses the pinned plan policy. The owner independently binds it to the retained import.
@@ -106,12 +113,12 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             wake: transport.wake, relayPort: transport.relayPort, settingsHost: consumers.transport)
         return try Self(reference: intent.target, bundlePath: bundlePath, host: nextHost, transport: nextTransport,
             gatewaySettingsHost: consumers.gateway, phoneRoutingVersion: phoneRoutingVersion,
-            phoneAuditVersion: PhoneAuditReleaseContract.version)
+            phoneAuditVersion: PhoneAuditReleaseContract.version, phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
     }
     private init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
                  transport: TransportPairingStartupConfiguration,
-                 gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? = nil,
-                 phoneRoutingVersion: UInt64? = nil, phoneAuditVersion: UInt64? = nil) throws {
+                 gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? = nil, phoneRoutingVersion: UInt64? = nil,
+                 phoneAuditVersion: UInt64? = nil, phoneUpdateSchedulingVersion: UInt64? = nil) throws {
         let selected: GatewaySettingsNativeHostPlan?
         if reference.serviceActivity != nil {
             let plan = try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: bundlePath, policy: host.codePolicy)
@@ -128,6 +135,10 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         }
         guard phoneAuditVersion == nil || (phoneAuditVersion == PhoneAuditReleaseContract.version && selected != nil &&
             host.command.presence.wake.request.service.maximumPayloadBytes > PhoneAuditFrame.overheadBytes) else {
+            throw RuntimeActivationError.invalidPlan
+        }
+        guard phoneUpdateSchedulingVersion == nil || (phoneUpdateSchedulingVersion == PhoneUpdateSchedulingReleaseContract.version && selected != nil &&
+            host.command.presence.wake.request.service.maximumPayloadBytes >= PhoneUpdateSchedulingFrame.maximumBytes) else {
             throw RuntimeActivationError.invalidPlan
         }
         let admittedAudits = Set(reference.auditDeliveryVersion.map { [$0] } ?? [])
@@ -171,7 +182,7 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         else { transportJob = try .init(accountID: services.accountID, role: .transport, executionUID: claim.number, userName: claim.name, bundlePath: bundlePath) }
         storage = .init(reference: reference, bundlePath: bundlePath, host: host, transport: transport,
             phoneRoutingVersion: phoneRoutingVersion, phoneAuditVersion: phoneAuditVersion,
-            consumerHosts: selected, authorityJob: authorityJob, transportJob: transportJob)
+            phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion, consumerHosts: selected, authorityJob: authorityJob, transportJob: transportJob)
     }
     func validate(account: AccountPreparationIntent, reference: RuntimeMaterialReference) throws {
         try self.reference.validate(account: account, services: reference.services)
@@ -210,8 +221,14 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .bytes(try reference.encoded),
             2: .text(bundlePath), 3: .bytes(host.canonicalBytes), 4: .bytes(transport.canonicalBytes)]
         if let gatewaySettingsHost { fields[5] = .bytes(try gatewaySettingsHost.encoded) }
-        if formatVersion >= 3 { fields[6] = phoneRoutingVersion.map(CBORValue.unsigned) ?? .null }
-        if formatVersion == 4 { fields[7] = phoneAuditVersion.map(CBORValue.unsigned) ?? .null }
+        if let phoneUpdateSchedulingVersion {
+            fields[6] = phoneRoutingVersion.map(CBORValue.unsigned) ?? .null
+            fields[7] = phoneAuditVersion.map(CBORValue.unsigned) ?? .null
+            fields[8] = .unsigned(phoneUpdateSchedulingVersion)
+        } else if let phoneAuditVersion {
+            fields[6] = phoneRoutingVersion.map(CBORValue.unsigned) ?? .null
+            fields[7] = .unsigned(phoneAuditVersion)
+        } else if let phoneRoutingVersion { fields[6] = .unsigned(phoneRoutingVersion) }
         return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
@@ -226,24 +243,34 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             guard case .bytes(let metadata) = f[5] else { throw RuntimeActivationError.invalidPlan }
             gateway = try .decode(metadata)
         }
-        let phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?
+        let phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?, phoneUpdateSchedulingVersion: UInt64?
         if version >= 3 {
             switch f[6] {
             case .unsigned(let selected) where selected == PhoneRoutingReleaseContract.version: phoneRoutingVersion = selected
-            case .null where version == 4: phoneRoutingVersion = nil
+            case .null where version >= 4: phoneRoutingVersion = nil
             default: throw RuntimeActivationError.invalidPlan
             }
         } else { phoneRoutingVersion = nil }
-        if version == 4 {
-            guard f[7] == .unsigned(PhoneAuditReleaseContract.version) else { throw RuntimeActivationError.invalidPlan }
-            phoneAuditVersion = PhoneAuditReleaseContract.version
+        if version >= 4 {
+            switch f[7] {
+            case .unsigned(let selected) where selected == PhoneAuditReleaseContract.version: phoneAuditVersion = selected
+            case .null where version >= 5: phoneAuditVersion = nil
+            default: throw RuntimeActivationError.invalidPlan
+            }
         } else { phoneAuditVersion = nil }
+        if version >= 5 {
+            guard case .unsigned(let selected) = f[8], selected == PhoneUpdateSchedulingReleaseContract.version else {
+                throw RuntimeActivationError.invalidPlan
+            }
+            phoneUpdateSchedulingVersion = selected
+        } else { phoneUpdateSchedulingVersion = nil }
         let result = try Self(reference: .decode(reference), bundlePath: path, host: .decode(host),
             transport: .decode(transport), gatewaySettingsHost: gateway,
-            phoneRoutingVersion: phoneRoutingVersion, phoneAuditVersion: phoneAuditVersion)
+            phoneRoutingVersion: phoneRoutingVersion, phoneAuditVersion: phoneAuditVersion,
+            phoneUpdateSchedulingVersion: phoneUpdateSchedulingVersion)
         guard try result.encoded == bytes else { throw RuntimeActivationError.invalidPlan }; return result
     }
-    static var limits: CBORLimits { get throws { try .init(maxBytes: 262144, maxDepth: 1, maxItems: 17) } }
+    static var limits: CBORLimits { get throws { try .init(maxBytes: 262144, maxDepth: 1, maxItems: 19) } }
 
     /// Retains published values after validating their account and release scope.
     static func retainingPublished(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
@@ -274,11 +301,14 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
             nativeHosts: reference.serviceActivity != nil, maximumPayloadBytes: maximum)
         let audit = try PhoneAuditReleaseContract.selectedVersion(in: installedRelease, policy: host.codePolicy,
             nativeHosts: reference.serviceActivity != nil, maximumPayloadBytes: maximum)
+        let update = try PhoneUpdateSchedulingReleaseContract.selectedVersion(in: installedRelease, policy: host.codePolicy,
+            nativeHosts: reference.serviceActivity != nil, maximumPayloadBytes: maximum)
         if reference.auditDeliveryVersion != nil {
             try PhoneAuditReleaseContract.validateDelivery(installedRelease, policy: host.codePolicy)
         }
         let plan = try Self(reference: reference, bundlePath: inventory.bundlePath, host: host, transport: transport,
-            gatewaySettingsHost: gatewaySettingsHost, phoneRoutingVersion: routing, phoneAuditVersion: audit)
+            gatewaySettingsHost: gatewaySettingsHost, phoneRoutingVersion: routing, phoneAuditVersion: audit,
+            phoneUpdateSchedulingVersion: update)
         try plan.validate(account: account, reference: reference)
         _ = try plan.configurationBundle(account: account, initialization: initialization, inventory: inventory, clients: clients)
         return plan

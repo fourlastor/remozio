@@ -14,7 +14,7 @@ final class RuntimeActivationFixture {
     let nativeRelease: SignedReleaseEvidence?
     init(firstServiceUID: UInt32 = 20000, nativeConsumerHosts: Bool = false, ownedInstalledBundle: Bool = false,
          phoneRouting: Bool = false, phoneAudit: Bool = false, auditDelivery: Bool = false,
-         materialAuditDelivery: Bool? = nil,
+         phoneUpdateScheduling: Bool = false, materialAuditDelivery: Bool? = nil,
          releaseEdit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws {
         let roles: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway, .commandFrontend, .commandMonitor, .commandChild, .setupController]
         let policy = try AuthorityCodePolicy(entries: roles.map { role in
@@ -22,7 +22,8 @@ final class RuntimeActivationFixture {
                 installedGeneration: 1, minimumGeneration: 1, codeDirectoryHash: Data(repeating: UInt8(role.rawValue), count: 20), active: true)
         })
         nativeRelease = nativeConsumerHosts ? try NativeHostReleaseFixture.make(policy: policy,
-            phoneRouting: phoneRouting, phoneAudit: phoneAudit, auditDelivery: auditDelivery, edit: releaseEdit) : nil
+            phoneRouting: phoneRouting, phoneAudit: phoneAudit, auditDelivery: auditDelivery,
+            phoneUpdateScheduling: phoneUpdateScheduling, edit: releaseEdit) : nil
         f = try .init(policy: policy, releaseDigest: nativeRelease.map { try InstallationInventory.digest($0) }, ownedInstalledBundle: ownedInstalledBundle)
         machine = try f.open(initialize: true)
         account = try f.resume(machine, f.begin(machine))

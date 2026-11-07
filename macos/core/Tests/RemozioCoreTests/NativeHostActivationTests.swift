@@ -7,12 +7,12 @@ import XCTest
 /// Synthetic signed evidence checks declarations only. It does not prove native signature or service admission.
 enum NativeHostReleaseFixture {
     static func make(policy: AuthorityCodePolicy, phoneRouting: Bool = false, phoneAudit: Bool = false,
-                     auditDelivery: Bool = false,
+                     auditDelivery: Bool = false, phoneUpdateScheduling: Bool = false,
                      edit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws -> SignedReleaseEvidence {
         let entries = policy.entries.filter(\.active)
         let components = try entries.map { code in
             var formats: [ReleaseFormat] = []
-            let planVersions: Set<UInt64> = phoneAudit ? [1, 2, 3, 4] : phoneRouting ? [1, 2, 3] : [1, 2]
+            let planVersions: Set<UInt64> = phoneUpdateScheduling ? [1, 2, 3, 4, 5] : phoneAudit ? [1, 2, 3, 4] : phoneRouting ? [1, 2, 3] : [1, 2]
             let materialVersions: Set<UInt64> = auditDelivery ? [1, 2, 3] : [1, 2]
             // Audit-capable releases also declare the local maintenance interface and its progress codec.
             if auditDelivery, [.app, .setupController].contains(code.role) {
@@ -67,6 +67,17 @@ enum NativeHostReleaseFixture {
             if phoneAudit {
                 for record in try PhoneAuditReleaseContract.requirements where record.role == code.role && record.name != RuntimeActivationPlan.formatName {
                     formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
+                }
+            }
+            if phoneUpdateScheduling {
+                for record in try PhoneUpdateSchedulingReleaseContract.requirements where record.role == code.role {
+                    if let index = formats.firstIndex(where: { $0.name == record.name }) {
+                        let current = formats[index]
+                        formats[index] = try .init(name: current.name, readers: current.readers.union(record.readVersions),
+                            writers: current.writers.union(record.writeVersions))
+                    } else {
+                        formats.append(try .init(name: record.name, readers: record.readVersions, writers: record.writeVersions))
+                    }
                 }
             }
             for item in try CommandMonitorActivityContract.requirements where item.role == code.role {
