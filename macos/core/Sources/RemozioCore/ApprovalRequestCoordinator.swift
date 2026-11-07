@@ -88,6 +88,8 @@ public final class ApprovalRequestCoordinator {
     private var lastTime: UInt64?
     private var stopped = false
     private var releaseActivity: ReleaseActivityBarrier?
+    private var updateAdmission: UpdateAdmissionBoundary?
+    private var accountUpdateDrain: UpdateDrainToken?
     var retired: Bool { stopped || database.retired || checkpointed?.retired == true }
     private var checkpointed: CheckpointedJournal?
     private var retainedBytes = 0
@@ -161,6 +163,18 @@ public final class ApprovalRequestCoordinator {
         guard entries.isEmpty, releaseActivity == nil else { throw ApprovalCoordinatorError.invalidConfiguration }
         try barrier.validate()
         releaseActivity = barrier
+    }
+
+    private func holdUpdateDrain(for action: UpdateSchedulingAction?) throws {
+        guard action == .installWhenCurrentWorkFinishes, let updateAdmission else { return }
+        if let accountUpdateDrain { try accountUpdateDrain.validate() }
+        else { accountUpdateDrain = try updateAdmission.beginAccountDrain() }
+    }
+
+    private func synchronizeUpdateAdmission(_ intent: UpdateSchedulingIntent?) throws {
+        try updateAdmission?.validate()
+        if intent?.requestedAction == .installWhenCurrentWorkFinishes { try holdUpdateDrain(for: intent?.requestedAction) }
+        else { accountUpdateDrain?.close(); accountUpdateDrain = nil }
     }
 
     /// Product pairing requires the independent store. Unpaired owners remain internal component fixtures only.
@@ -238,6 +252,7 @@ public final class ApprovalRequestCoordinator {
     /// This does not overwrite durable decisions or claim an execution outcome.
     public func close() {
         stopped = true
+        accountUpdateDrain?.close(); accountUpdateDrain = nil
         for entry in entries.values {
             notifyCommandTerminal(entry, outcome: .unknown)
             entry.command?.close()
@@ -1302,5 +1317,223 @@ public final class ApprovalRequestCoordinator {
         case .onePasswordUnlock: .onePasswordUnlock
         case .littleSnitch: .littleSnitch
         }
+    }
+}
+
+extension ApprovalRequestCoordinator {
+    /// Startup refresh owns migration and offer publication. An unchanged offer causes no checkpoint write.
+    func refreshUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate,
+        verifyHost: (JournalTransaction) throws -> Void) throws -> UpdateSchedulingIntent {
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        let schema = try read { tx in try verifyHost(tx); return try tx.storageSchemaVersion }
+        if schema != 17 { try enableUpdateSchedulingStorage(candidate: candidate, verifyHost: verifyHost) }
+        let previous = try read { tx in try verifyHost(tx); return try tx.updateSchedulingIntent() }
+        if let previous, previous.snapshot.updateID == candidate.updateID, previous.snapshot.generation == candidate.generation {
+            try candidate.requireCurrent(macID: mac, accountID: account)
+            try synchronizeUpdateAdmission(previous)
+            return previous
+        }
+        return try retainUpdateSchedulingOffer(candidate: candidate, expected: previous?.snapshot, verifyHost: verifyHost)
+    }
+
+    /// The host holds the current machine candidate until the checkpoint and the final recheck finish.
+    func enableUpdateSchedulingStorage(candidate: LiveUpdateSchedulingCandidate,
+        verifyHost: (JournalTransaction) throws -> Void) throws {
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        try write { tx in
+            try verifyHost(tx); try candidate.requireCurrent(macID: mac, accountID: account)
+            try tx.installUpdateSchedulingStorage()
+        }
+        try read { tx in
+            try verifyHost(tx)
+            guard try tx.storageSchemaVersion == 17 else { throw UpdateSchedulingJournalError.unavailableSchema }
+        }
+        try candidate.requireCurrent(macID: mac, accountID: account)
+    }
+
+    func retainUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate, expected: UpdateSchedulingSnapshot?,
+        verifyHost: (JournalTransaction) throws -> Void) throws -> UpdateSchedulingIntent {
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        let result = try write { tx in
+            try verifyHost(tx)
+            return try tx.retainUpdateSchedulingOffer(candidate: candidate, expected: expected)
+        }
+        try read { tx in
+            try verifyHost(tx)
+            guard try tx.updateSchedulingIntent() == result else { throw UpdateSchedulingJournalError.corruptData }
+        }
+        try candidate.requireCurrent(macID: mac, accountID: account)
+        try synchronizeUpdateAdmission(result)
+        return result
+    }
+
+    /// This read never creates an offer, upgrades storage or consumes a challenge.
+    func observeUpdateScheduling(candidate: LiveUpdateSchedulingCandidate, binding: AuthorityPeerBinding,
+        verifyHost: (JournalTransaction) throws -> Void) throws -> UpdateSchedulingIntent {
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        return try read { tx in
+            try verifyHost(tx); try tx.requireDirectApprovalBinding(binding)
+            guard let result = try tx.updateSchedulingIntent(), result.snapshot.updateID == candidate.updateID,
+                  result.snapshot.generation == candidate.generation else { throw UpdateSchedulingVerificationError.staleSchedulingState }
+            try candidate.requireCurrent(macID: mac, accountID: account)
+            return result
+        }
+    }
+
+    func issueUpdateSchedulingChallenge(candidate: LiveUpdateSchedulingCandidate, queryNonce: Data,
+        action: UpdateSchedulingAction, expected: UpdateSchedulingSnapshot, binding: AuthorityPeerBinding,
+        authorityPublicKey: Data, verifyHost: (JournalTransaction) throws -> Void,
+        now: () throws -> AuthorityMoment, wall: () throws -> UInt64, sign: (Data) throws -> Data) throws -> RootUpdateSchedulingReply {
+        guard queryNonce.count == 32 else { throw RootUpdateSchedulingChallengeError.invalidNonce }
+        _ = try P256.Signing.PublicKey(x963Representation: authorityPublicKey)
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        let issued = try updateSchedulingTime(now: now, wall: wall)
+        let control = try write { tx in
+            try verifyHost(tx)
+            return try tx.issueUpdateSchedulingControl(candidate: candidate, action: action, expected: expected,
+                binding: binding, nowUnixMillis: issued.wall, now: issued.moment)
+        }
+        let bytes = try control.encode(limits: requestLimits)
+        let challenge = try RootUpdateSchedulingChallenge(queryNonce: queryNonce, canonicalControl: bytes, limits: requestLimits)
+        let payload = try challenge.encode(limits: requestLimits)
+        func recheck() throws {
+            let sampled = try updateSchedulingTime(now: now, wall: wall)
+            let retained = try read { tx in
+                try verifyHost(tx)
+                return try tx.issuedUpdateSchedulingChallenge(candidate: candidate, canonicalControl: bytes,
+                    binding: binding, nowUnixMillis: sampled.wall, now: sampled.moment)
+            }
+            let checked = try updateSchedulingTime(now: now, wall: wall)
+            try retained.requireLive(now: checked.moment, wall: checked.wall)
+            try candidate.requireCurrent(macID: mac, accountID: account)
+        }
+        try recheck()
+        let input = try RootUpdateSchedulingChallengeSigningInput.make(wireVersion: 1, canonicalPayload: payload,
+            payloadLimits: requestLimits, inputLimits: signingLimits)
+        let signature = try sign(input)
+        guard try RootUpdateSchedulingChallengeSignature.verify(signature: signature, authorityPublicKey: authorityPublicKey,
+            wireVersion: 1, canonicalPayload: payload, payloadLimits: requestLimits, inputLimits: signingLimits) else {
+            throw UpdateSchedulingVerificationError.invalidSignature
+        }
+        try recheck()
+        return RootUpdateSchedulingReply(canonicalChallenge: payload, signature: signature)
+    }
+
+    func consumeUpdateScheduling(candidate: LiveUpdateSchedulingCandidate, canonicalControl: Data, signature: Data,
+        binding: AuthorityPeerBinding, verifyHost: (JournalTransaction) throws -> Void,
+        now: () throws -> AuthorityMoment, wall: () throws -> UInt64) throws -> UpdateSchedulingIntent {
+        try requirePairingCheckpoint(); try candidate.requireCurrent(macID: mac, accountID: account)
+        let previous = try read { try $0.retainedUpdateSchedulingIntentForAdmission() }
+        do {
+            if updateAdmission != nil {
+                let proposed = try UpdateSchedulingControl.decode(canonicalControl, limits: requestLimits)
+                if proposed.action == .installWhenCurrentWorkFinishes {
+                    let sampled = try updateSchedulingTime(now: now, wall: wall)
+                    let verified = try read { tx in
+                        try verifyHost(tx)
+                        return try tx.verifyUpdateSchedulingControl(candidate: candidate, canonicalControl: canonicalControl,
+                            signature: signature, binding: binding, nowUnixMillis: sampled.wall, now: sampled.moment)
+                    }
+                    try candidate.requireCurrent(macID: mac, accountID: account)
+                    let checked = try updateSchedulingTime(now: now, wall: wall)
+                    try verified.requireLive(now: checked.moment, wall: checked.wall)
+                    try holdUpdateDrain(for: verified.control.action)
+                }
+            }
+            let committed = try write { tx in
+                try verifyHost(tx)
+                let sampled = try updateSchedulingTime(now: now, wall: wall)
+                let retained = try tx.issuedUpdateSchedulingChallenge(candidate: candidate, canonicalControl: canonicalControl,
+                    binding: binding, nowUnixMillis: sampled.wall, now: sampled.moment)
+                let result = try tx.consumeUpdateSchedulingControl(candidate: candidate, canonicalControl: canonicalControl,
+                    signature: signature, binding: binding, nowUnixMillis: sampled.wall, now: sampled.moment)
+                try verifyHost(tx); try tx.requireDirectApprovalBinding(binding)
+                try candidate.requireCurrent(macID: mac, accountID: account)
+                let checked = try updateSchedulingTime(now: now, wall: wall)
+                try retained.requireLive(now: checked.moment, wall: checked.wall)
+                return (result, retained)
+            }
+            try read { tx in
+                try verifyHost(tx); try tx.requireDirectApprovalBinding(binding)
+                guard try tx.updateSchedulingIntent() == committed.0,
+                      try tx.consumedUpdateSchedulingRevision(operationID: committed.1.control.operationID) == committed.0.snapshot.revision else {
+                    throw UpdateSchedulingJournalError.corruptData
+                }
+            }
+            let checked = try updateSchedulingTime(now: now, wall: wall)
+            try committed.1.requireLive(now: checked.moment, wall: checked.wall)
+            try candidate.requireCurrent(macID: mac, accountID: account)
+            try synchronizeUpdateAdmission(committed.0)
+            return committed.0
+        } catch {
+            let failure = error
+            if !retired {
+                do {
+                    try candidate.requireCurrent(macID: mac, accountID: account)
+                    let current = try read { try $0.retainedUpdateSchedulingIntentForAdmission() }
+                    if current == previous { try synchronizeUpdateAdmission(current) }
+                } catch { }
+            }
+            throw failure
+        }
+    }
+
+    private func updateSchedulingTime(now: () throws -> AuthorityMoment, wall: () throws -> UInt64)
+        throws -> (moment: AuthorityMoment, wall: UInt64) {
+        do {
+            let moment = try now(); try checkClock(moment)
+            return (moment, try wall())
+        } catch { close(); throw error }
+    }
+}
+
+extension ApprovalRequestCoordinator {
+    func updateSchedulingStateFrame(candidate: LiveUpdateSchedulingCandidate, queryNonce: Data, binding: AuthorityPeerBinding,
+        authorityPublicKey: Data, verifyHost: (JournalTransaction) throws -> Void, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64, sign: (Data) throws -> Data) throws -> PhoneUpdateSchedulingFrame {
+        try signUpdateSchedulingStateFrame(candidate: candidate, queryNonce: queryNonce, binding: binding,
+            expected: nil, controlDigest: nil, authorityPublicKey: authorityPublicKey, verifyHost: verifyHost,
+            now: now, wall: wall, sign: sign)
+    }
+
+    /// Only a complete consumption can create a committed-control reply.
+    func consumeUpdateSchedulingFrame(candidate: LiveUpdateSchedulingCandidate, queryNonce: Data, canonicalControl: Data,
+        signature: Data, binding: AuthorityPeerBinding, authorityPublicKey: Data,
+        verifyHost: (JournalTransaction) throws -> Void, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64, sign: (Data) throws -> Data) throws -> PhoneUpdateSchedulingFrame {
+        guard queryNonce.count == 32 else { throw PhoneUpdateSchedulingFrameError.invalidMessage }
+        _ = try P256.Signing.PublicKey(x963Representation: authorityPublicKey)
+        let accepted = try consumeUpdateScheduling(candidate: candidate, canonicalControl: canonicalControl,
+            signature: signature, binding: binding, verifyHost: verifyHost, now: now, wall: wall)
+        return try signUpdateSchedulingStateFrame(candidate: candidate, queryNonce: queryNonce, binding: binding,
+            expected: accepted, controlDigest: Data(SHA256.hash(data: canonicalControl)), authorityPublicKey: authorityPublicKey,
+            verifyHost: verifyHost, now: now, wall: wall, sign: sign)
+    }
+
+    /// An accepted digest comes only from the complete consumption above. Observations never synthesize it.
+    private func signUpdateSchedulingStateFrame(candidate: LiveUpdateSchedulingCandidate, queryNonce: Data,
+        binding: AuthorityPeerBinding, expected: UpdateSchedulingIntent?, controlDigest: Data?, authorityPublicKey: Data,
+        verifyHost: (JournalTransaction) throws -> Void, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64, sign: (Data) throws -> Data) throws -> PhoneUpdateSchedulingFrame {
+        guard queryNonce.count == 32 else { throw PhoneUpdateSchedulingFrameError.invalidMessage }
+        _ = try P256.Signing.PublicKey(x963Representation: authorityPublicKey)
+        _ = try updateSchedulingTime(now: now, wall: wall)
+        let observed = try observeUpdateScheduling(candidate: candidate, binding: binding, verifyHost: verifyHost)
+        guard expected == nil || observed == expected else { throw UpdateSchedulingJournalError.conflict }
+        let payload = try UpdateSchedulingStatusResponse(scope: binding.scope, queryNonce: queryNonce,
+            updateID: observed.snapshot.updateID, generation: observed.snapshot.generation, revision: observed.snapshot.revision,
+            requestedAction: observed.requestedAction, controlDigest: controlDigest).encode()
+        let input = try UpdateSchedulingStatusSigningInput.make(wireVersion: 1, canonicalPayload: payload, inputLimits: signingLimits)
+        let signature = try sign(input)
+        guard try UpdateSchedulingStatusSignature.verify(signature: signature, authorityPublicKey: authorityPublicKey,
+            wireVersion: 1, canonicalPayload: payload, inputLimits: signingLimits) else { throw UpdateSchedulingVerificationError.invalidSignature }
+        guard try observeUpdateScheduling(candidate: candidate, binding: binding, verifyHost: verifyHost) == observed else {
+            throw UpdateSchedulingJournalError.conflict
+        }
+        _ = try updateSchedulingTime(now: now, wall: wall)
+        try candidate.requireCurrent(macID: mac, accountID: account)
+        let frame = PhoneUpdateSchedulingFrame.stateResponse(queryNonce: queryNonce, canonicalPayload: payload, signature: signature)
+        _ = try frame.encode()
+        return frame
     }
 }

@@ -782,3 +782,96 @@ struct CommandExecutionRuntime: Equatable, Sendable {
     let userID: uid_t
     let sessionID: au_asid_t?
 }
+
+extension AuthorityJournal {
+    /// The native owner already holds the current machine candidate. No status request calls this method.
+    func refreshUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate, policy: UpdateSchedulingJournalPolicy,
+        macID: Data, accountID: Data) throws -> UpdateSchedulingIntent {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try withUpdateSchedulingOwner { owner in
+            try validatedRead { tx in
+                try AuthoritySelfValidation.validate(transaction: tx)
+                let trust = try tx.approvalTrustSnapshot()
+                guard trust.macID == macID, trust.accountID == accountID else { throw JournalDatabaseError.wrongScope }
+            }
+            try candidate.requireCurrent(macID: macID, accountID: accountID)
+            try owner.requireLiveGatewaySetup(clockEpoch: policy.clockEpoch)
+            _ = try database.enableUpdateSchedulingPolicy(policy, macID: macID, accountID: accountID)
+            return try owner.refreshUpdateSchedulingOffer(candidate: candidate, verifyHost: AuthoritySelfValidation.validate)
+        }
+    }
+
+    /// The caller retains the machine candidate lease across this complete account operation.
+    func enableUpdateScheduling(candidate: LiveUpdateSchedulingCandidate, policy: UpdateSchedulingJournalPolicy,
+        macID: Data, accountID: Data) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try withUpdateSchedulingOwner { owner in
+            try validatedRead { tx in
+                try AuthoritySelfValidation.validate(transaction: tx)
+                let trust = try tx.approvalTrustSnapshot()
+                guard trust.macID == macID, trust.accountID == accountID else { throw JournalDatabaseError.wrongScope }
+            }
+            try candidate.requireCurrent(macID: macID, accountID: accountID)
+            try owner.requireLiveGatewaySetup(clockEpoch: policy.clockEpoch)
+            _ = try database.enableUpdateSchedulingPolicy(policy, macID: macID, accountID: accountID)
+            try owner.enableUpdateSchedulingStorage(candidate: candidate, verifyHost: AuthoritySelfValidation.validate)
+        }
+    }
+
+    func retainUpdateSchedulingOffer(candidate: LiveUpdateSchedulingCandidate,
+        expected: UpdateSchedulingSnapshot?) throws -> UpdateSchedulingIntent {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try withUpdateSchedulingOwner {
+            try $0.retainUpdateSchedulingOffer(candidate: candidate, expected: expected, verifyHost: AuthoritySelfValidation.validate)
+        }
+    }
+
+    func observeUpdateScheduling(candidate: LiveUpdateSchedulingCandidate,
+        binding: AuthorityPeerBinding) throws -> UpdateSchedulingIntent {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try withUpdateSchedulingOwner {
+            try $0.observeUpdateScheduling(candidate: candidate, binding: binding, verifyHost: AuthoritySelfValidation.validate)
+        }
+    }
+
+    func issueUpdateSchedulingChallenge(candidate: LiveUpdateSchedulingCandidate, queryNonce: Data,
+        action: UpdateSchedulingAction, expected: UpdateSchedulingSnapshot, binding: AuthorityPeerBinding,
+        signer: EnclaveAuthorityRequestSigner, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64) throws -> RootUpdateSchedulingReply {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard signer.macID == binding.scope.macID, signer.accountID == binding.scope.accountID else {
+            throw AuthorityRequestSignerError.wrongIdentity
+        }
+        return try withUpdateSchedulingOwner {
+            try $0.issueUpdateSchedulingChallenge(candidate: candidate, queryNonce: queryNonce, action: action,
+                expected: expected, binding: binding, authorityPublicKey: signer.publicKey,
+                verifyHost: AuthoritySelfValidation.validate, now: now, wall: wall, sign: signer.sign)
+        }
+    }
+
+    func consumeUpdateScheduling(candidate: LiveUpdateSchedulingCandidate, canonicalControl: Data, signature: Data,
+        binding: AuthorityPeerBinding, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64) throws -> UpdateSchedulingIntent {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try withUpdateSchedulingOwner {
+            try $0.consumeUpdateScheduling(candidate: candidate, canonicalControl: canonicalControl, signature: signature,
+                binding: binding, verifyHost: AuthoritySelfValidation.validate, now: now, wall: wall)
+        }
+    }
+
+    private func withUpdateSchedulingOwner<Value: Sendable>(_ body: (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            try withStorageFailureCleanup { try database.read { _ in () } }
+            guard let requests else { throw ApprovalCoordinatorError.unavailable }
+            try requests.requirePairingCheckpoint()
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            requestOperationActive = true
+            defer { requestOperationActive = false }
+            let result = try withStorageFailureCleanup { try body(requests) }
+            try activity?.validate()
+            return result
+        }
+    }
+}
