@@ -5097,6 +5097,28 @@ extension MachCommandCallerReceiverTests {
             usleep(1000)
         }
     }
+    // Issue #600: this test once failed with a thrown FileManager removal error for a
+    // non-canonical temporary path, which no direct step here should raise. Name the step
+    // and record the file state so the next CI failure identifies the thrower.
+    private func diagnosedStep<T>(_ step: String, marker: URL, _ body: () throws -> T) throws -> T {
+        do { return try body() } catch {
+            let ns = error as NSError
+            var lines = ["#600 diagnostics: step '\(step)' threw \(ns.domain) \(ns.code): \(ns.localizedDescription)"]
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                lines.append("  underlying: \(underlying.domain) \(underlying.code)")
+            }
+            var paths = [("marker", marker.path)]
+            if let path = ns.userInfo[NSFilePathErrorKey] as? String { paths.append(("error path", path)) }
+            for (label, path) in paths {
+                let resolved = realpath(path, nil).map { pointer in defer { free(pointer) }; return String(cString: pointer) } ?? "unresolved (errno \(errno))"
+                let parent = (path as NSString).deletingLastPathComponent
+                let contents = (try? FileManager.default.contentsOfDirectory(atPath: path)).map { "\($0.count) entries" } ?? "not listable"
+                lines.append("  \(label): \(path) resolved \(resolved) exists \(FileManager.default.fileExists(atPath: path)) contents \(contents) parent exists \(FileManager.default.fileExists(atPath: parent))")
+            }
+            FileHandle.standardError.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+            throw error
+        }
+    }
     private func nativeDispatchOutcome(_ test: NativeDispatchFixture) throws -> CommandTerminalOutcome {
         try ownerTerminal(test.terminal, submission: test.submission, admission: test.admission).outcome
     }
@@ -5192,16 +5214,22 @@ extension MachCommandCallerReceiverTests {
     func testNativeDispatchStorageFailureBeforeCommitNeverReleasesAndReportsUnknown() throws {
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: marker) }
-        let test = try nativeDispatchFixture(path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
-        try test.fixture.sql("CREATE TRIGGER fail_dispatch BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
-        try beginDispatch(test.fixture, request: test.request, launcher: test.launcher)
+        let test = try diagnosedStep("fixture", marker: marker) {
+            try nativeDispatchFixture(path: "/usr/bin/touch", arguments: [Data("touch".utf8), Data(marker.path.utf8)])
+        }
+        try diagnosedStep("create trigger", marker: marker) {
+            try test.fixture.sql("CREATE TRIGGER fail_dispatch BEFORE INSERT ON audit_records_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        }
+        try diagnosedStep("begin dispatch", marker: marker) { try beginDispatch(test.fixture, request: test.request, launcher: test.launcher) }
         XCTAssertEqual(try nativeDispatchOutcome(test), .unknown)
         XCTAssertEqual(test.authority.activeCommandCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
-        try test.fixture.sql("DROP TRIGGER fail_dispatch")
-        try awaitDispatchCleanup(test.authority)
+        try diagnosedStep("drop trigger", marker: marker) { try test.fixture.sql("DROP TRIGGER fail_dispatch") }
+        try diagnosedStep("await cleanup", marker: marker) { try awaitDispatchCleanup(test.authority) }
         let id = test.request.requestID
-        let outcome = try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        let outcome = try diagnosedStep("historical outcome", marker: marker) {
+            try test.authority.withRequests { try $0.historicalOutcome(requestID: id) }
+        }
         XCTAssertEqual(outcome?.phase, .unknown); XCTAssertEqual(outcome?.revision, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
