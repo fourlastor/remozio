@@ -169,6 +169,29 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
             let request = try PhoneRoutingFrame.decode(frame)
             reply(.routing(try PhoneRoutingFrame.failure(queryNonce: request.queryNonce, reason: .unavailable).encode()))
         }
+        private var updateSchedulingCapability: UInt64? = 0
+        private var updateSchedulingReply: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var updateSchedulingFrame: Data?
+        private var updateSchedulingCalls = 0
+        let updateSchedulingSent = XCTestExpectation(description: "held updateScheduling")
+        var updateSchedulingCount: Int { lock.withLock { updateSchedulingCalls } }
+        func setUpdateSchedulingVersion(_ value: UInt64?) { lock.withLock { updateSchedulingCapability = value } }
+        func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let version = lock.withLock({ updateSchedulingCapability }) { reply(.updateSchedulingVersion(version)) }
+            else { reply(.failed) }
+        }
+        func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { updateSchedulingCalls += 1; updateSchedulingFrame = frame; updateSchedulingReply = reply }
+            updateSchedulingSent.fulfill()
+        }
+        func finishUpdateScheduling() throws {
+            let value = lock.withLock { () -> (Data?, (@Sendable (AuthorityXPCReply) -> Void)?) in
+                let value = (updateSchedulingFrame, updateSchedulingReply); updateSchedulingFrame = nil; updateSchedulingReply = nil; return value
+            }
+            guard let frame = value.0, let reply = value.1 else { return }
+            let request = try PhoneUpdateSchedulingFrame.decode(frame)
+            reply(.updateScheduling(try PhoneUpdateSchedulingFrame.failure(queryNonce: request.queryNonce, reason: .unavailable).encode()))
+        }
         private var auditCapability: UInt64? = 0
         private var auditReply: (@Sendable (AuthorityXPCReply) -> Void)?
         private var auditFrame: Data?
@@ -505,6 +528,101 @@ final class AuthorityTrustFeedTests: XCTestCase, @unchecked Sendable {
         try await feed.start(host: host); try await host.start()
         try await feed.requirePhoneRoutingSupport(); try await feed.requirePhoneRoutingSupport()
         XCTAssertEqual(auxiliary.routingCount, 0); XCTAssertEqual(primary.routingCount, 0)
+        XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testUnsupportedUpdateSchedulingKeepsPrimaryApprovalTrustAlive() async throws {
+        let capabilities: [UInt64?] = [0, nil]
+        for capability in capabilities {
+            let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+            auxiliary.setUpdateSchedulingVersion(capability)
+            let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+            let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+            let listeners = Listeners(), host = host(listeners)
+            try await feed.start(host: host); try await host.start()
+            do { _ = try await feed.phoneUpdateScheduling(trust.peers[0], revision: trust.revision, frame: .status(queryNonce: Data(repeating: 9, count: 32))); XCTFail("Expected optional refusal") } catch { }
+            try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+            XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.updateSchedulingCount, 0)
+            XCTAssertFalse(try XCTUnwrap(listeners.values.first).isClosed)
+            XCTAssertEqual(factory.count, 2)
+            await feed.close(); await host.close()
+        }
+    }
+    func testUpdateSchedulingUsesSeparateRPCAndReturnsOnlyForTheCurrentAuthorityLease() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setUpdateSchedulingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneUpdateScheduling(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.updateSchedulingSent], timeout: 2)
+        try auxiliary.finishUpdateScheduling()
+        guard case .failure(let correlation, let result) = try await pending.value else { return XCTFail("Missing status") }
+        XCTAssertEqual(correlation, request.queryNonce); XCTAssertEqual(result, .unavailable)
+        XCTAssertEqual(primary.updateSchedulingCount, 0); XCTAssertEqual(auxiliary.updateSchedulingCount, 1); XCTAssertEqual(factory.count, 2)
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        await feed.close(); await host.close()
+    }
+    func testPrimaryInterruptionDiscardsLateUpdateSchedulingReply() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setUpdateSchedulingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneUpdateScheduling(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.updateSchedulingSent], timeout: 2)
+        primary.interrupt(); try auxiliary.finishUpdateScheduling()
+        do { _ = try await pending.value; XCTFail("Retired authority returned updateScheduling success") } catch { }
+        do { try await feed.validatePeer(trust.peers[0], revision: trust.revision); XCTFail("Retired primary revived") } catch { }
+        XCTAssertEqual(auxiliary.updateSchedulingCount, 1); XCTAssertGreaterThan(auxiliary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testCancelledUpdateSchedulingRetiresOnlyItsOptionalLink() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setUpdateSchedulingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneUpdateScheduling(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.updateSchedulingSent], timeout: 2)
+        pending.cancel(); try auxiliary.finishUpdateScheduling()
+        do { _ = try await pending.value; XCTFail("Cancelled updateScheduling returned success") } catch { }
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(auxiliary.updateSchedulingCount, 1); XCTAssertEqual(primary.closeCount, 0)
+        await feed.close(); await host.close()
+    }
+    func testAuxiliaryInterruptionDiscardsUpdateSchedulingReplyWithoutRetiringPrimary() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setUpdateSchedulingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        let request = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 9, count: 32))
+        let pending = Task { try await feed.phoneUpdateScheduling(trust.peers[0], revision: trust.revision, frame: request) }
+        await fulfillment(of: [auxiliary.updateSchedulingSent], timeout: 2)
+        auxiliary.interrupt(); try auxiliary.finishUpdateScheduling()
+        do { _ = try await pending.value; XCTFail("Retired optional connection returned a result") } catch {}
+        try await feed.validatePeer(trust.peers[0], revision: trust.revision)
+        XCTAssertEqual(primary.closeCount, 0); XCTAssertEqual(auxiliary.updateSchedulingCount, 1)
+        await feed.close(); await host.close()
+    }
+    func testUpdateSchedulingPreflightDoesNotSendPrivateFieldsOrOpenRepeatedConnections() async throws {
+        let trust = try trust(), primary = try Driver(trust), auxiliary = try Driver(trust)
+        auxiliary.setUpdateSchedulingVersion(1)
+        let factory = RegistrationFactory(primary: primary, auxiliary: auxiliary)
+        let feed = AuthorityTrustFeed(macID: mac, accountID: account, factory: { factory.make($0) })
+        let listeners = Listeners(), host = host(listeners)
+        try await feed.start(host: host); try await host.start()
+        try await feed.requirePhoneUpdateSchedulingSupport(); try await feed.requirePhoneUpdateSchedulingSupport()
+        XCTAssertEqual(auxiliary.updateSchedulingCount, 0); XCTAssertEqual(primary.updateSchedulingCount, 0)
         XCTAssertEqual(factory.count, 2)
         try await feed.validatePeer(trust.peers[0], revision: trust.revision)
         await feed.close(); await host.close()
