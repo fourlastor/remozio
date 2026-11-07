@@ -5,32 +5,36 @@ on:
 permissions:
   contents: read
 jobs:
-  loop:
+  suite:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     runs-on: macos-26
-    timeout-minutes: 90
+    timeout-minutes: 200
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Build the Core tests
-        run: swift build --package-path macos/core --triple arm64-apple-macosx26.0 --build-tests
-      - name: Loop the native dispatch tests
+      - name: Build the Core tests as CI does
+        run: swift build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O --build-tests
+      - name: Loop the full Core suite
         run: |
-          mkdir -p /tmp/m600
-          for i in $(seq 1 25); do
-            if ! swift test --skip-build --package-path macos/core --triple arm64-apple-macosx26.0 \
-                --filter 'MachCommandCallerReceiverTests/testNativeDispatch' > /tmp/m600/run-$i.log 2>&1; then
-              echo "iteration $i FAILED"; grep -E "error:|failed \(" /tmp/m600/run-$i.log | head -20
+          mkdir -p /tmp/m600/keep
+          start=$(date +%s); i=0
+          while [ $(( $(date +%s) - start )) -lt 9000 ]; do
+            i=$((i + 1))
+            log=/tmp/m600/run-$i.log
+            if swift test --skip-build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O > "$log" 2>&1; then
+              echo "iteration $i passed in $(( $(date +%s) - start ))s total"; rm -f "$log"
             else
-              echo "iteration $i passed $(grep -c "' passed (" /tmp/m600/run-$i.log) cases"
+              echo "iteration $i FAILED"; grep -E "error:|' failed \(" "$log" | head -20 | cut -c1-400
+              mv "$log" /tmp/m600/keep/
             fi
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: m600-${{ matrix.shard }}
-          path: /tmp/m600/
+          name: m600-suite-${{ matrix.shard }}
+          path: /tmp/m600/keep/
+          if-no-files-found: ignore
