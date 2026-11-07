@@ -17,6 +17,32 @@ final class MachineUpdateInstalledActivationCoordinatorTests: XCTestCase, @unche
         func waitForArrival() async { if !entered { await withCheckedContinuation { waiting.append($0) } } }
         func release() { blocked?.resume(); blocked = nil }
     }
+    private final class CleanupCounter: Sendable {
+        struct Values { var inFlight = 0, maximum = 0, failures: Int }
+        let values: Mutex<Values>
+        init(failures: Int) { values = Mutex(.init(failures: failures)) }
+    }
+    /// Issue #588: a caller that waited on a failed cleanup must not drop a newer one, so two cleanups never overlap.
+    func testFailedCleanupWaitersNeverStartAnOverlappingCleanup() async throws {
+        for _ in 0..<200 {
+            let counter = CleanupCounter(failures: 3)
+            let owner = Owner(operations: .init(validate: {}, pollRegistrations: { throw Fault.injected }, closeRegistrations: {
+                counter.values.withLock { $0.inFlight += 1; $0.maximum = max($0.maximum, $0.inFlight) }
+            }, commitReadiness: { throw Fault.injected }, closeReadiness: {
+                await Task.yield()
+                try counter.values.withLock {
+                    $0.inFlight -= 1
+                    if $0.failures > 0 { $0.failures -= 1; throw Fault.injected }
+                }
+            }))
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<6 { group.addTask { while (try? await owner.close()) == nil { await Task.yield() } } }
+            }
+            XCTAssertEqual(counter.values.withLock { $0.maximum }, 1)
+            XCTAssertEqual(counter.values.withLock { $0.failures }, 0)
+            XCTAssertTrue(owner.isClosed)
+        }
+    }
     private final class Fixture: Sendable {
         struct Values {
             var checkpoints: [Owner.RegistrationCheckpoint]
