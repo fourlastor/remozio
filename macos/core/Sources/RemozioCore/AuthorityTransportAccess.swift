@@ -148,6 +148,26 @@ final class AuthorityTransportAccess: Sendable {
         })
     }
 
+    /// Leave the account lock before the provider acquires the machine lease.
+    func phoneUpdateScheduling(binding: AuthorityPeerBinding, frame: PhoneUpdateSchedulingFrame,
+                               handler: AuthorityPhoneUpdateSchedulingProvider) throws -> PhoneUpdateSchedulingFrame {
+        try AuthorityPhoneUpdateSchedulingExchange.request(frame, binding: binding)
+        try journal.read { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }
+        let result = try handler(journal, binding, frame, { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        })
+        try journal.read { transaction in
+            try self.requireCurrent(transaction)
+            try transaction.requireDirectApprovalBinding(binding)
+        }
+        try AuthorityPhoneUpdateSchedulingExchange.response(result, to: frame, binding: binding)
+        return result
+    }
+
     private func requireCurrent(_ transaction: JournalTransaction) throws {
         guard let snapshot = try transaction.codePolicy(), snapshot.roleRevisions[.transport] == roleRevision,
               snapshot.policy.entries.first(where: { $0.role == .transport }) == entry else {

@@ -108,11 +108,13 @@ public final class AuthorityService: @unchecked Sendable {
     /// Protected signer loading and provisioning must precede construction. Closure retires the shared request owner.
     public convenience init(configuration: AuthorityServiceConfiguration, journal: AuthorityJournal,
                             requestProviders: AuthorityRequestProviders, maintenanceIntervalMilliseconds: Int = 1000,
+                            phoneUpdateScheduling: AuthorityPhoneUpdateSchedulingProvider? = nil,
                             reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                             onMaintenanceFailure: @escaping @Sendable () -> Void = {},
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws {
         try self.init(configuration: configuration, journal: journal, maintenanceIntervalMilliseconds: maintenanceIntervalMilliseconds,
-            validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders, reconcileExpired: reconcileExpired,
+            validateSelf: AuthoritySelfValidation.validate, requestProviders: requestProviders,
+            phoneUpdateScheduling: phoneUpdateScheduling, reconcileExpired: reconcileExpired,
             onMaintenanceFailure: onMaintenanceFailure, onCommandAuthorized: onCommandAuthorized)
     }
 
@@ -127,6 +129,7 @@ public final class AuthorityService: @unchecked Sendable {
          requestProviders: AuthorityRequestProviders? = nil,
          phonePushRegistration: AuthorityPhonePushRegistrationProvider? = nil,
          phonePushRecovery: AuthorityPhonePushRecoveryProvider? = nil,
+         phoneUpdateScheduling: AuthorityPhoneUpdateSchedulingProvider? = nil,
          wakeHintFeed: AuthorityWakeHintFeed? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil,
          reconcileExpired: (@Sendable ([ApprovalRequestState]) throws -> Void)? = nil,
@@ -188,7 +191,7 @@ public final class AuthorityService: @unchecked Sendable {
                 maximumOperations: configuration.maximumOperations, requestFrame: frameHandler, pendingRequestIDs: pendingHandler,
                 exchangeRequest: exchangeHandler, pairingReceipt: requestProviders?.pairingReceipt,
                 phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: auditHandler, phoneRouting: routingHandler,
-                wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
+                phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: hintHandler, onCommandAuthorized: onCommandAuthorized)
             let requestEpoch = try self.requestClock().epoch
             try journal.prepareRequests(clockEpoch: requestEpoch, maximumPayloadBytes: configuration.maximumPayloadBytes)
             if let requestProviders, let reconcileExpired {

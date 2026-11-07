@@ -35,11 +35,13 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
     private let exchange: (@Sendable (AuthorityPeerBinding, Data, Data?) throws -> Data?)?
     private let receipt: (@Sendable (AuthorityPeerBinding, Data) throws -> Data?)?
     private let routingExchange: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)?
+    private let updateSchedulingExchange: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)?
     private let auditExchange: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)?
     private let pushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)?
     private let pushRegistration: (@Sendable (AuthorityPeerBinding, PhonePushRegistrationFrame) throws -> PhonePushRegistrationFrame)?
     private let wakeHints: (@Sendable () throws -> AuthorityWakeHints)?
     private var routingReady = false
+    private var updateSchedulingReady = false
     private var auditReady = false
     private var recoveryReady = false
     private var registrationReady = false
@@ -67,6 +69,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
          phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
          phoneRouting: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)? = nil,
+         phoneUpdateScheduling: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) throws {
         guard peerPolicy.expectedUserID != 0, macID.count == 16, accountID.count == 16 else { throw AuthorityXPCEndpointError.invalidConfiguration }
         _ = try peerPolicy.verifyCredentials(connection)
@@ -74,7 +77,7 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
         self.init(macID: macID, accountID: accountID, budget: budget, activityJournal: activityJournal,
             verify: { _ = try invocation.verifyInvocation() }, verifyHandshakePolicy: verifyHandshakePolicy, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             snapshot: snapshot, validate: validate, requestFrame: requestFrame, pendingRequestIDs: pendingRequestIDs,
-            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, wakeHints: wakeHints)
+            exchangeRequest: exchangeRequest, pairingReceipt: pairingReceipt, phonePushRegistration: phonePushRegistration, phonePushRecovery: phonePushRecovery, phoneAudit: phoneAudit, phoneRouting: phoneRouting, phoneUpdateScheduling: phoneUpdateScheduling, wakeHints: wakeHints)
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: TransportAuthorityXPCProtocol.self)
         connection.exportedObject = self
@@ -94,11 +97,12 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
          phonePushRecovery: (@Sendable (AuthorityPeerBinding, PhonePushRecoveryFrame) throws -> PhonePushRecoveryFrame)? = nil,
          phoneAudit: (@Sendable (AuthorityPeerBinding, PhoneAuditFrame) throws -> PhoneAuditFrame)? = nil,
          phoneRouting: (@Sendable (AuthorityPeerBinding, PhoneRoutingFrame) throws -> PhoneRoutingFrame)? = nil,
+         phoneUpdateScheduling: (@Sendable (AuthorityPeerBinding, PhoneUpdateSchedulingFrame) throws -> PhoneUpdateSchedulingFrame)? = nil,
          wakeHints: (@Sendable () throws -> AuthorityWakeHints)? = nil) {
         self.activityJournal = activityJournal
         self.macID = macID; self.accountID = accountID; self.budget = budget
         self.verify = verify; self.verifyHandshakePolicy = verifyHandshakePolicy; self.invalidate = invalidate; self.onHandshake = onHandshake; self.snapshot = snapshot; self.validate = validate; self.frame = requestFrame; self.pendingRequests = pendingRequestIDs; self.exchange = exchangeRequest
-        self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting
+        self.wakeHints = wakeHints; self.receipt = pairingReceipt; self.pushRegistration = phonePushRegistration; self.pushRecovery = phonePushRecovery; self.auditExchange = phoneAudit; self.routingExchange = phoneRouting; self.updateSchedulingExchange = phoneUpdateScheduling
     }
     public func close() {
         let notify = lock.withLock { if closed { return false }; closed = true; ready = false; return true }
@@ -225,6 +229,36 @@ public final class AuthorityXPCEndpoint: NSObject, TransportAuthorityXPCProtocol
                 try AuthorityPhoneAuditExchange.request(request)
                 let result = try auditExchange(peer, request)
                 try AuthorityPhoneAuditExchange.response(result, to: request, binding: peer)
+                return try result.encode()
+            }
+            defer { completed.activity?.close() }
+            send { reply(completed.value) }
+        } catch { close(); reply(nil) }
+    }
+    public func phoneUpdateSchedulingVersion(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            let completed = try work {
+                try verifyHandshakePolicy()
+                let supported = updateSchedulingExchange != nil
+                lock.withLock { updateSchedulingReady = supported }
+                return supported ? UInt64(1) : UInt64(0)
+            }
+            defer { completed.activity?.close() }
+            send { reply(completed.value) }
+        } catch { close(); reply(0) }
+    }
+    public func phoneUpdateScheduling(_ binding: Data, frame: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            let completed = try work {
+                guard lock.withLock({ updateSchedulingReady }), let updateSchedulingExchange else {
+                    throw AuthorityXPCEndpointError.unavailable
+                }
+                guard frame.count <= PhoneUpdateSchedulingFrame.maximumBytes else { throw AuthorityXPCError.invalidMessage }
+                let peer = try AuthorityTrustCodec.decodeBinding(binding, expectedMacID: macID, expectedAccountID: accountID)
+                let request = try PhoneUpdateSchedulingFrame.decode(frame)
+                try AuthorityPhoneUpdateSchedulingExchange.request(request, binding: peer)
+                let result = try updateSchedulingExchange(peer, request)
+                try AuthorityPhoneUpdateSchedulingExchange.response(result, to: request, binding: peer)
                 return try result.encode()
             }
             defer { completed.activity?.close() }
