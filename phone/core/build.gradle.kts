@@ -23,6 +23,11 @@ dependencies {
 val capture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")
 tasks.withType<Test>().configureEach {
     useJUnit()
+    // CI keeps no test reports; print the failing assertion and its stack in the log.
+    testLogging {
+        events(org.gradle.api.tasks.testing.logging.TestLogEvent.FAILED)
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
     val historyVectors = rootProject.layout.projectDirectory.file("protocol/vectors/audit-history-status-v1.json")
     inputs.file(historyVectors)
     systemProperty("remozio.test.auditHistoryVectors", historyVectors.asFile.absolutePath)
