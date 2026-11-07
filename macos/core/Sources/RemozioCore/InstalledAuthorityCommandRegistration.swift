@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RemozioMach
+import RemozioProtocol
 
 /// Resource transfer only. The registration owner must validate the installation before calling this helper.
 enum InstalledCommandMachineHandoff {
@@ -20,6 +21,7 @@ enum InstalledCommandMachineHandoff {
 final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     let configuration: InstalledAuthorityCommandConfiguration
     let releaseActivity: ReleaseActivityBarrier
+    let admissionStartup: AuthorityUpdateAdmissionStartup?
     private var startupActivity: ReleaseActivityToken?
     private let lock = NSLock()
     private let path: String
@@ -52,16 +54,29 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             store = machine
             let activity = try ReleaseActivityBarrier.open(machineDirectory: config.machineDirectory)
             let startup = try activity.acquireShared()
-            let owner = InstalledAuthorityCommandRegistration(configuration: config, activity: activity, startup: startup, path: path, selfPath: selfPath,
+            let admission = try AuthorityUpdateAdmissionStartup.capture(machine: machine, macID: config.command.macID,
+                installationID: config.installationID, accountID: config.command.accountID, activity: activity, readCurrent: {
+                    let current = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
+                    do {
+                        let state = try current.updateAdmissionState()
+                        try current.close()
+                        return state
+                    } catch { try? current.close(); throw error }
+                }, openBarrier: { scope, identity in
+                    try UpdateAdmissionBarrier.open(machineDirectory: config.machineDirectory, expected: identity, scope: scope)
+                })
+            let owner = InstalledAuthorityCommandRegistration(configuration: config, activity: activity, startup: startup,
+                admission: admission, path: path, selfPath: selfPath,
                 bundle: bundle, requirement: requirement, placement: placement, machine: machine)
             try owner.validate()
             return owner
         } catch { try? store?.close(); placement.close(); throw error }
     }
     private init(configuration: InstalledAuthorityCommandConfiguration, activity: ReleaseActivityBarrier, startup: ReleaseActivityToken,
-                 path: String, selfPath: String,
+                 admission: AuthorityUpdateAdmissionStartup?, path: String, selfPath: String,
                  bundle: URL, requirement: String, placement: ReleaseDestinationLease, machine: PreparationIntentStore) {
         self.configuration = configuration; releaseActivity = activity; startupActivity = startup
+        admissionStartup = admission
         self.path = path; self.selfPath = selfPath; self.bundle = bundle
         self.requirement = requirement; self.placement = placement; self.machine = machine
     }
@@ -105,6 +120,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         }
         try placement.validate()
         try startupActivity?.validate()
+        try admissionStartup?.validate()
     }
     /// The startup writer is closed after check-in. Runtime checks retain the original protected inputs and signed identity.
     func validateRuntime() throws {
@@ -116,6 +132,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try DynamicCodeValidation.validateSelf(requirement: requirement)
             guard try DynamicCodeValidation.selfPath() == selfPath else { throw InstalledAuthorityCommandError.wrongExecutable }
             try placement.validate()
+            try admissionStartup?.validate()
         }
     }
     /// Read optional scope under the original machine lease, before check-in closes it.
@@ -141,6 +158,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try lock.withLock {
             guard !taken else { throw InstalledAuthorityCommandError.unavailable }
             try validate()
+            try admissionStartup?.requireCurrent(machine: machine)
             let port = try InstalledCommandMachineHandoff.take(machine: machine) {
                 var port = mach_port_t(MACH_PORT_NULL)
                 let status = configuration.command.serviceName.withCString { remozio_authority_check_in_service($0, &port) }
@@ -192,6 +210,108 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             return result
         } catch { try? current.close(); throw error }
     }
+    /// Capture eligibility before check-in closes the startup machine writer.
+    func captureUpdateSchedulingStartup() -> AuthorityUpdateSchedulingStartupSnapshot {
+        lock.withLock {
+            .init {
+                guard !taken else { throw InstalledAuthorityCommandError.unavailable }
+                try validate()
+                let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active })!
+                let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+                let plan = try machine.runtimeActivation(accountID: configuration.command.accountID).plan
+                let selected = try AuthorityUpdateSchedulingStartupSelection.capture(plan: plan,
+                    configuration: configuration, release: release, bundlePath: bundle.path)
+                if selected != nil, admissionStartup?.boundary.accountID != configuration.command.accountID {
+                    throw InstalledAuthorityCommandError.unavailable
+                }
+                return selected
+            }
+        }
+    }
+
+    /// The phone supplies no candidate path. Its validator remains mandatory inside every account read.
+    func withUpdateSchedulingCandidate<Value: Sendable>(journal: AuthorityJournal, binding: AuthorityPeerBinding,
+        selection: AuthorityUpdateSchedulingStartupSelection,
+        validateTransport: @Sendable (JournalTransaction) throws -> Void,
+        _ body: (LiveUpdateSchedulingCandidate) throws -> Value) throws -> Value {
+        guard binding.scope.macID == configuration.command.macID,
+              binding.scope.accountID == configuration.command.accountID else { throw UpdateSchedulingCandidateLeaseError.wrongScope }
+        return try withSelectedUpdateCandidate(journal: journal, selection: selection, validateAccount: { tx in
+            try validateTransport(tx); try tx.requireDirectApprovalBinding(binding)
+        }, body)
+    }
+
+    private func withSelectedUpdateCandidate<Value: Sendable>(journal: AuthorityJournal,
+        selection: AuthorityUpdateSchedulingStartupSelection,
+        validateAccount: @Sendable (JournalTransaction) throws -> Void,
+        _ body: (LiveUpdateSchedulingCandidate) throws -> Value) throws -> Value {
+        try withoutActuallyEscaping(validateAccount) { validator in
+            try withGatewayRecoveryMachine { store, release in
+                try selection.requireCurrent(plan: store.runtimeActivation(accountID: configuration.command.accountID).plan,
+                    configuration: configuration, release: release, bundlePath: bundle.path)
+                guard let selected = try store.updateCandidate(), selected.selected else { throw UpdateSchedulingJournalError.notOffered }
+                let destination = try ReleaseDestinationLease.acquire(path: selected.preparation.parent)
+                defer { destination.close() }
+                let readPolicy: () throws -> AuthorityCodePolicy = {
+                    try journal.read { transaction in
+                        try AuthoritySelfValidation.validate(transaction: transaction)
+                        try validator(transaction)
+                        let trust = try transaction.approvalTrustSnapshot()
+                        guard trust.macID == self.configuration.command.macID,
+                              trust.accountID == self.configuration.command.accountID,
+                              let policy = try transaction.codePolicy()?.policy else { throw AuthorityTransportAccessError.unconfigured }
+                        return policy
+                    }
+                }
+                let prepared = try UpdateSchedulingPreparedRelease.capture(attemptID: selected.preparation.id,
+                    macID: configuration.command.macID, accountID: configuration.command.accountID, destination: destination,
+                    store: store, readPolicy: readPolicy)
+                return try prepared.withCurrentCandidateLease(macID: configuration.command.macID, accountID: configuration.command.accountID,
+                    expected: selected, destination: destination, store: store, readPolicy: readPolicy, body)
+            }
+        }
+    }
+
+    /// Construction performs no migration. The service starts owned offer work only after check-in.
+    func makeUpdateSchedulingStartup(selection: AuthorityUpdateSchedulingStartupSelection, journal: AuthorityJournal,
+        signer: EnclaveAuthorityRequestSigner, clock: AuthorityClock) throws -> AuthorityUpdateSchedulingStartup {
+        let wall: @Sendable () throws -> UInt64 = {
+            let value = Date().timeIntervalSince1970 * 1000
+            guard value.isFinite, value >= 0, value < Double(UInt64.max) else { throw AuthorityClockError.overflow }
+            return UInt64(value)
+        }
+        let provider = try makePhoneUpdateSchedulingProvider(selection: selection, signer: signer,
+            now: { try clock.now() }, wall: wall)
+        let policy = try UpdateSchedulingJournalPolicy(clockEpoch: clock.epoch, challengeLifetimeMillis: 30_000,
+            maximumOperations: 1024, payloadLimits: .init(maxBytes: 65_536, maxDepth: 16, maxItems: 4096),
+            signingLimits: .init(maxBytes: 131_072, maxDepth: 16, maxItems: 4096))
+        let offers = try AuthorityUpdateSchedulingOfferOwner(
+            intervalMilliseconds: configuration.command.presence.wake.request.maintenanceIntervalMilliseconds) { [self] in
+            do {
+                return try withSelectedUpdateCandidate(journal: journal, selection: selection, validateAccount: { _ in }) { candidate in
+                    try journal.refreshUpdateSchedulingOffer(candidate: candidate, policy: policy,
+                        macID: configuration.command.macID, accountID: configuration.command.accountID).snapshot
+                }
+            } catch UpdateSchedulingJournalError.notOffered { return nil }
+        }
+        return .init(provider: provider, offers: offers)
+    }
+
+    /// This factory does not select a candidate, migrate storage or advertise a feature.
+    func makePhoneUpdateSchedulingProvider(selection: AuthorityUpdateSchedulingStartupSelection, signer: EnclaveAuthorityRequestSigner,
+        now: @escaping @Sendable () throws -> AuthorityMoment,
+        wall: @escaping @Sendable () throws -> UInt64) throws -> AuthorityPhoneUpdateSchedulingProvider {
+        guard signer.macID == configuration.command.macID, signer.accountID == configuration.command.accountID else {
+            throw AuthorityRequestSignerError.wrongIdentity
+        }
+        return { [self] journal, binding, frame, validateTransport in
+            try withUpdateSchedulingCandidate(journal: journal, binding: binding, selection: selection, validateTransport: validateTransport) { candidate in
+                try journal.exchangeUpdateScheduling(candidate: candidate, frame: frame, binding: binding,
+                    signer: signer, validateTransport: validateTransport, now: now, wall: wall)
+            }
+        }
+    }
+
     func gatewayRecoveryStatus() throws -> AuthorityGatewayRecoverySnapshot.Status {
         try withGatewayRecoveryMachine { machine, _ in
             try AuthorityGatewayRecoverySnapshot.status(machine: machine, authority: configuration)
@@ -270,10 +390,10 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     func close() throws {
         try lock.withLock {
             guard !closed else { return }
-            try machine.close(); placement.close(); startupActivity?.close(); startupActivity = nil; closed = true
+            try machine.close(); admissionStartup?.recovery.close(); placement.close(); startupActivity?.close(); startupActivity = nil; closed = true
         }
     }
-    deinit { try? machine.close(); placement.close() }
+    deinit { try? machine.close(); admissionStartup?.recovery.close(); placement.close() }
 }
 
 extension AuthorityRuntimeRunner {
@@ -289,9 +409,19 @@ extension AuthorityRuntimeRunner {
                     if registration.configuration.command.presence.wake.phonePush == nil {
                         optionalStartup = try registration.captureGatewaySettingsStartup()
                     } else { optionalStartup = .absent }
-                    let service = try AuthorityWakeService.open(configuration: registration.configuration.command,
+                    let schedulingFactory: AuthorityUpdateSchedulingStartupFactory?
+                    switch registration.captureUpdateSchedulingStartup() {
+                    case .selected(let selection):
+                        schedulingFactory = { journal, signer, clock in
+                            try registration.makeUpdateSchedulingStartup(selection: selection, journal: journal, signer: signer, clock: clock)
+                        }
+                    case .unsupported, .unavailable:
+                        schedulingFactory = nil
+                    }
+                    let service = try AuthorityWakeService.openInstalled(configuration: registration.configuration.command,
                         takingRegisteredReceiveRight: { try registration.takeReceiveRight() },
                         releaseActivity: registration.releaseActivity,
+                        updateAdmission: registration.admissionStartup?.boundary, updateSchedulingFactory: schedulingFactory,
                         reconcileExpired: Self.reconcileCoordinatorExpiration)
                     let recovery = AuthorityGatewaySettingsStartupRecovery(snapshot: optionalStartup, service: service,
                         reload: { try registration.reloadGatewaySettingsStartup() })

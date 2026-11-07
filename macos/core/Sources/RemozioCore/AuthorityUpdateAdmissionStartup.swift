@@ -30,6 +30,11 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
     }
     func requireCurrent(machine: PreparationIntentStore) throws {
         guard try machine.updateAdmissionState() == initial else { throw RuntimePreparationError.changedScope }
-        try boundary.validate(); try recovery.validate()
+        try validate()
+    }
+
+    func validate() throws {
+        try boundary.validate()
+        try recovery.validate()
     }
 }

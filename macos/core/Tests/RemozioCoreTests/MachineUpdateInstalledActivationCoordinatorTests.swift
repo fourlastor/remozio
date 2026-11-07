@@ -5,7 +5,7 @@ import XCTest
 
 final class MachineUpdateInstalledActivationCoordinatorTests: XCTestCase, @unchecked Sendable {
     private typealias Owner = MachineUpdateInstalledActivationCoordinator<UUID>
-    private enum Fault: Error { case injected, unknownCommit }
+    private enum Fault: Error, Equatable { case injected, unknownCommit }
     private actor Gate {
         private var entered = false
         private var waiting: [CheckedContinuation<Void, Never>] = []
@@ -130,9 +130,23 @@ final class MachineUpdateInstalledActivationCoordinatorTests: XCTestCase, @unche
         let owner = f.owner()
         do { _ = try await owner.advance(); XCTFail() } catch { XCTAssertTrue(error is Fault) }
         XCTAssertEqual(f.values.withLock { $0.commitCalls }, 0)
+        XCTAssertEqual(f.values.withLock { $0.closeCalls }, 0)
         guard case .committed = try await owner.advance() else { return XCTFail() }
         XCTAssertEqual(f.values.withLock { $0.commitCalls }, 1); XCTAssertEqual(f.values.withLock { $0.pollCalls }, 1)
         try await owner.close()
+    }
+    func testReadinessCleanupFailurePreservesTheCommitError() async throws {
+        let f = Fixture([.init(expected: [a], progress: .confirmed([a]))])
+        f.values.withLock { $0.unknownCommit = true; $0.closeFailures = 1 }
+        let owner = f.owner()
+        do { _ = try await owner.advance(); XCTFail() }
+        catch { XCTAssertEqual(error as? Fault, .unknownCommit) }
+        do { _ = try await owner.advance(); XCTFail() }
+        catch { XCTAssertEqual(error as? Owner.Failure, .recoveryRequired) }
+        XCTAssertEqual(f.values.withLock { $0.commitCalls }, 1)
+        XCTAssertEqual(f.values.withLock { $0.closeCalls }, 1)
+        try await owner.close()
+        XCTAssertEqual(f.values.withLock { $0.closeCalls }, 2)
     }
     func testConcurrentAdvanceCannotDuplicateTheCommit() async throws {
         let gate = Gate(), f = Fixture([.init(expected: [a], progress: .confirmed([a]))], gate: gate), owner = f.owner()

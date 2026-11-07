@@ -63,6 +63,7 @@ final class MachineUpdateInstalledActivationCoordinator<Commit: Sendable>: @unch
         }
     }
     private func perform() async throws -> Progress {
+        var readinessAttempted = false
         var cleanupAttempted = false
         do {
             while true {
@@ -77,6 +78,7 @@ final class MachineUpdateInstalledActivationCoordinator<Commit: Sendable>: @unch
                     try operations.closeRegistrations(); try requireOpen()
                     lock.withLock { phase = .committing }
                 case .committing:
+                    readinessAttempted = true
                     do {
                         let receipt = try await operations.commitReadiness()
                         lock.withLock { phase = .closingReadiness(receipt) }
@@ -94,9 +96,10 @@ final class MachineUpdateInstalledActivationCoordinator<Commit: Sendable>: @unch
                 }
             }
         } catch {
-            let failure = error
-            if !cleanupAttempted { try await operations.closeReadiness() }
-            throw failure
+            // Before the commit attempt, the readiness owner has not opened.
+            // After an uncertain commit, preserve its error and leave cleanup retryable.
+            if readinessAttempted, !cleanupAttempted { try? await operations.closeReadiness() }
+            throw error
         }
     }
     /// Cancellation joins the current operation before resource cleanup. Closing this owner cannot release admission.
