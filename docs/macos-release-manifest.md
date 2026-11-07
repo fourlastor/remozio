@@ -51,6 +51,12 @@ The [inventory record](macos-installation-inventory.md) grants no registration o
 It remains separate from the account journal.
 Optional protected installation still controls later schema changes.
 
+The authority and transport declare five phone update scheduling codecs.
+The transport writes the IPC and phone frame formats.
+The authority also writes the control, challenge, and status formats.
+The authority reads runtime activation plan format 5. The setup controller reads and writes it.
+The retained plan, signed release, and current Root capability govern scheduling startup.
+
 Request contracts declare the kind, wire version, capture schema, action tags, and signature purposes.
 The current command contracts use wire 1 and capture schemas 1, 2, and 3.
 They understand decline and execute. Execute still requires biometric authorization against the retained request.

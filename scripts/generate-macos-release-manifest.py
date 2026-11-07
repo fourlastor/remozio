@@ -108,7 +108,7 @@ def declarations(role):
     if role in (2, 4, 6, 8):
         values.append({0: 'runtime.audit-upgrade-startup-fence', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     host_formats = {
-        2: [('runtime.activation-plan', [1, 2, 3, 4], []),
+        2: [('runtime.activation-plan', [1, 2, 3, 4, 5], []),
             ('runtime.gateway-settings-consumer-host', [1], []),
             ('runtime.gateway-settings-fence', [1, 2], [2]),
             ('gateway.gateway-settings-control', [2], [2]), ('transport.gateway-settings-control', [2], [2]),
@@ -121,7 +121,7 @@ def declarations(role):
             ('runtime.gateway-settings-fence', [1, 2], []),
             ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
-        8: [('runtime.activation-plan', [1, 2, 3, 4], [1, 2, 3, 4]),
+        8: [('runtime.activation-plan', [1, 2, 3, 4, 5], [1, 2, 3, 4, 5]),
             ('runtime.gateway-settings-consumer-host', [1], [1]),
             ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
@@ -142,6 +142,12 @@ def declarations(role):
             writers = [1] if role == 2 or name in ('authority.audit-ipc', 'phone.audit-frame') else []
             if name in by_name:
                 raise ValueError('duplicate audit format declaration')
+            by_name[name] = {0: name, 1: [1], 2: writers, 3: {}}
+        for name in ('authority.update-scheduling-ipc', 'phone.update-scheduling-frame',
+                     'update.scheduling-control', 'update.scheduling-challenge', 'update.scheduling-status-response'):
+            writers = [1] if role == 2 or name in ('authority.update-scheduling-ipc', 'phone.update-scheduling-frame') else []
+            if name in by_name:
+                raise ValueError('duplicate update scheduling format declaration')
             by_name[name] = {0: name, 1: [1], 2: writers, 3: {}}
     return sorted(by_name.values(), key=lambda v: v[0])
 

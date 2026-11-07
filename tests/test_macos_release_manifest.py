@@ -31,7 +31,9 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record',
                  'runtime.audit-upgrade-startup-fence', 'command.monitor-activity', 'setup.audit-upgrade-progress',
                  'authority.update-scheduling-candidate', 'authority.update-admission-registration',
-                 'authority.machine-update-activation', 'authority.machine-update-replacement'}
+                 'authority.machine-update-activation', 'authority.machine-update-replacement',
+                 'authority.update-scheduling-ipc', 'phone.update-scheduling-frame', 'update.scheduling-control',
+                 'update.scheduling-challenge', 'update.scheduling-status-response'}
         def legacy(role):
             values = [dict(value) for value in original(role) if value[0] not in added]
             for value in values:
@@ -93,6 +95,23 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(by_name[name], {0: name, 1: [1], 2: [1], 3: {}})
             else:
                 self.assertNotIn(name, by_name)
+
+    def test_update_scheduling_declares_exact_codec_directions(self):
+        bidirectional = {'authority.update-scheduling-ipc', 'phone.update-scheduling-frame'}
+        names = bidirectional | {'update.scheduling-control', 'update.scheduling-challenge',
+                                 'update.scheduling-status-response'}
+        for role, *_ in MANIFEST.COMPONENTS:
+            formats = MANIFEST.declarations(role)
+            by_name = {value[0]: value for value in formats}
+            self.assertEqual(len(by_name), len(formats))
+            self.assertEqual(names.intersection(by_name), names if role in (2, 4) else set())
+            if role in (2, 4):
+                for name in names:
+                    writers = [1] if role == 2 or name in bidirectional else []
+                    self.assertEqual(by_name[name], {0: name, 1: [1], 2: writers, 3: {}})
+            if role in (2, 8):
+                self.assertIn(17, by_name['authority.journal'][1])
+                self.assertIn(17, by_name['authority.journal'][2])
 
     def test_update_admission_registration_is_declared_only_by_the_authority_and_setup_controller(self):
         name = 'authority.update-admission-registration'
@@ -409,7 +428,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
-                self.assertEqual(declarations[name], {0: name, 1: [1, 2, 3, 4], 2: [1, 2, 3, 4] if role == 8 else [], 3: {}})
+                versions = [1, 2, 3, 4, 5]
+                self.assertEqual(declarations[name], {0: name, 1: versions, 2: versions if role == 8 else [], 3: {}})
             else:
                 self.assertNotIn(name, declarations)
 
