@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -79,6 +80,7 @@ internal fun StoredMacList(onOpen: (StoredMac) -> Unit) {
                             Text(stringResource(R.string.macs_setup_incomplete_description))
                         } else {
                             dev.sebastiano.remozio.android.routing.MacRoutingStatusContent(mac.recordID)
+                            HorizontalDivider(Modifier.padding(vertical = 8.dp))
                             dev.sebastiano.remozio.android.updates.MacUpdateStatusContent(mac.recordID)
                         }
                         if (mac.setupIncomplete) PairingReceiptControl(mac,
