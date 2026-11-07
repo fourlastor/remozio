@@ -17,6 +17,23 @@ import org.junit.Test
 import kotlin.test.*
 
 class RelayConnectorTest {
+    /**
+     * Answers a client close frame, as a relay does. Cancelling the client can put a close frame on the wire before the
+     * socket is released. OkHttp's server side then waits for its own close to be written, and MockWebServer.close()
+     * gives up after five seconds if nothing answers.
+     */
+    private class ClosingPeer(private val delegate: WebSocketListener) : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) = delegate.onOpen(webSocket, response)
+        override fun onMessage(webSocket: WebSocket, text: String) = delegate.onMessage(webSocket, text)
+        override fun onMessage(webSocket: WebSocket, bytes: ByteString) = delegate.onMessage(webSocket, bytes)
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+            delegate.onClosing(webSocket, code, reason)
+            webSocket.close(1000, null)
+        }
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) = delegate.onClosed(webSocket, code, reason)
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = delegate.onFailure(webSocket, t, response)
+    }
+
     private class Fixture(hostname: String = "localhost") : AutoCloseable {
         val certificate = HeldCertificate.Builder().commonName("synthetic-relay")
             .addSubjectAlternativeName(hostname).build()
@@ -28,7 +45,7 @@ class RelayConnectorTest {
         val endpoint = RelayEndpoint("localhost", server.port)
         val credential = RelayAccessCredential(endpoint, "synthetic-id", "synthetic-secret")
         fun upgrade(listener: WebSocketListener) = server.enqueue(MockResponse.Builder()
-            .webSocketUpgrade(listener).addHeader("Sec-WebSocket-Protocol", WebSocketUpgrade.PROTOCOL).build())
+            .webSocketUpgrade(ClosingPeer(listener)).addHeader("Sec-WebSocket-Protocol", WebSocketUpgrade.PROTOCOL).build())
         override fun close() = server.close()
     }
 
