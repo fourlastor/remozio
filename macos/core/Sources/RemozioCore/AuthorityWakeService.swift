@@ -26,6 +26,7 @@ public actor AuthorityWakeService {
     private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
     private let phonePushCapability: AuthorityPhonePushCapability?
+    private let updateScheduling: AuthorityUpdateSchedulingStartup?
     private let hints: AuthorityWakeHintSource
     private let requestsRetired: @Sendable () -> Bool
     private let startRequests: @Sendable () throws -> Void
@@ -64,12 +65,14 @@ public actor AuthorityWakeService {
          commandExecutionWorker: AuthorityCommandExecutionWorker? = nil,
          stopRequestProducers: @escaping @Sendable () async -> Void = {},
          phonePushCapability: AuthorityPhonePushCapability? = nil,
-         gatewaySettingsBinding: GatewaySettingsControlBinding? = nil) throws {
+         gatewaySettingsBinding: GatewaySettingsControlBinding? = nil,
+         updateScheduling: AuthorityUpdateSchedulingStartup? = nil) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         guard gatewaySettingsBinding == nil || gatewaySettingsBinding?.accountID == hints.binding.accountID else { throw GatewayPreparationError.changedScope }
         self.gatewaySettingsBinding = gatewaySettingsBinding
         self.phonePushCapability = phonePushCapability
+        self.updateScheduling = updateScheduling
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
         self.stopRequestProducers = stopRequestProducers
@@ -80,10 +83,12 @@ public actor AuthorityWakeService {
         recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
+        let offers = updateScheduling?.offers
         let worker = task, drain = settingsDrain, recovery = recoveryDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
                 await commandReceiver?.close()
+                await offers?.close()
                 await stopRequestProducers()
                 await commandExecutionWorker?.close()
                 await observer?.value
@@ -126,6 +131,27 @@ public actor AuthorityWakeService {
                             commandReceiverFactory: AuthorityCommandReceiveFactory? = nil,
                             commandExecutionFactory: AuthorityCommandExecutionFactory? = nil,
                             onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void = { _ in }) throws -> AuthorityWakeService {
+        try openPresence(configuration: configuration, accountPresence: accountPresence, appEndpoint: appEndpoint,
+            pairingConfiguration: pairingConfiguration, updateSchedulingFactory: nil, reconcileExpired: reconcileExpired,
+            commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory,
+            onCommandAuthorized: onCommandAuthorized)
+    }
+    static func openInstalledPresence(configuration: AuthorityPresenceStartupConfiguration,
+        updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+        commandReceiverFactory: AuthorityCommandReceiveFactory?, commandExecutionFactory: AuthorityCommandExecutionFactory?,
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
+        try openPresence(configuration: configuration.wake, accountPresence: configuration.presence, appEndpoint: configuration.endpoint,
+            pairingConfiguration: configuration.pairing, updateSchedulingFactory: updateSchedulingFactory,
+            reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory,
+            commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
+    }
+    private static func openPresence(configuration: AuthorityWakeStartupConfiguration, accountPresence: AuthorityAccountPresenceConfiguration,
+        appEndpoint: AuthorityPresenceEndpointConfiguration, pairingConfiguration: AuthorityPairingSetupConfiguration?,
+        updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory?,
+        reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
+        commandReceiverFactory: AuthorityCommandReceiveFactory?, commandExecutionFactory: AuthorityCommandExecutionFactory?,
+        onCommandAuthorized: @escaping @Sendable (AuthorityCommandAuthorizationNotice) -> Void) throws -> AuthorityWakeService {
         guard getuid() == 0, geteuid() == 0 else { throw GatewayServiceError.wrongAccount }
         guard accountPresence.macID == configuration.request.service.macID,
               accountPresence.accountID == configuration.request.service.accountID,
@@ -142,11 +168,13 @@ public actor AuthorityWakeService {
             gatewayPolicy: configuration.phonePush?.journalPolicy(clockEpoch: clock.epoch))
         let presence = AuthorityPresenceRuntime(configuration: accountPresence, clockEpoch: clock.epoch)
         return try compose(configuration: configuration, journal: journal, clock: clock, presence: presence, appEndpoint: appEndpoint, pairingConfiguration: pairingConfiguration,
-            routing: { throw AuthorityPresenceError.unavailable }, reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
+            routing: { throw AuthorityPresenceError.unavailable }, updateSchedulingFactory: updateSchedulingFactory,
+            reconcileExpired: reconcileExpired, commandReceiverFactory: commandReceiverFactory, commandExecutionFactory: commandExecutionFactory, onCommandAuthorized: onCommandAuthorized)
     }
     private static func compose(configuration: AuthorityWakeStartupConfiguration, journal: AuthorityJournal, clock: AuthorityClock,
                                 presence: AuthorityPresenceRuntime?, appEndpoint: AuthorityPresenceEndpointConfiguration?,
                                 pairingConfiguration: AuthorityPairingSetupConfiguration?, routing: @escaping @Sendable () throws -> PresenceRouting,
+                                updateSchedulingFactory: AuthorityUpdateSchedulingStartupFactory? = nil,
                                 reconcileExpired: @escaping @Sendable ([ApprovalRequestState]) throws -> Void,
                                 commandReceiverFactory: AuthorityCommandReceiveFactory?,
                                 commandExecutionFactory: AuthorityCommandExecutionFactory?,
@@ -183,12 +211,14 @@ public actor AuthorityWakeService {
                     leaseMilliseconds: configuration.leaseMilliseconds, clock: { try clock.now() }, routing: routing,
                     ownerRouting: ownerRouting, phonePush: phoneCapability.publication, phonePushSource: { phoneCapability.publication })
             }
+            let updateScheduling = try updateSchedulingFactory?(journal, signer, clock)
             let executionWorker = try commandExecutionFactory?(journal, clock)
             let service = try AuthorityService(configuration: configuration.request.service, journal: journal,
                 maintenanceIntervalMilliseconds: configuration.request.maintenanceIntervalMilliseconds,
                 validateSelf: AuthoritySelfValidation.validate, requestClock: { try clock.now() }, requestProviders: providers,
                 phonePushRegistration: phoneCapability.registrationProvider(),
-                phonePushRecovery: phoneCapability.recoveryProvider(), wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
+                phonePushRecovery: phoneCapability.recoveryProvider(), phoneUpdateScheduling: updateScheduling?.provider,
+                wakeHints: { try hints.current() }, reconcileExpired: reconcileExpired,
                 onMaintenanceFailure: { retired.value.withLock { $0 = true } }, onCommandAuthorized: { notice in
                     _ = executionWorker?.enqueue(notice)
                     onCommandAuthorized(notice)
@@ -208,7 +238,8 @@ public actor AuthorityWakeService {
                 closeRequests: { presenceListener?.close(); try service.close() },
                 requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
                 stopRequestProducers: { await journal.stopCommandExchanges() }, phonePushCapability: phoneCapability,
-                gatewaySettingsBinding: .init(accountID: configuration.registration.accountID, rootEpoch: clock.epoch))
+                gatewaySettingsBinding: .init(accountID: configuration.registration.accountID, rootEpoch: clock.epoch),
+                updateScheduling: updateScheduling)
         } catch { presence?.close(); try? journal.close(); throw error }
     }
     /// Unreadable optional state must not be treated as absence. Foreground listeners can still start.
@@ -395,6 +426,11 @@ public actor AuthorityWakeService {
             try await commandReceiver?.start()
             try Task.checkCancellation()
             guard !closed else { throw AuthorityWakePublisherError.closed }
+            if let offers = updateScheduling?.offers {
+                try await offers.start()
+                try Task.checkCancellation()
+                guard !closed, !isRetired else { throw AuthorityWakePublisherError.closed }
+            }
         }
         catch { try? await close(); throw error }
         startPublisherLoop()
@@ -417,9 +453,11 @@ public actor AuthorityWakeService {
         let observer = receiverObserver; receiverObserver = nil; observer?.cancel()
         let executionObserver = executionObserver; self.executionObserver = nil; executionObserver?.cancel()
         hints.close(); presence?.close()
+        let offers = updateScheduling?.offers
         let publisher = publisher, drain = settingsDrain, recovery = recoveryDrain, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         let work = Task {
             await commandReceiver?.close()
+            await offers?.close()
             await stopRequestProducers()
             await commandExecutionWorker?.close()
             await publisher?.close()

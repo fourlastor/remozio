@@ -898,3 +898,42 @@ extension AuthorityJournal {
         }
     }
 }
+
+extension AuthorityJournal {
+    /// The trusted transport supplies its current binding. Acquire the machine lease before this journal lock.
+    func exchangeUpdateScheduling(candidate: LiveUpdateSchedulingCandidate, frame: PhoneUpdateSchedulingFrame,
+        binding: AuthorityPeerBinding, signer: EnclaveAuthorityRequestSigner,
+        validateTransport: (JournalTransaction) throws -> Void, now: () throws -> AuthorityMoment,
+        wall: () throws -> UInt64) throws -> PhoneUpdateSchedulingFrame {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard signer.macID == binding.scope.macID, signer.accountID == binding.scope.accountID else {
+            throw AuthorityRequestSignerError.wrongIdentity
+        }
+        _ = try frame.encode()
+        return try withoutActuallyEscaping(validateTransport) { validateTransport in
+            let verifyHost: (JournalTransaction) throws -> Void = { tx in
+                try AuthoritySelfValidation.validate(transaction: tx)
+                try validateTransport(tx)
+            }
+            return try withUpdateSchedulingOwner { owner in
+                switch frame {
+                case .status(let nonce):
+                    return try owner.updateSchedulingStateFrame(candidate: candidate, queryNonce: nonce, binding: binding,
+                        authorityPublicKey: signer.publicKey, verifyHost: verifyHost,
+                        now: now, wall: wall, sign: signer.sign)
+                case let .challenge(nonce, update, generation, revision, action):
+                    let expected = try UpdateSchedulingSnapshot(updateID: update, generation: generation, revision: revision)
+                    let reply = try owner.issueUpdateSchedulingChallenge(candidate: candidate, queryNonce: nonce, action: action,
+                        expected: expected, binding: binding, authorityPublicKey: signer.publicKey,
+                        verifyHost: verifyHost, now: now, wall: wall, sign: signer.sign)
+                    return .challengeResponse(queryNonce: nonce, canonicalPayload: reply.canonicalChallenge, signature: reply.signature)
+                case let .apply(nonce, control, signature):
+                    return try owner.consumeUpdateSchedulingFrame(candidate: candidate, queryNonce: nonce, canonicalControl: control,
+                        signature: signature, binding: binding, authorityPublicKey: signer.publicKey,
+                        verifyHost: verifyHost, now: now, wall: wall, sign: signer.sign)
+                default: throw PhoneUpdateSchedulingFrameError.invalidMessage
+                }
+            }
+        }
+    }
+}

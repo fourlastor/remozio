@@ -70,7 +70,8 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
         func state() throws -> ApprovalRequestState {
             try journal.withRequests { try $0.state(requestID: self.request.requestID) }
         }
-        func service(_ drivers: [Driver], creationGate: DispatchSemaphore? = nil, binding: GatewaySettingsControlBinding? = nil) throws -> AuthorityWakeService {
+        func service(_ drivers: [Driver], creationGate: DispatchSemaphore? = nil, binding: GatewaySettingsControlBinding? = nil,
+                     updateScheduling: AuthorityUpdateSchedulingStartup? = nil) throws -> AuthorityWakeService {
             let hints = try AuthorityWakeHintSource(registration: h.registration)
             return try .init(makePublisher: { [self] in
                 let index = attempts.withLock { let index = $0; $0 += 1; return index }
@@ -84,7 +85,8 @@ final class AuthorityWakeSettingsTests: XCTestCase, @unchecked Sendable {
                     })
             }, hints: hints, interval: 100, startRequests: { [self] in starts.withLock { $0 += 1 } },
                 closeRequests: { [self] in closes.withLock { $0 += 1 }; try journal.close() },
-                requestsRetired: { [self] in retired.withLock { $0 } }, phonePushCapability: capability, gatewaySettingsBinding: binding)
+                requestsRetired: { [self] in retired.withLock { $0 } }, phonePushCapability: capability, gatewaySettingsBinding: binding,
+                updateScheduling: updateScheduling)
         }
     }
     private func waitUntil(_ condition: () async -> Bool) async throws {

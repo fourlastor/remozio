@@ -22,6 +22,7 @@ public actor AuthorityTrustFeed {
     private weak var host: DirectApprovalTransportHost?
     private var channel: AuthorityXPCChannel?
     private var routingLink: (id: UUID, channel: AuthorityXPCChannel)?
+    private var updateSchedulingLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var auditLink: (id: UUID, channel: AuthorityXPCChannel)?
     private var auditAdvertised = false
     private var emptyTrustSnapshot = false
@@ -58,7 +59,7 @@ public actor AuthorityTrustFeed {
         self.maximumWaiting = maximumWaiting; self.factory = factory
     }
     deinit {
-        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort(); auditLink?.channel.abort(); routingLink?.channel.abort()
+        lease.invalidate(); timer?.cancel(); channel?.abort(); registrationLink?.channel.abort(); recoveryLink?.channel.abort(); auditLink?.channel.abort(); routingLink?.channel.abort(); updateSchedulingLink?.channel.abort()
         let host = host, lease = lease
         Task { await host?.authorityDisconnected(lease) }
     }
@@ -382,6 +383,53 @@ public actor AuthorityTrustFeed {
         let value = routingLink?.channel; routingLink = nil; value?.abort()
     }
 
+    /// Probe on a separate RPC link. A missing optional selector cannot retire ordinary approval delivery.
+    public func requirePhoneUpdateSchedulingSupport() async throws {
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire(); defer { release() }
+        let link = try await openUpdateSchedulingLink()
+        do {
+            try await link.channel.requirePhoneUpdateSchedulingSupport()
+            try requireActive()
+            guard updateSchedulingLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+        } catch AuthorityXPCError.unsupportedPhoneUpdateScheduling {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhoneUpdateScheduling
+        } catch { retireUpdateSchedulingLink(link.id); try requireActive(); throw error }
+    }
+    /// A response can acknowledge an earlier commit. This owner never retries an application operation.
+    public func phoneUpdateScheduling(_ peer: DirectApprovalPeer, revision: UUID, frame: PhoneUpdateSchedulingFrame) async throws -> PhoneUpdateSchedulingFrame {
+        guard peer.scope.macID == macID, peer.scope.accountID == accountID else { throw AuthorityXPCError.invalidMessage }
+        let binding = AuthorityPeerBinding(peer: peer, revision: revision)
+        try AuthorityPhoneUpdateSchedulingExchange.request(frame, binding: binding)
+        inFlightOperations += 1; defer { finishOperation() }
+        try await acquire(); defer { release() }
+        let link = try await openUpdateSchedulingLink()
+        do {
+            let response = try await link.channel.phoneUpdateScheduling(binding: binding, frame: frame)
+            try requireActive()
+            guard updateSchedulingLink?.id == link.id, link.channel.lifetimeActive else { throw AuthorityXPCError.closed }
+            return response
+        } catch AuthorityXPCError.unsupportedPhoneUpdateScheduling {
+            try requireActive(); throw AuthorityXPCError.unsupportedPhoneUpdateScheduling
+        } catch { retireUpdateSchedulingLink(link.id); try requireActive(); throw error }
+    }
+    private func openUpdateSchedulingLink() async throws -> (id: UUID, channel: AuthorityXPCChannel) {
+        try requireActive()
+        if let updateSchedulingLink { return updateSchedulingLink }
+        let id = UUID()
+        let value = try factory { [weak self] in Task { await self?.retireUpdateSchedulingLink(id) } }
+        updateSchedulingLink = (id, value)
+        do {
+            try await value.start(); try requireActive()
+            guard updateSchedulingLink?.id == id, value.lifetimeActive else { throw AuthorityXPCError.closed }
+            return (id, value)
+        } catch { retireUpdateSchedulingLink(id); throw error }
+    }
+    private func retireUpdateSchedulingLink(_ id: UUID) {
+        guard updateSchedulingLink?.id == id else { return }
+        let value = updateSchedulingLink?.channel; updateSchedulingLink = nil; value?.abort()
+    }
+
     public func close() async {
         if !closed {
             closed = true; ready = false; refreshDue = false; lease.invalidate()
@@ -391,6 +439,7 @@ public actor AuthorityTrustFeed {
             if let id = recoveryLink?.id { retireRecoveryLink(id) }
             if let id = auditLink?.id { retireAuditLink(id) }
             if let id = routingLink?.id { retireRoutingLink(id) }
+            if let id = updateSchedulingLink?.id { retireUpdateSchedulingLink(id) }
             let pending = waiters; waiters.removeAll()
             for (_, waiter) in pending { waiter.resume(throwing: AuthorityXPCError.closed) }
         }
