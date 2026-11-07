@@ -79,6 +79,17 @@ final class DirectApprovalTransportHostTests: XCTestCase {
         await host.close()
     }
 
+    func testUpdateSchedulingAdvertisementRequiresExplicitSupportAndIsSealedBeforeAdmission() async throws {
+        XCTAssertFalse(DirectApprovalListener.purposes(enablePhoneRouting: false, enablePhoneUpdateScheduling: false).contains(.updateScheduling))
+        XCTAssertTrue(DirectApprovalListener.purposes(enablePhoneRouting: false, enablePhoneUpdateScheduling: true).contains(.updateScheduling))
+        XCTAssertEqual(EnrolledChannelPurpose(applicationProtocol: "remozio-update-scheduling/1"), .updateScheduling)
+        let factory = Factory(), validator = Validator(), host = host(factory, validator)
+        try await host.configurePhoneUpdateSchedulingSupport(true)
+        try await host.replaceTrust(trust()); try await host.start()
+        do { try await host.configurePhoneUpdateSchedulingSupport(false); XCTFail("Changed support after admission") } catch {}
+        await host.close()
+    }
+
     func testAuditAdvertisementRequiresSupportAndIsSealedBeforeAdmission() async throws {
         XCTAssertFalse(DirectApprovalListener.purposes(enablePhoneAudit: false).contains(.audit))
         XCTAssertTrue(DirectApprovalListener.purposes(enablePhoneAudit: true).contains(.audit))

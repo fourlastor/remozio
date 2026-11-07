@@ -72,6 +72,8 @@ public actor DirectApprovalTransportService {
                         try await self.runPhoneRouting(for: session, over: channel, timeoutMilliseconds: timeout)
                     case .audit:
                         try await self.runPhoneAudit(for: session, over: channel, timeoutMilliseconds: timeout)
+                    case .updateScheduling:
+                        try await self.runPhoneUpdateScheduling(for: session, over: channel, timeoutMilliseconds: timeout)
                     }
                 }
             }
@@ -89,6 +91,12 @@ public actor DirectApprovalTransportService {
                 catch { auditSupported = false }
                 try Task.checkCancellation()
                 try await host.configurePhoneAuditSupport(auditSupported)
+                let updateSupported: Bool
+                do { try await feed.requirePhoneUpdateSchedulingSupport(); updateSupported = true }
+                catch is CancellationError { throw CancellationError() }
+                catch { updateSupported = false }
+                try Task.checkCancellation()
+                try await host.configurePhoneUpdateSchedulingSupport(updateSupported)
             }
             guard !closed else { throw DirectHostError.stopped }
             try Task.checkCancellation()
@@ -348,6 +356,16 @@ public actor DirectApprovalTransportService {
         let response: PhoneRoutingFrame
         do { response = try await feed.phoneRouting(session.peer, revision: session.revision, frame: frame) }
         catch AuthorityXPCError.unsupportedPhoneRouting { response = .failure(queryNonce: frame.queryNonce, reason: .incompatible) }
+        try await validate(session)
+        return response
+    }
+
+    /// A missing reply never permits replay. The enrolled phone must verify the signed response.
+    public func phoneUpdateScheduling(for session: DirectApprovalSession, frame: PhoneUpdateSchedulingFrame) async throws -> PhoneUpdateSchedulingFrame {
+        try await validate(session)
+        let response: PhoneUpdateSchedulingFrame
+        do { response = try await feed.phoneUpdateScheduling(session.peer, revision: session.revision, frame: frame) }
+        catch AuthorityXPCError.unsupportedPhoneUpdateScheduling { response = .failure(queryNonce: frame.queryNonce, reason: .incompatible) }
         try await validate(session)
         return response
     }
