@@ -110,6 +110,53 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                 if held { routingRequested.fulfill() } else { reply(.routing(result)) }
             } catch { reply(.failed) }
         }
+        var updateSchedulingVersionValue: UInt64? = 0
+        private var updateSchedulingCalls = 0
+        private var updateSchedulingHeld: (@Sendable (AuthorityXPCReply) -> Void)?
+        private var updateSchedulingResult: Data?
+        private var holdUpdateSchedulingReply = false
+        private let updateSchedulingKey = P256.Signing.PrivateKey()
+        let updateSchedulingRequested = XCTestExpectation(description: "updateScheduling requested")
+        var updateSchedulingCount: Int { lock.withLock { updateSchedulingCalls } }
+        var updateSchedulingPublicKey: Data { updateSchedulingKey.publicKey.x963Representation }
+        func holdUpdateScheduling() { lock.withLock { holdUpdateSchedulingReply = true } }
+        func finishUpdateScheduling() {
+            let result = lock.withLock { () -> ((@Sendable (AuthorityXPCReply) -> Void)?, Data?) in
+                let old = (updateSchedulingHeld, updateSchedulingResult); updateSchedulingHeld = nil; updateSchedulingResult = nil; return old
+            }
+            if let reply = result.0, let bytes = result.1 { reply(.updateScheduling(bytes)) }
+        }
+        func updateSchedulingVersion(_ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            if let updateSchedulingVersionValue { reply(.updateSchedulingVersion(updateSchedulingVersionValue)) } else { reply(.failed) }
+        }
+        func updateScheduling(_ binding: Data, frame: Data, _ reply: @escaping @Sendable (AuthorityXPCReply) -> Void) {
+            lock.withLock { updateSchedulingCalls += 1 }
+            do {
+                let request = try PhoneUpdateSchedulingFrame.decode(frame)
+                let status: UpdateSchedulingStatusResponse
+                if case .apply(_, let bytes, _) = request {
+                    let control = try UpdateSchedulingControl.decode(bytes, limits: .init(maxBytes: 1024, maxDepth: 2, maxItems: 32))
+                    let next = control.expectedRevision.addingReportingOverflow(1)
+                    guard !next.overflow else { throw ApprovalChannelError.invalidInput }
+                    status = try .init(scope: trust.peers[0].scope, queryNonce: request.queryNonce,
+                        updateID: control.updateID, generation: control.expectedGeneration, revision: next.partialValue,
+                        requestedAction: control.action, controlDigest: Data(SHA256.hash(data: bytes)))
+                } else {
+                    status = try .init(scope: trust.peers[0].scope, queryNonce: request.queryNonce,
+                        updateID: Data(repeating: 31, count: 32), generation: 1, revision: 0,
+                        requestedAction: nil, controlDigest: nil)
+                }
+                let payload = try status.encode()
+                let input = try UpdateSchedulingStatusSigningInput.make(wireVersion: 1, canonicalPayload: payload,
+                    inputLimits: .init(maxBytes: 3200, maxDepth: 2, maxItems: 16))
+                let result = try PhoneUpdateSchedulingFrame.stateResponse(queryNonce: request.queryNonce, canonicalPayload: payload,
+                    signature: updateSchedulingKey.signature(for: input).rawRepresentation).encode()
+                let held = lock.withLock {
+                    if holdUpdateSchedulingReply { updateSchedulingHeld = reply; updateSchedulingResult = result; return true }; return false
+                }
+                if held { updateSchedulingRequested.fulfill() } else { reply(.updateScheduling(result)) }
+            } catch { reply(.failed) }
+        }
         var auditVersionValue: UInt64? = 0
         private let auditKey = P256.Signing.PrivateKey()
         var auditPublicKey: Data { auditKey.publicKey.x963Representation }
@@ -352,12 +399,14 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
                        automatic: Bool = true, exchangeSupported: Bool = false, statuses: [Data: Data] = [:],
                        decisions: [Data: Data] = [:], refreshMilliseconds: UInt64 = 5000, recoveryVersion: UInt64? = 0, routingVersion: UInt64? = 0, routingOnly: Bool = false,
                        auditVersion: UInt64? = 0, auditOnly: Bool = false,
+                       updateSchedulingVersion: UInt64? = 0, updateSchedulingOnly: Bool = false,
                        handler: @escaping @Sendable (DirectApprovalSession, NegotiatedNetworkChannel) async throws -> Void = { _, _ in }) async throws -> (DirectApprovalTransportService, DirectApprovalTransportHost, Driver, Factory, DirectApprovalPeer) {
         let peer = try DirectApprovalPeer(scope: Self.scope(), transportPublicKey: P256.Signing.PrivateKey().publicKey.derRepresentation,
-            requests: (routingOnly || auditOnly) ? [] : [Self.capability(features: features)], auditVersions: auditOnly ? [1] : [], maximumPayloadBytes: maximum)
+            requests: (routingOnly || auditOnly || updateSchedulingOnly) ? [] : [Self.capability(features: features)], auditVersions: auditOnly ? [1] : [], maximumPayloadBytes: maximum)
         let trust = DirectApprovalTrust(macID: Self.id(1), accountID: Self.id(2), revision: UUID(), peers: [peer])
         let driver = Driver(trust: trust, ids: ids, frames: frames, exchangeSupported: exchangeSupported, statuses: statuses, decisions: decisions), factory = Factory()
         driver.recoveryVersionValue = recoveryVersion; driver.routingVersionValue = routingVersion; driver.auditVersionValue = auditVersion
+        driver.updateSchedulingVersionValue = updateSchedulingVersion
         let feed = AuthorityTrustFeed(macID: Self.id(1), accountID: Self.id(2), factory: { AuthorityXPCChannel(driver: driver, onClose: $0) })
         let host = DirectApprovalTransportHost(macID: Self.id(1), accountID: Self.id(2),
             factory: { generation, _, _, handler in factory.make(generation, handler) },
@@ -368,7 +417,7 @@ final class DirectApprovalRequestDeliveryTests: XCTestCase, @unchecked Sendable 
     }
     private func connect(_ phone: Phone, _ peer: DirectApprovalPeer,
                          purpose: EnrolledChannelPurpose = .approvals) async throws -> NegotiatedNetworkChannel {
-        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: (purpose == .pushRecovery || purpose == .routing || purpose == .audit) ? [] : peer.requests, auditVersions: purpose == .audit ? [1] : [],
+        try await NegotiatedNetworkChannel.accept(stream: phone, scope: peer.scope, requests: (purpose == .pushRecovery || purpose == .routing || purpose == .audit || purpose == .updateScheduling) ? [] : peer.requests, auditVersions: purpose == .audit ? [1] : [],
             maximumPayloadBytes: peer.channelMaximumPayloadBytes(for: purpose), purpose: purpose)
     }
     private func recoveryResume(_ id: Data = DirectApprovalRequestDeliveryTests.id(32)) throws -> PhonePushRecoveryFrame {
@@ -1220,5 +1269,112 @@ extension DirectApprovalRequestDeliveryTests {
             XCTAssertEqual(driver.routingCount, 1); let closed = await phone.closed; XCTAssertTrue(closed)
             await service.close()
         }
+    }
+}
+
+extension DirectApprovalRequestDeliveryTests {
+    func testUpdateSchedulingDefaultHandlerCarriesSignedStatusWithoutCommandCapabilities() async throws {
+        let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], updateSchedulingVersion: 1, updateSchedulingOnly: true)
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+        let channel = try await connect(phone, peer, purpose: .updateScheduling)
+        let query = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 21, count: 32))
+        try await phone.submit(query.encode())
+        try await factory.run(peer, channel)
+        let payloads = await phone.payloads; XCTAssertEqual(payloads.count, 1)
+        guard case .stateResponse(let nonce, let body, let signature) = try PhoneUpdateSchedulingFrame.decode(XCTUnwrap(payloads.first)) else {
+            await service.close(); return XCTFail("Missing signed updateScheduling status")
+        }
+        XCTAssertEqual(nonce, query.queryNonce)
+        XCTAssertTrue(try UpdateSchedulingStatusSignature.verify(signature: signature, authorityPublicKey: driver.updateSchedulingPublicKey,
+            wireVersion: 1, canonicalPayload: body, inputLimits: .init(maxBytes: 3200, maxDepth: 2, maxItems: 16)))
+        let status = try UpdateSchedulingStatusResponse.decode(body)
+        XCTAssertEqual(status.generation, 1); XCTAssertEqual(status.revision, 0); XCTAssertNil(status.requestedAction); XCTAssertNil(status.controlDigest)
+        XCTAssertTrue(driver.exchangeQueries.isEmpty); XCTAssertEqual(driver.discoveryCount, 0); XCTAssertEqual(driver.updateSchedulingCount, 1)
+        let closed = await phone.closed; XCTAssertTrue(closed)
+        await service.close()
+    }
+    func testUpdateSchedulingUnsupportedRootReturnsOnlyIncompatibleWithoutApprovalWork() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false)
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true)
+        let channel = try await connect(phone, peer, purpose: .updateScheduling), session = try await host.admit(peer, generation: factory.generation)
+        let query = PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 21, count: 32)); try await phone.submit(query.encode())
+        try await service.runPhoneUpdateScheduling(for: session, over: channel)
+        let payloads = await phone.payloads
+        guard case .failure(let nonce, .incompatible) = try PhoneUpdateSchedulingFrame.decode(XCTUnwrap(payloads.first)) else {
+            await service.close(); return XCTFail("Unsupported updateScheduling became status")
+        }
+        XCTAssertEqual(nonce, query.queryNonce); XCTAssertEqual(driver.updateSchedulingCount, 0); XCTAssertEqual(driver.discoveryCount, 0)
+        await service.close()
+    }
+    func testUpdateSchedulingRejectsWrongPurposeScopeAndApprovalCapabilitiesBeforeRootWork() async throws {
+        for mismatch in 0..<4 {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, updateSchedulingVersion: 1)
+            let scope = try mismatch == 1 ? Self.scope(phone: 5) : peer.scope
+            let requests = mismatch == 2 ? peer.requests : []
+            let phone = try Phone(scope: scope, requests: requests, persistent: true, auditVersions: mismatch == 3 ? [1] : [])
+            let channel = try await NegotiatedNetworkChannel.accept(stream: phone, scope: scope, requests: requests,
+                auditVersions: mismatch == 3 ? [1] : [], maximumPayloadBytes: 4096, purpose: mismatch == 0 ? .approvals : .updateScheduling)
+            let session = try await host.admit(peer, generation: factory.generation)
+            do { try await service.runPhoneUpdateScheduling(for: session, over: channel); XCTFail("Unbound updateScheduling accepted") } catch {}
+            XCTAssertEqual(driver.updateSchedulingCount, 0); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+    func testUpdateSchedulingRejectsMalformedAndResponseRoleBeforeRootWork() async throws {
+        let bad = [Data([1]), try PhoneUpdateSchedulingFrame.failure(queryNonce: Data(repeating: 21, count: 32), reason: .unavailable).encode()]
+        for bytes in bad {
+            let (service, _, driver, factory, peer) = try await setup(ids: [], frames: [:], updateSchedulingVersion: 1)
+            let phone = try Phone(scope: peer.scope, requests: [], persistent: true), channel = try await connect(phone, peer, purpose: .updateScheduling)
+            try await phone.submit(bytes)
+            do { try await factory.run(peer, channel); XCTFail("Invalid updateScheduling accepted") } catch {}
+            XCTAssertEqual(driver.updateSchedulingCount, 0); let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty)
+            await service.close()
+        }
+    }
+    func testUpdateSchedulingTrustRetirementWithholdsLateRootStatusWithoutReplay() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], updateSchedulingVersion: 1)
+        driver.holdUpdateScheduling()
+        let phone = try Phone(scope: peer.scope, requests: [], persistent: true), channel = try await connect(phone, peer, purpose: .updateScheduling)
+        try await phone.submit(PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 21, count: 32)).encode())
+        let operation = Task { try await factory.run(peer, channel) }
+        await fulfillment(of: [driver.updateSchedulingRequested], timeout: 2)
+        try await host.replaceTrust(driver.trust); driver.finishUpdateScheduling()
+        do { try await operation.value; XCTFail("Retired updateScheduling status published") } catch {}
+        let payloads = await phone.payloads; XCTAssertTrue(payloads.isEmpty); XCTAssertEqual(driver.updateSchedulingCount, 1)
+        await service.close()
+    }
+    func testUpdateSchedulingBlockedOrFailedWriteDoesNotReplayRootOperation() async throws {
+        for blocked in [false, true] {
+            let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, updateSchedulingVersion: 1)
+            let phone = try Phone(scope: peer.scope, requests: [], failWrite: !blocked, holdWrite: blocked, persistent: true)
+            let channel = try await connect(phone, peer, purpose: .updateScheduling), session = try await host.admit(peer, generation: factory.generation)
+            try await phone.submit(PhoneUpdateSchedulingFrame.status(queryNonce: Data(repeating: 21, count: 32)).encode())
+            do { try await service.runPhoneUpdateScheduling(for: session, over: channel, timeoutMilliseconds: 100); XCTFail("Failed write accepted") } catch {}
+            XCTAssertEqual(driver.updateSchedulingCount, 1); let closed = await phone.closed; XCTAssertTrue(closed)
+            await service.close()
+        }
+    }
+}
+
+
+extension DirectApprovalRequestDeliveryTests {
+    func testUpdateSchedulingLostWriteDoesNotReplayAnAcceptedControl() async throws {
+        let (service, host, driver, factory, peer) = try await setup(ids: [], frames: [:], automatic: false, updateSchedulingVersion: 1)
+        let scope = peer.scope
+        let control = try UpdateSchedulingControl(macID: scope.macID, accountID: scope.accountID,
+            phoneID: scope.phoneID, enrollmentEpoch: scope.enrollmentEpoch, operationID: Self.id(40),
+            challenge: Self.id(41, 32), keyID: Self.id(42), updateID: Self.id(31, 32), expectedGeneration: 1,
+            expectedRevision: 0, issuedAtUnixMillis: 100, expiresAtUnixMillis: 200, action: .deferUpdate)
+        let phone = try Phone(scope: scope, requests: [], failWrite: true, persistent: true)
+        let channel = try await connect(phone, peer, purpose: .updateScheduling)
+        let session = try await host.admit(peer, generation: factory.generation)
+        // The fixture Root checks framing only. Real decision and Root signatures have separate component coverage.
+        try await phone.submit(PhoneUpdateSchedulingFrame.apply(queryNonce: Self.id(43, 32),
+            canonicalControl: control.encode(limits: .init(maxBytes: 1024, maxDepth: 2, maxItems: 32)), signature: Data(count: 64)).encode())
+        do { try await service.runPhoneUpdateScheduling(for: session, over: channel); XCTFail("Lost acknowledgment accepted") } catch {}
+        XCTAssertEqual(driver.updateSchedulingCount, 1)
+        let payloads = await phone.payloads, closed = await phone.closed
+        XCTAssertTrue(payloads.isEmpty); XCTAssertTrue(closed)
+        await service.close()
     }
 }

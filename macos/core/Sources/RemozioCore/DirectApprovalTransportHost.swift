@@ -35,6 +35,7 @@ public actor DirectApprovalTransportHost {
     private final class FeatureSupport: Sendable { let value = Mutex(false) }
     private let phoneRoutingSupport = FeatureSupport()
     private let phoneAuditSupport = FeatureSupport()
+    private let phoneUpdateSchedulingSupport = FeatureSupport()
     private var authority: AuthorityTrustLease?
     private var trust: DirectApprovalTrust?
     private var listener: (generation: UUID, value: any OwnedDirectListener)?
@@ -54,10 +55,12 @@ public actor DirectApprovalTransportHost {
         self.validatePeer = validatePeer; self.handler = handler
         let connectionBudget = try AuthorityXPCWorkBudget(maximum: maximumConnections)
         let routingSupport = phoneRoutingSupport, auditSupport = phoneAuditSupport
+        let updateSupport = phoneUpdateSchedulingSupport
         factory = { _, peers, event, handler in
             try DirectApprovalListener(identity: identity, peers: peers, binding: binding,
                 maximumConnections: maximumConnections, timeoutMilliseconds: timeoutMilliseconds,
-                enablePhoneRouting: routingSupport.value.withLock { $0 }, enablePhoneAudit: auditSupport.value.withLock { $0 }, event: event, handler: handler, sharedWorkBudget: connectionBudget)
+                enablePhoneRouting: routingSupport.value.withLock { $0 }, enablePhoneAudit: auditSupport.value.withLock { $0 },
+                enablePhoneUpdateScheduling: updateSupport.value.withLock { $0 }, event: event, handler: handler, sharedWorkBudget: connectionBudget)
         }
     }
 
@@ -82,6 +85,12 @@ public actor DirectApprovalTransportHost {
     func configurePhoneAuditSupport(_ enabled: Bool) throws {
         guard !handlerSealed, !closed else { throw DirectHostError.stopped }
         phoneAuditSupport.value.withLock { $0 = enabled }
+    }
+
+    /// Fix support before listener admission. A codec declaration alone does not prove Root readiness.
+    func configurePhoneUpdateSchedulingSupport(_ enabled: Bool) throws {
+        guard !handlerSealed, !closed else { throw DirectHostError.stopped }
+        phoneUpdateSchedulingSupport.value.withLock { $0 = enabled }
     }
 
     public func start() throws {
