@@ -10,8 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
-        variant: [baseline, loopback, ha1, noedge]
+        shard: [1, 2, 3, 4]
+        variant: [baseline, hold, close]
     runs-on: macos-26
     timeout-minutes: 40
     steps:

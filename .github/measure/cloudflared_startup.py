@@ -7,9 +7,22 @@ token = base64.b64encode(json.dumps({"a": "a" * 32, "s": base64.b64encode(b"\x71
                                     separators=(",", ":")).encode())
 variant = sys.argv[4]
 profile = "(version 1)(allow default)(deny network-outbound)"
-if variant == "loopback":
+import socket, threading
+edge = "127.0.0.1:7844"
+if variant in ("loopback", "hold", "close"):
     profile += '(allow network-outbound (remote ip "localhost:*"))'
-tunnel = ["tunnel", "--edge", "127.0.0.1:7844", "--protocol", "http2", "--grace-period", "1s"]
+if variant in ("hold", "close"):
+    listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(64)
+    edge = f"127.0.0.1:{listener.getsockname()[1]}"
+    held = []
+    def serve():
+        while True:
+            try: connection, _ = listener.accept()
+            except OSError: return
+            if variant == "hold": held.append(connection)
+            else: connection.close()
+    threading.Thread(target=serve, daemon=True).start()
+tunnel = ["tunnel", "--edge", edge, "--protocol", "http2", "--grace-period", "1s"]
 if variant == "ha1":
     tunnel += ["--ha-connections", "1"]
 if variant == "noedge":
@@ -45,7 +58,8 @@ for run in range(runs):
                 if msg.startswith("Starting metrics server"): metrics = t
         if ident is not None and metrics is not None and time.monotonic() - start > max(metrics, ident) + 3: break
         if p.poll() is not None: break
-    os.killpg(p.pid, signal.SIGTERM)
+    try: os.killpg(p.pid, signal.SIGTERM)
+    except (PermissionError, ProcessLookupError): pass
     try: p.wait(5)
     except subprocess.TimeoutExpired: os.killpg(p.pid, signal.SIGKILL); p.wait()
     total = max(ident or 99, metrics or 99)
