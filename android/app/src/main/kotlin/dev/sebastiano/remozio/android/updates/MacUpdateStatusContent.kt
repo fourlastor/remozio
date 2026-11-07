@@ -1,10 +1,5 @@
 package dev.sebastiano.remozio.android.updates
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +11,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -194,7 +188,6 @@ internal fun MacUpdateUnavailable(onRetry: () -> Unit) {
     TextButton(onClick = onRetry, modifier = Modifier.offset(x = (-12).dp)) { Text(stringResource(R.string.mac_update_try_again)) }
 }
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 internal fun MacUpdateStatusBody(model: MacUpdateDisplay, checking: Boolean, userRefreshing: Boolean, working: Boolean,
     incomplete: Boolean, onRefresh: () -> Unit, onSchedule: (UpdateSchedulingAction) -> Unit, initiallyShowDetails: Boolean = false) {
@@ -285,11 +278,8 @@ internal fun MacUpdateStatusBody(model: MacUpdateDisplay, checking: Boolean, use
             TextButton(onClick = { shown = !shown }, modifier = Modifier.offset(x = (-12).dp)) {
                 Text(stringResource(if (shown) R.string.mac_update_details_hide else R.string.mac_update_details_show))
             }
-            val motion = MaterialTheme.motionScheme
-            AnimatedVisibility(shown, enter = expandVertically(motion.defaultSpatialSpec()) + fadeIn(motion.defaultEffectsSpec()),
-                exit = shrinkVertically(motion.defaultSpatialSpec()) + fadeOut(motion.defaultEffectsSpec())) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { details.forEach { Supporting(it) } }
-            }
+            // Instant, like the app's other Show and Hide toggles: label, lines and layout change in one frame.
+            if (shown) Column(verticalArrangement = Arrangement.spacedBy(4.dp)) { details.forEach { Supporting(it) } }
         }
     }
 }
