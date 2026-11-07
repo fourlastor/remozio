@@ -10,7 +10,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3]
+        variant: [baseline, loopback, ha1, noedge]
     runs-on: macos-26
     timeout-minutes: 40
     steps:
@@ -30,9 +31,9 @@ jobs:
       - name: Resolver state
         run: scutil --dns | head -40; cat /etc/resolv.conf || true
       - name: Measure
-        run: python3 .github/measure/cloudflared_startup.py /tmp/RemozioCloudflared 25 shard-${{ matrix.shard }}
+        run: python3 .github/measure/cloudflared_startup.py /tmp/RemozioCloudflared 25 shard-${{ matrix.shard }} ${{ matrix.variant }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: measure-${{ matrix.shard }}
+          name: measure-${{ matrix.shard }}-${{ matrix.variant }}
           path: /tmp/measure/

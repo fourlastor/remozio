@@ -5,9 +5,18 @@ binary, runs, label = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 token = base64.b64encode(json.dumps({"a": "a" * 32, "s": base64.b64encode(b"\x71" * 32).decode(),
                                      "t": "12345678-1234-4234-9234-123456789012"}, sort_keys=True,
                                     separators=(",", ":")).encode())
-args = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network-outbound)", binary,
-        "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json", "tunnel", "--edge", "127.0.0.1:7844",
-        "--protocol", "http2", "--grace-period", "1s", "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
+variant = sys.argv[4]
+profile = "(version 1)(allow default)(deny network-outbound)"
+if variant == "loopback":
+    profile += '(allow network-outbound (remote ip "localhost:*"))'
+tunnel = ["tunnel", "--edge", "127.0.0.1:7844", "--protocol", "http2", "--grace-period", "1s"]
+if variant == "ha1":
+    tunnel += ["--ha-connections", "1"]
+if variant == "noedge":
+    tunnel = ["tunnel", "--protocol", "http2", "--grace-period", "1s"]
+args = ["/usr/bin/sandbox-exec", "-p", profile, binary, "--no-autoupdate", "--config", "/dev/fd/5", "--output", "json",
+        *tunnel, "--metrics", "127.0.0.1:0", "run", "--token-file", "/dev/fd/4"]
+label = f"{label}-{variant}"
 results = []
 os.makedirs('/tmp/measure', exist_ok=True)
 for run in range(runs):
@@ -34,7 +43,7 @@ for run in range(runs):
                 lines.append((round(t, 3), msg[:300]))
                 if msg.startswith("Generated Connector ID"): ident = t
                 if msg.startswith("Starting metrics server"): metrics = t
-        if ident is not None and metrics is not None: break
+        if ident is not None and metrics is not None and time.monotonic() - start > max(metrics, ident) + 3: break
         if p.poll() is not None: break
     os.killpg(p.pid, signal.SIGTERM)
     try: p.wait(5)
@@ -42,8 +51,11 @@ for run in range(runs):
     total = max(ident or 99, metrics or 99)
     results.append(total)
     slow = total > 5
+    if run == 0 or slow: pass
+    import bisect
+    first = bisect.bisect([t for t, _ in lines], 1.0)
     record = {"label": label, "run": run, "connectorID": ident and round(ident, 3),
-              "metrics": metrics and round(metrics, 3), "exit": p.returncode, "count": len(lines)}
+              "metrics": metrics and round(metrics, 3), "exit": p.returncode, "count": len(lines), "linesFirstSecond": first}
     print(json.dumps(record), flush=True)
     if slow or run == 0:
         with open(f"/tmp/measure/{label}.jsonl", "a") as f: f.write(json.dumps({**record, "lines": lines}) + "\n")
