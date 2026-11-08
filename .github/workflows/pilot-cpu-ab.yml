@@ -18,21 +18,23 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      # One build directory: precompiled Clang modules record their absolute cache path, so a copied build fails.
       - name: Build A (split only)
         run: |
           git checkout -q "$BASE"
-          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-a"
-      - name: Build B (hex encoding and pure memos), incrementally from A
+          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-ab"
+          mkdir -p ab/a && cp -R .build-ab/arm64-apple-macosx/debug/*.xctest .build-ab/arm64-apple-macosx/debug/*.bundle ab/a/
+      - name: Build B (hex encoding and pure memos), incrementally
         run: |
-          cp -a .build-a .build-b
           git checkout -q "$CANDIDATE"
-          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-b"
+          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-ab"
+          mkdir -p ab/b && cp -R .build-ab/arm64-apple-macosx/debug/*.xctest .build-ab/arm64-apple-macosx/debug/*.bundle ab/b/
       - name: Run the CPU-heavy classes A, B, B, A
         run: |
           mkdir -p .build/ab
           for pass in 1:a 2:b 3:b 4:a; do
             n=${pass%%:*}; v=${pass##*:}
-            bundle=$(ls -d "$PWD/.build-$v"/arm64-apple-macosx/debug/*.xctest)
+            bundle=$(ls -d "$PWD/ab/$v"/*.xctest)
             # The A bundle has no memo or hex tests; xctest skips unknown classes only if they are absent from the list.
             classes="$CLASSES"
             [ "$v" = a ] && classes=$(echo "$CLASSES" | tr ',' '\n' | grep -v 'PureResultMemoTests\|LowercaseHexadecimalTests' | paste -sd, -)
