@@ -12,7 +12,7 @@ public enum AuthorityCodeRole: UInt64, CaseIterable, Sendable {
 }
 
 /// Retained installation metadata. Construction does not verify a binary or authorize its activation.
-public struct AuthorityCodeEntry: Equatable, Sendable {
+public struct AuthorityCodeEntry: Hashable, Sendable {
     public let role: AuthorityCodeRole
     public let teamID: String
     public let identifier: String
@@ -36,7 +36,7 @@ public struct AuthorityCodeEntry: Equatable, Sendable {
 }
 
 /// Includes inactive roles so disabling a component cannot erase its security floor.
-public struct AuthorityCodePolicy: Equatable, Sendable {
+public struct AuthorityCodePolicy: Hashable, Sendable {
     public let formatVersion: UInt64
     public let entries: [AuthorityCodeEntry]
     public init(entries: [AuthorityCodeEntry]) throws {
@@ -69,19 +69,29 @@ public struct AuthorityCodePolicy: Equatable, Sendable {
         }
     }
 
+    // Encoding and decoding are pure functions of the value and of the exact bytes, and verification repeats both.
+    private static let encodings = PureResultMemo<AuthorityCodePolicy, Data>()
+    private static let decodings = PureResultMemo<Data, AuthorityCodePolicy>()
+
     var bytes: Data {
-        get throws {
-            try DeterministicCBOR.encode(.map([0: .unsigned(formatVersion), 1: .array(entries.map { entry in
-                .map([0: .unsigned(entry.role.rawValue), 1: .text(entry.teamID), 2: .text(entry.identifier),
-                      3: .unsigned(entry.installedGeneration), 4: .unsigned(entry.minimumGeneration),
-                      5: .bytes(entry.codeDirectoryHash), 6: .unsigned(entry.active ? 1 : 0)])
-            })]), limits: Self.limits())
-        }
+        get throws { try Self.encodings.value(for: self) { try encodedBytes() } }
+    }
+
+    private func encodedBytes() throws -> Data {
+        try DeterministicCBOR.encode(.map([0: .unsigned(formatVersion), 1: .array(entries.map { entry in
+            .map([0: .unsigned(entry.role.rawValue), 1: .text(entry.teamID), 2: .text(entry.identifier),
+                  3: .unsigned(entry.installedGeneration), 4: .unsigned(entry.minimumGeneration),
+                  5: .bytes(entry.codeDirectoryHash), 6: .unsigned(entry.active ? 1 : 0)])
+        })]), limits: Self.limits())
     }
 
     static let maximumBytes = 8192
     private static func limits() throws -> CBORLimits { try CBORLimits(maxBytes: maximumBytes, maxDepth: 4, maxItems: 256) }
     static func decode(_ bytes: Data) throws -> Self {
+        try decodings.value(for: bytes) { try decodeUncached(bytes) }
+    }
+
+    private static func decodeUncached(_ bytes: Data) throws -> Self {
         do {
             guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits()),
                   fields.count == 2, case .unsigned(let version) = fields[0], case .array(let entries) = fields[1] else {

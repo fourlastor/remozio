@@ -16,3 +16,22 @@ struct AcceptedInputMemo<Key: Hashable & Sendable>: Sendable {
         }
     }
 }
+
+/// Remembers the result a pure function returned for an exact input, because verification decodes and re-encodes
+/// the same stored records many times. Only functions whose result depends on nothing but the key belong here: no
+/// clock, file, account or process state. An input the function refuses keeps no record and runs it again.
+struct PureResultMemo<Key: Hashable & Sendable, Value: Sendable>: Sendable {
+    private let results = OSAllocatedUnfairLock(initialState: [Key: Value]())
+    private let capacity: Int
+    init(capacity: Int = 32) { self.capacity = capacity }
+
+    func value(for key: Key, _ body: () throws -> Value) rethrows -> Value {
+        if let known = results.withLock({ $0[key] }) { return known }
+        let value = try body()
+        results.withLock {
+            if $0.count >= capacity { $0.removeAll() }
+            $0[key] = value
+        }
+        return value
+    }
+}
