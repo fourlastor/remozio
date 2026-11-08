@@ -51,8 +51,28 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Pair the JVM phone client with the Linux software-key pairing tool
         run: ./gradlew :phone-core:linuxPairToolTest
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Prepare private native TPM simulator dependencies
         run: |
           sudo apt-get install --yes --no-install-recommends \
@@ -127,7 +147,10 @@ jobs:
         run: python3 scripts/ci-build-cache.py save --scope mac --github-output "$GITHUB_OUTPUT"
       - name: Save validated Mac compiler outputs
         timeout-minutes: 5
-        if: steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        # Only main writes. A 3.5 GB entry per pull request evicted main's entry from the 10 GB budget.
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -200,12 +223,34 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Record validated interoperability cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope interop --github-output "$GITHUB_OUTPUT"
       - name: Save validated interoperability compiler outputs
-        if: steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -230,12 +275,32 @@ jobs:
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
       - run: xcodebuild -version
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Kotlin tests on the iOS simulator
         run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
         run: ./scripts/build-ios-app.sh
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest
@@ -254,7 +319,27 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   android:
     name: Android build
     runs-on: ubuntu-24.04
@@ -273,6 +358,26 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Install Android SDK packages
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"'
       - run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug :android-app:assembleRelease
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
