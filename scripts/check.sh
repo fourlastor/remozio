@@ -58,8 +58,12 @@ if [ "$(uname -s)" = Darwin ]; then
     run_stage 'Swift test: protocol/swift' swift test --package-path protocol/swift --triple arm64-apple-macosx26.0 --force-resolved-versions
     run_stage 'Swift test: host/shared-core' swift test --package-path host/shared-core --triple arm64-apple-macosx26.0 --force-resolved-versions --jobs 4
     # CI spends most of this stage in CPU-bound validation. Optimizing halves it; local runs keep faster rebuilds.
+    # In CI the Mac core tests job runs the other classes in shards. This job built the app these classes inspect,
+    # so none of them may skip here.
     if [ "${GITHUB_ACTIONS:-}" = true ]; then
-        run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O
+        run_stage 'Swift test: macos/core app-dependent classes' python3 scripts/run-xctest-shards.py \
+            --package-path macos/core --shards 1 --index 0 --app-dependent only --forbid-skips \
+            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
     else
         run_stage 'Swift test: macos/core' swift test --package-path macos/core --triple arm64-apple-macosx26.0
     fi
