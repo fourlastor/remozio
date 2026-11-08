@@ -882,7 +882,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertNil(try f.machine.store.machineUpdateBackendEpoch())
     }
 
-    func testPopulatedBackendPublicationReplacesOwnedFilesAndHonorsTheSettingsFence() throws {
+    private func populatedBackendFixture() throws -> (Fixture, GatewayJournalSetupExchangeTests.Fixture) {
         var gatewayFixture: GatewayJournalSetupExchangeTests.Fixture?
         let f = try Fixture(backendEpoch: true, beforeActivation: { files in
             let setup = try GatewayJournalSetupExchangeTests.Fixture(runtime: files.machine.f)
@@ -896,22 +896,35 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try store.markGatewayRuntimeRegistered(activation)
             gatewayFixture = setup
         })
-        let setup = try XCTUnwrap(gatewayFixture)
-        let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        return (f, try XCTUnwrap(gatewayFixture))
+    }
+
+    private func fixtureBackendCapture(_ f: Fixture, foreground: RuntimeActivationPlan,
+        activation: GatewayRuntimeActivationPlan, journal: GatewayJournalPreparationState) throws -> MachineUpdateBackendEpoch.Capture {
         let store = f.machine.store, account = f.machine.account
-        let configuration = try XCTUnwrap(store.machineUpdateConfigurationEpoch())
-        let configured = try XCTUnwrap(configuration.configuration(accountID: account))
+        let archive = try XCTUnwrap(store.machineUpdateConfigurationEpoch())
+        let configured = try XCTUnwrap(archive.configuration(accountID: account))
         let machine = try restartSource(f), inventory = machine.replacement.inventory
-        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: account).plan)
-        let journal = try setup.state()
-        let source = try RuntimeReleaseBackendSource(foreground: setup.runtime.plan, activation: activation,
+        let source = try RuntimeReleaseBackendSource(foreground: foreground, activation: activation,
             journal: journal, settings: store.gatewaySettingsTransition(accountID: account), inventory: inventory)
         func plan(_ value: RuntimeReleaseConfigurationPlan) throws -> RuntimeReleaseBackendPlan {
             try .init(configuration: value, source: source, sourceConfiguration: configured.source,
                 machine: machine, currentPolicy: releasePolicySnapshot(f), candidate: f.newRelease)
         }
-        let capture = try MachineUpdateBackendEpoch.Capture(accountID: account, source: source,
+        return try MachineUpdateBackendEpoch.Capture(accountID: account, source: source,
             startup: plan(configured.startup), completion: plan(configured.completion))
+    }
+
+    func testPopulatedBackendPublicationReplacesOwnedFilesAndHonorsTheSettingsFence() throws {
+        let (f, setup) = try populatedBackendFixture()
+        let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store, account = f.machine.account
+        let configuration = try XCTUnwrap(store.machineUpdateConfigurationEpoch())
+        let machine = try restartSource(f), inventory = machine.replacement.inventory
+        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: account).plan)
+        let journal = try setup.state()
+        let capture = try fixtureBackendCapture(f, foreground: setup.runtime.plan, activation: activation, journal: journal)
+        let source = try XCTUnwrap(capture.source)
         let initial = try store.upgradeMachineUpdateBackendEpochStorage(expected: published,
             candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
         let retained = try store.retainMachineUpdateBackendEpoch(initial, captures: [capture], candidate: f.newRelease,
@@ -1116,6 +1129,162 @@ final class MachineUpdateReplacementTests: XCTestCase {
             installed: f.installed, prepared: f.machine.destination)) {
             XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding)
         }
+    }
+
+    func testRestartHealthSelectsExactForegroundCodeKeysAndEpochs() throws {
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        let account = f.machine.account, reference = f.machine.f.plan.reference
+        let (configuration, authority) = try plan.select(accountID: account, role: .authority)
+        let (_, transport) = try plan.select(accountID: account, role: .transport)
+        XCTAssertEqual(plan.requirements.map(\.role), [.authority, .transport])
+        XCTAssertEqual(authority.executionUID, 0)
+        XCTAssertEqual(authority.publicKey, reference.services.authorityPublicKey)
+        XCTAssertEqual(transport.executionUID, try XCTUnwrap(reference.services.claims.first { $0.role == .transport }).number)
+        XCTAssertEqual(transport.publicKey, try reference.transportPublicKeyX963)
+        for requirement in [authority, transport] {
+            XCTAssertEqual(requirement.binding, configuration.configuration.binding)
+            XCTAssertEqual(requirement.configurationEpoch, snapshot.configuration.record.id)
+            XCTAssertEqual(requirement.configurationRevision, snapshot.configuration.record.revision)
+            XCTAssertEqual(requirement.backendEpoch, snapshot.backend.record.id)
+            XCTAssertEqual(requirement.backendRevision, snapshot.backend.record.revision)
+            XCTAssertEqual(requirement.code, configuration.configuration.host.codePolicy.entries.first {
+                $0.role == requirement.role && $0.active
+            })
+        }
+        XCTAssertThrowsError(try plan.select(accountID: account, role: .notificationGateway))
+        XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.oldRelease))
+    }
+
+    func testRestartHealthPreservesAnUnregisteredAccount() throws {
+        var reserved: Data?
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            reserved = try self.reserveRestartAccount(files).accountID
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        let account = try XCTUnwrap(reserved)
+        XCTAssertTrue(plan.preservedAccounts.contains(account))
+        XCTAssertFalse(plan.requirements.contains { $0.binding.accountID == account })
+        XCTAssertThrowsError(try plan.select(accountID: account, role: .authority))
+    }
+
+    func testRestartHealthSelectsTheRegisteredGatewayFromTheRetainedBackend() throws {
+        let (f, setup) = try populatedBackendFixture()
+        let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store, account = f.machine.account
+        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: account).plan)
+        let capture = try fixtureBackendCapture(f, foreground: setup.runtime.plan, activation: activation, journal: setup.state())
+        let initial = try store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let retained = try store.retainMachineUpdateBackendEpoch(initial, captures: [capture], candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        func advance(_ previous: MachineUpdateBackendEpochRecord, _ operation: MachineUpdateBackendPublicationOperation)
+            throws -> MachineUpdateBackendEpochRecord {
+            try store.advanceMachineUpdateBackendPublication(previous, operation: operation, candidate: f.newRelease,
+                directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        }
+        var record = try advance(retained, .begin)
+        for file in MachineUpdateBackendPublicationProgress.File.allCases {
+            record = try advance(record, .prepare(account, file))
+            record = try advance(record, .complete(account, file))
+        }
+        let restart = try f.quiet.releaseActivityForRestart()
+        defer { restart.close() }
+        let checking = try store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})
+        let source = try store.machineUpdateRestartSource(checking, directory: f.directory)
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        XCTAssertEqual(plan.requirements.map(\.role), [.authority, .transport, .notificationGateway])
+        let (selected, gateway) = try plan.select(accountID: account, role: .notificationGateway)
+        let startup = try XCTUnwrap(capture.startup)
+        XCTAssertEqual(try selected.backend?.encoded, try startup.encoded)
+        XCTAssertEqual(gateway.executionUID, startup.gateway.serviceUID)
+        XCTAssertEqual(gateway.publicKey, startup.gateway.receiptPublicKey)
+        XCTAssertEqual(gateway.backendRevision, record.revision)
+    }
+
+    func testHealthInventoryRejectsDuplicateRolesAndSplitForegroundPairs() throws {
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        let account = f.machine.account
+        let (_, authority) = try plan.select(accountID: account, role: .authority)
+        let (_, transport) = try plan.select(accountID: account, role: .transport)
+        let preserved = Data(repeating: 91, count: 16)
+        let inventory = try MachineUpdateHealthInventory(requirements: [transport, authority], preservedAccounts: [preserved])
+        XCTAssertEqual(inventory.accountIDs, [account])
+        XCTAssertEqual(inventory.requirements(accountID: account), [authority, transport])
+        XCTAssertEqual(inventory.preservedAccounts, [preserved])
+        for (requirements, preservedAccounts) in [
+            ([authority], []), ([authority, transport, authority], []), ([authority, transport], [account]),
+        ] {
+            XCTAssertThrowsError(try MachineUpdateHealthInventory(requirements: requirements, preservedAccounts: preservedAccounts)) {
+                XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .invalidInventory)
+            }
+        }
+    }
+
+    func testHealthInventoryRejectsMixedEpochRevisions() throws {
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        let (_, authority) = try plan.select(accountID: f.machine.account, role: .authority)
+        let (_, transport) = try plan.select(accountID: f.machine.account, role: .transport)
+        let changed = MachineUpdateRestartHealthPlan.Requirement(binding: transport.binding,
+            configurationEpoch: transport.configurationEpoch, configurationRevision: transport.configurationRevision,
+            backendEpoch: transport.backendEpoch, backendRevision: UUID(), role: transport.role,
+            executionUID: transport.executionUID, code: transport.code, publicKey: transport.publicKey)
+        XCTAssertThrowsError(try MachineUpdateHealthInventory(requirements: [authority, changed], preservedAccounts: [])) {
+            XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .invalidInventory)
+        }
+    }
+
+    func testHealthSourceBorrowPreventsReentryAndClearsAfterAnError() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let store = f.machine.store
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let access = MachineUpdateHealthSourceAccess()
+        var freshReads = 0
+        func fresh() throws -> MachineUpdateRestartSnapshot {
+            freshReads += 1
+            return try store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        }
+        try access.requireCurrent(snapshot, read: fresh)
+        XCTAssertEqual(freshReads, 1)
+        try store.withCurrentMachineUpdateRestartSnapshot(snapshot, directory: f.directory, restart: restart) { scope in
+            XCTAssertThrowsError(try access.withScope(scope, expected: snapshot) {
+                try access.requireCurrent(snapshot, read: fresh)
+                XCTAssertEqual(freshReads, 1)
+                XCTAssertThrowsError(try access.withScope(scope, expected: snapshot) {}) {
+                    XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .busy)
+                }
+                throw ReplacementFixtureError.injected
+            }) { XCTAssertTrue($0 is ReplacementFixtureError) }
+            try access.withScope(scope, expected: snapshot) {
+                try access.requireCurrent(snapshot, read: fresh)
+            }
+        }
+        try access.requireCurrent(snapshot, read: fresh)
+        XCTAssertEqual(freshReads, 2)
     }
 
     func testReleaseBoundGatewayCommitStaysOutOfOrdinaryReader() throws {
