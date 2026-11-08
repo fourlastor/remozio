@@ -10,7 +10,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     env:
-      HEAPS: '4g'
+      CONFIGS: 'candidate'
       TASKS: >-
         :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
         :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
@@ -33,24 +33,21 @@ jobs:
       - name: Measure cold client builds
         run: |
           mkdir -p "$RUNNER_TEMP/heap"
-          first=1
-          for heap in $HEAPS; do
-            out="$RUNNER_TEMP/heap/$heap"; mkdir -p "$out"
-            if [ "$first" = 1 ]; then guh="$HOME/.gradle"; ro=""; else guh="$RUNNER_TEMP/guh-$heap"; ro="$HOME/.gradle/caches"; fi
+          for config in $CONFIGS; do
+            out="$RUNNER_TEMP/heap/$config"; mkdir -p "$out"
             rm -rf .gradle/configuration-cache
             start=$(date +%s)
             set +e
-            GRADLE_USER_HOME="$guh" GRADLE_RO_DEP_CACHE="$ro" KONAN_DATA_DIR="$RUNNER_TEMP/konan-$heap" \
+            KONAN_DATA_DIR="$RUNNER_TEMP/konan-$config" \
               ./gradlew $TASKS --rerun-tasks --no-build-cache --console=plain \
-              "-Dorg.gradle.jvmargs=-Xmx$heap -Dfile.encoding=UTF-8 -Xlog:gc*:file=$out/gradle-gc.log:uptime,tags" \
-              "-Pkotlin.daemon.jvmargs=-Xmx$heap -Xlog:gc*:file=$out/kotlin-gc.log:uptime,tags" > "$out/build.log" 2>&1
+              "-Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Xlog:gc*:file=$out/gradle-gc.log:uptime,tags" \
+              "-Pkotlin.daemon.jvmargs=-Xmx2g -Xlog:gc*:file=$out/kotlin-gc.log:uptime,tags" > "$out/build.log" 2>&1
             rc=$?
             set -e
-            echo "heap $heap: exit $rc in $(( $(date +%s) - start ))s" | tee -a "$RUNNER_TEMP/heap/summary.txt"
+            echo "$config: exit $rc in $(( $(date +%s) - start ))s" | tee -a "$RUNNER_TEMP/heap/summary.txt"
             tail -25 "$out/build.log"
-            GRADLE_USER_HOME="$guh" ./gradlew --stop > /dev/null 2>&1 || true
+            ./gradlew --stop > /dev/null 2>&1 || true
             pkill -f '[k]otlin-daemon' || true
-            first=0
           done
       - name: Keep the GC logs
         if: always()
