@@ -1,0 +1,43 @@
+name: Pilot macos/core XCTest shards
+on:
+  push:
+    branches: [perf/ci-mac-shards-20261108]
+permissions:
+  contents: read
+jobs:
+  shards:
+    name: ${{ matrix.label }}
+    runs-on: macos-26
+    timeout-minutes: 80
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {label: 'serial baseline', shards: 1, mode: '--index 0'}
+          - {label: '3 shards concurrent', shards: 3, mode: '--concurrent'}
+          - {label: '3 shards, runner 1', shards: 3, mode: '--index 0'}
+          - {label: '3 shards, runner 2', shards: 3, mode: '--index 1'}
+          - {label: '3 shards, runner 3', shards: 3, mode: '--index 2'}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Runner
+        run: |
+          sysctl -n hw.ncpu hw.memsize
+          sw_vers
+          xcodebuild -version
+          swift --version
+      - name: Build macos/core tests (-O, as CI does)
+        run: /usr/bin/time -l swift build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O --build-tests
+      - name: Run XCTest shards
+        run: |
+          /usr/bin/time -l python3 scripts/run-xctest-shards.py --package-path macos/core \
+            --weights scripts/macos-core-test-weights.json --shards ${{ matrix.shards }} ${{ matrix.mode }} \
+            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
+      - name: Keep shard logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-shards-${{ strategy.job-index }}
+          path: .build/xctest-shards/*.log
+          if-no-files-found: ignore
+          retention-days: 7
