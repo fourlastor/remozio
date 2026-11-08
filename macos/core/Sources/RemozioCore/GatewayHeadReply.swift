@@ -51,6 +51,7 @@ public final class GatewayHeadQueryOwner {
     private var pending: [Data: Pending] = [:]
     private var lastMoment: UInt64?
     private var stopped = false
+    private var updateHealthQueryAttempted = false
 
     public init(registration: GatewayRegistrationIdentity, gatewayPublicKey: Data, clockEpoch: UUID,
                 lifetimeMillis: UInt64 = 30_000, maximumQueries: Int = 8) throws {
@@ -71,14 +72,14 @@ public final class GatewayHeadQueryOwner {
         return try makeQuery(history: HistoryRange(after: afterRevision, through: throughRevision, maximum: maximumRecords), now: now)
     }
 
-    private func makeQuery(history: HistoryRange?, now: AuthorityMoment) throws -> Data {
+    private func makeQuery(history: HistoryRange?, now: AuthorityMoment, boundNonce: Data? = nil) throws -> Data {
         try clock(now)
         pending = pending.filter { now.milliseconds < $0.value.deadline }
         guard pending.count < maximumQueries else { throw GatewayHeadReplyError.capacityExceeded }
         let (deadline, overflow) = now.milliseconds.addingReportingOverflow(lifetimeMillis)
         guard !overflow else { throw GatewayHeadReplyError.invalidClock }
-        let nonce = SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
-        guard pending[nonce] == nil else { throw GatewayHeadReplyError.capacityExceeded }
+        let nonce = boundNonce ?? SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) }
+        guard nonce.count == 32, pending[nonce] == nil else { throw GatewayHeadReplyError.capacityExceeded }
         var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .unsigned(history == nil ? 0 : 2),
             2: .bytes(try registration.encode()), 3: .bytes(nonce)]
         if let history {
@@ -86,6 +87,17 @@ public final class GatewayHeadQueryOwner {
         }
         let query = try DeterministicCBOR.encode(.map(fields), limits: GatewayHeadWire.queryLimits)
         pending[nonce] = Pending(deadline: deadline, history: history)
+        return query
+    }
+
+    /// A health query binds the existing head reply to the exact authenticated update challenge.
+    func makeUpdateHealthQuery(request: Data, now: AuthorityMoment) throws -> Data {
+        guard !updateHealthQueryAttempted else { throw GatewayHeadReplyError.unknownQuery }
+        updateHealthQueryAttempted = true
+        let expected = try MachineUpdateGatewayHealthQuery.make(request: request, registration: registration,
+            gatewayPublicKey: gatewayKey.x963Representation)
+        let query = try makeQuery(history: nil, now: now, boundNonce: MachineUpdateGatewayHealthQuery.nonce(request))
+        guard query == expected else { invalidate(); throw GatewayHeadReplyError.invalidMessage }
         return query
     }
 
