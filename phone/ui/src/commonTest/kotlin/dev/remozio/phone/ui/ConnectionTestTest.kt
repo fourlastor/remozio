@@ -4,6 +4,7 @@ import dev.remozio.pairing.PairingSendCompletion
 import dev.remozio.pairing.PairingTransport
 import dev.remozio.pairing.PairingTransportEvents
 import dev.remozio.pairing.PlatformPairingKeys
+import dev.remozio.protocol.*
 import kotlinx.coroutines.*
 import kotlin.test.*
 
@@ -59,5 +60,66 @@ class ConnectionTestTest {
         }
         assertEquals(ConnectionTestState.Failed, testConnection(this, text, silent, timeoutMillis = 200))
         assertTrue(isActive)
+    }
+
+    /** Answers hello, takes the proposal, sends a transcript built around it, and records every frame it gets. */
+    private class Computer(private val invitation: PairingInvitation) : PairingTransport {
+        var events: PairingTransportEvents? = null
+        val outgoing = ArrayDeque<ByteArray>()
+        val frames = mutableListOf<PairingSetupFrame>()
+        private var buffer = ByteArray(0)
+        var cancels = 0
+        private fun wire(frame: PairingSetupFrame) = frame.encode().let { body ->
+            byteArrayOf((body.size ushr 24).toByte(), (body.size ushr 16).toByte(), (body.size ushr 8).toByte(), body.size.toByte()) + body }
+        override fun start(events: PairingTransportEvents) {
+            this.events = events; outgoing.addLast(wire(PairingSetupFrame.Hello)); events.opened()
+        }
+        override fun requestBytes() { outgoing.removeFirstOrNull()?.let { events!!.received(it) } }
+        override fun send(bytes: ByteArray, completion: PairingSendCompletion) {
+            buffer += bytes; completion.done(null)
+            while (buffer.size >= 4) {
+                val length = buffer.take(4).fold(0) { v, b -> (v shl 8) or (b.toInt() and 255) }
+                if (buffer.size < 4 + length) return
+                val frame = PairingSetupFrame.decode(buffer.copyOfRange(4, 4 + length))
+                buffer = buffer.copyOfRange(4 + length, buffer.size); frames += frame
+                if (frame is PairingSetupFrame.Proposal) {
+                    val p = frame.value
+                    outgoing.addLast(wire(PairingSetupFrame.Transcript(PairingTranscript(ByteArray(16) { 1 }, ByteArray(32) { 2 },
+                        p.phone, ChannelOffer(ChannelRole.MAC, p.phone.scope, ByteArray(32) { 3 }, setOf(1u), emptyList(), emptySet()),
+                        1u, 1u, invitation.authorityPublicKey.copyBytes(), invitation.transportPublicKey.copyBytes(),
+                        p.transportKey, p.decisionKey, p.biometricKey, ByteArray(32) { 4 }, null, ByteArray(16) { 5 }, 1_000u, 2_000u))))
+                }
+            }
+        }
+        override fun cancel() { cancels++; events?.closed("cancelled") }
+    }
+
+    @Test fun aComputerThatAnswersGivesTheCodeAndReceivesNoProof(): Unit = runBlocking {
+        val computer = Computer(PairingInvitation.importText(text))
+        val answering = object : PlatformPairingKeys by keys() {
+            override fun openTransport(macID: ByteArray, accountID: ByteArray, pin: ByteArray, applicationProtocol: String) = computer
+        }
+        val result = testConnection(this, text, answering)
+        val reached = assertIs<ConnectionTestState.Reached>(result)
+        assertTrue(reached.code.isNotBlank())
+        assertEquals(1, computer.frames.size)
+        assertIs<PairingSetupFrame.Proposal>(computer.frames.single())
+        assertEquals(1, computer.cancels)
+    }
+
+    @Test fun theCallersCancellationEscapes(): Unit = runBlocking {
+        val silent = object : PlatformPairingKeys by keys() {
+            override fun openTransport(macID: ByteArray, accountID: ByteArray, pin: ByteArray, applicationProtocol: String) =
+                object : PairingTransport {
+                    var events: PairingTransportEvents? = null
+                    override fun start(events: PairingTransportEvents) { this.events = events }
+                    override fun requestBytes() {}
+                    override fun send(bytes: ByteArray, completion: PairingSendCompletion) = completion.done("closed")
+                    override fun cancel() { events?.closed("cancelled") }
+                }
+        }
+        val job = launch { testConnection(this, text, silent) }
+        delay(100); job.cancelAndJoin()
+        assertTrue(job.isCancelled)
     }
 }

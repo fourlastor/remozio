@@ -90,6 +90,8 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00])
 
     private let queue = DispatchQueue(label: "dev.remozio.pairing.transport")
+    // Apple advises a queue other than the connection's for the verify block.
+    private let verifyQueue = DispatchQueue(label: "dev.remozio.pairing.verify")
     private let target: Target
     private let pin: Data
     private let applicationProtocol: String
@@ -101,6 +103,7 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     private var finished = false
     private var open = false
     private var peerEnded = false
+    private var receiving = false
 
     init(target: Target, pin: Data, applicationProtocol: String, identity: @escaping () throws -> SecIdentity) {
         self.target = target
@@ -125,10 +128,12 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
 
     func requestBytes() {
         queue.async { [self] in
-            guard !finished, let connection, open else { return }
+            guard !finished, let connection, open, !receiving else { return }
             if peerEnded { return finish(nil) }
+            receiving = true
             connection.receive(minimumIncompleteLength: 1, maximumLength: Self.maximumDelivery) { [self] data, _, complete, error in
                 queue.async { [self] in
+                    receiving = false
                     guard !finished else { return }
                     if let error { return finish("receive failed: \(error)") }
                     if complete { peerEnded = true }
@@ -215,8 +220,8 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
             _ = sec_protocol_metadata_access_peer_certificate_chain(metadata) { certificate in
                 chain.append(sec_certificate_copy_ref(certificate).takeRetainedValue())
             }
-            complete(Self.matches(chain: chain, pin: pin))
-        }, queue)
+            complete(Self.matches(chain: chain, pin: pin, at: Date()))
+        }, verifyQueue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         parameters.includePeerToPeer = false
         let connection = NWConnection(to: endpoint, using: parameters)
@@ -260,9 +265,12 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         events = nil
     }
 
-    /// Exactly one P-256 leaf whose SubjectPublicKeyInfo equals the pin byte for byte.
-    static func matches(chain: [SecCertificate], pin: Data) -> Bool {
+    /// Exactly one P-256 leaf, valid at [now], whose SubjectPublicKeyInfo equals the pin byte for byte.
+    /// The JVM and Mac clients check the same validity window.
+    static func matches(chain: [SecCertificate], pin: Data, at now: Date) -> Bool {
         guard chain.count == 1,
+              let parsed = try? Certificate(chain[0]),
+              parsed.notValidBefore <= now, now < parsed.notValidAfter,
               let key = SecCertificateCopyKey(chain[0]),
               let attributes = SecKeyCopyAttributes(key) as? [String: Any],
               attributes[kSecAttrKeyType as String] as? String == kSecAttrKeyTypeECSECPrimeRandom as String,

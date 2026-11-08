@@ -41,13 +41,18 @@ final class PairingNetworkTests: XCTestCase {
         let leaf = try Self.certificate(of: PairingClientIdentity.make(key))
         let second = try Self.certificate(of: PairingClientIdentity.make(other))
         let pin = Self.prefix + key.publicKey.x963Representation
-        XCTAssertTrue(NetworkPairingTransport.matches(chain: [leaf], pin: pin))
-        XCTAssertFalse(NetworkPairingTransport.matches(chain: [second], pin: pin))
-        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf, second], pin: pin))
+        XCTAssertTrue(NetworkPairingTransport.matches(chain: [leaf], pin: pin, at: Date()))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [second], pin: pin, at: Date()))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf, second], pin: pin, at: Date()))
         var flipped = pin; flipped[0] ^= 1
-        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf], pin: flipped))
-        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf], pin: pin.dropLast()))
-        XCTAssertFalse(NetworkPairingTransport.matches(chain: [], pin: pin))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf], pin: flipped, at: Date()))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf], pin: pin.dropLast(), at: Date()))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [], pin: pin, at: Date()))
+        // The window is now - 300 s to now + 3300 s, in whole seconds.
+        let expired = try Self.certificate(of: PairingClientIdentity.make(key, now: Date().addingTimeInterval(-7_200)))
+        let future = try Self.certificate(of: PairingClientIdentity.make(key, now: Date().addingTimeInterval(7_200)))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [expired], pin: pin, at: Date()))
+        XCTAssertFalse(NetworkPairingTransport.matches(chain: [future], pin: pin, at: Date()))
     }
 
     func testRightPinOpensAndCarriesBytesWithTheTransportKey() throws {
@@ -72,9 +77,10 @@ final class PairingNetworkTests: XCTestCase {
         let transport = try server.transport(pin: Self.prefix + P256.Signing.PrivateKey().publicKey.x963Representation,
                                              key: P256.Signing.PrivateKey())
         transport.start(events: events)
-        wait(for: [events.closedExpectation, events.openedExpectation], timeout: 10)
+        wait(for: [events.closedExpectation], timeout: 10)
+        wait(for: [events.openedExpectation], timeout: 0.5)
         XCTAssertEqual(events.closedCount, 1)
-        XCTAssertNotNil(events.closedError ?? nil)
+        XCTAssertNotNil(events.closedError)
     }
 
     func testWrongProtocolNeverOpens() throws {
@@ -83,7 +89,8 @@ final class PairingNetworkTests: XCTestCase {
         let transport = try server.transport(pin: Self.prefix + server.key.publicKey.x963Representation,
                                              key: P256.Signing.PrivateKey())
         transport.start(events: events)
-        wait(for: [events.closedExpectation, events.openedExpectation], timeout: 10)
+        wait(for: [events.closedExpectation], timeout: 10)
+        wait(for: [events.openedExpectation], timeout: 0.5)
         XCTAssertEqual(events.closedCount, 1)
     }
 
@@ -94,7 +101,8 @@ final class PairingNetworkTests: XCTestCase {
             applicationProtocol: "remozio-pairing/1", identity: { try PairingClientIdentity.make(P256.Signing.PrivateKey()) })
         transport.cancel()
         transport.start(events: events)
-        wait(for: [events.closedExpectation, events.openedExpectation], timeout: 10)
+        wait(for: [events.closedExpectation], timeout: 10)
+        wait(for: [events.openedExpectation], timeout: 0.5)
         XCTAssertEqual(events.closedError, "cancelled")
     }
 
@@ -115,7 +123,8 @@ private final class Recorder: NSObject, PairingTransportEvents {
     private let lock = NSLock()
     private(set) var received: [Data] = []
     private(set) var closedCount = 0
-    private(set) var closedError: String??
+    private(set) var closed = false
+    private(set) var closedError: String?
 
     init(_ test: XCTestCase, expectOpen: Bool = true, expectBytes: Bool = false) {
         openedExpectation = test.expectation(description: "opened")
@@ -132,7 +141,7 @@ private final class Recorder: NSObject, PairingTransportEvents {
     }
 
     func closed(error: String?) {
-        lock.withLock { closedCount += 1; closedError = .some(error) }
+        lock.withLock { closedCount += 1; closed = true; closedError = error }
         closedExpectation.fulfill()
     }
 }
