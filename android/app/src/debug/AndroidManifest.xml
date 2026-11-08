@@ -32,6 +32,7 @@
         <activity android:name=".routing.RoutingSettingsLargeFontEndPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".routing.RoutingExpandedActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".routing.RoutingExpandedDarkActionsPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
+        <activity android:name=".updates.MacUpdatePreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".audit.AuditPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".audit.AuditDarkPreviewActivity" android:exported="true" android:excludeFromRecents="true" />
         <activity android:name=".audit.AuditLargeFontPreviewActivity" android:exported="true" android:excludeFromRecents="true" />

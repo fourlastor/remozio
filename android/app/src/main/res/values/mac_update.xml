@@ -3,47 +3,90 @@
     <string name="mac_update_heading">Mac update</string>
     <string name="mac_update_checking">Checking update status…</string>
     <string name="mac_update_unavailable">Update status unavailable</string>
+    <string name="mac_update_try_again">Try again</string>
     <string name="mac_update_refresh">Refresh update status</string>
-    <string name="mac_update_no_current_status">No current update status. Refresh before making a change.</string>
-    <string name="mac_update_current_phase">Update: %1$s</string>
-    <string name="mac_update_last_known_phase">Last known update: %1$s</string>
-    <string name="mac_update_security_unknown">Security status unknown</string>
-    <string name="mac_update_not_security">Not marked as a security update</string>
+    <string name="mac_update_no_status">No update status yet. Refresh to check.</string>
+    <string name="mac_update_last_known_phase">Last known: %1$s</string>
+    <string name="mac_update_last_known_hint">This may be out of date. Refresh before making a change.</string>
     <string name="mac_update_security">Security update</string>
-    <string name="mac_update_admission_unknown">Request admission status unknown</string>
+    <string name="mac_update_details_show">Show details</string>
+    <string name="mac_update_details_hide">Hide details</string>
     <string name="mac_update_admission_open">The Mac accepts new requests.</string>
-    <string name="mac_update_admission_closed">The Mac is not accepting new requests.</string>
-    <string name="mac_update_owner_this_account">This account is the designated update owner.</string>
-    <string name="mac_update_owner_other_account">Another account is the designated update owner.</string>
-    <string name="mac_update_owner_unassigned">No update owner is designated.</string>
-    <string name="mac_update_owner_unknown">Update owner unknown</string>
-    <string name="mac_update_ready_age_unknown">Update age unavailable</string>
-    <string name="mac_update_ready_age_seconds">Update ready for up to %1$s seconds</string>
-    <string name="mac_update_blocker_other_accounts">Other accounts have work in progress.</string>
-    <string name="mac_update_blocker_requests">Pending requests: %1$s</string>
-    <string name="mac_update_blocker_commands">Active commands: %1$s</string>
-    <string name="mac_update_blocker_permits">Approved actions finishing: %1$s</string>
-    <string name="mac_update_blocker_age_unknown">Work age unavailable</string>
-    <string name="mac_update_blocker_age_seconds">Oldest reported work: up to %1$s seconds</string>
-    <string name="mac_update_checked_age_seconds">Verified up to %1$s seconds ago</string>
-    <string name="mac_update_too_late">Too late to change this update. It has passed the point where it can be cancelled.</string>
-    <string name="mac_update_last_known_too_late">Last known: too late to change this update.</string>
-    <string name="mac_update_submitting">Sending the scheduling request…</string>
-    <string name="mac_update_acknowledged">Scheduling request accepted.</string>
-    <string name="mac_update_uncertain">The earlier scheduling result is unknown. Current progress does not confirm that request.</string>
-    <string name="mac_update_not_confirmed">The scheduling request was not confirmed. Refresh before making another change.</string>
-    <string name="mac_update_refresh_required">The scheduling result is not confirmed. Refresh before making another choice.</string>
-    <string name="mac_update_drain_effect">Install when current work finishes pauses new requests. Current work continues, with no time limit.</string>
-    <string name="mac_update_drain_active">New requests are paused while current work continues. There is no time limit.</string>
-    <string name="mac_update_install_when_idle">Install when current work finishes</string>
-    <string name="mac_update_defer">Defer update</string>
-    <string name="mac_update_cancel_drain">Cancel update drain</string>
-    <string name="mac_update_phase_unknown">Status unknown</string>
-    <string name="mac_update_phase_ready">Ready</string>
-    <string name="mac_update_phase_draining">Waiting for current work</string>
-    <string name="mac_update_phase_activating">Installing</string>
+    <string name="mac_update_admission_closed">The Mac has paused new requests.</string>
+    <string name="mac_update_owner_this_account">You manage this update.</string>
+    <string name="mac_update_owner_other_account">Another account manages this update.</string>
+    <string name="mac_update_owner_unassigned">No account manages this update.</string>
+    <string name="mac_update_ready_under_minute">Ready for less than a minute</string>
+    <plurals name="mac_update_ready_minutes">
+        <item quantity="one">Ready for %1$d minute</item>
+        <item quantity="other">Ready for %1$d minutes</item>
+    </plurals>
+    <plurals name="mac_update_ready_hours">
+        <item quantity="one">Ready for %1$d hour</item>
+        <item quantity="other">Ready for %1$d hours</item>
+    </plurals>
+    <plurals name="mac_update_ready_days">
+        <item quantity="one">Ready for %1$d day</item>
+        <item quantity="other">Ready for %1$d days</item>
+    </plurals>
+    <string name="mac_update_oldest_work_under_minute">Oldest work started less than a minute ago</string>
+    <plurals name="mac_update_oldest_work_minutes">
+        <item quantity="one">Oldest work started %1$d minute ago</item>
+        <item quantity="other">Oldest work started %1$d minutes ago</item>
+    </plurals>
+    <plurals name="mac_update_oldest_work_hours">
+        <item quantity="one">Oldest work started %1$d hour ago</item>
+        <item quantity="other">Oldest work started %1$d hours ago</item>
+    </plurals>
+    <plurals name="mac_update_oldest_work_days">
+        <item quantity="one">Oldest work started %1$d day ago</item>
+        <item quantity="other">Oldest work started %1$d days ago</item>
+    </plurals>
+    <string name="mac_update_checked_now">Checked just now</string>
+    <plurals name="mac_update_checked_minutes">
+        <item quantity="one">Checked %1$d minute ago</item>
+        <item quantity="other">Checked %1$d minutes ago</item>
+    </plurals>
+    <plurals name="mac_update_checked_hours">
+        <item quantity="one">Checked %1$d hour ago</item>
+        <item quantity="other">Checked %1$d hours ago</item>
+    </plurals>
+    <plurals name="mac_update_checked_days">
+        <item quantity="one">Checked %1$d day ago</item>
+        <item quantity="other">Checked %1$d days ago</item>
+    </plurals>
+    <string name="mac_update_blocker_other_accounts">Work from other accounts</string>
+    <plurals name="mac_update_blocker_requests">
+        <item quantity="one">%1$d pending request</item>
+        <item quantity="other">%1$d pending requests</item>
+    </plurals>
+    <plurals name="mac_update_blocker_commands">
+        <item quantity="one">%1$d running command</item>
+        <item quantity="other">%1$d running commands</item>
+    </plurals>
+    <plurals name="mac_update_blocker_permits">
+        <item quantity="one">%1$d approved action finishing</item>
+        <item quantity="other">%1$d approved actions finishing</item>
+    </plurals>
+    <string name="mac_update_too_late">This update can no longer be changed.</string>
+    <string name="mac_update_last_known_too_late">Last known: this update can no longer be changed.</string>
+    <string name="mac_update_submitting">Sending your choice…</string>
+    <string name="mac_update_acknowledged">The Mac accepted your choice.</string>
+    <string name="mac_update_uncertain">We don\'t know if your last choice reached the Mac. Refresh to check.</string>
+    <string name="mac_update_not_confirmed">Your choice was not confirmed. Refresh before choosing again.</string>
+    <string name="mac_update_drain_effect">If you choose this, the Mac stops taking new requests. It installs when current work ends. There is no time limit.</string>
+    <string name="mac_update_drain_active">New requests are paused. The Mac installs when current work ends. There is no time limit.</string>
+    <string name="mac_update_cancel_effect">Cancelling reopens new requests. The update stays pending.</string>
+    <string name="mac_update_cancelled_hint">The update is still pending.</string>
+    <string name="mac_update_install_when_idle">Install after current work</string>
+    <string name="mac_update_defer">Postpone update</string>
+    <string name="mac_update_cancel_drain">Cancel install</string>
+    <string name="mac_update_phase_unknown">Update status unknown</string>
+    <string name="mac_update_phase_ready">Update ready to install</string>
+    <string name="mac_update_phase_draining">Waiting for current work to finish</string>
+    <string name="mac_update_phase_activating">Installing the update</string>
     <string name="mac_update_phase_checking_restart">Checking restarted services</string>
-    <string name="mac_update_phase_finishing">Finishing</string>
-    <string name="mac_update_phase_completed">Completed</string>
-    <string name="mac_update_phase_cancelled">Drain cancelled</string>
+    <string name="mac_update_phase_finishing">Finishing the update</string>
+    <string name="mac_update_phase_completed">Update installed</string>
+    <string name="mac_update_phase_cancelled">Install cancelled</string>
 </resources>
