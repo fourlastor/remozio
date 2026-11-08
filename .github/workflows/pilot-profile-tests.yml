@@ -1,0 +1,26 @@
+name: Profile slow macos/core tests
+on:
+  push:
+    branches: [perf/ci-profile-20261108]
+permissions:
+  contents: read
+jobs:
+  profile:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build macos/core tests (-O, as CI does)
+        run: swift build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O --build-tests
+      - name: Profile selected tests
+        run: |
+          bin=$(swift build --package-path macos/core --triple arm64-apple-macosx26.0 -Xswiftc -O --show-bin-path)
+          python3 scripts/profile-xctests.py "$bin/RemozioCorePackageTests.xctest" .build/profile $(cat scripts/profile-tests.txt)
+      - name: Keep profiles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: core-test-profiles
+          path: .build/profile
+          if-no-files-found: ignore
+          retention-days: 7
