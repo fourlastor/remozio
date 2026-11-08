@@ -26,6 +26,28 @@ final class AuthorityStorage {
         })
     }
 
+    /// Opens existing paired stores without migration, recovery, or journal mode changes.
+    static func openForUpdateHealth(configuration: AuthorityServiceConfiguration,
+        gatewayPolicy: GatewayAuthorityPolicy? = nil,
+        acquireJournal: (String) throws -> ProtectedJournalLease = ProtectedJournalLease.acquire(directoryPath:),
+        acquireContinuity: (String, ProtectedStorageLease.DirectoryIdentity?) throws -> ProtectedContinuityLease =
+            ProtectedContinuityLease.acquire(directoryPath:excludingDirectory:)) throws -> AuthorityStorage {
+        guard let directory = configuration.continuityDirectory else {
+            throw AuthorityServiceConfigurationError.invalidConfiguration
+        }
+        let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
+        return try AuthorityStorage(openJournal: {
+            try JournalDatabase(lease: acquireJournal(configuration.journalDirectory),
+                macID: configuration.macID, accountID: configuration.accountID,
+                recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                maximumConsumptions: 1_000_000, busyMilliseconds: 5000, initialize: false,
+                gatewayPolicy: gatewayPolicy, readOnlyForCutover: true)
+        }, openContinuity: { journalDirectory in
+            try ContinuityStore(lease: acquireContinuity(directory, journalDirectory), macID: configuration.macID, accountID: configuration.accountID,
+                initialize: nil, readOnlyForCutover: true)
+        })
+    }
+
     /// Internal factory seam for protected fixture stores. Both factories transfer exclusive ownership.
     init(openJournal: () throws -> sending JournalDatabase, openContinuity: (ProtectedStorageLease.DirectoryIdentity) throws -> sending ContinuityStore) throws {
         let journal = try openJournal()

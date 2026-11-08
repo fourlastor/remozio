@@ -13,6 +13,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
+    private var updateHealthOnly = false
     private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
@@ -41,6 +42,33 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Owns existing read-only stores for update health. Recovery and request startup stay closed.
+    init(updateHealthStorage storage: sending AuthorityStorage,
+         validateSelf: (JournalTransaction) throws -> Void) throws {
+        do {
+            guard storage.journal.readOnlyForCutover, storage.continuity.readOnlyForCutover else {
+                throw JournalDatabaseError.readOnly
+            }
+            try storage.journal.read { transaction in
+                try validateSelf(transaction)
+                let state = try storage.continuity.read()
+                guard !state.recoveryRequired, state.pending == nil else { throw JournalDatabaseError.unavailable }
+                let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                    epoch: state.committed.journalEpoch, generation: state.committed.generation,
+                    authorityGeneration: state.committed.authorityGeneration)
+                guard actual == state.committed, try storage.continuity.read() == state else {
+                    throw JournalDatabaseError.unavailable
+                }
+            }
+            database = storage.journal
+            self.storage = storage
+            updateHealthOnly = true
+        } catch {
+            try? storage.close()
+            throw error
+        }
+    }
+
     /// Owns the configured stores for trust-only service work. Action recovery remains a separate gate.
     init(storage: sending AuthorityStorage) throws {
         do {
@@ -62,6 +90,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     func prepareRequests(clockEpoch: UUID, maximumPayloadBytes: Int) throws {
         try lock.withLock {
             try requireNoRequestOperation()
+            guard !updateHealthOnly else { throw JournalDatabaseError.readOnly }
             guard let storage else { return }
             try withStorageFailureCleanup { try database.read { _ in () } }
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
@@ -473,6 +502,16 @@ public final class AuthorityJournal: @unchecked Sendable {
     public func read<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
         try lock.withLock {
             try requireNoRequestOperation()
+            return try validatedRead(body)
+        }
+    }
+
+    /// Reads paired update health state before request startup. The native owner must separately verify code and closed admission.
+    func readForUpdateHealth<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard storage != nil, requests == nil, !requestStartupAttempted,
+                  commandExecutions.isEmpty, !commandExchanges.hasActive else { throw JournalDatabaseError.unavailable }
             return try validatedRead(body)
         }
     }
