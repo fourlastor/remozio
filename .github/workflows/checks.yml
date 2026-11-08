@@ -139,7 +139,10 @@ jobs:
         env:
           REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
         run: python3 scripts/ci-build-cache.py restore --scope mac
-      - run: ./scripts/check.sh
+      - name: Build the app and run the stages that inspect it or macos/core
+        env:
+          REMOZIO_CHECK_MAC_PART: app
+        run: ./scripts/check.sh
       - name: Record validated Mac cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope mac --github-output "$GITHUB_OUTPUT"
@@ -186,6 +189,45 @@ jobs:
                   '-XCTest', 'RemozioCoreTests.NegotiatedNetworkChannelTests/testCoalescedAndFragmentedFramesSurviveNegotiation',
                   str(bundle.resolve())], env=env, timeout=90, check=False)
           PYTHON
+  mac-experiments:
+    name: Mac experiments
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compatible Mac experiments cache
+        id: build-cache-key
+        run: python3 scripts/ci-build-cache.py key --scope experiments --github-output "$GITHUB_OUTPUT"
+      - name: Restore Mac experiments compiler outputs
+        id: build-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.build-cache-key.outputs.paths }}
+          key: ${{ steps.build-cache-key.outputs.key }}
+          restore-keys: ${{ steps.build-cache-key.outputs.restore-prefix }}
+      - name: Restore timestamps of unchanged Mac inputs
+        env:
+          REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
+        run: python3 scripts/ci-build-cache.py restore --scope experiments
+      - name: Run the Mac stages that need neither the app nor macos/core
+        env:
+          REMOZIO_CHECK_MAC_PART: experiments
+        run: ./scripts/check.sh
+      - name: Record validated Mac experiments cache inputs
+        id: build-cache-manifest
+        run: python3 scripts/ci-build-cache.py save --scope experiments --github-output "$GITHUB_OUTPUT"
+      - name: Save validated Mac experiments compiler outputs
+        timeout-minutes: 5
+        # Only main writes, as for the Mac build cache.
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.build-cache-key.outputs.paths }}
+          key: ${{ steps.build-cache-key.outputs.key }}
   mac-core:
     name: Mac core tests
     runs-on: macos-26
