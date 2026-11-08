@@ -8,7 +8,7 @@ enum ServiceAccountProvisioningError: Error, Equatable {
 enum ServiceAccountRole: UInt64, Sendable { case transport = 4, gateway = 6 }
 
 /// A retained record claim. Matching a name alone never proves ownership.
-struct ServiceAccountClaim: Equatable, Sendable, CustomStringConvertible {
+struct ServiceAccountClaim: Hashable, Sendable, CustomStringConvertible {
     let accountID: Data
     let role: ServiceAccountRole
     let number: UInt32
@@ -34,7 +34,7 @@ struct ServiceAccountClaim: Equatable, Sendable, CustomStringConvertible {
 }
 
 /// Frozen setup inputs, retained before any directory write. This value grants no provisioning or runtime authority.
-struct ServiceAccountPlan: Equatable, Sendable, CustomStringConvertible {
+struct ServiceAccountPlan: Hashable, Sendable, CustomStringConvertible {
     // Version 1 provisions these roles. Future optional roles must not change old record semantics.
     static let roles: [ServiceAccountRole] = [.transport, .gateway]
     let planID: Data
@@ -82,13 +82,21 @@ struct ServiceAccountPlan: Equatable, Sendable, CustomStringConvertible {
             throw ServiceAccountProvisioningError.changedScope
         }
     }
-    var encoded: Data { get throws {
+    // Encoding and decoding are pure functions of the value and of the exact bytes, and verification repeats both.
+    private static let encodings = PureResultMemo<ServiceAccountPlan, Data>()
+    private static let decodings = PureResultMemo<Data, ServiceAccountPlan>()
+
+    var encoded: Data { get throws { try Self.encodings.value(for: self) { try encodedBytes() } } }
+    private func encodedBytes() throws -> Data {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .bytes(macID), 2: .bytes(accountID), 3: .bytes(accountSetupID),
             4: .bytes(installationID), 5: .bytes(releaseDigest), 6: .unsigned(UInt64(ownerUID)),
             7: .bytes(Self.bytes(ownerDirectoryID)), 8: .bytes(authorityPublicKey), 9: .bytes(planID),
             10: .array(claims.map(\.value))]), limits: Self.limits)
-    } }
+    }
     static func decode(_ bytes: Data) throws -> Self {
+        try decodings.value(for: bytes) { try decodeUncached(bytes) }
+    }
+    private static func decodeUncached(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...10),
               f[0] == .unsigned(1), case .bytes(let mac) = f[1], case .bytes(let account) = f[2],
               case .bytes(let setup) = f[3], case .bytes(let installation) = f[4], case .bytes(let release) = f[5],
