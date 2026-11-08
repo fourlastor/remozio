@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 
 /// Retained setup and runtime requirements. This snapshot contains no imported credentials or update authority.
 struct RuntimeReleaseCompatibilitySnapshot: Sendable {
@@ -33,14 +34,17 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         private(set) var machineUpdateActivation: Data?
         /// Canonical machine update replacement record bytes at schema 18 and later, so a replacement change makes earlier inputs stale.
         let machineUpdateReplacement: Data?
+        /// The canonical header binds every retained configuration row and its publication revision.
+        let machineUpdateConfigurationEpoch: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
-             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil) {
+             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
             self.machineUpdateReplacement = machineUpdateReplacement
+            self.machineUpdateConfigurationEpoch = machineUpdateConfigurationEpoch
         }
         /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
         func replacingMachineUpdateActivation(_ value: Data?) -> Self {
@@ -84,6 +88,17 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         }
         if inputs.schemaVersion >= 18 {
             for item in try MachineUpdateReplacementRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 19 {
+            for item in try MachineUpdateConfigurationEpochRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if let bytes = inputs.machineUpdateConfigurationEpoch,
+           try MachineUpdateConfigurationEpochRecord.decode(bytes).formatVersion == 2 {
+            for item in try MachineUpdateConfigurationEpochRecord.publicationRequirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
@@ -211,6 +226,33 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             }
         }
         return try .init(inputs: inputs, requirements: .init(formats: formats, requests: []))
+    }
+    /// Pins external public snapshots in addition to the machine SQLite rows. Digests contain no credential bytes.
+    static func externalSourceDigest(sharedImport: SharedSetupImportCompatibilitySnapshot?) throws -> Data {
+        func identity(_ value: ProtectedStorageLease.DirectoryIdentity) -> CBORValue {
+            .array([.unsigned(UInt64(bitPattern: Int64(value.device))), .unsigned(UInt64(value.inode))])
+        }
+        func file(_ value: (ProtectedStorageLease.DirectoryIdentity, Data)?) -> CBORValue {
+            value.map { .array([identity($0.0), .bytes($0.1)]) } ?? .null
+        }
+        let imported: CBORValue
+        if let snapshot = sharedImport {
+            let records = snapshot.records.map { record in
+                CBORValue.map([0: .bytes(record.accountID), 1: .bytes(record.operationID), 2: .bytes(record.revision),
+                    3: .unsigned(record.phase), 4: .bytes(record.digest), 5: .unsigned(record.portableVersion),
+                    6: .unsigned(record.settingsVersion), 7: file(record.relay.map { ($0.identity, $0.digest) }),
+                    8: file(record.relayProvisioning.map { ($0.identity, $0.digest) }),
+                    9: file(record.accessApplication.map { ($0.identity, $0.digest) }),
+                    10: file(record.dnsRecord.map { ($0.identity, $0.digest) }),
+                    11: file(record.runCredential.map { ($0.identity, $0.digest) })])
+            }
+            imported = .map([0: .array(snapshot.directories.map(identity)), 1: identity(snapshot.database),
+                2: identity(snapshot.writer), 3: .array(records)])
+        } else { imported = .null }
+        // Schema 19 has no separate retained-setup provisioning store.
+        let bytes = try DeterministicCBOR.encode(.map([0: imported, 1: .array([])]),
+            limits: .init(maxBytes: 262144, maxDepth: 6, maxItems: 16384))
+        return MachineUpdateActivationRecord.digest(Data("Remozio/MachineEpochExternalSource/v1\0".utf8) + bytes)
     }
     func requireCurrent(machine: PreparationIntentStore) throws {
         guard try machine.retainedRuntimeCompatibilityInputs() == inputs else { throw RuntimeActivationError.changedScope }

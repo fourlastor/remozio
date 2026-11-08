@@ -51,3 +51,26 @@ enum MachineUpdatePublicationOperation {
     case prepare(Data, MachineUpdatePublicationProgress.File)
     case complete(Data, MachineUpdatePublicationProgress.File)
 }
+
+extension MachineUpdateConfigurationEpoch.Configuration {
+    func bytes(_ file: MachineUpdatePublicationProgress.File, target: Bool) throws -> Data {
+        switch file {
+        case .host: return target ? startup.host.canonicalBytes : source.host.canonicalBytes
+        case .transport: return target ? startup.transport.canonicalBytes : source.transport.canonicalBytes
+        case .gateway: return try target ? startup.gateway.encoded : source.gateway.encoded
+        case .presence: return target ? startup.clients.presence.canonicalBytes : source.clients.presence.canonicalBytes
+        case .pairing: return target ? startup.clients.pairing.canonicalBytes : source.clients.pairing.canonicalBytes
+        case .frontend: return target ? startup.clients.frontend.canonicalBytes : source.clients.frontend.canonicalBytes
+        }
+    }
+    func requireActual(_ actual: RuntimeReleaseConfigurationSource, progress: MachineUpdatePublicationProgress?) throws {
+        let actuals = try [actual.host.canonicalBytes, actual.transport.canonicalBytes, actual.gateway.encoded,
+            actual.clients.presence.canonicalBytes, actual.clients.pairing.canonicalBytes, actual.clients.frontend.canonicalBytes]
+        for file in MachineUpdatePublicationProgress.File.allCases {
+            let state = try progress?.state(accountID: startup.binding.accountID, file: file) ?? .pending
+            let source = try bytes(file, target: false), target = try bytes(file, target: true), value = actuals[file.rawValue]
+            guard state == .pending && value == source || state == .writing && (value == source || value == target) ||
+                  state == .published && value == target else { throw InstalledAuthorityCommandError.changedConfiguration }
+        }
+    }
+}

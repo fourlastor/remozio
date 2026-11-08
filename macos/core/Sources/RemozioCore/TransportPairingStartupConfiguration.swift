@@ -46,6 +46,12 @@ public struct TransportPairingStartupConfiguration: Sendable, CustomStringConver
         guard settingsHost == nil else { throw TransportPairingControlError.unsupportedVersion }
     }
     public static func decode(_ bytes: Data) throws -> Self {
+        try decode(bytes, allowReleaseBound: false)
+    }
+    static func decodeForReleaseArchive(_ bytes: Data) throws -> Self {
+        try decode(bytes, allowReleaseBound: true)
+    }
+    private static func decode(_ bytes: Data, allowReleaseBound: Bool) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), case .unsigned(let version) = f[0],
               supportedVersions.contains(version), Set(f.keys) == Set(UInt64(0)...(version == 1 ? 4 : 5)),
               case .bytes(let transport) = f[1], case .bytes(let control) = f[4] else {
@@ -63,7 +69,9 @@ public struct TransportPairingStartupConfiguration: Sendable, CustomStringConver
         if version == 1 { settingsHost = nil }
         else {
             guard case .bytes(let bytes) = f[5] else { throw TransportPairingControlError.invalidConfiguration }
-            settingsHost = try .decode(bytes)
+            settingsHost = try allowReleaseBound
+                ? GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(bytes)
+                : GatewaySettingsConsumerHostConfiguration.decode(bytes)
         }
         let result = try Self(transport: .decode(transport), control: .decode(control), wake: wake, relayPort: port, settingsHost: settingsHost)
         guard result.canonicalBytes == bytes else { throw TransportPairingControlError.invalidConfiguration }; return result
