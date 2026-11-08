@@ -1,0 +1,52 @@
+name: Pilot CPU fixes A/B
+on:
+  push:
+    branches: [perf/ci-cpu-ab-20261108]
+permissions:
+  contents: read
+jobs:
+  ab:
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      BASE: 5995a42c
+      CANDIDATE: f0e4b694
+      FLAGS: --triple arm64-apple-macosx26.0 -Xswiftc -O
+      CLASSES: >-
+        RemozioCoreTests.GatewayRuntimeSettingsRecoveryPublicationTests,RemozioCoreTests.RuntimeAuditUpgradeRestartTests,RemozioCoreTests.SharedSetupDNSCreationOwnerTests,RemozioCoreTests.SharedSetupImportGatewayRuntimeOwnerTests,RemozioCoreTests.UpdateSchedulingJournalTests,RemozioCoreTests.MachineUpdateReplacementTests,RemozioCoreTests.AuthorityGatewayRecoveryAccessTests,RemozioCoreTests.GatewaySettingsTransitionOperationTests,RemozioCoreTests.SharedSetupImportCompletionValidationTests,RemozioCoreTests.PureResultMemoTests,RemozioCoreTests.LowercaseHexadecimalTests
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Build A (split only)
+        run: |
+          git checkout -q "$BASE"
+          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-a"
+      - name: Build B (hex encoding and pure memos), incrementally from A
+        run: |
+          cp -a .build-a .build-b
+          git checkout -q "$CANDIDATE"
+          /usr/bin/time -l swift build --package-path macos/core $FLAGS --build-tests --scratch-path "$PWD/.build-b"
+      - name: Run the CPU-heavy classes A, B, B, A
+        run: |
+          mkdir -p .build/ab
+          for pass in 1:a 2:b 3:b 4:a; do
+            n=${pass%%:*}; v=${pass##*:}
+            bundle=$(ls -d "$PWD/.build-$v"/arm64-apple-macosx/debug/*.xctest)
+            # The A bundle has no memo or hex tests; xctest skips unknown classes only if they are absent from the list.
+            classes="$CLASSES"
+            [ "$v" = a ] && classes=$(echo "$CLASSES" | tr ',' '\n' | grep -v 'PureResultMemoTests\|LowercaseHexadecimalTests' | paste -sd, -)
+            start=$(date +%s)
+            /usr/bin/time -l xcrun xctest -XCTest "$classes" "$bundle" > ".build/ab/pass-$n-$v.log" 2>&1 || { echo "pass $n ($v) failed"; tail -50 ".build/ab/pass-$n-$v.log"; exit 1; }
+            echo "pass $n ($v): $(( $(date +%s) - start ))s"
+            grep -E "Test Suite '[A-Za-z]+Tests' (passed|failed)" -A1 ".build/ab/pass-$n-$v.log" | grep -oE "^Test Suite '[A-Za-z]+'|in [0-9.]+ \([0-9.]+\) seconds" | paste - - | sed "s/^/  /"
+            tail -3 ".build/ab/pass-$n-$v.log"
+          done
+      - name: Keep logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cpu-ab
+          path: .build/ab
+          if-no-files-found: ignore
+          retention-days: 7
