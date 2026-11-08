@@ -16,7 +16,8 @@ package dev.remozio.pairing
  *   with an error.
  * - [cancel] may arrive at any time, from any thread, more than once and even before [start]. A [start] after a
  *   cancel reports `closed`.
- * - Byte arrays belong to the receiver after each call. Callbacks may arrive on any thread.
+ * - Byte arrays belong to the receiver after each call. Callbacks may arrive on any thread, but never overlap:
+ *   each event returns before the next one starts, in the order the connection produced them.
  */
 interface PairingTransport {
     fun start(events: PairingTransportEvents)

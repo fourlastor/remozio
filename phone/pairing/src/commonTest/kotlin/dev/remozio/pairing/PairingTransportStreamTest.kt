@@ -203,4 +203,44 @@ class PairingTransportStreamTest {
         val failure = assertFailsWith<IOException> { open.await() }
         assertTrue(failure.message!!.contains("pin mismatch"))
     }
+
+    @Test fun anUnevenDeliverySplitsAtTheChunkBoundary() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        val bytes = ByteArray(40_000) { (it / 32_768 + 1).toByte() }
+        val read = async { stream.receive() }
+        yield(); fake.events!!.received(bytes)
+        val head = read.await()!!; val tail = stream.receive()!!
+        assertEquals(32_768, head.size); assertEquals(7_232, tail.size)
+        assertTrue(head.all { it == 1.toByte() }); assertTrue(tail.all { it == 2.toByte() })
+        assertContentEquals(bytes, head + tail)
+    }
+
+    @Test fun anUnrequestedDeliveryKeepsItsReasonWhenCancelReportsClosedAtOnce() = test {
+        val fake = object : PairingTransport {
+            var events: PairingTransportEvents? = null
+            override fun start(events: PairingTransportEvents) { this.events = events }
+            override fun requestBytes() {}
+            override fun send(bytes: ByteArray, completion: PairingSendCompletion) {}
+            override fun cancel() { events?.closed(null) }
+        }
+        val stream = PairingTransportStream(fake)
+        val open = async { stream.awaitOpen() }
+        yield(); fake.events!!.opened(); open.await()
+        fake.events!!.received(byteArrayOf(1))
+        val failure = assertFailsWith<IOException> { stream.receive() }
+        assertTrue(failure.message!!.contains("Unrequested"))
+    }
+
+    @Test fun nothingIsRequestedOrSentAfterClose() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        stream.close()
+        assertFailsWith<IOException> { stream.send(byteArrayOf(1)) }
+        val read = async { stream.receive() }
+        yield(); assertEquals(0, fake.requests)
+        fake.events!!.closed("cancelled")
+        assertFailsWith<IOException> { read.await() }
+        assertTrue(fake.sent.isEmpty())
+    }
 }

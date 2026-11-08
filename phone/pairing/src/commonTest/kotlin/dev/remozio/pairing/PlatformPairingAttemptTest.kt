@@ -119,4 +119,9 @@ class PlatformPairingAttemptTest {
         assertNull(keys.opened)
         assertNull(host.events)
     }
+
+    @Test fun thePinPrefixIsTheP256SubjectPublicKeyInfoHeader() {
+        assertEquals("3059301306072a8648ce3d020106082a8648ce3d030107034200",
+            P256_SPKI_PREFIX.joinToString("") { (it.toInt() and 255).toString(16).padStart(2, '0') })
+    }
 }
