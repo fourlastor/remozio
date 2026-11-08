@@ -1,4 +1,4 @@
-plugins { kotlin("multiplatform") }
+plugins { alias(libs.plugins.kotlin.multiplatform) }
 
 kotlin {
     jvmToolchain(21)
@@ -11,12 +11,12 @@ kotlin {
             kotlin.srcDir(layout.buildDirectory.dir("generated/commonTestVectors"))
             dependencies {
                 implementation(kotlin("test"))
-                implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+                implementation(libs.kotlinx.serialization.json)
             }
         }
         jvmTest.dependencies {
             implementation(kotlin("test-junit"))
-            implementation("junit:junit:4.13.2")
+            implementation(libs.junit)
         }
     }
 }

@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
     `java-test-fixtures`
 }
 
@@ -9,15 +9,15 @@ dependencies {
     implementation(project(":protocol-kotlin"))
     api(project(":phone-pairing"))
     testFixturesImplementation(project(":protocol-kotlin"))
-    implementation("io.ktor:ktor-websockets:3.6.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-    testImplementation("org.bouncycastle:bcprov-jdk18on:1.86")
-    testImplementation("com.squareup.okhttp3:mockwebserver3:5.5.0")
-    testImplementation("com.squareup.okhttp3:okhttp-tls:5.5.0")
+    implementation(libs.ktor.websockets)
+    implementation(libs.kotlinx.coroutines.core)
+    testImplementation(libs.bouncycastle.bcprov)
+    testImplementation(libs.okhttp.mockwebserver3)
+    testImplementation(libs.okhttp.tls)
     testImplementation(kotlin("test-junit"))
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.serialization.json)
 }
 
 val capture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")

@@ -1,5 +1,5 @@
 plugins {
-    kotlin("jvm")
+    alias(libs.plugins.kotlin.jvm)
     application
 }
 
@@ -7,9 +7,9 @@ kotlin { jvmToolchain(21) }
 
 dependencies {
     implementation(project(":protocol-kotlin"))
-    implementation("com.google.zxing:core:3.5.3")
+    implementation(libs.zxing.core)
     testImplementation(kotlin("test-junit"))
-    testImplementation("junit:junit:4.13.2")
+    testImplementation(libs.junit)
 }
 
 application {
