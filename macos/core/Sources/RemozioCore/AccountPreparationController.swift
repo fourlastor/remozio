@@ -7,7 +7,7 @@ enum AccountPreparationController {
     static let accountsDirectory = "/Library/Application Support/Remozio/Accounts"
     static func authorityDirectory(accountID: Data) throws -> String {
         guard accountID.count == 16 else { throw AccountPreparationError.invalidRecord }
-        return accountsDirectory + "/" + accountID.map { String(format: "%02x", $0) }.joined() + "/Authority"
+        return accountsDirectory + "/" + LowercaseHexadecimal.encode(accountID) + "/Authority"
     }
     static func resume(machine: PreparationIntentStore, expected: AccountPreparationIntent,
                        verifyCurrent: () throws -> Void) throws -> AccountPreparationIntent {
