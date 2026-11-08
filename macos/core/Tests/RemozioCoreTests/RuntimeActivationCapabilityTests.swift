@@ -34,6 +34,22 @@ final class RuntimeActivationCapabilityTests: XCTestCase {
         }
     }
 
+    func testRepeatedDecodingFollowsTheExactBytesAndKeepsRefusals() throws {
+        let routed = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneRouting: true)
+        let legacy = try RuntimeActivationFixture(nativeConsumerHosts: false)
+        let routedBytes = try routed.plan.encoded, legacyBytes = try legacy.plan.encoded
+        XCTAssertNotEqual(routedBytes, legacyBytes)
+        for _ in 0..<2 {
+            XCTAssertEqual(try RuntimeActivationPlan.decode(routedBytes).encoded, routedBytes)
+            XCTAssertEqual(try RuntimeActivationPlan.decode(legacyBytes).encoded, legacyBytes)
+            XCTAssertEqual(try RuntimeActivationPlan.decode(routedBytes).phoneRoutingVersion, 1)
+            XCTAssertNil(try RuntimeActivationPlan.decode(legacyBytes).phoneRoutingVersion)
+        }
+        var changed = try fields(routedBytes)
+        changed[0] = .unsigned(7)
+        for _ in 0..<2 { XCTAssertThrowsError(try RuntimeActivationPlan.decode(encoded(changed))) }
+    }
+
     func testRoutingSelectionRetainsSchemaThreeAndExactCodecVersion() throws {
         let f = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneRouting: true)
         let bytes = try f.plan.encoded, record = try fields(bytes)
