@@ -1347,16 +1347,20 @@ final class CheckpointedJournalTests: XCTestCase {
         func observed(generation: UInt64, authorityGeneration: UInt64? = 7) throws -> ContinuityCheckpoint {
             try journal.read { try CheckpointedJournal.checkpoint(transaction: $0, epoch: epoch, generation: generation, authorityGeneration: authorityGeneration) }
         }
-        func openTransferredStorage(readOnlyForCutover: Bool = false) throws -> sending AuthorityStorage {
-            try Self.openTransferredStorage(anchor: root.path, limits: limits, readOnlyForCutover: readOnlyForCutover)
+        func openTransferredStorage(readOnlyForCutover: Bool = false,
+                                    gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> sending AuthorityStorage {
+            try Self.openTransferredStorage(anchor: root.path, limits: limits,
+                readOnlyForCutover: readOnlyForCutover, gatewayPolicy: gatewayPolicy)
         }
         static func openTransferredStorage(anchor: String, limits: CBORLimits,
-                                           readOnlyForCutover: Bool = false) throws -> sending AuthorityStorage {
+                                           readOnlyForCutover: Bool = false,
+                                           gatewayPolicy: GatewayAuthorityPolicy? = nil) throws -> sending AuthorityStorage {
             return try AuthorityStorage(openJournal: {
                 try JournalDatabase(lease: ProtectedJournalLease(anchor: anchor, relativeDirectory: "journal", owner: geteuid()),
                     macID: Data(repeating: 1, count: 16), accountID: Data(repeating: 2, count: 16),
                     recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
-                    maximumConsumptions: 10, busyMilliseconds: 100, initialize: false, readOnlyForCutover: readOnlyForCutover)
+                    maximumConsumptions: 10, busyMilliseconds: 100, initialize: false,
+                    gatewayPolicy: gatewayPolicy, readOnlyForCutover: readOnlyForCutover)
             }, openContinuity: { journalDirectory in
                 try ContinuityStore(lease: ProtectedContinuityLease(anchor: anchor, relativeDirectory: "continuity", owner: geteuid(),
                     excludingDirectory: journalDirectory),

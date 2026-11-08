@@ -13,7 +13,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
-    private var updateHealthOnly = false
+    private(set) var updateHealthOnly = false
     private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
