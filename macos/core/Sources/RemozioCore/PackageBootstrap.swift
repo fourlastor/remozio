@@ -29,7 +29,7 @@ public struct PackageBootstrapProfile: Equatable, Sendable {
         try self.init(teamID: String(parts[0]), setupHash: bytes(parts[1], count: 20), releaseDigest: bytes(parts[2], count: 32))
     }
     public var argument: String {
-        func hex(_ value: Data) -> String { value.map { String(format: "%02x", $0) }.joined() }
+        func hex(_ value: Data) -> String { LowercaseHexadecimal.encode(value) }
         return teamID + ":" + hex(setupHash) + ":" + hex(releaseDigest)
     }
     func validate(_ release: SignedReleaseEvidence) throws {

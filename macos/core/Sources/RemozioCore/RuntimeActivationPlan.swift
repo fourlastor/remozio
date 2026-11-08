@@ -231,7 +231,13 @@ struct RuntimeActivationPlan: CustomStringConvertible, CustomDebugStringConverti
         } else if let phoneRoutingVersion { fields[6] = .unsigned(phoneRoutingVersion) }
         return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     } }
+    // Decoding depends only on the bytes: its nested decoders and validation read no clock, file, account or
+    // process state. A plan can reach 256 KiB, so few are kept.
+    private static let decodings = PureResultMemo<Data, RuntimeActivationPlan>(capacity: 8)
     static func decode(_ bytes: Data) throws -> Self {
+        try decodings.value(for: bytes) { try decodeUncached(bytes) }
+    }
+    private static func decodeUncached(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits),
               case .unsigned(let version) = f[0], supportedVersions.contains(version),
               Set(f.keys) == Set(UInt64(0)...(version + 3)),
