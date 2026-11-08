@@ -9,16 +9,30 @@
 /* Begin PBXBuildFile section */
 		26E93B227B5F808579A594F0 /* NativePhoneServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */; };
 		2D80731155D29E8D4ECD3541 /* RemozioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */; };
+		30C948E365BE8A7AEBCC472E /* X509 in Frameworks */ = {isa = PBXBuildFile; productRef = F6B4F6584BE9292681575A36 /* X509 */; };
 		5043DC6C40DF1988D99CB9B9 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */; };
+		8CF8E03572D3D7F4B28888C6 /* PairingNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		0BA30A8C993DE7263C5DDDC0 /* Remozio.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Remozio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePhoneServices.swift; sourceTree = "<group>"; };
 		11D517B1E34851969CE37AB7 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingNetwork.swift; sourceTree = "<group>"; };
 		5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemozioApp.swift; sourceTree = "<group>"; };
 		9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BF97BCE50B098EAEB559A63E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				30C948E365BE8A7AEBCC472E /* X509 in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		67A058C2E079F1705BA0E8EF /* Remozio */ = {
@@ -27,6 +41,7 @@
 				9EA17677BAB8C0D6B9C91825 /* Assets.xcassets */,
 				11D517B1E34851969CE37AB7 /* Info.plist */,
 				0C2B9B3D2383749B5182B9BB /* NativePhoneServices.swift */,
+				19CBD09BF426A72F6FEB822C /* PairingNetwork.swift */,
 				5DE2F14DF59D4D461F9F923B /* RemozioApp.swift */,
 			);
 			path = Remozio;
@@ -58,6 +73,7 @@
 				D5B348E5D28D04A50EE6809D /* Build the shared Kotlin framework */,
 				F21DD38BF6D0E395A4EF1BA0 /* Sources */,
 				4628E32E2E038C1F5D296727 /* Resources */,
+				BF97BCE50B098EAEB559A63E /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -65,6 +81,7 @@
 			);
 			name = Remozio;
 			packageProductDependencies = (
+				F6B4F6584BE9292681575A36 /* X509 */,
 			);
 			productName = Remozio;
 			productReference = 0BA30A8C993DE7263C5DDDC0 /* Remozio.app */;
@@ -93,6 +110,9 @@
 			);
 			mainGroup = 69EB81BA28054B610F49D23C;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				F0B2B8B46ADF3C781DB1FF81 /* XCRemoteSwiftPackageReference "swift-certificates" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A8ED3D7C09C1D91D756D24F3 /* Products */;
 			projectDirPath = "";
@@ -142,6 +162,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				26E93B227B5F808579A594F0 /* NativePhoneServices.swift in Sources */,
+				8CF8E03572D3D7F4B28888C6 /* PairingNetwork.swift in Sources */,
 				2D80731155D29E8D4ECD3541 /* RemozioApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -342,6 +363,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		F0B2B8B46ADF3C781DB1FF81 /* XCRemoteSwiftPackageReference "swift-certificates" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/apple/swift-certificates.git";
+			requirement = {
+				kind = exactVersion;
+				version = 1.21.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F6B4F6584BE9292681575A36 /* X509 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F0B2B8B46ADF3C781DB1FF81 /* XCRemoteSwiftPackageReference "swift-certificates" */;
+			productName = X509;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = E5E73D6758CD00330E27DAB6 /* Project object */;
 }
