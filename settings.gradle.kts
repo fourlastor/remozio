@@ -13,10 +13,12 @@ dependencyResolutionManagement {
     }
 }
 rootProject.name = "remozio"
-include(":protocol-kotlin")
-project(":protocol-kotlin").projectDir = file("protocol/kotlin")
+// Android lint checks gradle/libs.versions.toml and the Gradle wrapper only for the first included project,
+// so the app, the one project lint analyzes, comes first.
 include(":android-app")
 project(":android-app").projectDir = file("android/app")
+include(":protocol-kotlin")
+project(":protocol-kotlin").projectDir = file("protocol/kotlin")
 include(":phone-pairing")
 project(":phone-pairing").projectDir = file("phone/pairing")
 include(":phone-core")
