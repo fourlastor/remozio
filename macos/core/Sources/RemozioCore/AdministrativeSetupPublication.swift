@@ -334,6 +334,18 @@ public enum AdministrativeSetupPublication {
             owner: owner, verify: verify, didStage: didStage)
     }
 
+    /// The update owner retains exact source and target bytes before this backend exchange.
+    static func replaceMachineUpdateBackend(_ bytes: Data, expected: Data, file: File,
+        directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,
+        didStage: (Stage) throws -> Void) throws {
+        switch file {
+        case .authorityGatewayRuntime, .transportGatewayRuntime, .gatewayConfiguration, .gatewayRuntimeCommit: break
+        default: throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        _ = try replaceSettingsRecord(bytes, expected: expected, file: file, directory: directory,
+            owner: owner, verify: verify, didStage: didStage)
+    }
+
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
                                               didStage: (Stage) throws -> Void,

@@ -146,6 +146,14 @@ struct MachineUpdateConfigurationEpochRecord: Codable, Equatable, Sendable, Cust
             try RetainedReleaseFormat(role: role, name: formatName, readVersions: [1, 2], writeVersions: [2])
         }
     } }
+    /// The formats a release needs to read and advance this retained record: publication formats while it publishes,
+    /// and the provenance and provisioning history formats when it carries provenance (formats 3 and 4).
+    static func retainedRequirements(_ bytes: Data) throws -> [RetainedReleaseFormat] {
+        let record = try decode(bytes)
+        var formats = record.formatVersion == 2 ? try publicationRequirements : []
+        if record.carriesProvenance { formats += try provenanceRequirements + MachineUpdateProvisioningHistory.requirements }
+        return formats
+    }
     static var provenanceRequirements: [RetainedReleaseFormat] { get throws {
         try [AuthorityCodeRole.authority, .setupController].map {
             try .init(role: $0, name: formatName, readVersions: [1, 2, 3, 4], writeVersions: [3, 4])

@@ -23,7 +23,7 @@ private final class MachineReplacementFixture {
     let newIdentity: PreparationFileIdentity
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
-    init(configurationEpoch: Bool = false,
+    init(configurationEpoch: Bool = false, backendEpoch: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true))
@@ -42,11 +42,16 @@ private final class MachineReplacementFixture {
         XCTAssertEqual(try files.machine.store.inventory()?.bundlePath, app.path)
         newRelease = try files.machine.editedRelease { c in
             var formats = c.formats
-            if configurationEpoch {
-                let requiredFormats = try MachineUpdateConfigurationEpochRecord.requirements
+            var requiredFormats: [RetainedReleaseFormat] = []
+            if configurationEpoch || backendEpoch {
+                requiredFormats += try MachineUpdateConfigurationEpochRecord.requirements
                     + MachineUpdateConfigurationEpochRecord.publicationRequirements
                     + GatewaySettingsConsumerHostConfiguration.releaseBoundFormatRequirements
-                for required in requiredFormats where required.role == c.role {
+            }
+            if backendEpoch {
+                requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
+            }
+            for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
                         formats[index] = try .init(name: current.name, readers: current.readers.union(required.readVersions),
@@ -54,7 +59,6 @@ private final class MachineReplacementFixture {
                     } else {
                         formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
                     }
-                }
             }
             return try .init(role: c.role, identifier: c.identifier, generation: c.generation + 1, relativePath: c.relativePath,
                 codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats, requests: c.requests)
@@ -822,6 +826,188 @@ final class MachineUpdateReplacementTests: XCTestCase {
             directory: f.directory, quiescence: f.quiet) { _ in XCTFail("Changed machine rows reached the verifier") }) {
             XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
         }
+    }
+
+    private func publishFixtureConfigurationEpoch(_ f: Fixture, _ record: MachineUpdateConfigurationEpochRecord)
+        throws -> MachineUpdateConfigurationEpochRecord {
+        func advance(_ previous: MachineUpdateConfigurationEpochRecord, _ operation: MachineUpdatePublicationOperation)
+            throws -> MachineUpdateConfigurationEpochRecord {
+            try f.machine.store.advanceMachineUpdatePublication(previous, operation: operation, candidate: f.newRelease,
+                directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        }
+        var current = try advance(record, .begin)
+        for file in MachineUpdatePublicationProgress.File.allCases {
+            current = try advance(current, .prepare(f.machine.account, file))
+            current = try advance(current, .complete(f.machine.account, file))
+        }
+        return current
+    }
+
+    func testBackendEpochRequiresCompletedConfigurationAndRetainsEmptyCaptures() throws {
+        let f = try Fixture(backendEpoch: true)
+        let configuration = try retainFixtureConfigurationEpoch(f)
+        XCTAssertNil(try f.machine.store.machineUpdateBackendEpoch())
+        XCTAssertThrowsError(try f.machine.store.upgradeMachineUpdateBackendEpochStorage(expected: configuration,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})) {
+            XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+        }
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 19)
+        let published = try publishFixtureConfigurationEpoch(f, configuration)
+        let initial = try f.machine.store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        XCTAssertNil(initial.accounts)
+        XCTAssertEqual(try f.machine.store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {}), initial)
+        let retained = try f.machine.store.retainMachineUpdateBackendEpoch(initial,
+            captures: [.init(accountID: f.machine.account, source: nil, startup: nil, completion: nil)],
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        XCTAssertEqual(try f.machine.store.machineUpdateBackendEpoch()?.record, retained)
+        XCTAssertNil(try f.machine.store.machineUpdateBackendEpoch()?.capture(accountID: f.machine.account))
+        let final = try f.machine.store.advanceMachineUpdateBackendPublication(retained, operation: .begin,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        XCTAssertEqual(final.publication?.complete, true)
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().machineUpdateBackendEpoch, try final.encoded)
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 20)
+    }
+
+    func testBackendEpochRefusesMigrationWithoutSignedBackendFormats() throws {
+        let f = try Fixture(configurationEpoch: true)
+        let configuration = try retainFixtureConfigurationEpoch(f)
+        let published = try publishFixtureConfigurationEpoch(f, configuration)
+        XCTAssertThrowsError(try f.machine.store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().schemaVersion, 19)
+        XCTAssertNil(try f.machine.store.machineUpdateBackendEpoch())
+    }
+
+    func testPopulatedBackendPublicationReplacesOwnedFilesAndHonorsTheSettingsFence() throws {
+        var gatewayFixture: GatewayJournalSetupExchangeTests.Fixture?
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
+            let setup = try GatewayJournalSetupExchangeTests.Fixture(runtime: files.machine.f)
+            try setup.retainCompletion(.decode(setup.initialize()))
+            let store = files.machine.store
+            let activation = try GatewayRuntimeActivationPlan(journal: setup.state(),
+                foreground: setup.runtime.plan, inventory: XCTUnwrap(store.inventory()))
+            try store.retainGatewayRuntimeActivation(activation)
+            try store.markGatewayRuntimePublished(activation)
+            _ = try store.enrollGatewayRuntimeActivation(activation)
+            try store.markGatewayRuntimeRegistered(activation)
+            gatewayFixture = setup
+        })
+        let setup = try XCTUnwrap(gatewayFixture)
+        let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store, account = f.machine.account
+        let configuration = try XCTUnwrap(store.machineUpdateConfigurationEpoch())
+        let configured = try XCTUnwrap(configuration.configuration(accountID: account))
+        let machine = try restartSource(f), inventory = machine.replacement.inventory
+        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: account).plan)
+        let journal = try setup.state()
+        let source = try RuntimeReleaseBackendSource(foreground: setup.runtime.plan, activation: activation,
+            journal: journal, settings: store.gatewaySettingsTransition(accountID: account), inventory: inventory)
+        func plan(_ value: RuntimeReleaseConfigurationPlan) throws -> RuntimeReleaseBackendPlan {
+            try .init(configuration: value, source: source, sourceConfiguration: configured.source,
+                machine: machine, currentPolicy: releasePolicySnapshot(f), candidate: f.newRelease)
+        }
+        let capture = try MachineUpdateBackendEpoch.Capture(accountID: account, source: source,
+            startup: plan(configured.startup), completion: plan(configured.completion))
+        let initial = try store.upgradeMachineUpdateBackendEpochStorage(expected: published,
+            candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        let retained = try store.retainMachineUpdateBackendEpoch(initial, captures: [capture], candidate: f.newRelease,
+            directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+        XCTAssertEqual(retained.operands.count, 3)
+
+        // Shared metadata needs a public anchor; the fixture root is private (0700).
+        XCTAssertEqual(chmod(f.files.root.path, 0o755), 0)
+        let directory = try ProtectedSetupDirectory(anchor: f.files.root.path, relativePath: "BackendPublication",
+            owner: getuid(), visibility: .sharedMetadata)
+        defer { directory.close() }
+        for file in MachineUpdateBackendPublicationProgress.File.allCases {
+            _ = try AdministrativeSetupPublication.publish(capture.bytes(file, target: false),
+                file: file.artifact, directory: directory, owner: getuid())
+        }
+        let revision = try GatewayRuntimeSettingsRevision(id: Data(repeating: 1, count: 16),
+            selection: .init(service: source.gateway.settings,
+                activation: .init(wakePollMilliseconds: 2000, wakeTimeoutMilliseconds: 6000)),
+            activation: activation, previous: nil, journal: journal, foreground: setup.runtime.plan, inventory: inventory)
+        let fence = try GatewayRuntimeSettingsFence(.init(revision: revision, previous: nil,
+            activation: activation, journal: journal, foreground: setup.runtime.plan, inventory: inventory))
+        let fenceFile = AdministrativeSetupPublication.File.gatewaySettingsFence
+        let fenceURL = URL(fileURLWithPath: directory.path).appendingPathComponent(fenceFile.name)
+        func readFence() throws -> GatewayRuntimeSettingsFence? {
+            try GatewayRuntimeSettingsFenceReader.load(macID: machine.replacement.inventory.macID, accountID: account, read: {
+                try ProtectedServiceConfiguration.readOptional(anchor: directory.path, relativePath: fenceFile.name, owner: getuid())
+            }, verifyCurrent: {})
+        }
+        func verify(_ archive: MachineUpdateBackendEpoch.Archive) throws {
+            try MachineUpdateBackendPublicationFiles.requireInLease(archive, configuration: configuration,
+                accountID: account, directory: directory, owner: getuid(), readFence: readFence, verifyCurrent: {})
+        }
+        func advance(_ previous: MachineUpdateBackendEpochRecord, _ operation: MachineUpdateBackendPublicationOperation)
+            throws -> MachineUpdateBackendEpochRecord {
+            try store.advanceMachineUpdateBackendPublication(previous, operation: operation, candidate: f.newRelease,
+                directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+        }
+        var record = try advance(retained, .begin)
+        XCTAssertThrowsError(try advance(record, .prepare(account, .commit)))
+        for file in MachineUpdateBackendPublicationProgress.File.allCases {
+            let url = URL(fileURLWithPath: directory.path).appendingPathComponent(file.artifact.name)
+            let original = try capture.bytes(file, target: false), target = try capture.bytes(file, target: true)
+            let pending = try XCTUnwrap(store.machineUpdateBackendEpoch())
+            XCTAssertThrowsError(try MachineUpdateBackendPublicationFiles.publishInLease(pending, configuration: configuration,
+                accountID: account, file: file, directory: directory, owner: getuid(), verify: {})) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            record = try advance(record, .prepare(account, file))
+            let writing = try XCTUnwrap(store.machineUpdateBackendEpoch())
+            if file == .authority {
+                _ = try AdministrativeSetupPublication.publish(fence.encoded, file: fenceFile, directory: directory, owner: getuid())
+                XCTAssertNotNil(try readFence())
+                XCTAssertThrowsError(try MachineUpdateBackendPublicationFiles.publishInLease(writing, configuration: configuration,
+                    accountID: account, file: file, directory: directory, owner: getuid(), verify: { try verify(writing) },
+                    didStage: { _ in XCTFail("A retained fence reached staging") })) {
+                    XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+                }
+                XCTAssertEqual(try Data(contentsOf: url), original)
+                try FileManager.default.removeItem(at: fenceURL)
+            }
+            try MachineUpdateBackendPublicationFiles.publishInLease(writing, configuration: configuration,
+                accountID: account, file: file, directory: directory, owner: getuid(), verify: { try verify(writing) })
+            XCTAssertEqual(try Data(contentsOf: url), target)
+            var before = stat(), after = stat()
+            XCTAssertEqual(lstat(url.path, &before), 0)
+            try MachineUpdateBackendPublicationFiles.publishInLease(writing, configuration: configuration,
+                accountID: account, file: file, directory: directory, owner: getuid(), verify: { try verify(writing) },
+                didStage: { _ in XCTFail("Replay staged another file") })
+            XCTAssertEqual(lstat(url.path, &after), 0)
+            XCTAssertEqual(before.st_ino, after.st_ino)
+            record = try advance(record, .complete(account, file))
+            try verify(XCTUnwrap(store.machineUpdateBackendEpoch()))
+        }
+        XCTAssertEqual(record.publication?.complete, true)
+    }
+
+    func testReleaseBoundGatewayCommitStaysOutOfOrdinaryReader() throws {
+        let f = try Fixture(); _ = try f.run()
+        let binding = try releaseBinding(f, source: restartSource(f), policy: releasePolicySnapshot(f))
+        let digest = Data(repeating: 3, count: 32)
+        var fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .text("remozio-gateway-runtime-commit"),
+            2: .bytes(f.machine.account), 3: .bytes(digest), 4: .bytes(digest), 5: .bytes(digest),
+            6: .bytes(digest), 7: .bytes(digest)]
+        let limits = try CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 33)
+        let original = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        XCTAssertEqual(try GatewayRuntimeCommit.decode(original).encoded, original)
+        fields[0] = .unsigned(3)
+        fields[8] = .null; fields[9] = .null; fields[10] = .bytes(digest); fields[11] = .null
+        fields[12] = .bytes(try binding.encoded); fields[13] = .unsigned(RuntimeReleasePolicyStage.startup.rawValue)
+        fields[14] = .bytes(original); fields[15] = .bytes(digest)
+        let bytes = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        XCTAssertThrowsError(try GatewayRuntimeCommit.decode(bytes))
+        let commit = try GatewayRuntimeCommit.decodeForReleaseArchive(bytes)
+        try commit.requireRelease(binding: binding, stage: .startup)
+        XCTAssertThrowsError(try commit.requireRelease(binding: binding, stage: .completion))
+        XCTAssertEqual(try commit.encoded, bytes)
     }
 
     func testReleaseBindingKeepsHistoricalMaterialSeparateFromTheInstalledRelease() throws {
