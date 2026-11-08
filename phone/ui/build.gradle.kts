@@ -1,7 +1,7 @@
 plugins {
-    kotlin("multiplatform")
-    kotlin("plugin.compose")
-    id("org.jetbrains.compose")
+    alias(libs.plugins.kotlin.multiplatform)
+    alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.compose.multiplatform)
 }
 
 kotlin {
@@ -18,10 +18,10 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             implementation(project(":protocol-kotlin"))
-            implementation("org.jetbrains.compose.runtime:runtime:1.12.2")
-            implementation("org.jetbrains.compose.animation:animation:1.12.2")
-            implementation("org.jetbrains.compose.foundation:foundation:1.12.2")
-            implementation("org.jetbrains.compose.ui:ui:1.12.2")
+            implementation(libs.compose.multiplatform.runtime)
+            implementation(libs.compose.multiplatform.animation)
+            implementation(libs.compose.multiplatform.foundation)
+            implementation(libs.compose.multiplatform.ui)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
