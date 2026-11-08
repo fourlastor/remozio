@@ -89,6 +89,8 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
                     role: role, executionUID: uid, code: code, publicKey: publicKey))
             }
             if foregroundRegistered {
+                try MachineUpdateConsumerHealthReleaseValidation.validateDeclarations(candidate,
+                    policy: plans.startup.host.codePolicy, consumer: .transport)
                 guard let transport = runtime.reference.services.claims.first(where: { $0.role == .transport }) else {
                     throw RuntimePreparationError.incomplete
                 }
@@ -96,6 +98,8 @@ struct MachineUpdateRestartHealthPlan: CustomStringConvertible, CustomDebugStrin
                 try add(.transport, uid: transport.number, publicKey: runtime.reference.transportPublicKeyX963)
             }
             if gatewayRegistered {
+                try MachineUpdateConsumerHealthReleaseValidation.validateDeclarations(candidate,
+                    policy: plans.startup.host.codePolicy, consumer: .notificationGateway)
                 guard gateway?.configurationPublished == true, let startup,
                       let claim = runtime.reference.services.claims.first(where: { $0.role == .gateway }),
                       startup.gateway.serviceUID == claim.number else { throw RuntimePreparationError.incomplete }

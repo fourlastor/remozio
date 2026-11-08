@@ -6,8 +6,9 @@ import SQLite3
 
 public enum GatewayDatabaseError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongScope, closed, unavailable, transactionActive
-    case headMismatch, operationConflict, capacityExceeded, invalidClock, corruptData
+    case headMismatch, operationConflict, capacityExceeded, invalidClock, corruptData, readOnly
     case revokedEnrollment, unavailableCandidate, retiredCredential, revokedCredential
+    case updateHealthRecoveryRequired
     case storage(Int32)
 }
 
@@ -30,6 +31,7 @@ public struct GatewayCandidateAdmission: Sendable {
 public final class GatewayDatabase {
     private static let applicationID: Int64 = 0x524D5A47
     private let lease: ProtectedGatewayLease
+    private let readOnlyForUpdateHealth: Bool
     private let identity: GatewayRegistrationIdentity
     private let payloadLimits: CBORLimits
     private let signingLimits: CBORLimits
@@ -55,10 +57,26 @@ public final class GatewayDatabase {
             clockEpoch: clockEpoch, busyMilliseconds: busyMilliseconds, initialize: initialize, migrateLegacyStore: migrateLegacyStore, probePolicy: probePolicy)
     }
 
+    /// Opens retained health state only. The caller must authenticate current code, the Root peer and closed admission first.
+    static func openForUpdateHealth(configuration: GatewayServiceConfiguration, clockEpoch: UUID) throws -> GatewayDatabase {
+        try configuration.requireNativeProcess()
+        let settings = configuration.settings
+        let limits = try CBORLimits(maxBytes: 65536, maxDepth: 8, maxItems: 256)
+        return try GatewayDatabase(lease: ProtectedGatewayLease.acquire(directoryPath: configuration.directoryPath,
+            serviceUID: configuration.serviceUID), identity: configuration.registration,
+            payloadLimits: limits, signingLimits: limits, maximumOperations: settings.maximumStoredControls,
+            maximumPendingPerEnrollment: settings.maximumPendingPerEnrollment,
+            maximumLifetimeMillis: settings.maximumCandidateLifetimeMillis, clockEpoch: clockEpoch,
+            busyMilliseconds: settings.databaseBusyMillis, initialize: false, migrateLegacyStore: false,
+            probePolicy: settings.probe, readOnlyForUpdateHealth: true)
+    }
+
     /// Internal fixture entry point. Ownership of the lease transfers even if opening fails.
     init(lease: ProtectedGatewayLease, identity: GatewayRegistrationIdentity, payloadLimits: CBORLimits,
          signingLimits: CBORLimits, maximumOperations: Int, maximumPendingPerEnrollment: Int,
-         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false, probePolicy: GatewayProbePolicy? = nil) throws {
+         maximumLifetimeMillis: UInt64, clockEpoch: UUID, busyMilliseconds: UInt32, initialize: Bool, migrateLegacyStore: Bool = false, probePolicy: GatewayProbePolicy? = nil,
+         readOnlyForUpdateHealth: Bool = false) throws {
+        self.readOnlyForUpdateHealth = readOnlyForUpdateHealth
         self.lease = lease; self.identity = identity; self.payloadLimits = payloadLimits; self.signingLimits = signingLimits
         self.maximumOperations = maximumOperations; self.maximumPendingPerEnrollment = maximumPendingPerEnrollment
         self.maximumLifetimeMillis = maximumLifetimeMillis; self.clockEpoch = clockEpoch; self.probePolicy = probePolicy
@@ -67,9 +85,11 @@ public final class GatewayDatabase {
                   maximumPendingPerEnrollment > 0, maximumPendingPerEnrollment <= maximumOperations,
                   maximumLifetimeMillis > 0, busyMilliseconds <= 60_000,
                   payloadLimits.maxBytes <= Int(Int32.max) - 32768 else { throw GatewayDatabaseError.invalidConfiguration }
+            guard !readOnlyForUpdateHealth || (!initialize && !migrateLegacyStore) else { throw GatewayDatabaseError.invalidConfiguration }
             try lease.validate()
             var connection: OpaquePointer?
-            let rc = sqlite3_open_v2(lease.databasePath, &connection, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+            let access = readOnlyForUpdateHealth ? SQLITE_OPEN_READONLY : SQLITE_OPEN_READWRITE
+            let rc = sqlite3_open_v2(lease.databasePath, &connection, access | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
             db = connection
             guard rc == SQLITE_OK, let connection else { throw GatewayDatabaseError.storage(rc) }
             try lease.validate()
@@ -79,12 +99,14 @@ public final class GatewayDatabase {
             _ = sqlite3_limit(connection, SQLITE_LIMIT_LENGTH, Int32(payloadLimits.maxBytes + 32768))
             try exec("PRAGMA trusted_schema=OFF"); try exec("PRAGMA foreign_keys=ON")
             if initialize { try requireEmpty() } else { try validateIdentity(allowLegacy: migrateLegacyStore) }
-            try exec("PRAGMA journal_mode=DELETE"); try exec("PRAGMA synchronous=EXTRA"); try exec("PRAGMA fullfsync=ON")
+            if !readOnlyForUpdateHealth { try exec("PRAGMA journal_mode=DELETE") }
+            try exec("PRAGMA synchronous=EXTRA"); try exec("PRAGMA fullfsync=ON")
+            if readOnlyForUpdateHealth { try exec("PRAGMA query_only=ON") }
             guard try scalarText("PRAGMA journal_mode") == "delete", try scalar("PRAGMA synchronous") == 3,
                   try scalar("PRAGMA fullfsync") == 1, try scalar("PRAGMA foreign_keys") == 1,
                   try scalar("PRAGMA trusted_schema") == 0 else { throw GatewayDatabaseError.invalidConfiguration }
             if initialize { try transaction(write: true) { try create() } }
-            else if try scalar("PRAGMA user_version") < 4 {
+            else if try !readOnlyForUpdateHealth && scalar("PRAGMA user_version") < 4 {
                 try transaction(write: true) {
                     try validateIdentity(allowLegacy: true)
                     if try scalar("PRAGMA user_version") == 1 { try createRecipientTables() }
@@ -95,15 +117,41 @@ public final class GatewayDatabase {
             }
             try validateIdentity()
             // A restart cannot restore a process-local deadline or turn an old receipt into another probe.
-            try transaction(write: true) {
-                try exec("UPDATE gateway_candidates_v1 SET token=NULL WHERE token IS NOT NULL")
-                try exec("UPDATE gateway_probes_v3 SET status=5,retry=NULL WHERE status IN (1,2,4)")
+            if !readOnlyForUpdateHealth {
+                try transaction(write: true) {
+                    try exec("UPDATE gateway_candidates_v1 SET token=NULL WHERE token IS NOT NULL")
+                    try exec("UPDATE gateway_probes_v3 SET status=5,retry=NULL WHERE status IN (1,2,4)")
+                }
             }
-        } catch { shutdown(); throw error }
+        } catch {
+            // SQLite's extended SQLITE_READONLY_ROLLBACK code. Leave recovery to the ordinary writer.
+            let hotJournal = SQLITE_READONLY | (3 << 8)
+            let recoveryRequired = readOnlyForUpdateHealth && db.map { sqlite3_extended_errcode($0) == hotJournal } == true
+            shutdown()
+            if recoveryRequired { throw GatewayDatabaseError.updateHealthRecoveryRequired }
+            throw error
+        }
     }
     deinit { shutdown() }
 
     public func head() throws -> UInt64 { try transaction(write: false) { try storedHead() } }
+
+    /// Retained store evidence only. This read grants no provider dispatch, enrollment or update completion authority.
+    func updateHealthEvidence() throws -> GatewayHeadEvidence {
+        guard readOnlyForUpdateHealth else { throw GatewayDatabaseError.invalidConfiguration }
+        try transaction(write: false) {
+            try validateIdentity()
+            guard try scalar("PRAGMA query_only") == 1, try scalarText("PRAGMA quick_check") == "ok" else {
+                throw GatewayDatabaseError.corruptData
+            }
+        }
+        let evidence = try headEvidence()
+        try transaction(write: false) {
+            try validateIdentity()
+            guard try storedHead() == evidence.revision else { throw GatewayDatabaseError.headMismatch }
+        }
+        return evidence
+    }
     /// Reads the counter and latest signed receipt in one transaction. The service must authenticate any network response separately.
     public func headEvidence() throws -> GatewayHeadEvidence {
         try transaction(write: false) {
@@ -757,6 +805,7 @@ public final class GatewayDatabase {
     private func transaction<T>(write: Bool, _ body: () throws -> T) throws -> T {
         guard db != nil else { throw GatewayDatabaseError.closed }
         guard !unavailable else { throw GatewayDatabaseError.unavailable }
+        guard !write || !readOnlyForUpdateHealth else { throw GatewayDatabaseError.readOnly }
         guard !active else { throw GatewayDatabaseError.transactionActive }
         try validateLease()
         try exec(write ? "BEGIN IMMEDIATE" : "BEGIN")
