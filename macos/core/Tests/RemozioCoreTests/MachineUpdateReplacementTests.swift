@@ -24,6 +24,7 @@ private final class MachineReplacementFixture {
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false,
+         omitHealthFormatFor: AuthorityCodeRole? = nil,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true))
@@ -50,6 +51,9 @@ private final class MachineReplacementFixture {
             }
             if backendEpoch {
                 requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
+                requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements.filter {
+                    $0.role != omitHealthFormatFor
+                }
             }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
@@ -1159,6 +1163,18 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         XCTAssertThrowsError(try plan.select(accountID: account, role: .notificationGateway))
         XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.oldRelease))
+    }
+
+    func testRestartHealthPlanRejectsACandidateWithoutTheSelectedConsumerFormat() throws {
+        let f = try Fixture(backendEpoch: true, omitHealthFormatFor: .transport, beforeActivation: { files in
+            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
     }
 
     func testRestartHealthPreservesAnUnregisteredAccount() throws {

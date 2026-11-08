@@ -61,6 +61,15 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
               inventory.releaseDigest == services.releaseDigest, inventory.bundlePath == bundlePath,
               try codePolicy.bytes == account.initialAuthority.codePolicy.bytes else { throw GatewayPreparationError.changedScope }
     }
+    /// Update health keeps ordinary startup closed. The native scope must still authenticate code, placement and the dedicated account.
+    func requireUpdateHealthStartupSupported() throws {
+        guard formatVersion == Self.releaseBoundVersion, let releaseBinding,
+              releaseBinding.formatVersion == Self.releaseBoundVersion, policyStage == .startup else {
+            throw GatewayPreparationError.changedScope
+        }
+        try releaseBinding.requireHistoricalRuntime(runtime)
+        try releaseBinding.requireStartupPolicy(codePolicy)
+    }
     /// Actual signature inspection and protected placement remain prerequisites for native startup.
     func validateRelease(_ release: SignedReleaseEvidence) throws {
         guard try InstallationInventory.digest(release) == installedReleaseDigest else { throw GatewayPreparationError.changedScope }
