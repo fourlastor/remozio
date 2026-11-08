@@ -12,7 +12,7 @@ enum UpdateAdmissionScope: Hashable, Sendable {
         case .machine: return UpdateAdmissionBarrier.fileName
         case .account(let id):
             guard id.count == 16 else { throw UpdateAdmissionProvisioningError.invalidScope }
-            return "update-admission-" + id.map { String(format: "%02x", $0) }.joined() + ".lock"
+            return "update-admission-" + LowercaseHexadecimal.encode(id) + ".lock"
         }
     } }
 }

@@ -10,7 +10,7 @@ struct RuntimePreparationPaths: Sendable {
     let namespace: String
     init(accountID: Data) throws {
         guard accountID.count == 16 else { throw RuntimePreparationError.invalidRecord }
-        let suffix = accountID.map { String(format: "%02x", $0) }.joined()
+        let suffix = LowercaseHexadecimal.encode(accountID)
         authorityDirectory = try AccountPreparationController.authorityDirectory(accountID: accountID)
         privateDirectory = (authorityDirectory as NSString).deletingLastPathComponent + "/Runtime"
         serviceDirectory = Self.sharedDirectory + "/Services/" + suffix
