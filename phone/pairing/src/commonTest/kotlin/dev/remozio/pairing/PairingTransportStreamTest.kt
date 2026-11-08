@@ -134,13 +134,73 @@ class PairingTransportStreamTest {
         assertFailsWith<IOException> { open.await() }
     }
 
-    @Test fun cancellingAWaitingOpenLeavesTheCleanupToClose() = test {
+    @Test fun cancellingAWaitingOpenCancelsTheTransport() = test {
         val fake = Fake(); val stream = PairingTransportStream(fake)
         val open = async { stream.awaitOpen() }
         yield(); open.cancelAndJoin()
+        assertEquals(1, fake.cancels)
         stream.close()
         assertEquals(1, fake.cancels)
         fake.events!!.closed(null)
         withTimeout(1_000) { stream.awaitClosed() }
+    }
+
+    @Test fun aQueuedCloseAfterTheLastDeliveryRequestsNothingMore() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        val read = async { stream.receive() }
+        yield(); fake.events!!.received(byteArrayOf(1)); fake.events!!.closed(null)
+        assertContentEquals(byteArrayOf(1), read.await())
+        assertNull(stream.receive()); assertNull(stream.receive())
+        assertEquals(1, fake.requests)
+    }
+
+    @Test fun anUnrequestedDeliveryEndsTheStream() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        fake.events!!.received(byteArrayOf(1))
+        assertEquals(1, fake.cancels)
+        assertFailsWith<IOException> { stream.receive() }
+        assertEquals(0, fake.requests)
+    }
+
+    @Test fun aSecondConcurrentReceiveIsRefused() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        val first = async { stream.receive() }
+        yield()
+        assertFailsWith<IllegalStateException> { stream.receive() }
+        assertEquals(1, fake.requests)
+        fake.events!!.received(byteArrayOf(2)); assertContentEquals(byteArrayOf(2), first.await())
+    }
+
+    @Test fun aLateSendCompletionAfterCloseChangesNothing() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        val lost = async { stream.send(byteArrayOf(1)) }
+        yield(); fake.events!!.closed("reset")
+        assertFailsWith<IOException> { lost.await() }
+        fake.completions.single().done(null)
+        assertFailsWith<IOException> { stream.send(byteArrayOf(2)) }
+        assertEquals(1, fake.sent.size)
+    }
+
+    @Test fun cancellingAWaitingReadCancelsTheTransport() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        opened(fake, stream, this)
+        val read = async { stream.receive() }
+        yield(); read.cancelAndJoin()
+        assertEquals(1, fake.cancels)
+        fake.events!!.closed("cancelled")
+        withTimeout(1_000) { stream.awaitClosed() }
+        assertEquals(1, fake.requests)
+    }
+
+    @Test fun thePlatformReasonReachesTheFailure() = test {
+        val fake = Fake(); val stream = PairingTransportStream(fake)
+        val open = async { stream.awaitOpen() }
+        yield(); fake.events!!.closed("pin mismatch")
+        val failure = assertFailsWith<IOException> { open.await() }
+        assertTrue(failure.message!!.contains("pin mismatch"))
     }
 }

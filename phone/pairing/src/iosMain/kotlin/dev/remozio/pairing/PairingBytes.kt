@@ -12,8 +12,10 @@ import platform.posix.memcpy
 fun pairingData(bytes: ByteArray): NSData =
     if (bytes.isEmpty()) NSData() else bytes.usePinned { NSData.create(bytes = it.addressOf(0), length = bytes.size.toULong()) }
 
+/** Refuses more than [PairingTransport.MAXIMUM_DELIVERY] bytes, so the length always fits the copy. */
 @OptIn(ExperimentalForeignApi::class)
 fun pairingBytes(data: NSData): ByteArray {
+    require(data.length <= PairingTransport.MAXIMUM_DELIVERY.toULong()) { "Pairing data too large" }
     val size = data.length.toInt()
     val bytes = ByteArray(size)
     if (size > 0) bytes.usePinned { memcpy(it.addressOf(0), data.bytes, data.length) }
