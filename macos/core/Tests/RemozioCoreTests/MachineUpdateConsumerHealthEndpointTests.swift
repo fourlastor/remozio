@@ -112,8 +112,14 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
         let once = try MachineUpdateInstalledReadinessReply(request: request, packet: packet)
         XCTAssertEqual(try once.answer(bytes), packet)
         XCTAssertThrowsError(try once.answer(bytes))
+        let otherBytes = try fixture.session().request
+        let otherPeer = fixture.peer(), otherRequest = try otherPeer.accept(otherBytes)
+        defer { otherPeer.close() }
+        XCTAssertThrowsError(try MachineUpdateInstalledReadinessReply(request: otherRequest, packet: packet)) {
+            XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .invalidMessage)
+        }
         let mismatch = try MachineUpdateInstalledReadinessReply(request: request, packet: packet)
-        XCTAssertThrowsError(try mismatch.answer(Data([0])))
+        XCTAssertThrowsError(try mismatch.answer(otherBytes))
         XCTAssertThrowsError(try mismatch.answer(bytes))
         let closed = try MachineUpdateInstalledReadinessReply(request: request, packet: packet)
         closed.close(); XCTAssertThrowsError(try closed.answer(bytes))
@@ -232,6 +238,10 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
         }), helloBytes: fixture.hello, verifyCurrent: {}, acquireActivity: { try activity.acquireShared() }, budget: budget,
             invalidate: {}, makeOwner: { _ in opens.lock.withLock { $0 += 1 }; return fixture.owner() })
         hello(endpoint, fixture: fixture); denied.lock.withLock { $0 = true }
+        let rejected = fixture.peer(authenticate: { throw MachineUpdateOwnedHealthFailure.denied })
+        XCTAssertThrowsError(try rejected.accept(Data([0]))) {
+            guard case .denied? = $0 as? MachineUpdateOwnedHealthFailure else { return XCTFail("Payload parsed before authentication") }
+        }
         endpoint.checkUpdateHealth(Data([0])) { XCTAssertNil($0) }
         try await endpoint.closeAndWait()
         XCTAssertEqual(opens.lock.withLock { $0 }, 0); XCTAssertTrue(budget.acquire()); budget.release()
@@ -295,6 +305,23 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
         }
         try await waitUntil { replies.lock.withLock { $0 == 1 } }; try await endpoint.closeAndWait()
     }
+    func testScopeChangeDuringSettlementSuppressesTheReply() async throws {
+        let fixture = try MachineUpdateOwnedHealthEndpointFixture(), files = try ReleaseActivityFixture()
+        let activity = try files.open(), valid = TestState(true), replies = TestState(0)
+        let owner = fixture.owner(close: { valid.lock.withLock { $0 = false } })
+        let endpoint = MachineUpdateConsumerHealthXPCEndpoint(peer: fixture.peer(), helloBytes: fixture.hello,
+            verifyCurrent: {
+                guard valid.lock.withLock({ $0 }) else { throw MachineUpdateOwnedHealthFailure.denied }
+            }, acquireActivity: { try activity.acquireShared() }, budget: try .init(maximum: 1),
+            invalidate: {}, makeOwner: { _ in owner })
+        hello(endpoint, fixture: fixture)
+        endpoint.checkUpdateHealth(try fixture.session().request) { bytes in
+            XCTAssertNil(bytes); XCTAssertTrue(owner.isClosed); replies.lock.withLock { $0 += 1 }
+        }
+        try await waitUntil { replies.lock.withLock { $0 == 1 } }
+        try await endpoint.closeAndWait()
+    }
+
     func testASecondConnectionCannotOpenWhileDisconnectedWorkStillRuns() async throws {
         let fixture = try MachineUpdateOwnedHealthEndpointFixture(), files = try ReleaseActivityFixture(), activity = try files.open()
         let budget = try AuthorityXPCWorkBudget(maximum: 1), opens = TestState(0), gate = TestState<CheckedContinuation<Void, Never>?>(nil)
@@ -310,6 +337,9 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
         defer { gate.lock.withLock { let old = $0; $0 = nil; old?.resume() }; first.close(); second.close() }
         hello(first, fixture: fixture); first.checkUpdateHealth(try fixture.session().request) { _ in XCTFail() }
         try await waitUntil { gate.lock.withLock { $0 != nil } }; first.close()
+        let acquired = budget.acquire()
+        XCTAssertFalse(acquired)
+        if acquired { budget.release() }
         hello(second, fixture: fixture); second.checkUpdateHealth(try fixture.session().request) { XCTAssertNil($0) }
         XCTAssertEqual(opens.lock.withLock { $0 }, 1)
         gate.lock.withLock { let old = $0; $0 = nil; old?.resume() }

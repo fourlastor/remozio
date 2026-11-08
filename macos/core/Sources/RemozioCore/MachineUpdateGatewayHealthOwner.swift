@@ -18,6 +18,69 @@ final class MachineUpdateGatewayHealthOwner: @unchecked Sendable {
     private var closing = false
     private var retired = false
 
+    static func openNative(configurationPath: String, request: MachineUpdateConsumerHealthRequest) throws -> MachineUpdateGatewayHealthOwner {
+        try request.claim()
+        let requirement = request.requirement
+        guard requirement.role == .notificationGateway else { request.close(); throw MachineUpdateRoleChallengeError.changedScope }
+        let opened: (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence)
+        do { opened = try GatewaySettingsConsumerNativeScope.openGatewayForUpdateHealth(path: configurationPath) }
+        catch { request.close(); throw error }
+        let scope = opened.scope, host = scope.configuration
+        var database: GatewayDatabase?
+        do {
+            try request.validate(); try scope.validate()
+            guard host.releaseBinding == requirement.binding, host.consumerCode == requirement.code,
+                  host.serviceUID == requirement.executionUID else { throw MachineUpdateRoleChallengeError.changedScope }
+            let paths = try RuntimePreparationPaths(accountID: host.runtime.services.accountID)
+            let read: @Sendable (AdministrativeSetupPublication.File) throws -> Data = { file in
+                try ProtectedServiceConfiguration.readPublic(path: paths.serviceDirectory + "/" + file.name)
+            }
+            let verify: @Sendable () throws -> Void = { try request.validate(); try scope.validate() }
+            let fence: @Sendable () throws -> GatewayRuntimeSettingsFence? = {
+                try GatewayRuntimeSettingsFenceReader.load(macID: host.runtime.services.macID,
+                    accountID: host.runtime.services.accountID, verifyCurrent: verify)
+            }
+            let publication = try GatewayRuntimeLoader.loadForUpdateHealth(host: host,
+                readFence: fence, read: read, verifyCurrent: verify)
+            let marker = try publication.commit.encoded
+            let configuration = publication.configuration
+            guard configuration.registration.macID == requirement.binding.macID,
+                  configuration.registration.accountID == requirement.binding.accountID,
+                  configuration.serviceUID == requirement.executionUID,
+                  configuration.receiptPublicKey == requirement.publicKey else { throw MachineUpdateRoleChallengeError.changedScope }
+            let verifyPublication: @Sendable () throws -> Void = {
+                let current = try GatewayRuntimeLoader.loadForUpdateHealth(host: host,
+                    readFence: fence, read: read, verifyCurrent: verify)
+                guard try current.commit.encoded == marker,
+                      current.configuration.canonicalBytes == configuration.canonicalBytes else {
+                    throw GatewayPreparationError.changedScope
+                }
+            }
+            try verifyPublication()
+            let openedDatabase = try GatewayDatabase.openForUpdateHealth(configuration: configuration, clockEpoch: UUID())
+            database = openedDatabase
+            let signer = try loadReceiptSigner(database: openedDatabase, configuration: configuration,
+                verifyCurrent: verifyPublication, load: GatewayReceiptSigner.load(configuration:))
+            let owner = try Self(database: openedDatabase, configuration: configuration, requirement: requirement,
+                signer: signer, expectedRequest: request.bytes, verifyCurrent: verifyPublication,
+                release: { request.close(); scope.close() })
+            database = nil
+            return owner
+        } catch { try? database?.close(); request.close(); scope.close(); throw error }
+    }
+
+    static func loadReceiptSigner(database: GatewayDatabase, configuration: GatewayServiceConfiguration,
+        verifyCurrent: () throws -> Void, load: (GatewayServiceConfiguration) throws -> GatewayReceiptSigner) throws -> GatewayReceiptSigner {
+        try verifyCurrent()
+        guard try database.updateHealthEvidence().registration == configuration.registration else {
+            throw GatewayDatabaseError.wrongScope
+        }
+        try verifyCurrent()
+        let signer = try load(configuration)
+        try verifyCurrent()
+        return signer
+    }
+
     /// Owned SQLite and a disposable signer exercise ordering. They do not establish a native account or Root peer.
     static func openOwned(database: GatewayDatabase, configuration: GatewayServiceConfiguration, requirement: Requirement,
         signer: GatewayReceiptSigner, expectedRequest: Data? = nil, verifyCurrent: @escaping @Sendable () throws -> Void,

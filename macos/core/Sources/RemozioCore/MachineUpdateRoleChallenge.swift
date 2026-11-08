@@ -77,6 +77,10 @@ final class MachineUpdateRoleChallengeSession: @unchecked Sendable {
         try Challenge.decode(bytes).requirement
     }
 
+    static func verifyReply(request: Data, response: Data, expected: Requirement) throws {
+        _ = try authenticateReply(response, challenge: Challenge.decode(request, expected: expected))
+    }
+
     /// Verifies public signatures only. Native code, UID, freshness and history require their separate owners.
     static func verifyGatewayReply(request: Data, response: Data, expected: Requirement, boundTo root: Data) throws -> MachineUpdateAuthenticatedRoleReply {
         try requireGatewayChallenge(request, boundTo: root)

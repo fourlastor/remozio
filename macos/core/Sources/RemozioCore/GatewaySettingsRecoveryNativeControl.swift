@@ -15,8 +15,18 @@ struct GatewaySettingsRecoveryNativePolicy: Sendable {
     let serviceUID: UInt32
     init(role: GatewaySettingsConsumerRole, services: ServiceAccountPlan,
          codePolicy: AuthorityCodePolicy, release: SignedReleaseEvidence) throws {
+        try self.init(role: role, services: services, codePolicy: codePolicy, release: release,
+            installedReleaseDigest: services.releaseDigest)
+    }
+    init(host: GatewaySettingsConsumerHostConfiguration, release: SignedReleaseEvidence) throws {
+        try host.validateRelease(release)
+        try self.init(role: host.role, services: host.runtime.services, codePolicy: host.codePolicy, release: release,
+            installedReleaseDigest: host.installedReleaseDigest)
+    }
+    private init(role: GatewaySettingsConsumerRole, services: ServiceAccountPlan, codePolicy: AuthorityCodePolicy,
+        release: SignedReleaseEvidence, installedReleaseDigest: Data) throws {
         try GatewayRuntimeSettingsFenceReleaseValidation.validateRecovery(release, policy: codePolicy)
-        guard try InstallationInventory.digest(release) == services.releaseDigest,
+        guard try InstallationInventory.digest(release) == installedReleaseDigest,
               let consumer = codePolicy.entries.first(where: { $0.role == role.codeRole && $0.active }),
               let authority = codePolicy.entries.first(where: { $0.role == .authority && $0.active }),
               let claim = services.claims.first(where: { $0.role == (role == .gateway ? .gateway : .transport) }),

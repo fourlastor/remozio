@@ -65,6 +65,77 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
             relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
             build: component.build, teamID: component.teamID, formats: value)
     }
+    func testGatewayHealthReaderAcceptsOnlyTheProtectedStartupHost() throws {
+        let fixture = try Fixture()
+        let startup = try fixture.startup.encoded
+        XCTAssertEqual(try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(startup), fixture.startup)
+        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup))
+        let ordinary = try fixture.original.encoded, completion = try fixture.completion.encoded
+        XCTAssertEqual(try GatewaySettingsConsumerHostConfiguration.decode(ordinary), fixture.original)
+        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(ordinary))
+        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(completion))
+        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(completion))
+    }
+
+    func testTransportHealthReaderPreservesTheStartupHostAndRejectsOrdinaryAndCompletion() throws {
+        let fixture = try Fixture(), base = fixture.runtime.plan.transport
+        func encode(_ host: GatewaySettingsConsumerHostConfiguration) throws -> Data {
+            let transportHost = try select(.transport, from: host)
+            return try TransportPairingStartupConfiguration(transport: base.transport, control: base.control,
+                wake: base.wake, relayPort: base.relayPort, settingsHost: transportHost).canonicalBytes
+        }
+        let startup = try encode(fixture.startup)
+        let decoded = try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(startup)
+        XCTAssertEqual(decoded.host, try select(.transport, from: fixture.startup))
+        XCTAssertEqual(decoded.base.canonicalBytes, startup)
+        XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decode(startup))
+        let ordinary = try encode(fixture.original), completion = try encode(fixture.completion)
+        XCTAssertEqual(try TransportSettingsConsumerBootstrap.decode(ordinary).host, try select(.transport, from: fixture.original))
+        XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(ordinary))
+        XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(completion))
+        XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decode(completion))
+    }
+
+    func testHealthPeerPolicyUsesTheSuccessorReleaseAndRetainedConsumerAccount() throws {
+        let fixture = try Fixture()
+        XCTAssertNotEqual(try InstallationInventory.digest(fixture.release), fixture.original.runtime.services.releaseDigest)
+        for role in GatewaySettingsConsumerRole.allCases {
+            let startup = try select(role, from: fixture.startup)
+            let policy = try GatewaySettingsRecoveryNativePolicy(host: startup, release: fixture.release)
+            XCTAssertEqual(policy.consumer, startup.consumerCode)
+            XCTAssertEqual(policy.serviceUID, startup.serviceUID)
+            XCTAssertEqual(policy.authority, try XCTUnwrap(startup.codePolicy.entries.first { $0.role == .authority && $0.active }))
+            let expected = try XCTUnwrap(fixture.runtime.services.claims.first { $0.role == startup.serviceRole })
+            func retain(_ claim: ServiceAccountClaim, _: ServiceDirectoryKind) throws -> ServiceDirectoryState {
+                claim == expected ? .retained : .absent
+            }
+            try GatewaySettingsConsumerNativeScope.requireRetainedAccount(host: startup, state: retain)
+            let foreignAccount = try ServiceAccountClaim(accountID: expected.accountID, role: expected.role,
+                number: expected.number, userID: UUID(), groupID: UUID())
+            XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.requireRetainedAccount(host: startup,
+                state: { claim, _ in claim == foreignAccount ? .retained : .absent })) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            let ordinary = try select(role, from: fixture.original)
+            XCTAssertThrowsError(try GatewaySettingsRecoveryNativePolicy(host: ordinary, release: fixture.release))
+            var hashes = fixture.release.codeDirectoryHashes
+            hashes[.authority] = Data(repeating: 99, count: 20)
+            let foreign = SignedReleaseEvidence(manifest: fixture.release.manifest, codeDirectoryHashes: hashes)
+            XCTAssertThrowsError(try GatewaySettingsRecoveryNativePolicy(host: startup, release: foreign))
+        }
+    }
+
+    func testNativeParticipantChecksPreserveStartupBindingsAndAcceptOrdinaryHosts() throws {
+        let fixture = try Fixture(), ordinaryRelease = try XCTUnwrap(fixture.runtime.nativeRelease)
+        for role in GatewaySettingsConsumerRole.allCases {
+            let startup = try select(role, from: fixture.startup)
+            let ordinary = try select(role, from: fixture.original)
+            try GatewaySettingsConsumerNativeScope.validateParticipants(host: startup, release: fixture.release)
+            try GatewaySettingsConsumerNativeScope.validateParticipants(host: ordinary, release: ordinaryRelease)
+            XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.validateParticipants(host: startup, release: ordinaryRelease))
+        }
+    }
+
     func testBothNativeParticipantsMustDeclareTheHealthReaderAndWriter() throws {
         let fixture = try Fixture(), name = MachineUpdateConsumerHealthReleaseValidation.formatName
         for consumer in [AuthorityCodeRole.transport, .notificationGateway] {

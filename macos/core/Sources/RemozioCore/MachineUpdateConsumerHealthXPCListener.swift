@@ -53,7 +53,14 @@ final class MachineUpdateConsumerHealthXPCListener: NSObject, NSXPCListenerDeleg
     deinit {
         listener.invalidate(); registry.close()
         let pending = Array(active.values) + Array(retired.values)
-        Task { for endpoint in pending { try? await endpoint.closeAndWait() } }
+        for endpoint in pending {
+            Task {
+                while true {
+                    do { try await endpoint.closeAndWait(); return }
+                    catch { try? await Task.sleep(for: .milliseconds(100)) }
+                }
+            }
+        }
     }
     func start() throws {
         try lock.withLock {

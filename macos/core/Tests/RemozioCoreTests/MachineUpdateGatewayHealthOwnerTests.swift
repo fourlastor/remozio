@@ -120,6 +120,29 @@ final class MachineUpdateGatewayHealthOwnerTests: XCTestCase {
             let lease = try fixture.files.lease(); lease.close()
         }
     }
+    func testNativeReceiptReadRequiresCurrentPublicationAndReadOnlyEvidence() throws {
+        let fixture = try Fixture(), ordinary = try Fixture(ordinary: true)
+        var reads = [String]()
+        func load(_ configuration: GatewayServiceConfiguration) throws -> GatewayReceiptSigner {
+            try GatewayReceiptSigner.load(configuration: configuration, read: { path, uid in
+                reads.append(path)
+                XCTAssertEqual(uid, fixture.configuration.serviceUID)
+                return try Fixture.keyBytes(fixture.key)
+            })
+        }
+        XCTAssertThrowsError(try MachineUpdateGatewayHealthOwner.loadReceiptSigner(database: fixture.database,
+            configuration: fixture.configuration, verifyCurrent: { throw Failure.changed }, load: load))
+        XCTAssertThrowsError(try MachineUpdateGatewayHealthOwner.loadReceiptSigner(database: ordinary.database,
+            configuration: ordinary.configuration, verifyCurrent: {}, load: load)) {
+            XCTAssertEqual($0 as? GatewayDatabaseError, .invalidConfiguration)
+        }
+        XCTAssertTrue(reads.isEmpty)
+        let signer = try MachineUpdateGatewayHealthOwner.loadReceiptSigner(database: fixture.database,
+            configuration: fixture.configuration, verifyCurrent: {}, load: load)
+        XCTAssertEqual(signer.publicKey, fixture.configuration.receiptPublicKey)
+        XCTAssertEqual(reads, [fixture.configuration.receiptKeyPath])
+    }
+
     func testOrdinaryDatabaseCannotBecomeAnUpdateHealthOwner() throws {
         let fixture = try Fixture(ordinary: true)
         XCTAssertThrowsError(try fixture.owner()) { XCTAssertEqual($0 as? GatewayDatabaseError, .invalidConfiguration) }

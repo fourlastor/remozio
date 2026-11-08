@@ -22,6 +22,16 @@ final class GatewayReceiptSigner: Sendable {
         publicKey = value.publicKey.x963Representation
     }
 
+    static func load(configuration: GatewayServiceConfiguration) throws -> Self {
+        try configuration.requireNativeProcess()
+        return try load(configuration: configuration, read: ProtectedServiceConfiguration.readServicePrivate)
+    }
+
+    static func load(configuration: GatewayServiceConfiguration, read: (String, uid_t) throws -> Data) throws -> Self {
+        try Self(bytes: read(configuration.receiptKeyPath, configuration.serviceUID),
+                 expectedPublicKey: configuration.receiptPublicKey)
+    }
+
     /// Only the gateway's typed recovery encoders receive this callback. Never expose a generic signing RPC.
     func sign(_ input: Data) throws -> Data { try key.withLock { try $0.signature(for: input).rawRepresentation } }
 }
@@ -44,8 +54,7 @@ struct GatewayServiceCredentials: Sendable {
             throw GatewayServiceError.invalidCredentials
         }
         let account = try FCMServiceAccount(json: provider)
-        let receipts = try GatewayReceiptSigner(bytes: read(configuration.receiptKeyPath, configuration.serviceUID),
-                                               expectedPublicKey: configuration.receiptPublicKey)
+        let receipts = try GatewayReceiptSigner.load(configuration: configuration, read: read)
         return Self(account: account, receipts: receipts)
     }
 }

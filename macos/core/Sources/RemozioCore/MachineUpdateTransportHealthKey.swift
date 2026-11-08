@@ -42,6 +42,37 @@ final class MachineUpdateTransportHealthKey: @unchecked Sendable {
         }
     }
 
+    static func loadNative(configurationPath: String, request: MachineUpdateConsumerHealthRequest) throws -> MachineUpdateTransportHealthKey {
+        try request.claim()
+        let requirement = request.requirement
+        let opened: (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence, bootstrap: TransportSettingsConsumerBootstrap)
+        do { opened = try GatewaySettingsConsumerNativeScope.openTransportForUpdateHealth(path: configurationPath) }
+        catch { request.close(); throw error }
+        do {
+            let scope = opened.scope, host = scope.configuration, configuration = opened.bootstrap.base.transport
+            guard host.releaseBinding == requirement.binding, host.consumerCode == requirement.code,
+                  requirement.role == .transport, requirement.executionUID == host.serviceUID,
+                  requirement.binding.macID == configuration.macID, requirement.binding.accountID == configuration.accountID else {
+                throw RuntimePreparationError.changedScope
+            }
+            let identity = try loadAdmittedIdentity(configuration: configuration, requirement: requirement,
+                verifyCurrent: { try request.validate(); try scope.validate() }, load: ApprovalTransportIdentity.load(configuration:))
+            return try Self(identity: identity, publicKeyInfo: configuration.identityPublicKeyInfo, requirement: requirement, expectedRequest: request.bytes,
+                verifyCurrent: { try request.validate(); try scope.validate() }, release: { request.close(); scope.close() })
+        } catch { request.close(); opened.scope.close(); throw error }
+    }
+
+    static func loadAdmittedIdentity(configuration: ApprovalTransportConfiguration, requirement: Requirement,
+        verifyCurrent: () throws -> Void, load: (ApprovalTransportConfiguration) throws -> SecIdentity) throws -> SecIdentity {
+        guard try P256.Signing.PublicKey(derRepresentation: configuration.identityPublicKeyInfo).x963Representation == requirement.publicKey else {
+            throw RuntimePreparationError.changedScope
+        }
+        try verifyCurrent()
+        let identity = try load(configuration)
+        try verifyCurrent()
+        return identity
+    }
+
     /// A disposable identity exercises signing. This factory does not establish a native service account or code identity.
     static func openOwned(identity: SecIdentity, publicKeyInfo: Data, requirement: Requirement, expectedRequest: Data? = nil,
         verifyCurrent: @escaping @Sendable () throws -> Void, release: @escaping @Sendable () -> Void = {}) throws -> MachineUpdateTransportHealthKey {
