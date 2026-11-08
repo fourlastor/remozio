@@ -17,6 +17,7 @@ public final class PreparationIntentStore {
     private let maximumRecords: Int
     private let macID: Data
     private let didCommit: (() throws -> Void)?
+    private let inventoryRecordLimit: Int32
     private var active = false
     private var unavailable = false
     private static let applicationID: Int64 = 0x524D4953
@@ -27,11 +28,14 @@ public final class PreparationIntentStore {
                   macID: macID, maximumRecords: maximumRecords, initialize: initialize)
     }
     // Internal fixture seam. The connection owns the lease even when initialization fails.
+    // A fixture may only lower the ordinary record limit, to model records above it with small fixture values.
     init(lease: InstallationStorageLease, macID: Data, maximumRecords: Int, initialize: Bool,
-         didCommit: (() throws -> Void)? = nil) throws {
+         didCommit: (() throws -> Void)? = nil, inventoryRecordLimit: Int32 = 278_528) throws {
         self.lease = lease; self.maximumRecords = maximumRecords; self.macID = macID; self.didCommit = didCommit
+        self.inventoryRecordLimit = inventoryRecordLimit
         do {
-            guard macID.count == 16, (1...4096).contains(maximumRecords) else { throw PreparationStoreError.invalidConfiguration }
+            guard macID.count == 16, (1...4096).contains(maximumRecords),
+                  (32_768...278_528).contains(inventoryRecordLimit) else { throw PreparationStoreError.invalidConfiguration }
             try lease.validate()
             var connection: OpaquePointer?
             let result = sqlite3_open_v2(lease.databasePath, &connection,
@@ -1715,7 +1719,7 @@ public final class PreparationIntentStore {
         }
     }
     private func configureInventoryLimit() {
-        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 278_528) }
+        if let db { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, inventoryRecordLimit) }
     }
     private func requireInventorySchema() throws {
         try identity(macID)
@@ -2609,6 +2613,83 @@ public final class PreparationIntentStore {
         }
     }
 
+    func machineUpdateRestartSnapshot(expected: MachineUpdateRestartSource, directory: ReleaseDestinationLease,
+        restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try loadMachineUpdateRestartSnapshot(expected: expected, directory: directory, restart: restart)
+            }
+        }
+    }
+
+    /// A callback-bound read of the current machine transaction. It cannot cross a thread or survive the callback.
+    final class HealthSnapshotScope: @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private let snapshot: MachineUpdateRestartSnapshot
+        private let verifyCurrent: () throws -> Void
+        private var active = true
+
+        fileprivate init(snapshot: MachineUpdateRestartSnapshot, verifyCurrent: @escaping () throws -> Void) {
+            self.snapshot = snapshot; self.verifyCurrent = verifyCurrent
+        }
+        func read() throws -> MachineUpdateRestartSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
+                throw JournalLeaseError.invalidated
+            }
+            return try lock.withLock {
+                guard active else { throw JournalLeaseError.invalidated }
+                do {
+                    try verifyCurrent()
+                    guard active else { throw JournalLeaseError.invalidated }
+                    return snapshot
+                } catch { active = false; throw error }
+            }
+        }
+        fileprivate func expire() { lock.withLock { active = false } }
+    }
+
+    func withCurrentMachineUpdateRestartSnapshot<Value>(_ expected: MachineUpdateRestartSnapshot,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        _ body: (HealthSnapshotScope) throws -> Value) throws -> Value {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                let initial = try loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
+                try initial.requireSame(as: expected)
+                let scope = HealthSnapshotScope(snapshot: initial, verifyCurrent: { [weak self] in
+                    guard let self, self.active else { throw JournalLeaseError.invalidated }
+                    try restart.validate()
+                    let current = try self.loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
+                    try current.requireSame(as: initial)
+                })
+                defer { scope.expire() }
+                _ = try scope.read()
+                let value = try body(scope)
+                _ = try scope.read()
+                return value
+            }
+        }
+    }
+
+    private func loadMachineUpdateRestartSnapshot(expected: MachineUpdateRestartSource,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
+        try identity(macID)
+        guard expected.replacement.activation.phase == .restartChecking, try scalar("PRAGMA user_version") == 20,
+              let configuration = try loadMachineUpdateConfigurationEpoch(),
+              configuration.record.publication?.complete == true,
+              let backend = try loadMachineUpdateBackendEpoch(epoch: configuration),
+              backend.record.accounts != nil, backend.record.publication?.complete == true else {
+            throw PreparationStoreError.staleRevision
+        }
+        let current = try requireCurrentConfigurationEpoch(configuration.record, directory: directory)
+        guard current == expected, try machineEpochSourceDigest() == backend.record.currentSourceDigest else {
+            throw PreparationStoreError.staleRevision
+        }
+        try restart.validateMachineBoundary(directory: directory, expected: current.replacement.admission.machine)
+        return .init(source: current, configuration: configuration, backend: backend)
+    }
+
     func machineUpdateBackendEpoch() throws -> MachineUpdateBackendEpoch.Archive? {
         try transaction(write: false) {
             try identity(macID)
@@ -2679,15 +2760,17 @@ public final class PreparationIntentStore {
                 try MachineUpdateBackendEpoch.requirePublicationFormats(candidate, epoch: epoch)
                 try requireCurrentBackendEpoch(expected, epoch: epoch, directory: directory, quiescence: quiescence)
                 try verifyCurrent(expected); try verifyCurrent(next)
-                try statement("UPDATE machine_update_backend_epoch_v1 SET revision=? WHERE epoch=? AND revision=?") { row in
-                    try bind(bytes(next.revision), column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
-                    try bind(bytes(expected.revision), column: 3, row: row)
-                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == Int32(next.operands.count + 1) else { throw PreparationStoreError.staleRevision }
-                }
-                try statement("UPDATE machine_update_backend_epoch_v1 SET record=? WHERE kind=0 AND epoch=? AND revision=?") { row in
-                    try bind(next.encoded, column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
-                    try bind(bytes(next.revision), column: 3, row: row)
-                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                try withBackendRecordLimit {
+                    try statement("UPDATE machine_update_backend_epoch_v1 SET revision=? WHERE epoch=? AND revision=?") { row in
+                        try bind(bytes(next.revision), column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                        try bind(bytes(expected.revision), column: 3, row: row)
+                        guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == Int32(next.operands.count + 1) else { throw PreparationStoreError.staleRevision }
+                    }
+                    try statement("UPDATE machine_update_backend_epoch_v1 SET record=? WHERE kind=0 AND epoch=? AND revision=?") { row in
+                        try bind(next.encoded, column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                        try bind(bytes(next.revision), column: 3, row: row)
+                        guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                    }
                 }
                 try requireCurrentBackendEpoch(next, epoch: epoch, directory: directory, quiescence: quiescence)
                 try verifyCurrent(next); return next
