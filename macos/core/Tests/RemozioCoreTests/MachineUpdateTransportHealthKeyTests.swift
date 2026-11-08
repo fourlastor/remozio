@@ -85,6 +85,28 @@ final class MachineUpdateTransportHealthKeyTests: XCTestCase {
         XCTAssertThrowsError(try key.answer(other.request))
         XCTAssertThrowsError(try key.answer(first.request))
     }
+    func testNativeIdentityLoadRequiresTheExactTLSPinAndCurrentScopeFirst() throws {
+        let configuration = try RuntimeActivationFixture().plan.transport.transport
+        let factory = MachineUpdateRoleChallengeTests.Fixture()
+        let actual = try P256.Signing.PublicKey(derRepresentation: configuration.identityPublicKeyInfo).x963Representation
+        let expected = try factory.requirement(role: .transport, uid: configuration.serviceUID, publicKey: actual)
+        let foreign = try requirement(material())
+        var reads = 0
+        func load(_: ApprovalTransportConfiguration) throws -> SecIdentity { reads += 1; throw Failure.changed }
+        XCTAssertThrowsError(try MachineUpdateTransportHealthKey.loadAdmittedIdentity(configuration: configuration,
+            requirement: foreign, verifyCurrent: {}, load: load)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        XCTAssertThrowsError(try MachineUpdateTransportHealthKey.loadAdmittedIdentity(configuration: configuration,
+            requirement: expected, verifyCurrent: { throw Failure.changed }, load: load))
+        XCTAssertEqual(reads, 0)
+        XCTAssertThrowsError(try MachineUpdateTransportHealthKey.loadAdmittedIdentity(configuration: configuration,
+            requirement: expected, verifyCurrent: {}, load: load)) {
+            XCTAssertTrue($0 is Failure)
+        }
+        XCTAssertEqual(reads, 1)
+    }
+
     func testWrongExpectedPublicKeyIsRejectedAndReleasesTheOwner() throws {
         let first = try material(), other = try material(), released = State(0)
         XCTAssertThrowsError(try MachineUpdateTransportHealthKey.openOwned(identity: identity(first), publicKeyInfo: first.subjectPublicKeyInfo,

@@ -33,6 +33,30 @@ final class MachineUpdateConsumerHealthXPCEndpoint: NSObject, MachineUpdateConsu
     private var activity: (any OwnedReleaseActivity)?
     private var budgetHeld = false
 
+    /// The listener must configure its pinned Root policy before activation. This initializer configures the accepted connection.
+    convenience init(connection: NSXPCConnection, configurationPath: String, scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence, budget: AuthorityXPCWorkBudget,
+        onHandshake: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void) throws {
+        let peer = try MachineUpdateConsumerHealthPeer.native(connection: connection, scope: scope, release: release)
+        let invalidator = MachineUpdateHealthConnectionInvalidator(connection)
+        self.init(peer: peer, helloBytes: try scope.configuration.encoded, verifyCurrent: { try scope.validate() },
+            acquireActivity: { try scope.acquireActivity() }, budget: budget, onHandshake: onHandshake,
+            invalidate: { invalidator.invalidate(); onClose() }, makeOwner: { request in
+                switch scope.configuration.role {
+                case .transport:
+                    let key = try MachineUpdateTransportHealthKey.loadNative(configurationPath: configurationPath, request: request)
+                    return MachineUpdateTransportHealthReply(key: key)
+                case .gateway:
+                    let owner = try MachineUpdateGatewayHealthOwner.openNative(configurationPath: configurationPath, request: request)
+                    return MachineUpdateGatewayHealthReply(owner: owner)
+                }
+            })
+        connection.exportedInterface = NSXPCInterface(with: MachineUpdateConsumerHealthXPCProtocol.self)
+        connection.exportedObject = self
+        connection.interruptionHandler = { [weak self] in self?.close() }
+        connection.invalidationHandler = { [weak self] in self?.close() }
+    }
+
     /// Injected callbacks test settlement. Native construction must authenticate the connection and its completed host configuration.
     convenience init(peer: MachineUpdateConsumerHealthPeer, helloBytes: Data,
         verifyCurrent: @escaping @Sendable () throws -> Void,
@@ -101,6 +125,11 @@ final class MachineUpdateConsumerHealthXPCEndpoint: NSObject, MachineUpdateConsu
         } catch { result = nil }
         do { try settleResources(id) }
         catch { result = nil; close() }
+        if result != nil {
+            // The owner closed its request. Recheck the surviving peer and native scope.
+            do { try Task.checkCancellation(); try peer.validate(); try verifyCurrent() }
+            catch { result = nil }
+        }
         lock.withLock { if !closed { reply(result) } }
     }
 

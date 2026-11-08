@@ -121,6 +121,11 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     static func decodeForReleaseArchive(_ bytes: Data) throws -> Self {
         try decode(bytes, allowReleaseBound: true)
     }
+    static func decodeForUpdateHealthStartup(_ bytes: Data) throws -> Self {
+        let host = try decodeForReleaseArchive(bytes)
+        try host.requireUpdateHealthStartupSupported()
+        return host
+    }
     private static func decode(_ bytes: Data, allowReleaseBound: Bool) throws -> Self {
         let allowed: Set<UInt64> = allowReleaseBound ? [version, releaseBoundVersion] : [version]
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: allowReleaseBound ? archiveLimits : limits),

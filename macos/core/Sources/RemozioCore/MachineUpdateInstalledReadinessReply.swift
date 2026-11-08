@@ -6,7 +6,12 @@ final class MachineUpdateInstalledReadinessReply: MachineUpdateConsumerHealthAns
     private let request: MachineUpdateConsumerHealthRequest
     private var packet: Data?
     init(request: MachineUpdateConsumerHealthRequest, packet: Data) throws {
-        try request.validate(); _ = try MachineUpdateConsumerHealthPacket.decode(packet)
+        try request.validate()
+        let reply = try MachineUpdateConsumerHealthPacket.decode(packet)
+        guard reply.gatewayHead == nil else { throw MachineUpdateRoleChallengeError.changedScope }
+        try MachineUpdateRoleChallengeSession.verifyReply(request: request.bytes, response: reply.roleReply,
+            expected: request.requirement)
+        try request.validate()
         self.request = request; self.packet = packet
     }
     func answer(_ bytes: Data) throws -> Data {

@@ -919,6 +919,106 @@ final class MachineUpdateReplacementTests: XCTestCase {
             startup: plan(configured.startup), completion: plan(configured.completion))
     }
 
+    func testGatewayHealthReadsOnlyTheMatchingReleaseBoundPublication() throws {
+        let (f, setup) = try populatedBackendFixture()
+        _ = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let activation = try XCTUnwrap(f.machine.store.gatewayRuntimeActivation(accountID: f.machine.account).plan)
+        let capture = try fixtureBackendCapture(f, foreground: setup.runtime.plan, activation: activation, journal: setup.state())
+        let startup = try XCTUnwrap(capture.startup), completion = try XCTUnwrap(capture.completion)
+        typealias File = AdministrativeSetupPublication.File
+        let marker = try capture.bytes(.commit, target: true)
+        let role = try capture.bytes(.transport, target: true)
+        let gateway = try capture.bytes(.gateway, target: true)
+        let files = [File.gatewayRuntimeCommit.name: marker,
+            File.transportConfiguration.name: startup.configuration.transport.canonicalBytes,
+            File.transportGatewayRuntime.name: role, File.gatewayConfiguration.name: gateway]
+        let host = startup.configuration.gateway
+        func load(_ overrides: [String: Data] = [:], changed: File? = nil,
+                  fence: GatewayRuntimeSettingsFence? = nil, verify: () throws -> Void = {}) throws -> GatewayRuntimeCommit {
+            let contents = files.merging(overrides) { _, override in override }
+            var reads = [String: Int]()
+            return try GatewayRuntimeLoader.loadForUpdateHealth(host: host, readFence: { fence }, read: { file in
+                let count = reads[file.name, default: 0] + 1
+                reads[file.name] = count
+                if file.name == changed?.name, count == 2 { return Data() }
+                guard let bytes = contents[file.name] else { throw JournalLeaseError.system(ENOENT) }
+                return bytes
+            }, verifyCurrent: verify).commit
+        }
+        func rejects(_ overrides: [String: Data] = [:], changed: File? = nil,
+                     fence: GatewayRuntimeSettingsFence? = nil, line: UInt = #line) {
+            XCTAssertThrowsError(try load(overrides, changed: changed, fence: fence), line: line) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope, line: line)
+            }
+        }
+        XCTAssertEqual(try load().encoded, marker)
+        XCTAssertThrowsError(try GatewayRuntimeLoader.load(target: .transport, read: { file in
+            try XCTUnwrap(files[file.name])
+        }, verifyCurrent: {}, validate: { _ in }))
+        XCTAssertThrowsError(try GatewayRuntimeLoader.loadForUpdateHealth(host: completion.configuration.gateway,
+            readFence: { nil }, read: { _ in XCTFail("Completion host read the publication"); return Data() }, verifyCurrent: {}))
+
+        let limits = try CBORLimits(maxBytes: 65536, maxDepth: 1, maxItems: 64)
+        guard case .map(var markerFields) = try DeterministicCBOR.decode(marker, limits: limits),
+              case .bytes(let oldMarker) = markerFields[14],
+              case .map(var oldFields) = try DeterministicCBOR.decode(oldMarker, limits: limits) else {
+            return XCTFail("Fixture lacks the release commit")
+        }
+        var foreignFields = try XCTUnwrap(JSONSerialization.jsonObject(with: startup.binding.encoded) as? [String: Any])
+        foreignFields["installedReleaseDigest"] = Data(repeating: 231, count: 32).base64EncodedString()
+        let foreignBinding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: foreignFields,
+            options: [.sortedKeys, .withoutEscapingSlashes]))
+        var foreignCommit = markerFields
+        foreignCommit[12] = try .bytes(foreignBinding.encoded)
+        rejects([File.gatewayRuntimeCommit.name: try DeterministicCBOR.encode(.map(foreignCommit), limits: limits)])
+        let transport = startup.configuration.transport
+        let foreignHost = try GatewaySettingsConsumerHostConfiguration(role: .transport, runtime: host.runtime,
+            bundlePath: host.bundlePath, codePolicy: host.codePolicy, releaseBinding: foreignBinding, policyStage: .startup)
+        let foreignTransport = try TransportPairingStartupConfiguration(transport: transport.transport,
+            control: transport.control, wake: transport.wake, relayPort: transport.relayPort, settingsHost: foreignHost)
+        rejects([File.transportConfiguration.name: foreignTransport.canonicalBytes])
+        let pair = try GatewayRuntimeExtensions(release: startup)
+        rejects([File.transportGatewayRuntime.name: try pair.authority.encoded])
+
+        let inventory = try XCTUnwrap(f.machine.store.inventory())
+        let endpoint = try XCTUnwrap(startup.gateway.wakeEndpoint)
+        let selection = try GatewayRuntimeSettingsSelection(service: startup.gateway.settings,
+            activation: .init(wakePollMilliseconds: startup.transportWake.pollMilliseconds,
+                              wakeTimeoutMilliseconds: startup.transportWake.wake.timeoutMilliseconds),
+            maximumWakeConnections: endpoint.maximumConnections, maximumWakeOperations: endpoint.maximumOperations,
+            wakeChallengeLifetimeMilliseconds: endpoint.challengeLifetimeMillis)
+        func revision(_ id: UInt8) throws -> GatewayRuntimeSettingsRevision {
+            try .init(id: Data(repeating: id, count: 16), selection: selection, activation: activation,
+                journal: setup.state(), foreground: setup.runtime.plan, inventory: inventory)
+        }
+        let retained = try revision(1), foreignRevision = try revision(2)
+        oldFields[0] = .unsigned(2)
+        oldFields[8] = .unsigned(retained.sequence)
+        oldFields[9] = try .bytes(retained.digest)
+        oldFields[10] = .bytes(retained.gatewayDigest)
+        oldFields[11] = .bytes(retained.activationDigest)
+        for index in [UInt64(8), 9, 11] { markerFields[index] = oldFields[index] }
+        markerFields[14] = try .bytes(DeterministicCBOR.encode(.map(oldFields), limits: limits))
+        let revisionMarker = try DeterministicCBOR.encode(.map(markerFields), limits: limits)
+        let withRevision = [File.gatewayRuntimeCommit.name: revisionMarker, File.gatewaySettingsRevision.name: try retained.encoded]
+        XCTAssertEqual(try load(withRevision).settingsSequence, retained.sequence)
+        rejects([File.gatewayRuntimeCommit.name: revisionMarker])
+        rejects([File.gatewayRuntimeCommit.name: revisionMarker, File.gatewaySettingsRevision.name: try foreignRevision.encoded])
+        rejects([File.gatewaySettingsRevision.name: try retained.encoded])
+        let fence = try GatewayRuntimeSettingsFence(.init(revision: retained, previous: nil, activation: activation,
+            journal: setup.state(), foreground: setup.runtime.plan, inventory: inventory))
+        rejects(withRevision, fence: fence)
+        var verifications = 0
+        XCTAssertThrowsError(try load(withRevision, verify: {
+            verifications += 1
+            if verifications == 2 { throw ReplacementFixtureError.injected }
+        })) { XCTAssertTrue($0 is ReplacementFixtureError) }
+        XCTAssertEqual(verifications, 2)
+        for file in [File.gatewayRuntimeCommit, .transportConfiguration, .transportGatewayRuntime, .gatewayConfiguration, .gatewaySettingsRevision] {
+            rejects(withRevision, changed: file)
+        }
+    }
+
     func testPopulatedBackendPublicationReplacesOwnedFilesAndHonorsTheSettingsFence() throws {
         let (f, setup) = try populatedBackendFixture()
         let published = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))

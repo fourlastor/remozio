@@ -13,6 +13,25 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
     private var greeted = false
     private var closed = false
 
+    /// Configure the accepted connection before activation. The listener must apply the same pinned Root policy before activation.
+    static func native(connection: NSXPCConnection, scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence) throws -> MachineUpdateConsumerHealthPeer {
+        let host = scope.configuration
+        try scope.validate(); try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: host)
+        let pins = try GatewaySettingsRecoveryNativePolicy(host: host, release: release)
+        let policy = try XPCPeerPolicy(teamID: pins.authority.teamID, componentIdentifier: pins.authority.identifier,
+            approvedCodeDirectoryHashes: [pins.authority.codeDirectoryHash], expectedUserID: 0)
+        policy.configure(connection)
+        let native = NativeConnection(connection: connection, policy: policy)
+        return Self(authenticateInvocation: { try native.authenticateInvocation() }, verifyPeer: { try native.validate() },
+            verifyCurrent: { try scope.validate() }, requireScope: { requirement in
+                guard requirement.binding == host.releaseBinding, requirement.role == host.role.codeRole,
+                      requirement.executionUID == host.serviceUID, requirement.code == host.consumerCode else {
+                    throw MachineUpdateRoleChallengeError.changedScope
+                }
+            })
+    }
+
     /// Injected checks exercise local ordering only. This factory does not authenticate a native connection.
     static func owned(expected: Requirement, authorityInstalledReadiness: Bool = false, authenticateInvocation: @escaping @Sendable () throws -> Void,
         verifyPeer: @escaping @Sendable () throws -> Void, verifyCurrent: @escaping @Sendable () throws -> Void) -> Self {
@@ -52,7 +71,7 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
             } catch { closed = true; throw error }
         }
     }
-    fileprivate func validate() throws {
+    func validate() throws {
         try lock.withLock {
             guard !closed, greeted || issued else { throw MachineUpdateRoleChallengeError.unavailable }
             do {
@@ -63,6 +82,32 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
     }
     func close() { lock.withLock { closed = true } }
     deinit { close() }
+    private final class NativeConnection: @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        private weak var connection: NSXPCConnection?
+        private let policy: XPCPeerPolicy
+        private let invocation: XPCInvocationGuard
+        private var credentials: XPCPeerCredentials?
+        init(connection: NSXPCConnection, policy: XPCPeerPolicy) {
+            self.connection = connection; self.policy = policy
+            invocation = XPCInvocationGuard(connection: connection, policy: policy)
+        }
+        func authenticateInvocation() throws {
+            try lock.withLock {
+                let current = try invocation.verifyInvocation()
+                if let credentials {
+                    guard current == credentials else { throw XPCPeerPolicyError.wrongPeer }
+                } else { credentials = current }
+            }
+        }
+        func validate() throws {
+            try lock.withLock {
+                guard let connection, let credentials, try policy.verifyCredentials(connection) == credentials else {
+                    throw XPCPeerPolicyError.wrongPeer
+                }
+            }
+        }
+    }
 }
 
 /// One owner opening per authenticated invocation. Peer closure or a changed native scope invalidates the retained request.

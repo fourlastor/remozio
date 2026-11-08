@@ -146,6 +146,28 @@ final class MachineUpdateConsumerHealthListenerTests: XCTestCase, @unchecked Sen
         allowed.withLock { $0 = true }; try await listener.closeAndWait(); client.close()
         XCTAssertTrue(answerer.isClosed); let exclusive = try installer.acquireExclusive(); exclusive.close()
     }
+    func testDroppingTheListenerKeepsFailedSettlementUntilTheOwnerCloses() async throws {
+        let fixture = try MachineUpdateOwnedHealthEndpointFixture(), files = try ReleaseActivityFixture()
+        let activity = try files.open(), installer = try files.open(), allowed = Mutex(false), native = NSXPCListener.anonymous()
+        let answerer = fixture.owner(close: { guard allowed.withLock({ $0 }) else { throw MachineUpdateOwnedHealthFailure.closeFailed } })
+        let builder = Builder(fixture: fixture, acquireActivity: { try activity.acquireShared() }, makeOwner: { answerer })
+        var listener: MachineUpdateConsumerHealthXPCListener? = try .init(listener: native, builder: builder, verifyCurrent: {})
+        weak var dropped = listener
+        defer { allowed.withLock { $0 = true } }
+        try listener?.start()
+        let client = Client(native); defer { client.close() }
+        try await hello(client, fixture: fixture)
+        do { _ = try await client.check(fixture.session().request); XCTFail("The failed close must invalidate the response") } catch {}
+        try await waitUntil { answerer.closeAttempts.withLock { $0 > 0 } }
+        listener = nil
+        try await waitUntil { dropped == nil }
+        let attempts = answerer.closeAttempts.withLock { $0 }
+        try await waitUntil { answerer.closeAttempts.withLock { $0 > attempts } }
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        allowed.withLock { $0 = true }
+        try await waitUntil { answerer.isClosed }
+    }
+
     func testChangedScopeCannotStartOrConstructAnEndpoint() async throws {
         let fixture = try MachineUpdateOwnedHealthEndpointFixture(), files = try ReleaseActivityFixture(), activity = try files.open()
         let valid = Mutex(false), native = NSXPCListener.anonymous()

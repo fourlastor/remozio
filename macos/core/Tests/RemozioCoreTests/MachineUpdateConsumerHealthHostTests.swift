@@ -7,7 +7,7 @@ final class MachineUpdateConsumerHealthHostTests: XCTestCase, @unchecked Sendabl
     private struct Failed: Error {}
     private final class Listener: OwnedMachineUpdateConsumerHealthListener {
         struct State {
-            var starts = 0, joins = 0, retired = false, failStart = false, failClose = 0
+            var starts = 0, joins = 0, closes = 0, retired = false, failStart = false, failClose = 0
             var hold = false
             var gate: CheckedContinuation<Void, Never>?
         }
@@ -15,7 +15,7 @@ final class MachineUpdateConsumerHealthHostTests: XCTestCase, @unchecked Sendabl
         func start() throws {
             if state.withLock({ $0.starts += 1; return $0.failStart }) { throw Failed() }
         }
-        func close() { state.withLock { $0.retired = true } }
+        func close() { state.withLock { $0.closes += 1; $0.retired = true } }
         func closeAndWait() async throws {
             close()
             if state.withLock({ $0.joins += 1; if $0.failClose > 0 { $0.failClose -= 1; return true }; return false }) { throw Failed() }
@@ -86,6 +86,9 @@ final class MachineUpdateConsumerHealthHostTests: XCTestCase, @unchecked Sendabl
         let first = Task { try await host.close() }
         try await until { listener.state.withLock { $0.gate != nil } }
         let second = Task { try await host.close() }
+        defer { listener.finish() }
+        try await until { listener.state.withLock { $0.closes == 3 } }
+        XCTAssertEqual(activity.closes.withLock { $0 }, 0)
         listener.finish(); try await first.value; try await second.value
         XCTAssertEqual(listener.state.withLock { $0.joins }, 1); XCTAssertEqual(activity.closes.withLock { $0 }, 1)
     }
@@ -95,8 +98,15 @@ final class MachineUpdateConsumerHealthHostTests: XCTestCase, @unchecked Sendabl
         let activity = try CheckedActivity(service.acquireShared()), host = MachineUpdateConsumerHealthHost(listener: listener, activity: activity)
         let done = Mutex(false)
         try await host.start()
-        let closing = Task { try await host.close(); done.withLock { $0 = true } }
+        let cancelled = Mutex(false)
+        let closing = Task {
+            try await withTaskCancellationHandler {
+                try await host.close(); done.withLock { $0 = true }
+            } onCancel: { cancelled.withLock { $0 = true } }
+        }
+        defer { listener.finish() }
         try await until { listener.state.withLock { $0.gate != nil } }; closing.cancel()
+        try await until { cancelled.withLock { $0 } }
         XCTAssertFalse(done.withLock { $0 }); XCTAssertEqual(activity.closes.withLock { $0 }, 0)
         listener.finish(); try await closing.value
         XCTAssertEqual(activity.closes.withLock { $0 }, 1)

@@ -150,3 +150,19 @@ final class MachineUpdateConsumerHealthChallengeSession: @unchecked Sendable {
     }
     deinit { close() }
 }
+
+final class MachineUpdateTransportHealthReply: MachineUpdateConsumerHealthAnswering, @unchecked Sendable {
+    private let key: MachineUpdateTransportHealthKey
+    init(key: MachineUpdateTransportHealthKey) { self.key = key }
+    func answer(_ bytes: Data) throws -> Data {
+        try MachineUpdateConsumerHealthPacket(roleReply: key.answer(bytes), gatewayHead: nil).encoded
+    }
+    func close() { key.close() }
+}
+
+final class MachineUpdateGatewayHealthReply: MachineUpdateConsumerHealthAnswering, @unchecked Sendable {
+    private let owner: MachineUpdateGatewayHealthOwner
+    init(owner: MachineUpdateGatewayHealthOwner) { self.owner = owner }
+    func answer(_ bytes: Data) throws -> Data { try owner.answerWithHead(bytes) }
+    func close() throws { try owner.close() }
+}
