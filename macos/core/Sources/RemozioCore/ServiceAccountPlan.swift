@@ -19,7 +19,7 @@ struct ServiceAccountClaim: Equatable, Sendable, CustomStringConvertible {
     static func recordName(accountID: Data, role: ServiceAccountRole) -> String {
         let prefix: String
         switch role { case .transport: prefix = "t"; case .gateway: prefix = "g" }
-        let suffix = SHA256.hash(data: accountID).prefix(12).map { String(format: "%02x", $0) }.joined()
+        let suffix = LowercaseHexadecimal.encode(SHA256.hash(data: accountID).prefix(12))
         return "_rmz_" + prefix + "_" + suffix
     }
     init(accountID: Data, role: ServiceAccountRole, number: UInt32, userID: UUID, groupID: UUID) throws {

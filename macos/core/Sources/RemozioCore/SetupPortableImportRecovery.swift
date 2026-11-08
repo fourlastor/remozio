@@ -98,7 +98,7 @@ public struct SetupPortableImportRecovery: Equatable, Sendable, CustomStringConv
         }
         if let relayScope {
             guard let operation = progress.operationID else { throw AdministrativeSetupChannelError.invalidMessage }
-            let suffix = operation.map { String(format: "%02x", $0) }.joined()
+            let suffix = LowercaseHexadecimal.encode(operation)
             guard relayConfigured, relayScope.tunnelName == "remozio-" + suffix, relayScope.hostname.hasPrefix("m-" + suffix + ".") else {
                 throw AdministrativeSetupChannelError.invalidMessage
             }
