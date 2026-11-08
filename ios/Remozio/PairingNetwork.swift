@@ -37,6 +37,9 @@ final class NativePairingKeys: NSObject, PlatformPairingKeys {
 enum PairingServiceName {
     static let type = "_remozio-pairing._tcp"
 
+    /// DNS-SD instance names are at most 63 bytes. 16-byte IDs give 47.
+    static let maximumBytes = 63
+
     static func make(macID: Data, accountID: Data) -> String {
         "R-\(base64URL(macID))-\(base64URL(accountID))"
     }
@@ -113,7 +116,9 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
             guard pin.count == 91, pin.prefix(26) == Self.spkiPrefix else { return finish("invalid pin") }
             switch target {
             case .fixed(let endpoint): connect(endpoint)
-            case .service(let name): browse(name)
+            case .service(let name):
+                guard name.utf8.count <= PairingServiceName.maximumBytes else { return finish("service name too long") }
+                browse(name)
             }
         }
     }
@@ -162,13 +167,16 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     // MARK: - Queue-confined steps
 
     private func browse(_ name: String) {
-        let browser = NWBrowser(for: .bonjour(type: PairingServiceName.type, domain: nil), using: .tcp)
+        let parameters = NWParameters.tcp
+        parameters.includePeerToPeer = false
+        let browser = NWBrowser(for: .bonjour(type: PairingServiceName.type, domain: nil), using: parameters)
         self.browser = browser
         browser.stateUpdateHandler = { [self] state in
             queue.async { [self] in
                 switch state {
                 case .failed(let error): finish("discovery failed: \(error)")
-                case .waiting(let error): finish("discovery waiting: \(error)")
+                // Waiting is normal while iOS asks for local network access or has no path yet.
+                // The shared setup budget ends the attempt if it never recovers.
                 default: break
                 }
             }
@@ -201,8 +209,13 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         sec_protocol_options_set_tls_resumption_enabled(options, false)
         sec_protocol_options_set_local_identity(options, secIdentity)
         let pin = pin
-        sec_protocol_options_set_verify_block(options, { _, trust, complete in
-            complete(Self.matches(trust: sec_trust_copy_ref(trust).takeRetainedValue(), pin: pin))
+        // The chain the peer presented, not a chain built by trust evaluation, which can drop extra certificates.
+        sec_protocol_options_set_verify_block(options, { metadata, _, complete in
+            var chain: [SecCertificate] = []
+            _ = sec_protocol_metadata_access_peer_certificate_chain(metadata) { certificate in
+                chain.append(sec_certificate_copy_ref(certificate).takeRetainedValue())
+            }
+            complete(Self.matches(chain: chain, pin: pin))
         }, queue)
         let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
         parameters.includePeerToPeer = false
@@ -213,7 +226,9 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
                 switch state {
                 case .ready: ready(connection)
                 case .failed(let error): finish("connection failed: \(error)")
-                case .waiting(let error): finish("connection waiting: \(error)")
+                // A TLS refusal (a wrong pin, protocol or version) is final. Other waits retry within the budget.
+                case .waiting(let error):
+                    if case .tls = error { finish("connection refused: \(error)") }
                 default: break
                 }
             }
@@ -246,8 +261,8 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     }
 
     /// Exactly one P-256 leaf whose SubjectPublicKeyInfo equals the pin byte for byte.
-    static func matches(trust: SecTrust, pin: Data) -> Bool {
-        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], chain.count == 1,
+    static func matches(chain: [SecCertificate], pin: Data) -> Bool {
+        guard chain.count == 1,
               let key = SecCertificateCopyKey(chain[0]),
               let attributes = SecKeyCopyAttributes(key) as? [String: Any],
               attributes[kSecAttrKeyType as String] as? String == kSecAttrKeyTypeECSECPrimeRandom as String,

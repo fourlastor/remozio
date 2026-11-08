@@ -22,7 +22,7 @@ class LocalChecksTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts/check-local.sh", repo / "scripts/check-local.sh")
             stub = '#!/bin/sh\nprintf "%s\\n" "$0 $*" >> "$CHECK_LOG"\n[ "${0##*/}" != "$FAIL_CHECK" ] || exit 23\n'
             for name in ("scripts/check.sh", "scripts/check-linux-protocol.sh", "scripts/check-linux-host.sh",
-                         "scripts/check-linux-pairing-peer.sh", "scripts/build-ios-app.sh", "gradlew"):
+                         "scripts/check-linux-pairing-peer.sh", "scripts/build-ios-app.sh", "scripts/test-ios-app.sh", "gradlew"):
                 path = repo / name
                 path.write_text(stub)
                 path.chmod(0o755)
@@ -51,7 +51,7 @@ class LocalChecksTests(unittest.TestCase):
                                   ":protocol-kotlin:iosSimulatorArm64Test", ":phone-pairing:iosSimulatorArm64Test",
                                   ":phone-ui:iosSimulatorArm64Test",
                                   *ANDROID_TASKS],
-                                 ["./scripts/build-ios-app.sh"]])
+                                 ["./scripts/build-ios-app.sh"], ["./scripts/test-ios-app.sh"]])
 
     def test_unknown_platform_fails_before_running_checks(self):
         result, calls = self.run_gate("FreeBSD")

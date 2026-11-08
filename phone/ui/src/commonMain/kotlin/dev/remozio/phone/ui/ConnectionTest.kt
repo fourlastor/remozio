@@ -7,6 +7,8 @@ import dev.remozio.protocol.PairingInvitation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** The steps of a connection test. It never pairs: it stops at the comparison code and saves nothing. */
@@ -28,8 +30,11 @@ suspend fun testConnection(scope: CoroutineScope, invitationText: String, keys: 
     catch (_: IllegalArgumentException) { return ConnectionTestState.Failed }
     catch (_: IllegalStateException) { return ConnectionTestState.Failed }
     val channel = try { PairingSetupChannel.connectPlatform(scope, invitation, keys, timeoutMillis) }
-    catch (cancelled: CancellationException) { throw cancelled }
+    catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive(); return ConnectionTestState.Failed }
     catch (_: Throwable) { return ConnectionTestState.Failed }
+    // Only the caller's own cancellation escapes. Any other failure, including an inner timeout, is a failed test.
     return try { ConnectionTestState.Reached(channel.transcript.verificationCode()) }
+    catch (cancelled: CancellationException) { currentCoroutineContext().ensureActive(); ConnectionTestState.Failed }
+    catch (_: Throwable) { ConnectionTestState.Failed }
     finally { withContext(NonCancellable) { channel.closeAndJoin() } }
 }

@@ -218,9 +218,15 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
 @Composable
 private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, services: PhoneServices, onChange: () -> Unit) {
     val palette = LocalPalette.current
-    val scope = rememberCoroutineScope()
-    // A new invitation starts a new test.
+    // A new invitation starts a new test. The attempt runs in an effect keyed on the invitation, so a changed
+    // invitation or a closed screen cancels it and its network work.
     var test by remember(text) { mutableStateOf<ConnectionTestState>(ConnectionTestState.Idle) }
+    var attempt by remember(text) { mutableStateOf(0) }
+    LaunchedEffect(text, attempt) {
+        if (attempt == 0) return@LaunchedEffect
+        test = ConnectionTestState.Connecting
+        test = testConnection(this, text, services.pairingKeys())
+    }
     LaunchedEffect(test) { if (test != ConnectionTestState.Idle) onChange() }
     Column(Modifier.testTag("parsed"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card {
@@ -255,20 +261,17 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, se
                             "Make sure that the computer is waiting for a phone and is on the same network, then try again.")
                     }
                 }
-                PrimaryButton("Test connection", "test-connection") {
-                    test = ConnectionTestState.Connecting
-                    scope.launch { test = testConnection(this, text, services.pairingKeys()) }
-                }
+                PrimaryButton("Test connection", "test-connection") { attempt++ }
             }
             ConnectionTestState.Connecting -> Card {
                 BasicText("Looking for the computer…", Modifier.testTag("connecting"), style = Type.body.copy(color = palette.text))
             }
             is ConnectionTestState.Reached -> Card {
-                BasicText("Connection works", style = Type.headline.copy(color = palette.text))
+                BasicText("The computer answered", style = Type.headline.copy(color = palette.text))
                 BasicText("Comparison code", style = Type.caption.copy(color = palette.secondary))
                 BasicText(current.code, Modifier.testTag("comparison-code"), style = Type.fingerprint.copy(color = palette.text))
-                BasicText("The computer showed its pinned key and answered. This test does not pair: it sent no proof, " +
-                    "and the computer saved nothing.", style = Type.caption.copy(color = palette.secondary))
+                BasicText("The computer proved the key in the invitation. Compare this code with the one on the computer. " +
+                    "This test does not pair: it sent no proof, and the computer saved nothing.", style = Type.caption.copy(color = palette.secondary))
             }
         }
     }
