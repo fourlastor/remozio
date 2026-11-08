@@ -8,21 +8,23 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
     private let verifyPeer: @Sendable () throws -> Void
     private let verifyCurrent: @Sendable () throws -> Void
     private let requireScope: @Sendable (Requirement) throws -> Void
+    private let authorityInstalledReadiness: Bool
     private var issued = false
     private var greeted = false
     private var closed = false
 
     /// Injected checks exercise local ordering only. This factory does not authenticate a native connection.
-    static func owned(expected: Requirement, authenticateInvocation: @escaping @Sendable () throws -> Void,
+    static func owned(expected: Requirement, authorityInstalledReadiness: Bool = false, authenticateInvocation: @escaping @Sendable () throws -> Void,
         verifyPeer: @escaping @Sendable () throws -> Void, verifyCurrent: @escaping @Sendable () throws -> Void) -> Self {
-        Self(authenticateInvocation: authenticateInvocation, verifyPeer: verifyPeer, verifyCurrent: verifyCurrent,
+        Self(authenticateInvocation: authenticateInvocation, verifyPeer: verifyPeer, verifyCurrent: verifyCurrent, authorityInstalledReadiness: authorityInstalledReadiness,
             requireScope: { guard $0 == expected else { throw MachineUpdateRoleChallengeError.changedScope } })
     }
     private init(authenticateInvocation: @escaping @Sendable () throws -> Void,
         verifyPeer: @escaping @Sendable () throws -> Void, verifyCurrent: @escaping @Sendable () throws -> Void,
-        requireScope: @escaping @Sendable (Requirement) throws -> Void) {
+        authorityInstalledReadiness: Bool = false, requireScope: @escaping @Sendable (Requirement) throws -> Void) {
         self.authenticateInvocation = authenticateInvocation; self.verifyPeer = verifyPeer
         self.verifyCurrent = verifyCurrent; self.requireScope = requireScope
+        self.authorityInstalledReadiness = authorityInstalledReadiness
     }
 
     /// The harmless handshake authenticates its own invocation. It opens no owner and issues no request capability.
@@ -41,9 +43,12 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
             issued = true
             do {
                 try authenticateInvocation(); try validate()
-                let requirement = try MachineUpdateRoleChallengeSession.decodeRequestedRequirement(bytes)
+                let authority = try authorityInstalledReadiness ? MachineUpdateAuthorityReadinessRequest.decode(bytes) : nil
+                let challenge = authority?.challenge ?? bytes
+                let requirement = try MachineUpdateRoleChallengeSession.decodeRequestedRequirement(challenge)
                 try requireScope(requirement); try validate()
-                return MachineUpdateConsumerHealthRequest(peer: self, bytes: bytes, requirement: requirement)
+                return MachineUpdateConsumerHealthRequest(peer: self, bytes: challenge, requirement: requirement,
+                    authorityReadiness: authority)
             } catch { closed = true; throw error }
         }
     }
@@ -65,11 +70,13 @@ final class MachineUpdateConsumerHealthRequest: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private weak var peer: MachineUpdateConsumerHealthPeer?
     let bytes: Data
+    let authorityReadiness: MachineUpdateAuthorityReadinessRequest?
     let requirement: MachineUpdateRestartHealthPlan.Requirement
     private var claimed = false
     private var retired = false
-    fileprivate init(peer: MachineUpdateConsumerHealthPeer, bytes: Data, requirement: MachineUpdateRestartHealthPlan.Requirement) {
-        self.peer = peer; self.bytes = bytes; self.requirement = requirement
+    fileprivate init(peer: MachineUpdateConsumerHealthPeer, bytes: Data, requirement: MachineUpdateRestartHealthPlan.Requirement,
+        authorityReadiness: MachineUpdateAuthorityReadinessRequest?) {
+        self.peer = peer; self.bytes = bytes; self.requirement = requirement; self.authorityReadiness = authorityReadiness
     }
     func claim() throws {
         try lock.withLock {
