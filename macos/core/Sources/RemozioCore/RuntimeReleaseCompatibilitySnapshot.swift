@@ -36,15 +36,17 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let machineUpdateReplacement: Data?
         /// The canonical header binds every retained configuration row and its publication revision.
         let machineUpdateConfigurationEpoch: Data?
+        let machineUpdateBackendEpoch: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
-             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil) {
+             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil, machineUpdateBackendEpoch: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
             self.machineUpdateReplacement = machineUpdateReplacement
             self.machineUpdateConfigurationEpoch = machineUpdateConfigurationEpoch
+            self.machineUpdateBackendEpoch = machineUpdateBackendEpoch
         }
         /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
         func replacingMachineUpdateActivation(_ value: Data?) -> Self {
@@ -96,9 +98,19 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
-        if let bytes = inputs.machineUpdateConfigurationEpoch,
-           try MachineUpdateConfigurationEpochRecord.decode(bytes).formatVersion == 2 {
-            for item in try MachineUpdateConfigurationEpochRecord.publicationRequirements {
+        if let bytes = inputs.machineUpdateConfigurationEpoch {
+            for item in try MachineUpdateConfigurationEpochRecord.retainedRequirements(bytes) {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 20 {
+            for item in try MachineUpdateBackendEpochRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if let bytes = inputs.machineUpdateBackendEpoch,
+           try MachineUpdateBackendEpochRecord.decode(bytes).publication != nil {
+            for item in try MachineUpdateBackendEpochRecord.publicationRequirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }

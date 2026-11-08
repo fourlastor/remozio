@@ -51,6 +51,28 @@ final class MachineUpdateConfigurationEpochRecordTests: XCTestCase {
         XCTAssertEqual(try record.applying(.begin).formatVersion, 4)
     }
 
+    func testRetainedRequirementsFollowTheRecordFormat() throws {
+        typealias Record = MachineUpdateConfigurationEpochRecord
+        func names(_ formats: [RetainedReleaseFormat]) -> Set<String> { Set(formats.map(\.name)) }
+        let plain = try encode(fields())
+        XCTAssertTrue(try Record.retainedRequirements(plain).isEmpty)
+        let publishing = try Record.decode(plain).applying(.begin)
+        XCTAssertEqual(publishing.formatVersion, 2)
+        XCTAssertEqual(try Record.retainedRequirements(publishing.encoded).map(\.readVersions), try Record.publicationRequirements.map(\.readVersions))
+
+        var value = fields()
+        var accounts = try XCTUnwrap(value["accounts"] as? [[String: Any]])
+        accounts[0]["provisioningDigest"] = digest
+        value["accounts"] = accounts
+        value["formatVersion"] = 3
+        let provenance = try Record.decode(encode(value))
+        for record in [provenance, try provenance.applying(.begin)] {
+            let required = try Record.retainedRequirements(record.encoded)
+            XCTAssertTrue(names(required).contains(MachineUpdateProvisioningHistory.formatName), "\(record.formatVersion)")
+            XCTAssertTrue(required.contains { $0.name == Record.formatName && $0.readVersions.contains(record.formatVersion) }, "\(record.formatVersion)")
+        }
+    }
+
     func testStorageRowsBindEveryPayloadToTheExactEpoch() throws {
         let payload = Data([1, 2, 3])
         let record = try MachineUpdateConfigurationEpochRecord.decode(encode(fields(

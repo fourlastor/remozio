@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -316,7 +316,8 @@ public final class PreparationIntentStore {
         return try .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
             updateAdmissionRegistration: admission, machineUpdateActivation: schema >= 17 ? loadMachineUpdateActivation()?.encoded : nil,
             machineUpdateReplacement: schema >= 18 ? loadMachineUpdateReplacement()?.encoded : nil,
-            machineUpdateConfigurationEpoch: schema >= 19 ? loadMachineUpdateConfigurationEpoch()?.record.encoded : nil)
+            machineUpdateConfigurationEpoch: schema >= 19 ? loadMachineUpdateConfigurationEpoch()?.record.encoded : nil,
+            machineUpdateBackendEpoch: schema >= 20 ? loadRequiredMachineUpdateBackendEpochHeader() : nil)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -2181,7 +2182,7 @@ public final class PreparationIntentStore {
             admission: admission, replacement: nil, runtime: runtime)
         let accounts = try loadMachineUpdateAccounts(context)
         // These schemas cannot contain an installed-release archive. Later readers must load its exact history.
-        guard try [Int64(17), 18, 19].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        guard try [Int64(17), 18, 19, 20].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -2532,10 +2533,17 @@ public final class PreparationIntentStore {
     private func requireCurrentConfigurationEpoch(_ expected: MachineUpdateConfigurationEpochRecord,
         directory: ReleaseDestinationLease) throws -> MachineUpdateRestartSource {
         try identity(macID); try requireUpdateAdmissionDirectory(directory)
-        guard try scalar("PRAGMA user_version") == 19, let epoch = try loadMachineUpdateConfigurationEpoch(), epoch.record == expected,
+        guard try scalar("PRAGMA user_version") >= 19, let epoch = try loadMachineUpdateConfigurationEpoch(), epoch.record == expected,
               let activation = try loadMachineUpdateActivation(), activation.phase.irreversible else { throw PreparationStoreError.staleRevision }
         let source = try loadMachineUpdateRestartSource(activation), context = source.replacement
-        guard try machineEpochSourceDigest() == expected.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
+        if try scalar("PRAGMA user_version") == 20 {
+            guard let backend = try loadMachineUpdateBackendEpoch(epoch: epoch),
+                  try machineEpochSourceDigest(normalizedSchema: 19) == expected.sourceMachineDigest,
+                  try machineEpochSourceDigest() == backend.record.currentSourceDigest else { throw PreparationStoreError.staleRevision }
+            try backend.record.requireScope(epoch)
+        } else {
+            guard try machineEpochSourceDigest() == expected.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
+        }
         guard activation.attemptID == expected.activationAttempt, activation.updateID == expected.updateID,
               activation.candidateDigest == expected.candidateDigest, activation.inventoryDigest == expected.inventoryDigest,
               activation.admissionDigest == expected.admissionDigest, context.inventory.macID == expected.macID,
@@ -2569,24 +2577,229 @@ public final class PreparationIntentStore {
         return archive
     }
 
-    private func machineEpochSourceDigest() throws -> Data {
+    func upgradeMachineUpdateBackendEpochStorage(expected: MachineUpdateConfigurationEpochRecord,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease,
+        verifyCurrent: () throws -> Void) throws -> MachineUpdateBackendEpochRecord {
+        try quiescence.withExclusiveActivity { _ in
+            let value = try transaction(write: true, activationWrite: true) {
+                try requireCurrentConfigurationEpoch(expected, directory: directory, quiescence: quiescence)
+                guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                try MachineUpdateBackendEpoch.requireFormats(candidate, epoch: epoch)
+                try verifyCurrent()
+                let version = try scalar("PRAGMA user_version")
+                if version == 20 {
+                    guard let existing = try loadMachineUpdateBackendEpoch(epoch: epoch) else { throw PreparationStoreError.corruptRecord }
+                    try requireCurrentBackendEpoch(existing.record, epoch: epoch, directory: directory, quiescence: quiescence)
+                    try verifyCurrent(); return existing.record
+                }
+                guard version == 19, expected.publication?.complete == true else { throw PreparationStoreError.invalidTransition }
+                try exec("CREATE TABLE machine_update_backend_epoch_v1(kind INTEGER NOT NULL CHECK(kind BETWEEN 0 AND 3),account BLOB NOT NULL CHECK(length(account)=CASE WHEN kind=0 THEN 1 ELSE 16 END),epoch BLOB NOT NULL CHECK(length(epoch)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND CASE WHEN kind=0 THEN 131072 WHEN kind=1 THEN 1048576 ELSE 2097152 END),PRIMARY KEY(kind,account)) STRICT")
+                try exec("PRAGMA user_version=20"); try identity(macID)
+                guard try machineEpochSourceDigest(normalizedSchema: 19) == expected.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
+                let record = try MachineUpdateBackendEpochRecord(epoch: epoch, currentSourceDigest: machineEpochSourceDigest())
+                try writeBackendEpochRow(kind: 0, account: MachineUpdateBackendEpoch.global, bytes: record.encoded, record: record)
+                try requireCurrentBackendEpoch(record, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent(); return record
+            }
+            return try transaction(write: false) {
+                guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                try requireCurrentBackendEpoch(value, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent(); return value
+            }
+        }
+    }
+
+    func machineUpdateBackendEpoch() throws -> MachineUpdateBackendEpoch.Archive? {
+        try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") >= 20 else { return nil }
+            guard let epoch = try loadMachineUpdateConfigurationEpoch(), let archive = try loadMachineUpdateBackendEpoch(epoch: epoch) else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return archive
+        }
+    }
+
+    /// The protected verifier checks actual backend files before, during and after the durable write.
+    func retainMachineUpdateBackendEpoch(_ expected: MachineUpdateBackendEpochRecord,
+        captures: [MachineUpdateBackendEpoch.Capture], candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease,
+        verifyCurrent: () throws -> Void) throws -> MachineUpdateBackendEpochRecord {
+        try quiescence.withExclusiveActivity { _ in
+            let value = try transaction(write: true, activationWrite: true) {
+                guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                try MachineUpdateBackendEpoch.requireFormats(candidate, epoch: epoch)
+                try requireCurrentBackendEpoch(expected, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent()
+                guard let inventory = try loadInventoryRecord() else { throw PreparationStoreError.corruptRecord }
+                for capture in captures {
+                    let state = try loadGatewayRuntimeActivation(accountID: capture.accountID)
+                    if let activation = state.plan, state.filesPublished {
+                        guard let foreground = try loadRuntimeActivation(accountID: capture.accountID).plan,
+                              let source = capture.source else { throw PreparationStoreError.staleRevision }
+                        let actual = try RuntimeReleaseBackendSource(foreground: foreground, activation: activation,
+                            journal: loadGatewayJournalPreparation(accountID: capture.accountID),
+                            settings: loadGatewaySettingsTransition(accountID: capture.accountID), inventory: inventory)
+                        guard try actual.encoded == source.encoded else { throw PreparationStoreError.staleRevision }
+                    } else {
+                        guard capture.source == nil, capture.startup == nil, capture.completion == nil else { throw PreparationStoreError.staleRevision }
+                    }
+                }
+                let next = try expected.retaining(captures, epoch: epoch)
+                if next == expected { try verifyCurrent(); return expected }
+                let artifacts = try MachineUpdateBackendEpoch.artifacts(captures, epoch: epoch)
+                for artifact in artifacts {
+                    try writeBackendEpochRow(kind: artifact.kind, account: artifact.accountID, bytes: artifact.bytes, record: next)
+                }
+                try statement("UPDATE machine_update_backend_epoch_v1 SET revision=?,record=? WHERE kind=0 AND epoch=? AND revision=?") { row in
+                    try bind(bytes(next.revision), column: 1, row: row); try bind(next.encoded, column: 2, row: row)
+                    try bind(bytes(next.id), column: 3, row: row); try bind(bytes(expected.revision), column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                try requireCurrentBackendEpoch(next, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent(); return next
+            }
+            do {
+                return try transaction(write: false) {
+                    guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                    try requireCurrentBackendEpoch(value, epoch: epoch, directory: directory, quiescence: quiescence)
+                    try verifyCurrent(); return value
+                }
+            } catch { unavailable = true; shutdown(); throw error }
+        }
+    }
+
+    func advanceMachineUpdateBackendPublication(_ expected: MachineUpdateBackendEpochRecord,
+        operation: MachineUpdateBackendPublicationOperation, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease, verifyCurrent: (MachineUpdateBackendEpochRecord) throws -> Void) throws -> MachineUpdateBackendEpochRecord {
+        let next = try expected.applying(operation)
+        return try quiescence.withExclusiveActivity { _ in
+            let value = try transaction(write: true, activationWrite: true) {
+                guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                try MachineUpdateBackendEpoch.requirePublicationFormats(candidate, epoch: epoch)
+                try requireCurrentBackendEpoch(expected, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent(expected); try verifyCurrent(next)
+                try statement("UPDATE machine_update_backend_epoch_v1 SET revision=? WHERE epoch=? AND revision=?") { row in
+                    try bind(bytes(next.revision), column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                    try bind(bytes(expected.revision), column: 3, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == Int32(next.operands.count + 1) else { throw PreparationStoreError.staleRevision }
+                }
+                try statement("UPDATE machine_update_backend_epoch_v1 SET record=? WHERE kind=0 AND epoch=? AND revision=?") { row in
+                    try bind(next.encoded, column: 1, row: row); try bind(bytes(next.id), column: 2, row: row)
+                    try bind(bytes(next.revision), column: 3, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                try requireCurrentBackendEpoch(next, epoch: epoch, directory: directory, quiescence: quiescence)
+                try verifyCurrent(next); return next
+            }
+            do {
+                return try transaction(write: false) {
+                    guard let epoch = try loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                    try requireCurrentBackendEpoch(value, epoch: epoch, directory: directory, quiescence: quiescence)
+                    try verifyCurrent(value); return value
+                }
+            } catch { unavailable = true; shutdown(); throw error }
+        }
+    }
+
+    /// This verifier expires when the callback returns. It grants no native identity, file writer or admission.
+    func withCurrentMachineUpdateBackendEpoch<Value>(_ expected: MachineUpdateBackendEpochRecord,
+        directory: ReleaseDestinationLease, quiescence: UpdateQuiescenceLease,
+        _ body: (_ validate: @escaping () throws -> Void) throws -> Value) throws -> Value {
+        try quiescence.withExclusiveActivity { _ in
+            try transaction(write: false) {
+                let processID = getpid()
+                var scopeActive = true; defer { scopeActive = false }
+                let validate: () throws -> Void = { [weak self] in
+                    guard scopeActive, getpid() == processID, let self else { throw JournalLeaseError.invalidated }
+                    guard let epoch = try self.loadMachineUpdateConfigurationEpoch() else { throw PreparationStoreError.corruptRecord }
+                    try self.requireCurrentBackendEpoch(expected, epoch: epoch, directory: directory, quiescence: quiescence)
+                }
+                try validate(); let value = try body(validate); try validate(); return value
+            }
+        }
+    }
+
+    private func withBackendRecordLimit<Value>(_ body: () throws -> Value) throws -> Value {
+        guard let db else { throw PreparationStoreError.closed }
+        let previous = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, 2150000)
+        defer { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, previous) }
+        return try body()
+    }
+    private func writeBackendEpochRow(kind: Int64, account: Data, bytes recordBytes: Data,
+        record: MachineUpdateBackendEpochRecord) throws {
+        try withBackendRecordLimit {
+            try statement("INSERT INTO machine_update_backend_epoch_v1 VALUES(?,?,?,?,?)") { row in
+                try bind(kind, column: 1, row: row); try bind(account, column: 2, row: row)
+                try bind(bytes(record.id), column: 3, row: row); try bind(bytes(record.revision), column: 4, row: row)
+                try bind(recordBytes, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+            }
+        }
+    }
+    private func requireCurrentBackendEpoch(_ expected: MachineUpdateBackendEpochRecord,
+        epoch: MachineUpdateConfigurationEpoch.Archive, directory: ReleaseDestinationLease,
+        quiescence: UpdateQuiescenceLease) throws {
+        try requireCurrentConfigurationEpoch(epoch.record, directory: directory, quiescence: quiescence)
+        guard try loadMachineUpdateBackendEpoch(epoch: epoch)?.record == expected,
+              try expected.currentSourceDigest == machineEpochSourceDigest() else { throw PreparationStoreError.staleRevision }
+    }
+    private func loadMachineUpdateBackendEpoch(epoch: MachineUpdateConfigurationEpoch.Archive) throws -> MachineUpdateBackendEpoch.Archive? {
+        try withBackendRecordLimit {
+            let rows: [(Int64, Data, Data, Data, Data)] = try statement("SELECT kind,account,epoch,revision,record FROM machine_update_backend_epoch_v1 ORDER BY kind,account") { row in
+                var values: [(Int64, Data, Data, Data, Data)] = []
+                while try step(row) == SQLITE_ROW {
+                    guard values.count < 385, sqlite3_column_type(row, 0) == SQLITE_INTEGER else { throw PreparationStoreError.corruptRecord }
+                    let kind = sqlite3_column_int64(row, 0)
+                    guard (0...3).contains(kind) else { throw PreparationStoreError.corruptRecord }
+                    let maximum = kind == 0 ? MachineUpdateBackendEpochRecord.maximumBytes : kind == 1 ? RuntimeReleaseBackendSource.maximumBytes : RuntimeReleaseBackendPlan.maximumBytes
+                    values.append(try (kind, blob(row, column: 1, maximum: 16), blob(row, column: 2, maximum: 16),
+                        blob(row, column: 3, maximum: 16), blob(row, column: 4, maximum: maximum)))
+                }
+                return values
+            }
+            guard let first = rows.first else { return nil }
+            guard first.0 == 0, first.1 == MachineUpdateBackendEpoch.global else { throw PreparationStoreError.corruptRecord }
+            let header = try MachineUpdateBackendEpochRecord.decode(first.4)
+            guard header.macID == macID, rows.allSatisfy({ $0.2 == bytes(header.id) && $0.3 == bytes(header.revision) }) else {
+                throw PreparationStoreError.corruptRecord
+            }
+            let archive = MachineUpdateBackendEpoch.Archive(record: header,
+                artifacts: rows.dropFirst().map { .init(kind: $0.0, accountID: $0.1, bytes: $0.4) })
+            try archive.validate(epoch: epoch)
+            return archive
+        }
+    }
+    private func loadRequiredMachineUpdateBackendEpochHeader() throws -> Data {
+        guard let epoch = try loadMachineUpdateConfigurationEpoch(),
+              let archive = try loadMachineUpdateBackendEpoch(epoch: epoch) else {
+            throw PreparationStoreError.corruptRecord
+        }
+        return try archive.record.encoded
+    }
+
+    private func machineEpochSourceDigest(normalizedSchema: Int64? = nil) throws -> Data {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
-        guard schema == 19 else { throw PreparationStoreError.incompatibleStore }
+        guard [Int64(19), 20].contains(schema),
+              normalizedSchema == nil || (schema == 20 && normalizedSchema == 19) else {
+            throw PreparationStoreError.incompatibleStore
+        }
         let tables: [String] = try statement("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var values: [String] = []
             while try step(row) == SQLITE_ROW {
-                guard values.count < 21, let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
+                guard values.count < (schema == 20 ? 22 : 21), let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
                 values.append(String(cString: name))
             }
             return values
         }
         var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochSource/v1\0".utf8))
-        hash.update(data: candidateGeneration(UInt64(schema)))
+        hash.update(data: candidateGeneration(UInt64(normalizedSchema ?? schema)))
         let inventory = try loadInventoryRecord()
         let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
         hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
-        for table in tables where table != "machine_update_configuration_epoch_v1" && table != "machine_update_activation_v1" {
+        for table in tables where table != "machine_update_configuration_epoch_v1" &&
+            table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" {
             hash.update(data: try machineTableDigest(table))
         }
         return Data(hash.finalize())
@@ -2803,7 +3016,7 @@ public final class PreparationIntentStore {
         let context = try loadMachineUpdateReplacementContext(activation)
         guard context.replacement != nil else { throw MachineUpdateReplacementError.changedBinding }
         let accounts = try loadMachineUpdateAccounts(context)
-        guard try [Int64(17), 18, 19].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        guard try [Int64(17), 18, 19, 20].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -2829,6 +3042,7 @@ public final class PreparationIntentStore {
         if version >= 17 { expected.append("machine_update_activation_v1") }
         if version >= 18 { expected.append("machine_update_replacement_v1") }
         if version >= 19 { expected.append("machine_update_configuration_epoch_v1") }
+        if version >= 20 { expected.append("machine_update_backend_epoch_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

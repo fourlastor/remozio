@@ -42,6 +42,19 @@ struct GatewayRuntimeExtensions: Sendable {
         try self.init(authority: activation.extensions.authority, transport: transport)
         try validate(journal: journal, foreground: foreground, inventory: inventory)
     }
+    init(release plan: RuntimeReleaseBackendPlan) throws {
+        let original = plan.source.pair, configuration = plan.configuration, policy = configuration.host.codePolicy
+        let authority = try GatewayRuntimeExtension(target: .authority, intentID: original.authority.intentID,
+            intentDigest: original.authority.intentDigest, foregroundDigest: original.authority.foregroundDigest,
+            baseDigest: Data(SHA256.hash(data: configuration.host.canonicalBytes)),
+            material: original.authority.material, codePolicy: policy, wake: nil)
+        let transport = try GatewayRuntimeExtension(target: .transport, intentID: original.transport.intentID,
+            intentDigest: original.transport.intentDigest, foregroundDigest: original.transport.foregroundDigest,
+            baseDigest: Data(SHA256.hash(data: configuration.transport.canonicalBytes)),
+            material: original.transport.material, codePolicy: policy, wake: plan.transportWake)
+        try authority.validate(authority: configuration.host); try transport.validate(transport: configuration.transport)
+        try self.init(authority: authority, transport: transport)
+    }
     private init(authority: GatewayRuntimeExtension, transport: GatewayRuntimeExtension) throws {
         guard authority.target == .authority, transport.target == .transport,
               authority.intentID == transport.intentID, authority.intentDigest == transport.intentDigest,
