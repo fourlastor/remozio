@@ -1,7 +1,7 @@
 import Foundation
 
 enum MachineUpdateHealthCoordinatorError: Error, Equatable {
-    case invalidInventory, busy
+    case invalidInventory, incompleteHealth, busy
 }
 
 /// Exact selected checks and preserved accounts. These values grant no startup, journal writer or completion authority.
@@ -56,4 +56,13 @@ struct MachineUpdateHealthInventory: Sendable {
         self.preservedAccounts = preservedAccounts.sorted { $0.lexicographicallyPrecedes($1) }
     }
     func requirements(accountID: Data) -> [Requirement] { requirements.filter { $0.binding.accountID == accountID } }
+    func requireReplies(_ replies: [MachineUpdateAuthenticatedRoleReply], accountID: Data) throws {
+        let expected = requirements(accountID: accountID)
+        guard !expected.isEmpty, replies.count == expected.count,
+              Set(replies.map { $0.requirement.role.rawValue }).count == replies.count,
+              Set(replies.map(\.challengeDigest)).count == replies.count,
+              replies.allSatisfy({ $0.challengeDigest.count == 32 && expected.contains($0.requirement) }) else {
+            throw MachineUpdateHealthCoordinatorError.incompleteHealth
+        }
+    }
 }
