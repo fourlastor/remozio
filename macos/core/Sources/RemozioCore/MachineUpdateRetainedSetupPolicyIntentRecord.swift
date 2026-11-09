@@ -6,7 +6,7 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
     enum Observation: Equatable, Sendable { case sourceUnchanged, startupBoundary }
     typealias StoredPolicy = MachineUpdatePolicyIntentRecord.StoredPolicy
     static let formatName = "authority.retained-setup-policy-intent"
-    private static let currentFormatVersion: UInt64 = 2
+    static let currentFormatVersion: UInt64 = 2
     static let maximumBytes = 131072
     let formatVersion: UInt64
     let id: UUID
