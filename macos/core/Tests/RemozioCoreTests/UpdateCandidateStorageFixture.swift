@@ -104,9 +104,9 @@ final class UpdateCandidateStorageFixture {
             })
     }
     private func evidence(_ record: PreparationIntentRecord) -> SignedReleaseEvidence { inspectedCopies[record.id] ?? release }
-    func reopen(hook: (() throws -> Void)? = nil) throws {
+    func reopen(hook: (() throws -> Void)? = nil, inventoryRecordLimit: Int32 = 278_528) throws {
         try store.close()
-        store = try f.f.open(hook: hook)
+        store = try f.f.open(hook: hook, inventoryRecordLimit: inventoryRecordLimit)
     }
     func sql(_ statement: String) throws { XCTAssertEqual(try f.f.sql(statement), Int64(SQLITE_OK)) }
     func editedRelease(_ edit: (ReleaseComponent) throws -> ReleaseComponent) throws -> SignedReleaseEvidence {

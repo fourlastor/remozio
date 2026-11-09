@@ -25,20 +25,48 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
     private var baseline: ServiceReleaseActivityToken?
     private var closed = false
 
-    static func openGateway(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
+    static func decodeGatewayStartup(_ bytes: Data, path: String) throws ->
+        (host: GatewaySettingsConsumerHostConfiguration, mode: GatewaySettingsConsumerStartupMode) {
+        let host = try GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(bytes)
+        guard host.role == .gateway, path == (try host.gatewayConfigurationPath) else { throw GatewayPreparationError.changedScope }
+        return (host, try .select(host))
+    }
+    static func decodeTransportStartup(_ bytes: Data, path: String) throws ->
+        (bootstrap: TransportSettingsConsumerBootstrap, mode: GatewaySettingsConsumerStartupMode) {
+        let bootstrap = try TransportSettingsConsumerBootstrap(base: .decodeForReleaseArchive(bytes))
+        try bootstrap.validatePath(path)
+        return (bootstrap, try .select(bootstrap.host))
+    }
+
+    static func openGateway(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence, mode: GatewaySettingsConsumerStartupMode) {
         let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
-        let host = try GatewaySettingsConsumerHostConfiguration.decode(bytes)
+        let (host, mode) = try decodeGatewayStartup(bytes, path: path)
+        let opened = try open(host: host, path: path, bytes: bytes)
+        return (opened.scope, opened.release, mode)
+    }
+    static func openTransport(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence, bootstrap: TransportSettingsConsumerBootstrap, mode: GatewaySettingsConsumerStartupMode) {
+        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
+        let (bootstrap, mode) = try decodeTransportStartup(bytes, path: path)
+        let opened = try open(host: bootstrap.host, path: path, bytes: bytes)
+        return (opened.scope, opened.release, bootstrap, mode)
+    }
+    static func openGatewayForUpdateHealth(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
+        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
+        let host = try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(bytes)
         guard host.role == .gateway, path == (try host.gatewayConfigurationPath) else { throw GatewayPreparationError.changedScope }
         return try open(host: host, path: path, bytes: bytes)
     }
-    static func openTransport(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence,
-                                                     bootstrap: TransportSettingsConsumerBootstrap) {
+    static func openTransportForUpdateHealth(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence,
+                                                                   bootstrap: TransportSettingsConsumerBootstrap) {
         let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
-        let bootstrap = try TransportSettingsConsumerBootstrap.decode(bytes)
+        let bootstrap = try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(bytes)
         try bootstrap.validatePath(path)
         let opened = try open(host: bootstrap.host, path: path, bytes: bytes)
         return (opened.scope, opened.release, bootstrap)
     }
+
     private static func open(host: GatewaySettingsConsumerHostConfiguration, path: String, bytes: Data) throws ->
         (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
         guard host.bundlePath == MachineBootstrap.bundlePath else { throw GatewayPreparationError.changedScope }
@@ -67,20 +95,36 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let app = host.codePolicy.entries.first { $0.role == .app && $0.active }!
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-            for role in GatewaySettingsConsumerRole.allCases {
-                let participant = try GatewaySettingsConsumerHostConfiguration(role: role, runtime: host.runtime,
-                    bundlePath: host.bundlePath, codePolicy: host.codePolicy)
-                try participant.validateRelease(release)
-                guard release.manifest.components.first(where: { $0.role == role.codeRole })?.relativePath
-                    == participant.consumerExecutableRelativePath else { throw GatewayPreparationError.changedScope }
-            }
-            guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
-                    == AdministrativeSetupConfiguration.executablePath else { throw GatewayPreparationError.changedScope }
+            try validateParticipants(host: host, release: release)
             try current.validate()
             try RuntimeAuditUpgradeStartupFence.requireOpen(macID: host.runtime.services.macID, accountID: host.runtime.services.accountID)
             return (current, release)
         } catch { scope?.close(); placement.close(); throw error }
     }
+    static func validateParticipants(host: GatewaySettingsConsumerHostConfiguration, release: SignedReleaseEvidence) throws {
+        for role in GatewaySettingsConsumerRole.allCases {
+            let participant = try GatewaySettingsConsumerHostConfiguration(role: role, runtime: host.runtime,
+                bundlePath: host.bundlePath, codePolicy: host.codePolicy,
+                releaseBinding: host.releaseBinding, policyStage: host.policyStage)
+            try participant.validateRelease(release)
+            guard release.manifest.components.first(where: { $0.role == role.codeRole })?.relativePath
+                == participant.consumerExecutableRelativePath else { throw GatewayPreparationError.changedScope }
+        }
+        guard release.manifest.components.first(where: { $0.role == .setupController })?.relativePath
+                == AdministrativeSetupConfiguration.executablePath else { throw GatewayPreparationError.changedScope }
+        if host.policyStage == .startup {
+            try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: host)
+        }
+    }
+
+    static func requireRetainedAccount(host: GatewaySettingsConsumerHostConfiguration,
+        state: (ServiceAccountClaim, ServiceDirectoryKind) throws -> ServiceDirectoryState) throws {
+        guard let claim = host.runtime.services.claims.first(where: { $0.role == host.serviceRole }),
+              try state(claim, .user) == .retained, try state(claim, .group) == .retained else {
+            throw GatewayPreparationError.changedScope
+        }
+    }
+
     private init(configuration: GatewaySettingsConsumerHostConfiguration, path: String, bytes: Data,
                  placement: ReleaseDestinationLease, bundleIdentity: PreparationFileIdentity, requirement: String) throws {
         self.configuration = configuration; self.path = path; self.bytes = bytes; self.placement = placement
@@ -91,11 +135,9 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
             guard !closed else { throw GatewayPreparationError.changedScope }
             let host = configuration, services = host.runtime.services
             try DedicatedServiceAccount.requireCurrent(serviceUID: host.serviceUID, ownerUID: services.ownerUID)
-            guard getgid() == host.serviceUID, getegid() == host.serviceUID,
-                  let claim = services.claims.first(where: { $0.role == host.serviceRole }) else { throw GatewayPreparationError.changedScope }
+            guard getgid() == host.serviceUID, getegid() == host.serviceUID else { throw GatewayPreparationError.changedScope }
             let directory = try ServiceAccountDirectoryReader()
-            guard try directory.state(claim: claim, kind: .user) == .retained,
-                  try directory.state(claim: claim, kind: .group) == .retained else { throw GatewayPreparationError.changedScope }
+            try Self.requireRetainedAccount(host: host, state: directory.state(claim:kind:))
             try DynamicCodeValidation.validateSelf(requirement: requirement)
             guard try DynamicCodeValidation.selfPath() == host.bundlePath + "/" + host.consumerExecutableRelativePath,
                   try ProtectedServiceConfiguration.readPublic(path: path) == bytes else { throw GatewayPreparationError.changedScope }

@@ -29,6 +29,8 @@ public actor AuthorityWakeService {
     private let updateScheduling: AuthorityUpdateSchedulingStartup?
     private let hints: AuthorityWakeHintSource
     private let requestsRetired: @Sendable () -> Bool
+    private let makeInstalledReadinessReply: @Sendable (MachineUpdateConsumerHealthRequest, MachineUpdateRestartHealthPlan.Requirement,
+        MachineUpdateAuthorityReadinessGateway?, @Sendable () throws -> Void) throws -> Data
     private let startRequests: @Sendable () throws -> Void
     private let closeRequests: @Sendable () throws -> Void
     private let stopRequestProducers: @Sendable () async -> Void
@@ -66,13 +68,18 @@ public actor AuthorityWakeService {
          stopRequestProducers: @escaping @Sendable () async -> Void = {},
          phonePushCapability: AuthorityPhonePushCapability? = nil,
          gatewaySettingsBinding: GatewaySettingsControlBinding? = nil,
-         updateScheduling: AuthorityUpdateSchedulingStartup? = nil) throws {
+         updateScheduling: AuthorityUpdateSchedulingStartup? = nil,
+         makeInstalledReadinessReply: @escaping @Sendable (MachineUpdateConsumerHealthRequest, MachineUpdateRestartHealthPlan.Requirement,
+             MachineUpdateAuthorityReadinessGateway?, @Sendable () throws -> Void) throws -> Data = { _, _, _, _ in
+                 throw MachineUpdateRoleChallengeError.unavailable
+             }) throws {
         guard (1...30_000).contains(interval), (100...60_000).contains(initialRetryMilliseconds),
               (initialRetryMilliseconds...300_000).contains(maximumRetryMilliseconds) else { throw AuthorityWakePublisherError.invalidConfiguration }
         guard gatewaySettingsBinding == nil || gatewaySettingsBinding?.accountID == hints.binding.accountID else { throw GatewayPreparationError.changedScope }
         self.gatewaySettingsBinding = gatewaySettingsBinding
         self.phonePushCapability = phonePushCapability
         self.updateScheduling = updateScheduling
+        self.makeInstalledReadinessReply = makeInstalledReadinessReply
         self.presence = presence; self.makePublisher = makePublisher; self.hints = hints; self.interval = interval
         self.initialRetry = initialRetryMilliseconds; self.maximumRetry = maximumRetryMilliseconds
         self.stopRequestProducers = stopRequestProducers
@@ -239,9 +246,35 @@ public actor AuthorityWakeService {
                 requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
                 stopRequestProducers: { await journal.stopCommandExchanges() }, phonePushCapability: phoneCapability,
                 gatewaySettingsBinding: .init(accountID: configuration.registration.accountID, rootEpoch: clock.epoch),
-                updateScheduling: updateScheduling)
+                updateScheduling: updateScheduling, makeInstalledReadinessReply: { request, expected, gateway, verifyCurrent in
+                    let reply = try journal.answerMachineUpdateInstalledReadiness(request, expected: expected,
+                        macID: configuration.request.service.macID, accountID: configuration.request.service.accountID,
+                        keyPublicKey: signer.publicKey, gateway: gateway, now: clock.now(),
+                        verifyCurrent: verifyCurrent, sign: signer.sign)
+                    return try MachineUpdateConsumerHealthPacket(roleReply: reply, gatewayHead: nil).encoded
+                })
         } catch { presence?.close(); try? journal.close(); throw error }
     }
+    func answerInstalledReadiness(_ request: MachineUpdateConsumerHealthRequest,
+        expected: MachineUpdateRestartHealthPlan.Requirement, gateway: MachineUpdateAuthorityReadinessGateway?,
+        phonePushCommitDigest: Data?, verifyCurrent: @Sendable () throws -> Void) throws -> Data {
+        func requireCurrent() throws {
+            guard started, !closed, !isRetired, !startupRestorePending, !recoveryStartupHold,
+                  settingsChange == nil, recoveryTicket == nil,
+                  gatewaySettingsBinding?.accountID == expected.binding.accountID, request.requirement == expected,
+                  (gateway != nil) == (phonePushCommitDigest != nil),
+                  phonePushCapability?.installedCommitDigest == phonePushCommitDigest,
+                  phonePushCapability?.retainedCommitDigest == phonePushCommitDigest else {
+                throw MachineUpdateRoleChallengeError.unavailable
+            }
+            try request.validate(); try verifyCurrent(); try Task.checkCancellation()
+        }
+        try requireCurrent()
+        let reply = try makeInstalledReadinessReply(request, expected, gateway, verifyCurrent)
+        try requireCurrent()
+        return reply
+    }
+
     /// Unreadable optional state must not be treated as absence. Foreground listeners can still start.
     func pauseUnknownPhonePushStartup() throws {
         guard !closed, !isRetired, !started, startupScope == nil, settingsChange == nil else { throw AuthorityWakePublisherError.busy }

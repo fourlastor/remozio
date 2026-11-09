@@ -19,7 +19,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let settingsPhase: Int64?
     }
     struct Inputs: Equatable, Sendable {
-        let schemaVersion: Int64
+        private(set) var schemaVersion: Int64
         let macID: Data
         let inventory: Data?
         let runtimes: [Runtime]
@@ -37,16 +37,26 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         /// The canonical header binds every retained configuration row and its publication revision.
         let machineUpdateConfigurationEpoch: Data?
         let machineUpdateBackendEpoch: Data?
+        private(set) var completionIntent: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
-             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil, machineUpdateBackendEpoch: Data? = nil) {
+             updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil, machineUpdateBackendEpoch: Data? = nil,
+             completionIntent: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
             self.machineUpdateReplacement = machineUpdateReplacement
             self.machineUpdateConfigurationEpoch = machineUpdateConfigurationEpoch
             self.machineUpdateBackendEpoch = machineUpdateBackendEpoch
+            self.completionIntent = completionIntent
+        }
+        /// Projects the historical restart source from a verified schema 21 completion frame.
+        func completionSourceInputs() -> Self {
+            var copy = self
+            copy.schemaVersion = 20
+            copy.completionIntent = nil
+            return copy
         }
         /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
         func replacingMachineUpdateActivation(_ value: Data?) -> Self {
@@ -111,6 +121,12 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         if let bytes = inputs.machineUpdateBackendEpoch,
            try MachineUpdateBackendEpochRecord.decode(bytes).publication != nil {
             for item in try MachineUpdateBackendEpochRecord.publicationRequirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion == 21 {
+            guard inputs.completionIntent != nil else { throw PreparationStoreError.corruptRecord }
+            for item in try MachineUpdateCompletionIntentRecord.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }

@@ -59,7 +59,7 @@ struct DirectPeerSnapshot: Sendable {
         }
         macID = first.scope.macID; self.peers = peers
     }
-    var serviceName: String { "Remozio-" + macID.map { String(format: "%02x", $0) }.joined() }
+    var serviceName: String { "Remozio-" + LowercaseHexadecimal.encode(macID) }
 
     func peer(certificate data: Data, at date: Date = Date()) -> DirectApprovalPeer? {
         guard !data.isEmpty, data.count <= 8192,

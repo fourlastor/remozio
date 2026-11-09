@@ -17,7 +17,7 @@ SPEC.loader.exec_module(CHECKS)
 
 
 class CheckStageTimingTests(unittest.TestCase):
-    def run_checks(self, system="Linux", github=False, fail_argument="", fail_command=""):
+    def run_checks(self, system="Linux", github=False, fail_argument="", fail_command="", mac_part=None):
         with tempfile.TemporaryDirectory(prefix="timed checks ") as temporary:
             directory = Path(temporary)
             (directory / "repo/scripts").mkdir(parents=True)
@@ -42,9 +42,12 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
             env = os.environ | {"PATH": str(binary) + os.pathsep + os.environ["PATH"],
                                 "CHECK_SYSTEM": system, "CHECK_TIMING_LOG": str(log),
                                 "GITHUB_ACTIONS": "true" if github else "false", "FAIL_ARGUMENT": fail_argument, "FAIL_COMMAND": fail_command}
+            env.pop("REMOZIO_CHECK_MAC_PART", None)
+            if mac_part is not None:
+                env["REMOZIO_CHECK_MAC_PART"] = mac_part
             result = subprocess.run(["/bin/sh", str(directory / "repo/scripts/check.sh")], cwd=directory,
                                     env=env, capture_output=True, text=True, timeout=10)
-            return result, log.read_text().splitlines()
+            return result, log.read_text().splitlines() if log.exists() else []
 
     def test_local_timing_keeps_child_streams_and_command_arguments(self):
         result, calls = self.run_checks()
@@ -78,6 +81,49 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
         self.assertFalse(any("run-macos-job-control-experiment.py" in call for call in calls))
         self.assertFalse(any(call.startswith("git ") for call in calls))
         self.assertRegex(result.stderr, r"Stage timing: Swift test: macos/ui-adapters: [0-9]+s \(exit 23\)")
+
+    def test_ci_mac_parts_run_every_stage_once_in_the_original_order(self):
+        whitespace = "git diff --check"
+        runs = {}
+        for part in (None, "app", "experiments"):
+            result, calls = self.run_checks("Darwin", github=True, mac_part=part)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls[-1], whitespace)
+            runs[part] = calls[:-1]
+        every, app, experiments = runs[None], runs["app"], runs["experiments"]
+        self.assertEqual(sorted(app + experiments), sorted(every))
+        self.assertEqual([call for call in every if call in app], app)
+        self.assertEqual([call for call in every if call in experiments], experiments)
+        self.assertEqual(app, [
+            "python3 scripts/check-macos-app.py",
+            "python3 scripts/run-macos-release-signing-experiment.py",
+            "python3 scripts/run-xctest-shards.py --package-path macos/core --shards 1 --index 0 --app-dependent only "
+            "--forbid-skips -- --triple arm64-apple-macosx26.0 -Xswiftc -O",
+            "python3 scripts/check-command-transfer.py",
+        ])
+        self.assertEqual(experiments[:2], ["python3 -m unittest discover -s tests -p test_*.py",
+                                           "python3 -m unittest discover -s .agents/skills/babysit-pr/scripts -p test_*.py"])
+
+    def test_local_mac_run_keeps_the_serial_core_suite_in_the_app_part(self):
+        _, every = self.run_checks("Darwin")
+        result, app = self.run_checks("Darwin", mac_part="app")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        core = "swift test --package-path macos/core --triple arm64-apple-macosx26.0"
+        self.assertIn(core, every)
+        self.assertIn(core, app)
+
+    def test_other_hosts_ignore_the_mac_part(self):
+        _, every = self.run_checks()
+        for part in ("app", "experiments"):
+            result, calls = self.run_checks(mac_part=part)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls, every)
+
+    def test_unknown_mac_part_fails_before_any_stage(self):
+        result, calls = self.run_checks("Darwin", github=True, mac_part="core")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("Unknown REMOZIO_CHECK_MAC_PART: core", result.stderr)
 
 
 class CapturedBuildTimingTests(unittest.TestCase):

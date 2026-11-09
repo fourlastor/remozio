@@ -541,6 +541,74 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try events.map { try AuditEventMetadata.decode($0, limits: limits).kind }, [.enrollmentAdded, .enrollmentRevoked, .enrollmentAdded])
     }
 
+    private func emptyGatewayHealthProof(registration: GatewayRegistrationIdentity) throws -> MachineUpdateConsumerHealthProof {
+        let signer = MachineUpdateRoleChallengeTests.Fixture()
+        let requirement = try signer.requirement(role: .notificationGateway, uid: 20001, mac: 1, account: 2)
+        let now = moment()
+        let session = try MachineUpdateConsumerHealthChallengeSession(requirement: requirement, registration: registration,
+            clock: { now }, verifyCurrent: {})
+        let request = try session.makeRequest()
+        let roleReply = try signer.answer(request, expected: requirement)
+        let fields: [UInt64: CBORValue] = [0: .unsigned(1), 1: .unsigned(1),
+            2: .bytes(try registration.encode()), 3: .bytes(MachineUpdateGatewayHealthQuery.nonce(request)),
+            4: .unsigned(0), 5: .unsigned(0), 6: .bytes(Data()), 7: .bytes(Data())]
+        let payload = try DeterministicCBOR.encode(.map(fields), limits: limits)
+        let signature = try signer.key.signature(for: Data("Remozio/GatewayHeadReply/v1\u{0}".utf8) + payload).rawRepresentation
+        let packet = try MachineUpdateConsumerHealthPacket(roleReply: roleReply,
+            gatewayHead: .init(canonicalPayload: payload, signature: signature)).encoded
+        return try session.accept(packet, authenticatePeer: { _ in })
+    }
+
+    func testGatewayHealthReconciliationInspectsTheExactHeadWithoutRecordingIt() throws {
+        let fixture = try Fixture(), (db, _, _) = try setup(fixture)
+        let registration = try identity()
+        try db.write { try $0.configureGatewayAuthority(registration) }
+        let proof = try emptyGatewayHealthProof(registration: registration)
+
+        try db.read {
+            try MachineUpdateGatewayHealthReconciliation.requireCurrent(proof, expected: proof.role.requirement,
+                registration: registration, transaction: $0)
+        }
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 0)
+        XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
+    }
+
+    func testGatewayHealthReconciliationRejectsAStaleSignedHead() throws {
+        let fixture = try Fixture(), (db, writer, initial) = try setup(fixture)
+        let registration = try identity()
+        try db.write { try $0.configureGatewayAuthority(registration) }
+        let proof = try emptyGatewayHealthProof(registration: registration)
+        let revision = try add(db, writer: writer, revision: initial)
+        _ = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval())
+
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, 1)
+        XCTAssertThrowsError(try db.read {
+            try MachineUpdateGatewayHealthReconciliation.requireCurrent(proof, expected: proof.role.requirement,
+                registration: registration, transaction: $0)
+        }) { XCTAssertEqual($0 as? GatewayAuthorityError, .headMismatch) }
+        XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
+    }
+
+    func testGatewayHealthReconciliationRejectsMissingHeadOrForeignRegistration() throws {
+        let fixture = try Fixture(), (db, _, _) = try setup(fixture)
+        let registration = try identity()
+        try db.write { try $0.configureGatewayAuthority(registration) }
+        let proof = try emptyGatewayHealthProof(registration: registration)
+        let missing = MachineUpdateConsumerHealthProof(role: proof.role, gatewayHead: nil)
+        let foreign = try GatewayRegistrationIdentity(ownerID: registration.ownerID, macID: registration.macID,
+            accountID: registration.accountID, gatewayID: id(14), lifecycleEpoch: registration.lifecycleEpoch,
+            rootPublicKey: registration.rootPublicKey)
+
+        XCTAssertThrowsError(try db.read {
+            try MachineUpdateGatewayHealthReconciliation.requireCurrent(missing, expected: proof.role.requirement,
+                registration: registration, transaction: $0)
+        }) { XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope) }
+        XCTAssertThrowsError(try db.read {
+            try MachineUpdateGatewayHealthReconciliation.requireCurrent(proof, expected: proof.role.requirement,
+                registration: foreign, transaction: $0)
+        }) { XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope) }
+    }
+
     func testGatewayRemovalAndAuditCommitTogetherAndBadSignerRollsEverythingBack() throws {
         let fixture = try Fixture(), (db, writer, empty) = try setup(fixture)
         let revision = try add(db, writer: writer, revision: empty)

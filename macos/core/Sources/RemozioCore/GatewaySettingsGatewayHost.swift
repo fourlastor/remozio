@@ -57,10 +57,13 @@ private struct GatewaySettingsGatewayPublication: Sendable {
 /// A distinct immutable bootstrap entry. Opening it never reads provider credentials or opens SQLite.
 /// Fresh activation remains disabled until Transport, restart recovery, and Root update coordination also participate.
 public final class GatewaySettingsGatewayHost: Sendable {
-    private let host: GatewaySettingsConsumerHost
-    private init(host: GatewaySettingsConsumerHost) { self.host = host }
+    private let host: any OwnedSettingsConsumerHost
+    private init(host: any OwnedSettingsConsumerHost) { self.host = host }
     public static func open(path: String) throws -> GatewaySettingsGatewayHost {
-        let (scope, release) = try GatewaySettingsConsumerNativeScope.openGateway(path: path)
+        let (scope, release, mode) = try GatewaySettingsConsumerNativeScope.openGateway(path: path)
+        if mode == .updateHealth {
+            return .init(host: try MachineUpdateConsumerHealthHost.open(path: path, scope: scope, release: release))
+        }
         do {
             let configuration = scope.configuration, services = configuration.runtime.services
             let publication = GatewaySettingsGatewayPublication(scope: scope)
@@ -74,7 +77,7 @@ public final class GatewaySettingsGatewayHost: Sendable {
                 setupCode: configuration.setupCode, release: release, access: access, acquireActivity: scope.acquireActivity)
             let recovery = try GatewaySettingsConsumerXPCListener.recovery(services: services,
                 codePolicy: configuration.codePolicy, release: release, access: access, acquireActivity: scope.acquireActivity)
-            return try .init(host: .init(owner: owner, listener: listener, activity: scope, recoveryListener: recovery))
+            return try .init(host: GatewaySettingsConsumerHost(owner: owner, listener: listener, activity: scope, recoveryListener: recovery))
         } catch { scope.close(); throw error }
     }
     public func start() async throws { try await host.start() }

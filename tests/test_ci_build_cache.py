@@ -541,14 +541,24 @@ class BuildCacheTests(unittest.TestCase):
         self.assertEqual(self.source.read_text(), 'print(2)\n')
         self.assertEqual(self.source.stat().st_mtime_ns, stamp)
 
-    def test_system_keychain_output_root_is_cached_only_for_mac(self):
+    def test_system_keychain_output_root_is_cached_only_for_experiments(self):
         name = 'experiments/system-keychain/.build'
-        self.assertIn(name, CACHE.CACHE_PATHS['mac'])
+        self.assertIn(name, CACHE.CACHE_PATHS['experiments'])
+        self.assertNotIn(name, CACHE.CACHE_PATHS['mac'])
         self.assertNotIn(name, CACHE.CACHE_PATHS['interop'])
         path = self.root / name / 'object.o'
         path.parent.mkdir(parents=True); path.write_bytes(b'cached native output')
         CACHE.clear_outputs(self.root, 'interop'); self.assertTrue(path.exists())
-        CACHE.clear_outputs(self.root, 'mac'); self.assertFalse(path.exists())
+        CACHE.clear_outputs(self.root, 'mac'); self.assertTrue(path.exists())
+        CACHE.clear_outputs(self.root, 'experiments'); self.assertFalse(path.exists())
+
+    def test_the_mac_jobs_save_disjoint_output_roots(self):
+        mac, experiments = set(CACHE.CACHE_PATHS['mac']), set(CACHE.CACHE_PATHS['experiments'])
+        self.assertEqual(mac & experiments, set())
+        # The Mac build job inspects the app and macos/core; the Mac core tests job restores the same entry.
+        self.assertEqual(mac, {'macos/core/.build', '.build/release-signing', '.build/macos-app/DerivedData'})
+        self.assertIn('.build/packaging/DerivedData', experiments)
+        self.assertEqual(set(CACHE.CACHE_PATHS['interop']), {'experiments/approval-flow/.build'})
 
 
 if __name__ == '__main__':

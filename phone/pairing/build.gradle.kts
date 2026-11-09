@@ -1,4 +1,4 @@
-plugins { kotlin("multiplatform") }
+plugins { alias(libs.plugins.kotlin.multiplatform) }
 
 kotlin {
     jvmToolchain(21)
@@ -9,17 +9,17 @@ kotlin {
     sourceSets {
         commonMain.dependencies {
             api(project(":protocol-kotlin"))
-            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-            api("org.jetbrains.kotlinx:kotlinx-io-core:0.9.1")
+            api(libs.kotlinx.coroutines.core)
+            api(libs.kotlinx.io.core)
         }
         commonTest.dependencies {
-            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+            implementation(libs.kotlinx.serialization.json)
             implementation(kotlin("test"))
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+            implementation(libs.kotlinx.coroutines.test)
         }
         jvmTest.dependencies {
             implementation(kotlin("test-junit"))
-            implementation("junit:junit:4.13.2")
+            implementation(libs.junit)
         }
     }
 }

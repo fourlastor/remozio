@@ -80,8 +80,28 @@ certificate. The verdict is:
   A read that waits out its remaining awake time after resume fails here, whatever its total awake time.
 
 It covers a read deadline only. The handshake uses the same wait but is capped at 60 s. One run is evidence for that
-host, kernel and sleep state only. Until an attended run passes, host suspend is not established
-([issue 496](https://github.com/rock3r/remozio/issues/496)).
+host, kernel and sleep state only.
+
+**Attended run, 2026-11-08 ([issue 496](https://github.com/rock3r/remozio/issues/496)): passed.** The host was an x86_64
+desktop (Intel Z890 chipset) running kernel 6.17.0-41-generic. The operator suspended it to `deep` (S3, as `PM: suspend
+entry (deep)` in the kernel log shows) with `systemctl suspend -i`. The probe ran with `--wait-seconds 180` and
+recorded:
+
+| Field | Value |
+| --- | --- |
+| `suspendedMs` | 215005 |
+| `suspensionStartedBeforeDeadline`, `resumeAfterDeadline`, `deadlineExpiredDuringSuspend` | `true` |
+| `readStatus` | `timeout` |
+| `readEndedAfterResumeMs` | 0 |
+| `monotonicElapsedMs` / `realtimeElapsedMs` | 61106 / 276111 |
+
+The read returned its timeout as soon as the host resumed, and did not wait out its remaining awake time. An earlier
+run on the same host, with no suspend, reported `inconclusive` as designed. This does not cover `s2idle`, other
+hardware or kernels, a handshake that spans a suspension, or a real network peer.
+
+On a GNOME desktop, an application's suspend inhibitor (for example, a desktop app that keeps the session awake)
+blocks a plain `systemctl suspend` with `Operation inhibited`. `systemctl suspend -i` ignores inhibitors for that one
+suspend.
 
 ## Durable commit state (`PairingCommitState`)
 

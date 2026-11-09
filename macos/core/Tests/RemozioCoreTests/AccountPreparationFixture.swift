@@ -36,9 +36,10 @@ final class AccountPreparationFixture {
         defer { directory.close() }
         _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: kind, owner: getuid())
     }
-    func open(initialize: Bool = false, hook: (() throws -> Void)? = nil) throws -> PreparationIntentStore {
+    func open(initialize: Bool = false, hook: (() throws -> Void)? = nil,
+              inventoryRecordLimit: Int32 = 278_528) throws -> PreparationIntentStore {
         let store = try PreparationIntentStore(lease: .init(anchor: root.path, relativeDirectory: "machine", owner: getuid()),
-            macID: mac, maximumRecords: 64, initialize: initialize, didCommit: hook)
+            macID: mac, maximumRecords: 64, initialize: initialize, didCommit: hook, inventoryRecordLimit: inventoryRecordLimit)
         if initialize {
             try store.upgradeInventoryStorage()
             _ = try store.writeInventory(.init(macID: mac, installationID: Data(repeating: 5, count: 16),
