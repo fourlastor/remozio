@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RemozioProtocol
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -169,6 +170,57 @@ final class InstalledAuthorityReadinessHostTests: XCTestCase {
             XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
         }
     }
+    private final class ReadinessActivity: OwnedReleaseActivity, Sendable {
+        let closes = Mutex(0)
+        func validate() throws {}
+        func close() { closes.withLock { $0 += 1 } }
+    }
+
+    func testNativeRootReadinessRefusesAnOrdinaryProcessAndReleasesItsLoan() throws {
+        guard getuid() != 0 || geteuid() != 0 else { throw XCTSkip("Ordinary-owner guard") }
+        let f = try fixture(), base = try selected(f), release = try XCTUnwrap(f.nativeRelease)
+        let monitor = try XCTUnwrap(release.manifest.components.first(where: { $0.role == .commandMonitor }))
+        let child = try XCTUnwrap(release.manifest.components.first(where: { $0.role == .commandChild }))
+        let execution = try AuthorityCommandExecutionConfiguration(
+            monitorPath: MachineBootstrap.bundlePath + "/" + monitor.relativePath,
+            childPath: MachineBootstrap.bundlePath + "/" + child.relativePath)
+        let old = base.command
+        let command = try AuthorityCommandStartupConfiguration(presence: old.presence, serviceName: old.serviceName,
+            policyPath: old.policyPath, environment: old.environment, submissionLimits: old.submissionLimits,
+            captureLimits: old.captureLimits, execution: execution)
+        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: base.machineDirectory,
+            installationID: base.installationID, releaseDigest: base.releaseDigest, codePolicy: base.codePolicy,
+            command: command, label: base.label, plistName: base.plistName, jobPlacement: base.jobPlacement,
+            gatewaySettingsControlEnabled: true, installedReadinessEnabled: true)
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement()
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: seed.binding.encoded) as? [String: Any])
+        fields["macID"] = command.macID.base64EncodedString()
+        fields["accountID"] = command.accountID.base64EncodedString()
+        fields["installationID"] = host.installationID.base64EncodedString()
+        fields["installedReleaseDigest"] = host.releaseDigest.base64EncodedString()
+        fields["completionPolicyDigest"] = try MachineUpdateActivationRecord.digest(host.codePolicy.bytes).base64EncodedString()
+        let binding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+            options: [.sortedKeys, .withoutEscapingSlashes]))
+        let requirement = MachineUpdateRestartHealthPlan.Requirement(binding: binding,
+            configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+            backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision, role: .authority,
+            executionUID: 0, code: try XCTUnwrap(host.codePolicy.entries.first(where: { $0.role == .authority })),
+            publicKey: command.presence.wake.request.authorityPublicKey)
+        let loan = ReadinessActivity()
+        let scope = try MachineUpdateAuthorityReadinessScope(host: host, requirement: requirement, release: release,
+            verifySelection: { XCTFail("Root check did not run first") }, acquireActivity: { loan })
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.nativeAuthorityReadiness(scope: scope)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(loan.closes.withLock { $0 }, 1)
+        let consumers = try XCTUnwrap(f.plan.consumerHosts)
+        XCTAssertThrowsError(try MachineUpdateNativeInstalledReadinessAccount.native(scope: scope,
+            requirements: [requirement], transport: consumers.transport, gateway: nil, registration: nil, release: release)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(loan.closes.withLock { $0 }, 1)
+    }
+
     func testTheNativeLoaderRefusesAnOrdinaryOwnerBeforeOpeningAPath() throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner guard") }
         XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.load(

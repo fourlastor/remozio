@@ -71,8 +71,9 @@ final class MachineUpdateNativeRestartHealth: @unchecked Sendable {
         let verifier = MachineUpdateNativeRestartVerifier(snapshot: snapshot, host: account.configuration.host,
             sourceAccess: sourceAccess, readCurrent: readCurrent)
         let loan = try activity.acquireShared()
-        let channel = try MachineUpdateConsumerHealthChannel.nativeStartup(host: input.host, requirement: selected,
-            registration: input.registration, release: candidate, authorityReadinessRequest: authorityChallenge,
+        let channel = try MachineUpdateConsumerHealthChannel.nativeConsumer(host: input.host, requirement: selected,
+            registration: input.registration, release: candidate, purpose: .startup,
+            authorityReadinessRequest: authorityChallenge,
             verifyCurrent: { [self] in try verifyCurrent(); try verifier.validate(loan) }, releaseScope: { loan.close() })
         return try await channel.openScope()
     }

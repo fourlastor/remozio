@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import Synchronization
 import RemozioProtocol
 import XCTest
 @testable import RemozioCore
@@ -175,19 +177,19 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         }
         let key = try host.runtime.transportPublicKeyX963
         let expected = requirement(uid: host.serviceUID, key: key)
-        let pins = try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+        let pins = try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: expected,
             registration: nil, release: fixture.release)
         XCTAssertEqual(pins.consumer, expected.code)
         XCTAssertEqual(pins.serviceUID, expected.executionUID)
         XCTAssertEqual(pins.authority, host.codePolicy.entries.first { $0.role == .authority && $0.active })
         for foreign in [requirement(uid: host.serviceUID + 1, key: key),
                         requirement(uid: host.serviceUID, key: seed.publicKey)] {
-            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: foreign,
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: foreign,
                 registration: nil, release: fixture.release)) {
                 XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
             }
         }
-        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.peerPins(
             host: select(.transport, from: fixture.completion), requirement: expected, registration: nil, release: fixture.release)) {
             XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
         }
@@ -201,7 +203,7 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
             backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision, role: .notificationGateway,
             executionUID: host.serviceUID, code: host.consumerCode, publicKey: seed.publicKey)
         let registration = host.runtime.gateway
-        _ = try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+        _ = try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: expected,
             registration: registration, release: fixture.release)
         let wrongRole = MachineUpdateRestartHealthPlan.Requirement(binding: expected.binding,
             configurationEpoch: expected.configurationEpoch, configurationRevision: expected.configurationRevision,
@@ -213,7 +215,7 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
             executionUID: expected.executionUID, code: seed.code, publicKey: expected.publicKey)
         XCTAssertNotEqual(foreignCode.code, expected.code)
         for invalid in [wrongRole, foreignCode] {
-            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: invalid,
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: invalid,
                 registration: registration, release: fixture.release)) {
                 XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
             }
@@ -222,9 +224,93 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
             accountID: registration.accountID, gatewayID: registration.gatewayID,
             lifecycleEpoch: Data(repeating: 247, count: 16), rootPublicKey: registration.rootPublicKey)
         for invalid in [nil, foreign] as [GatewayRegistrationIdentity?] {
-            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: expected,
                 registration: invalid, release: fixture.release)) {
                 XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
+            }
+        }
+    }
+
+    func testInstalledReadinessPinsOnlyTheCompletionPolicyStage() throws {
+        let fixture = try Fixture(), host = fixture.completion
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement(role: .notificationGateway, uid: host.serviceUID)
+        let expected = try MachineUpdateRestartHealthPlan.Requirement(binding: XCTUnwrap(host.releaseBinding),
+            configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+            backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision, role: .notificationGateway,
+            executionUID: host.serviceUID, code: host.consumerCode, publicKey: seed.publicKey)
+        let pins = try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: expected,
+            registration: host.runtime.gateway, release: fixture.release, purpose: .installedReadiness)
+        XCTAssertEqual(pins.consumer, expected.code)
+        XCTAssertEqual(pins.serviceUID, expected.executionUID)
+
+        for foreign in [fixture.original, fixture.startup] {
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.peerPins(host: foreign, requirement: expected,
+                registration: host.runtime.gateway, release: fixture.release, purpose: .installedReadiness)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testInstalledTransportPinsAndRefusesForeignHistoricalRuntime() throws {
+        let fixture = try Fixture(), host = try select(.transport, from: fixture.completion)
+        let binding = try XCTUnwrap(host.releaseBinding)
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement()
+        let requirement = MachineUpdateRestartHealthPlan.Requirement(binding: binding,
+            configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+            backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision,
+            role: .transport, executionUID: host.serviceUID, code: host.consumerCode,
+            publicKey: try host.runtime.transportPublicKeyX963)
+        let pins = try MachineUpdateConsumerHealthChannel.peerPins(host: host, requirement: requirement,
+            registration: nil, release: fixture.release, purpose: .installedReadiness)
+        XCTAssertEqual(pins.consumer, host.consumerCode)
+        let foreign = try Fixture()
+        XCTAssertThrowsError(try binding.requireHistoricalRuntime(foreign.completion.runtime)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
+        guard getuid() != 0 || geteuid() != 0 else { return }
+        let releases = Mutex(0)
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.nativeConsumer(host: host, requirement: requirement,
+            registration: nil, release: fixture.release, purpose: .installedReadiness,
+            verifyCurrent: { XCTFail("Root check did not run first") }, releaseScope: { releases.withLock { $0 += 1 } })) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(releases.withLock { $0 }, 1)
+    }
+
+    func testInstalledNativeInventoryRejectsForeignRootGatewayAndBundle() throws {
+        let fixture = try Fixture(), candidate = fixture.release
+        let old = try select(.transport, from: fixture.completion)
+        let transport = try GatewaySettingsConsumerHostConfiguration(role: .transport, runtime: old.runtime,
+            bundlePath: MachineBootstrap.bundlePath, codePolicy: old.codePolicy,
+            releaseBinding: old.releaseBinding, policyStage: .completion)
+        let binding = try XCTUnwrap(transport.releaseBinding)
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement()
+        func requirement(_ role: AuthorityCodeRole, uid: UInt32, code: AuthorityCodeEntry, key: Data)
+            -> MachineUpdateRestartHealthPlan.Requirement {
+            .init(binding: binding, configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+                backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision,
+                role: role, executionUID: uid, code: code, publicKey: key)
+        }
+        let root = requirement(.authority, uid: 0,
+            code: try XCTUnwrap(transport.codePolicy.entries.first(where: { $0.role == .authority })), key: seed.publicKey)
+        let consumer = requirement(.transport, uid: transport.serviceUID, code: transport.consumerCode,
+            key: try transport.runtime.transportPublicKeyX963)
+        let owner = MachineUpdateNativeInstalledReadinessAccount.self
+        _ = try owner.nativeInventory(root: root, requirements: [root, consumer], transport: transport,
+            gateway: nil, registration: nil, release: candidate)
+        let invalid: [(MachineUpdateRestartHealthPlan.Requirement, GatewaySettingsConsumerHostConfiguration, GatewaySettingsConsumerHostConfiguration?)] =
+            [(seed, transport, nil), (root, transport, fixture.completion), (root, old, nil)]
+        for (authority, host, gateway) in invalid {
+            XCTAssertThrowsError(try owner.nativeInventory(root: authority, requirements: [root, consumer], transport: host,
+                gateway: gateway, registration: gateway?.runtime.gateway, release: candidate)) {
+                XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .invalidInventory)
+            }
+        }
+        let invalidChallenges: [(AuthorityCodeRole, Data?)] = [(.transport, Data([1])), (.notificationGateway, nil), (.authority, nil)]
+        for (role, nonce) in invalidChallenges {
+            XCTAssertThrowsError(try owner.consumerSelection(role: role, rootRequest: nonce, transport: transport,
+                gateway: fixture.completion, registration: fixture.completion.runtime.gateway)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
             }
         }
     }

@@ -72,11 +72,12 @@ actor MachineUpdateConsumerHealthChannel {
     private var pending: (id: UUID, continuation: CheckedContinuation<MachineUpdateConsumerHealthReply, any Error>)?
     private var timer: Task<Void, Never>?
 
-    /// Checks the retained startup selection before constructing any native connection.
-    static func startupPeerPins(host: GatewaySettingsConsumerHostConfiguration,
+    /// Checks the retained selection before constructing any native connection.
+    static func peerPins(host: GatewaySettingsConsumerHostConfiguration,
         requirement: MachineUpdateRestartHealthPlan.Requirement, registration: GatewayRegistrationIdentity?,
-        release: SignedReleaseEvidence) throws -> GatewaySettingsRecoveryNativePolicy {
-        try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: host)
+        release: SignedReleaseEvidence, purpose: MachineUpdateConsumerHealthPurpose = .startup
+    ) throws -> GatewaySettingsRecoveryNativePolicy {
+        try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: host, purpose: purpose)
         let pins = try GatewaySettingsRecoveryNativePolicy(host: host, release: release)
         guard host.releaseBinding == requirement.binding, pins.consumer == requirement.code,
               pins.serviceUID == requirement.executionUID, host.role.codeRole == requirement.role,
@@ -96,9 +97,10 @@ actor MachineUpdateConsumerHealthChannel {
     }
 
     /// Transfers the retained restart scope to the pinned connection. The driver activates only when an exchange opens.
-    static func nativeStartup(host: GatewaySettingsConsumerHostConfiguration,
+    static func nativeConsumer(host: GatewaySettingsConsumerHostConfiguration,
         requirement: MachineUpdateRestartHealthPlan.Requirement, registration: GatewayRegistrationIdentity?,
-        release: SignedReleaseEvidence, authorityReadinessRequest: Data? = nil, timeoutMilliseconds: UInt64 = 5000,
+        release: SignedReleaseEvidence, purpose: MachineUpdateConsumerHealthPurpose,
+        authorityReadinessRequest: Data? = nil, timeoutMilliseconds: UInt64 = 5000,
         verifyCurrent: @escaping @Sendable () throws -> Void,
         releaseScope: @escaping @Sendable () -> Void) throws -> MachineUpdateConsumerHealthChannel {
         var opened: NativeMachineUpdateConsumerHealthDriver?
@@ -108,7 +110,8 @@ actor MachineUpdateConsumerHealthChannel {
             guard authorityReadinessRequest == nil || requirement.role == .notificationGateway else {
                 throw MachineUpdateConsumerHealthChannelError.changedScope
             }
-            let pins = try startupPeerPins(host: host, requirement: requirement, registration: registration, release: release)
+            let pins = try peerPins(host: host, requirement: requirement, registration: registration,
+                release: release, purpose: purpose)
             let local = try AuthoritySelfValidation.requirement(for: pins.authority)
             let peer = try XPCPeerPolicy(teamID: pins.consumer.teamID, componentIdentifier: pins.consumer.identifier,
                 approvedCodeDirectoryHashes: [pins.consumer.codeDirectoryHash], expectedUserID: pins.serviceUID)
@@ -134,6 +137,30 @@ actor MachineUpdateConsumerHealthChannel {
             releaseScope()
             throw error
         }
+    }
+
+    /// Opens only the pinned installed Authority readiness channel and owns its activity loan.
+    static func nativeAuthorityReadiness(scope: MachineUpdateAuthorityReadinessScope,
+        timeoutMilliseconds: UInt64 = 5000) throws -> MachineUpdateConsumerHealthChannel {
+        let activity = try scope.acquireActivity()
+        var opened: NativeMachineUpdateConsumerHealthDriver?
+        do {
+            let executable = MachineBootstrap.bundlePath + "/" + InstalledAuthorityCommandConfiguration.executablePath
+            let verify: @Sendable () throws -> Void = {
+                try scope.validate()
+                guard try DynamicCodeValidation.selfPath() == executable else {
+                    throw MachineUpdateConsumerHealthChannelError.changedScope
+                }
+                try activity.validate()
+            }
+            try verify()
+            let clock = try AuthorityClock()
+            let driver = NativeMachineUpdateConsumerHealthDriver(serviceName: try scope.serviceName, policy: scope.rootPolicy)
+            opened = driver
+            return try Self(driver: driver, expectedHello: scope.host.canonicalBytes, requirement: scope.requirement,
+                registration: nil, authorityInstalledReadiness: true, timeoutMilliseconds: timeoutMilliseconds,
+                clock: { try clock.now() }, verifyCurrent: verify, release: { activity.close() })
+        } catch { opened?.close(); activity.close(); throw error }
     }
 
     /// Injected drivers exercise ordering only. They grant no native peer, store or key access.
