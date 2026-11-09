@@ -218,12 +218,18 @@ public final class PreparationIntentStore {
     func retainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try transaction(write: false) { try loadRetainedRuntimeCompatibilityInputs() }
     }
-    private func loadRetainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+    private func loadRetainedRuntimeCompatibilityInputs(finishing: MachineUpdateInstalledSourceSnapshot? = nil)
+        throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
-        // The installed frame must be read through the dedicated finishing reader.
-        guard schema <= 22 else { throw PreparationStoreError.invalidTransition }
-        let inventory = try schema >= 2 ? loadInventoryRecord() : nil
+        let actualInventory = try schema >= 2 ? loadInventoryRecord() : nil
+        if let finishing {
+            guard schema == 23, finishing.actual.inventory == actualInventory else { throw PreparationStoreError.staleRevision }
+        } else {
+            // The ordinary reader cannot treat a finishing store as a stable runtime.
+            guard schema <= 22 else { throw PreparationStoreError.invalidTransition }
+        }
+        let inventory = finishing?.historicalInventory ?? actualInventory
         let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
         guard schema >= 6 else {
             guard sharedImport?.records.allSatisfy({ $0.runCredential == nil }) ?? true else { throw PreparationStoreError.corruptRecord }
@@ -246,12 +252,12 @@ public final class PreparationIntentStore {
         for id in ids {
             let state = try loadRuntimePreparation(accountID: id)
             guard let reference = state.reference else { throw PreparationStoreError.corruptRecord }
-            try requireRuntimeMaterialScope(reference)
+            try requireRuntimeMaterialScope(reference, historicalInventory: finishing?.historicalInventory)
             var record: Data?, registered = false
             if activated.contains(id) {
                 let activation = try loadRuntimeActivation(accountID: id)
                 guard let plan = activation.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
-                try requireRuntimeActivationScope(plan)
+                try requireRuntimeActivationScope(plan, historicalInventory: finishing?.historicalInventory)
                 if activation.jobsRegistered {
                     guard let inventory, try plan.enrolledInventory(inventory) == inventory else { throw PreparationStoreError.corruptRecord }
                 }
@@ -277,13 +283,13 @@ public final class PreparationIntentStore {
         for id in gatewayIDs {
             let state = try loadGatewayRuntimeActivation(accountID: id)
             guard let plan = state.plan else { throw PreparationStoreError.corruptRecord }
-            let scope = try requireGatewayRuntimeActivationScope(plan)
+            let scope = try requireGatewayRuntimeActivationScope(plan, historicalInventory: finishing?.historicalInventory)
             if state.jobRegistered {
                 let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
                 guard try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw PreparationStoreError.corruptRecord }
             }
             let settings = try schema >= 11 ? loadGatewaySettingsTransition(accountID: id) : .empty
-            if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision) }
+            if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision, historicalInventory: finishing?.historicalInventory) }
             gateways.append(.init(accountID: id, activationRecord: try plan.encoded,
                 configurationPublished: state.filesPublished, jobRegistered: state.jobRegistered,
                 activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
@@ -293,7 +299,7 @@ public final class PreparationIntentStore {
         guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
         let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
             guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
-            try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true); return record
+            try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true, historicalInventory: finishing?.historicalInventory); return record
         }
         let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
         if schema >= 13 {
@@ -319,6 +325,18 @@ public final class PreparationIntentStore {
         } : []
         try identity(macID)
         let admission = try schema >= 16 ? loadUpdateAdmissionRegistration()?.encoded : nil
+        if let finishing {
+            let installed = finishing.actual.installed
+            return try .init(schemaVersion: schema, macID: macID, inventory: actualInventory?.canonicalBytes, runtimes: values,
+                gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs,
+                auditCutovers: auditCutovers, updateAdmissionRegistration: admission,
+                machineUpdateActivation: finishing.actual.activation.encoded,
+                machineUpdateConfigurationEpoch: installed.configuration().record.encoded,
+                machineUpdateBackendEpoch: installed.backend().record.encoded,
+                completionIntent: MachineUpdateActivationRecord.digest(installed.completionIntent().record.encoded),
+                completionPublication: MachineUpdateActivationRecord.digest(installed.publicationSource().encoded),
+                installedRelease: installed.record.encoded)
+        }
         return try .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: values, gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs, auditCutovers: auditCutovers,
             updateAdmissionRegistration: admission, machineUpdateActivation: schema >= 17 ? loadMachineUpdateActivation()?.encoded : nil,
             machineUpdateReplacement: schema >= 18 ? loadMachineUpdateReplacement()?.encoded : nil,
@@ -389,13 +407,13 @@ public final class PreparationIntentStore {
             }
         }
     }
-    private func requireRuntimeActivationScope(_ plan: RuntimeActivationPlan) throws {
+    private func requireRuntimeActivationScope(_ plan: RuntimeActivationPlan, historicalInventory: InstallationInventory? = nil) throws {
         guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimeActivationError.incomplete }
-        try requireRuntimeMaterialScope(plan.reference)
+        try requireRuntimeMaterialScope(plan.reference, historicalInventory: historicalInventory)
         let runtime = try loadRuntimePreparation(accountID: plan.accountID)
         guard runtime.configurationPublished, runtime.reference == plan.reference,
               let account = try loadAccountPreparation(ownerUID: plan.reference.services.ownerUID),
-              let inventory = try loadInventoryRecord() else { throw RuntimeActivationError.incomplete }
+              let inventory = try historicalInventory ?? loadInventoryRecord() else { throw RuntimeActivationError.incomplete }
         try plan.validate(account: account, reference: plan.reference)
         _ = try plan.enrolledInventory(inventory)
     }
@@ -579,12 +597,12 @@ public final class PreparationIntentStore {
             }
         }
     }
-    private func requireGatewaySettingsScope(_ revision: GatewayRuntimeSettingsRevision) throws -> GatewayRuntimeActivationPlan {
+    private func requireGatewaySettingsScope(_ revision: GatewayRuntimeSettingsRevision, historicalInventory: InstallationInventory? = nil) throws -> GatewayRuntimeActivationPlan {
         guard revision.sequence <= UInt64(Int64.max) else { throw GatewayPreparationError.exhausted }
         guard try scalar("PRAGMA user_version") >= 10 else { throw GatewayPreparationError.incomplete }
         let state = try loadGatewayRuntimeActivation(accountID: revision.accountID)
         guard state.filesPublished, state.jobRegistered, let activation = state.plan else { throw GatewayPreparationError.incomplete }
-        let scope = try requireGatewayRuntimeActivationScope(activation)
+        let scope = try requireGatewayRuntimeActivationScope(activation, historicalInventory: historicalInventory)
         _ = try revision.proposal(activation: activation, journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
         return activation
     }
@@ -628,15 +646,15 @@ public final class PreparationIntentStore {
             return result
         }
     }
-    private func requireGatewayRuntimeActivationScope(_ plan: GatewayRuntimeActivationPlan) throws
+    private func requireGatewayRuntimeActivationScope(_ plan: GatewayRuntimeActivationPlan, historicalInventory: InstallationInventory? = nil) throws
         -> (journal: GatewayJournalPreparationState, foreground: RuntimeActivationPlan, inventory: InstallationInventory) {
         guard try scalar("PRAGMA user_version") >= 9 else { throw GatewayPreparationError.incomplete }
         let journal = try loadGatewayJournalPreparation(accountID: plan.accountID)
         let activation = try loadRuntimeActivation(accountID: plan.accountID)
         guard journal.initialized, let intent = journal.intent, activation.jobsRegistered, let foreground = activation.plan,
-              let inventory = try loadInventoryRecord(), intent.id == plan.journalIntentID,
+              let inventory = try historicalInventory ?? loadInventoryRecord(), intent.id == plan.journalIntentID,
               try intent.digest == plan.journalIntentDigest else { throw GatewayPreparationError.incomplete }
-        try requireGatewayJournalScope(intent)
+        try requireGatewayJournalScope(intent, historicalInventory: historicalInventory)
         _ = try plan.proposal(journal: journal, foreground: foreground, inventory: inventory)
         return (journal, foreground, inventory)
     }
@@ -716,12 +734,12 @@ public final class PreparationIntentStore {
             return .init(intent: intent, initialized: true)
         }
     }
-    private func requireGatewayJournalScope(_ intent: GatewayJournalSetupIntent) throws {
+    private func requireGatewayJournalScope(_ intent: GatewayJournalSetupIntent, historicalInventory: InstallationInventory? = nil) throws {
         guard try scalar("PRAGMA user_version") >= 8 else { throw GatewayPreparationError.incomplete }
-        try requireGatewayMaterialScope(intent.material)
+        try requireGatewayMaterialScope(intent.material, historicalInventory: historicalInventory)
         guard try loadGatewayPreparation(accountID: intent.accountID).reference == intent.material,
               let foreground = try loadRuntimeActivation(accountID: intent.accountID).plan,
-              let inventory = try loadInventoryRecord() else { throw GatewayPreparationError.incomplete }
+              let inventory = try historicalInventory ?? loadInventoryRecord() else { throw GatewayPreparationError.incomplete }
         try intent.validate(foreground: foreground, inventory: inventory)
     }
     private func loadGatewayJournalPreparation(accountID: Data) throws -> GatewayJournalPreparationState {
@@ -784,17 +802,17 @@ public final class PreparationIntentStore {
             try identity(macID)
         }
     }
-    private func requireGatewayMaterialScope(_ reference: GatewayMaterialReference) throws {
-        try requireRuntimeMaterialScope(reference.runtime)
+    private func requireGatewayMaterialScope(_ reference: GatewayMaterialReference, historicalInventory: InstallationInventory? = nil) throws {
+        try requireRuntimeMaterialScope(reference.runtime, historicalInventory: historicalInventory)
         guard try scalar("PRAGMA user_version") >= 7 else { throw GatewayPreparationError.incomplete }
         let runtime = try loadRuntimePreparation(accountID: reference.runtime.services.accountID)
         let activation = try loadRuntimeActivation(accountID: reference.runtime.services.accountID)
         guard runtime.configurationPublished, runtime.reference == reference.runtime, activation.jobsRegistered,
               let plan = activation.plan, plan.reference == reference.runtime,
-              let inventory = try loadInventoryRecord(), try plan.enrolledInventory(inventory) == inventory else {
+              let inventory = try historicalInventory ?? loadInventoryRecord(), try plan.enrolledInventory(inventory) == inventory else {
             throw GatewayPreparationError.incomplete
         }
-        try requireRuntimeActivationScope(plan)
+        try requireRuntimeActivationScope(plan, historicalInventory: historicalInventory)
     }
     private func loadGatewayPreparation(accountID: Data) throws -> GatewayPreparationState {
         try statement("SELECT account,material,receipt,credential,wake,digest,record FROM gateway_preparation_v1 ORDER BY account LIMIT 65") { row in
@@ -872,9 +890,10 @@ public final class PreparationIntentStore {
             return next
         }
     }
-    private func requireRuntimeAuditUpgradeScope(_ intent: RuntimeAuditUpgradeIntent, allowCommitted: Bool = false) throws {
+    private func requireRuntimeAuditUpgradeScope(_ intent: RuntimeAuditUpgradeIntent, allowCommitted: Bool = false,
+        historicalInventory: InstallationInventory? = nil) throws {
         guard try scalar("PRAGMA user_version") >= 6 else { throw RuntimePreparationError.incomplete }
-        try requireRuntimeMaterialScope(intent.source)
+        try requireRuntimeMaterialScope(intent.source, historicalInventory: historicalInventory)
         let current = try loadRuntimePreparation(accountID: intent.source.services.accountID)
         guard current.configurationPublished else { throw RuntimePreparationError.changedScope }
         if current.reference == intent.source { return }
@@ -1350,8 +1369,8 @@ public final class PreparationIntentStore {
             }
         }
     }
-    private func requireRuntimeMaterialScope(_ reference: RuntimeMaterialReference) throws {
-        try requireServiceAccountScope(reference.services)
+    private func requireRuntimeMaterialScope(_ reference: RuntimeMaterialReference, historicalInventory: InstallationInventory? = nil) throws {
+        try requireServiceAccountScope(reference.services, historicalInventory: historicalInventory)
         guard try scalar("PRAGMA user_version") >= 5 else { throw RuntimePreparationError.incomplete }
         let current = try loadServiceAccountPlan(accountID: reference.services.accountID)
         guard current.plan == reference.services, current.complete else { throw RuntimePreparationError.incomplete }
@@ -1444,10 +1463,10 @@ public final class PreparationIntentStore {
             }
         }
     }
-    private func requireServiceAccountScope(_ plan: ServiceAccountPlan) throws {
+    private func requireServiceAccountScope(_ plan: ServiceAccountPlan, historicalInventory: InstallationInventory? = nil) throws {
         guard plan.macID == macID, try scalar("PRAGMA user_version") >= 4,
               let account = try loadAccountPreparation(ownerUID: plan.ownerUID),
-              let inventory = try loadInventoryRecord(), inventory.installationID == plan.installationID,
+              let inventory = try historicalInventory ?? loadInventoryRecord(), inventory.installationID == plan.installationID,
               inventory.releaseDigest == plan.releaseDigest else { throw ServiceAccountProvisioningError.changedScope }
         try plan.validate(account: account)
     }
@@ -2873,8 +2892,13 @@ public final class PreparationIntentStore {
         private let thread = pthread_self()
         private let frame: MachineUpdateFinalizationFrame
         private var verifyCurrent: (() throws -> Void)?
-        fileprivate init(frame: MachineUpdateFinalizationFrame, verifyCurrent: @escaping () throws -> Void) {
+        private var readSource: ((MachineUpdateFinalizationSnapshot) throws -> MachineUpdateInstalledSourceSnapshot)?
+        private var readRuntime: ((MachineUpdateInstalledSourceSnapshot) throws -> RuntimeReleaseCompatibilitySnapshot)?
+        fileprivate init(frame: MachineUpdateFinalizationFrame, verifyCurrent: @escaping () throws -> Void,
+            readSource: @escaping (MachineUpdateFinalizationSnapshot) throws -> MachineUpdateInstalledSourceSnapshot,
+            readRuntime: @escaping (MachineUpdateInstalledSourceSnapshot) throws -> RuntimeReleaseCompatibilitySnapshot) {
             self.frame = frame; self.verifyCurrent = verifyCurrent
+            self.readSource = readSource; self.readRuntime = readRuntime
         }
         func read() throws -> MachineUpdateFinalizationFrame {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
@@ -2886,7 +2910,35 @@ public final class PreparationIntentStore {
                 catch { expire(); throw error }
             }
         }
-        fileprivate func expire() { lock.withLock { verifyCurrent = nil } }
+        func readRetainedSource() throws -> MachineUpdateInstalledSourceSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
+                throw JournalLeaseError.invalidated
+            }
+            return try lock.withLock {
+                guard case .installed(let installed) = try read() else { throw PreparationStoreError.invalidTransition }
+                guard let readSource else { throw JournalLeaseError.invalidated }
+                do {
+                    let result = try readSource(installed)
+                    _ = try read()
+                    return result
+                } catch { expire(); throw error }
+            }
+        }
+        func readCompatibility() throws -> MachineUpdateInstalledCompatibilitySnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
+                throw JournalLeaseError.invalidated
+            }
+            return try lock.withLock {
+                let source = try readRetainedSource()
+                guard let readRuntime else { throw JournalLeaseError.invalidated }
+                do {
+                    let runtime = try readRuntime(source)
+                    try readRetainedSource().requireSame(as: source)
+                    return .init(source: source, runtime: runtime)
+                } catch { expire(); throw error }
+            }
+        }
+        fileprivate func expire() { lock.withLock { verifyCurrent = nil; readSource = nil; readRuntime = nil } }
     }
 
     private static let completionRetirementTables = ["machine_update_completion_publication_v1",
@@ -2899,6 +2951,13 @@ public final class PreparationIntentStore {
         let scope = CompletionFinalizationScope(frame: frame, verifyCurrent: { [weak self] in
             guard let self, self.active else { throw JournalLeaseError.invalidated }
             try capture().requireSame(as: frame)
+        }, readSource: { [weak self] actual in
+            guard let self, self.active else { throw JournalLeaseError.invalidated }
+            return try self.loadInstalledRuntimeSource(actual: actual)
+        }, readRuntime: { [weak self] source in
+            guard let self, self.active else { throw JournalLeaseError.invalidated }
+            let inputs = try self.loadRetainedRuntimeCompatibilityInputs(finishing: source)
+            return try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs)
         })
         defer { scope.expire() }
         _ = try scope.read()
@@ -3016,6 +3075,70 @@ public final class PreparationIntentStore {
                 }, body)
             }
         }
+    }
+
+    func installedRuntimeSource(candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease)
+        throws -> MachineUpdateInstalledSourceSnapshot {
+        try transaction(write: false) {
+            try requireUpdateAdmissionDirectory(directory)
+            return try loadInstalledRuntimeSource(actual: loadMachineUpdateFinalization(candidate: candidate))
+        }
+    }
+
+    private enum HistoricalMachineColumn {
+        case integer(Int64), blob(Data)
+    }
+
+    /// Recreates the original row hash for a singleton replaced by finalization.
+    private func historicalSingletonTableDigest(_ table: String, columns: [HistoricalMachineColumn]) throws -> Data {
+        var row = SHA256(); row.update(data: Data("Remozio/MachineEpochRow/v1\0".utf8))
+        row.update(data: candidateGeneration(UInt64(columns.count)))
+        for column in columns {
+            switch column {
+            case .integer(let value):
+                row.update(data: Data([UInt8(SQLITE_INTEGER)]))
+                row.update(data: candidateGeneration(UInt64(bitPattern: value)))
+            case .blob(let bytes):
+                guard bytes.count <= 278528 else { throw PreparationStoreError.corruptRecord }
+                row.update(data: Data([UInt8(SQLITE_BLOB)]))
+                row.update(data: candidateGeneration(UInt64(bytes.count)))
+                row.update(data: bytes)
+            }
+        }
+        return machineEpochTableDigest(table, rows: [Data(row.finalize())])
+    }
+
+    private func loadInstalledRuntimeSource(actual: MachineUpdateFinalizationSnapshot) throws
+        -> MachineUpdateInstalledSourceSnapshot {
+        try identity(macID)
+        guard actual.schemaVersion == 23, try scalar("PRAGMA user_version") == 23,
+              actual.activation.phase == .finishing, try loadInventoryRecord() == actual.inventory else {
+            throw PreparationStoreError.staleRevision
+        }
+        let installed = actual.installed
+        let configuration = try installed.configuration(), intent = try installed.completionIntent()
+        guard intent.record.sourceSchemaVersion == 20 else { throw PreparationStoreError.incompatibleStore }
+        let historical = try InstallationInventory.decode(configuration.artifact(5), expectedMacID: macID)
+        let candidate = try UpdateSchedulingCandidateRecord.decode(configuration.artifact(6))
+        let replacement = try MachineUpdateReplacementRecord.decode(configuration.artifact(9))
+        guard historical.installationID == actual.inventory.installationID,
+              historical.revision == candidate.inventoryRevision,
+              historical.revision == intent.record.sourceInventoryRevision else { throw PreparationStoreError.staleRevision }
+
+        let historicalTables = [
+            "installation_inventory_v1": try historicalSingletonTableDigest("installation_inventory_v1", columns: [
+                .integer(1), .blob(historical.installationID), .blob(historical.revision), .blob(historical.canonicalBytes)]),
+            "update_scheduling_candidate_v1": try historicalSingletonTableDigest("update_scheduling_candidate_v1", columns: [
+                .integer(1), .blob(candidateGeneration(candidate.generation)), .blob(bytes(candidate.revision)), .blob(candidate.encoded)]),
+            "machine_update_replacement_v1": try historicalSingletonTableDigest("machine_update_replacement_v1", columns: [
+                .integer(1), .blob(bytes(replacement.revision)), .blob(replacement.encoded)]),
+        ]
+        let digest = try machineEpochSourceDigest(schema: 23, digestSchema: intent.record.sourceSchemaVersion,
+            installationID: actual.inventory.installationID, historicalTables: historicalTables)
+        guard try digest == installed.backend().record.currentSourceDigest,
+              digest == intent.record.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
+        return .init(actual: actual, historicalInventory: historical, historicalSchemaVersion: intent.record.sourceSchemaVersion,
+            historicalSourceDigest: digest)
     }
 
     private func requireInstalledReleaseFormats(_ candidate: SignedReleaseEvidence) throws {
@@ -3797,6 +3920,12 @@ public final class PreparationIntentStore {
               digestSchema <= schema else {
             throw PreparationStoreError.incompatibleStore
         }
+        return try machineEpochSourceDigest(schema: schema, digestSchema: digestSchema,
+            installationID: loadInventoryRecord()?.installationID)
+    }
+
+    private func machineEpochSourceDigest(schema: Int64, digestSchema: Int64, installationID: Data?,
+        historicalTables: [String: Data] = [:]) throws -> Data {
         let tables: [String] = try statement("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name") { row in
             var values: [String] = []
             while try step(row) == SQLITE_ROW {
@@ -3807,13 +3936,13 @@ public final class PreparationIntentStore {
         }
         var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochSource/v1\0".utf8))
         hash.update(data: candidateGeneration(UInt64(digestSchema)))
-        let inventory = try loadInventoryRecord()
-        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
+        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: installationID)
         hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
         for table in tables where table != "machine_update_configuration_epoch_v1" &&
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
-            table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" {
-            hash.update(data: try machineTableDigest(table))
+            table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" &&
+            table != "installed_release_state_v1" {
+            hash.update(data: try historicalTables[table] ?? machineTableDigest(table))
         }
         return Data(hash.finalize())
     }
@@ -3849,6 +3978,10 @@ public final class PreparationIntentStore {
             }
             return rows.sorted { $0.lexicographicallyPrecedes($1) }
         }
+        return machineEpochTableDigest(table, rows: rows)
+    }
+
+    private func machineEpochTableDigest(_ table: String, rows: [Data]) -> Data {
         var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochTable/v1\0".utf8))
         hash.update(data: candidateGeneration(UInt64(table.utf8.count))); hash.update(data: Data(table.utf8))
         hash.update(data: candidateGeneration(UInt64(rows.count)))

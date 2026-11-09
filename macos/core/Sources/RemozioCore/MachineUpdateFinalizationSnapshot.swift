@@ -1,7 +1,7 @@
 import Foundation
 
 /// Actual installed metadata. Historical operands do not grant startup or admission authority.
-struct MachineUpdateFinalizationSnapshot {
+struct MachineUpdateFinalizationSnapshot: Sendable {
     let schemaVersion: Int64
     let inventory: InstallationInventory
     let candidate: UpdateSchedulingCandidateRecord

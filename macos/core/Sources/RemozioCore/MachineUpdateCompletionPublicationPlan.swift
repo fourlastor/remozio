@@ -132,9 +132,11 @@ struct MachineUpdateCompletionPublicationPlan: CustomStringConvertible, CustomDe
             }
             if config.completion.host.installedReadinessEnabled {
                 try MachineUpdateAuthorityReadinessJobTransition.requireRelease(candidate, policy: config.completion.host.codePolicy)
-                let job = try MachineUpdateAuthorityReadinessJobTransition(startup: config.startup.host,
-                    completion: config.completion.host, bundlePath: target.bundlePath)
-                try append(.authorityJob, startup: job.startup.bytes, completion: job.completion.bytes)
+                if !config.startup.host.installedReadinessEnabled {
+                    let job = try MachineUpdateAuthorityReadinessJobTransition(startup: config.startup.host,
+                        completion: config.completion.host, bundlePath: target.bundlePath)
+                    try append(.authorityJob, startup: job.startup.bytes, completion: job.completion.bytes)
+                }
             }
         }
         guard selected.count <= 1408,

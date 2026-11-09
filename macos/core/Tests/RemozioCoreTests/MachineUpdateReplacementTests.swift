@@ -24,19 +24,28 @@ private final class MachineReplacementFixture {
     let oldRelease: SignedReleaseEvidence
     let newRelease: SignedReleaseEvidence
     let installedReadiness: Bool
+    let readinessAlreadyEnabled: Bool
     var quiet: UpdateQuiescenceLease
     let oldIdentity: PreparationFileIdentity
     let newIdentity: PreparationFileIdentity
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
-         completionIntent: Bool = false,
+         completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
+        self.readinessAlreadyEnabled = readinessAlreadyEnabled
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
-            replacement: true, ownedInstalledBundle: true))
+            replacement: true, ownedInstalledBundle: true, installedReadiness: readinessAlreadyEnabled))
         try beforeActivation(files)
-        let registration = try files.prepare(); oldRelease = files.machine.release
+        var registration = try files.prepare()
+        if admitEveryAccount {
+            let inventory = try XCTUnwrap(files.machine.store.inventory())
+            for account in inventory.accounts where account.accountID != files.machine.account {
+                registration = try files.prepare(accountID: account.accountID, replacing: registration)
+            }
+        }
+        oldRelease = files.machine.release
         try MachineUpdateActivationStorage.enableInLease(installedRelease: oldRelease, policy: files.machine.policy, store: files.machine.store)
         try MachineUpdateReplacementStorage.enableInLease(installedRelease: oldRelease, policy: files.machine.policy, store: files.machine.store)
         let parent = files.root.appendingPathComponent("Installed")
@@ -711,37 +720,49 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertNil(try f.machine.store.machineUpdateConfigurationEpoch())
     }
 
-    private func retainFixtureConfigurationEpoch(_ f: Fixture) throws -> MachineUpdateConfigurationEpochRecord {
+    private func retainFixtureConfigurationEpoch(_ f: Fixture, additionalForeground: [RuntimeActivationPlan] = []) throws
+        -> MachineUpdateConfigurationEpochRecord {
         _ = try f.run()
         let previous = try restartSource(f)
         let source = try f.machine.store.upgradeConfigurationEpochForInstalledRecovery(expected: previous,
             candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
         let accountID = f.machine.account
-        let account = try XCTUnwrap(source.accounts.first { $0.accountID == accountID })
-        let foreground = f.machine.f.plan
-        let bundle = try RuntimeConfigurationBundle.initial(account: XCTUnwrap(account.preparation),
-            initialization: XCTUnwrap(account.initialization), reference: foreground.reference, inventory: source.replacement.inventory)
-        let original = RuntimeReleaseConfigurationSource(host: foreground.host, transport: foreground.transport,
-            gateway: try XCTUnwrap(foreground.gatewaySettingsHost),
-            clients: .init(presence: bundle.presenceClient, pairing: bundle.pairingClient, frontend: bundle.frontendClient))
-        let policy = releasePolicySnapshot(f)
-        func plan(_ stage: RuntimeReleasePolicyStage) throws -> RuntimeReleaseConfigurationPlan {
-            try .init(accountID: accountID, source: source, currentPolicy: policy, candidate: f.newRelease,
-                host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients, stage: stage)
+        let policies: [MachineUpdateConfigurationEpoch.PolicyCapture]
+        if additionalForeground.isEmpty {
+            policies = source.accounts.map { .init(accountID: $0.accountID, snapshot: $0.accountID == accountID ? releasePolicySnapshot(f) : nil) }
+        } else {
+            policies = try f.machine.policyCaptures(for: source)
         }
-        let startup = try plan(.startup), proposedCompletion = try plan(.completion)
-        let completion = f.installedReadiness
-            ? try proposedCompletion.selectingInstalledRootReadiness(candidate: f.newRelease) : proposedCompletion
-        XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup.gateway.encoded))
-        XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(startup.transport.canonicalBytes))
-        XCTAssertEqual(try RuntimeReleaseConfigurationPlan.decode(startup.encoded).encoded, try startup.encoded)
+        let configurations: [MachineUpdateConfigurationEpoch.Configuration] = try ([f.machine.f.plan] + additionalForeground).map { foreground in
+            let account = try XCTUnwrap(source.accounts.first { $0.accountID == foreground.accountID })
+            let bundle = try RuntimeConfigurationBundle.initial(account: XCTUnwrap(account.preparation),
+                initialization: XCTUnwrap(account.initialization), reference: foreground.reference, inventory: source.replacement.inventory)
+            let host = f.readinessAlreadyEnabled && account.accountID == accountID
+                ? try foreground.host.enablingInstalledReadiness(release: f.oldRelease) : foreground.host
+            let original = RuntimeReleaseConfigurationSource(host: host, transport: foreground.transport,
+                gateway: try XCTUnwrap(foreground.gatewaySettingsHost),
+                clients: .init(presence: bundle.presenceClient, pairing: bundle.pairingClient, frontend: bundle.frontendClient))
+            let policy = try XCTUnwrap(policies.first { $0.accountID == account.accountID }?.snapshot)
+            func plan(_ stage: RuntimeReleasePolicyStage) throws -> RuntimeReleaseConfigurationPlan {
+                try .init(accountID: account.accountID, source: source, currentPolicy: policy, candidate: f.newRelease,
+                    host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients, stage: stage)
+            }
+            let startup = try plan(.startup), proposedCompletion = try plan(.completion)
+            let completion = f.installedReadiness && account.accountID == accountID
+                ? try proposedCompletion.selectingInstalledRootReadiness(candidate: f.newRelease) : proposedCompletion
+            XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup.gateway.encoded))
+            XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(startup.transport.canonicalBytes))
+            XCTAssertEqual(try RuntimeReleaseConfigurationPlan.decode(startup.encoded).encoded, try startup.encoded)
+            return .init(source: original, startup: startup, completion: completion)
+        }
         let record = try f.machine.store.retainMachineUpdateConfigurationEpoch(expected: source, candidate: f.newRelease,
-            policies: source.accounts.map { .init(accountID: $0.accountID, snapshot: $0.accountID == accountID ? policy : nil) },
-            configurations: [.init(source: original, startup: startup, completion: completion)],
-            directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
+            policies: policies, configurations: configurations, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
         let archive = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
         XCTAssertEqual(archive.record, record)
-        XCTAssertEqual(try archive.configuration(accountID: accountID)?.startup.encoded, try startup.encoded)
+        for configuration in configurations {
+            let startup = configuration.startup
+            XCTAssertEqual(try archive.configuration(accountID: startup.binding.accountID)?.startup.encoded, try startup.encoded)
+        }
         XCTAssertEqual(try f.machine.store.retainedRuntimeCompatibilityInputs().machineUpdateConfigurationEpoch, try record.encoded)
         return record
     }
@@ -868,9 +889,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
         }
         var current = try advance(record, .begin)
-        for file in MachineUpdatePublicationProgress.File.allCases {
-            current = try advance(current, .prepare(f.machine.account, file))
-            current = try advance(current, .complete(f.machine.account, file))
+        for account in record.accounts where account.configurationPublished {
+            for file in MachineUpdatePublicationProgress.File.allCases {
+                current = try advance(current, .prepare(account.accountID, file))
+                current = try advance(current, .complete(account.accountID, file))
+            }
         }
         return current
     }
@@ -1220,18 +1243,40 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(try archive.capture(accountID: account)?.completion?.encoded, try capture.completion?.encoded)
     }
 
-    private func restartWithRetainedBackend(_ f: Fixture, complete: Bool) throws
+    private func restartWithRetainedBackend(_ f: Fixture, complete: Bool,
+        gateway: GatewayJournalSetupExchangeTests.Fixture? = nil, additionalForeground: [RuntimeActivationPlan] = []) throws
         -> (MachineUpdateRestartSource, UpdateRestartAdmissionLease) {
-        let configuration = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let configuration = try publishFixtureConfigurationEpoch(f,
+            retainFixtureConfigurationEpoch(f, additionalForeground: additionalForeground))
         let store = f.machine.store
+        let account = f.machine.account
+        let capture: MachineUpdateBackendEpoch.Capture
+        if let gateway {
+            let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: account).plan)
+            capture = try fixtureBackendCapture(f, foreground: gateway.runtime.plan, activation: activation, journal: gateway.state())
+        } else {
+            capture = .init(accountID: account, source: nil, startup: nil, completion: nil)
+        }
         let backend = try store.upgradeMachineUpdateBackendEpochStorage(expected: configuration,
             candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
-        let retained = try store.retainMachineUpdateBackendEpoch(backend,
-            captures: [.init(accountID: f.machine.account, source: nil, startup: nil, completion: nil)],
+        let captures = [capture] + additionalForeground.map {
+            MachineUpdateBackendEpoch.Capture(accountID: $0.accountID, source: nil, startup: nil, completion: nil)
+        }
+        let retained = try store.retainMachineUpdateBackendEpoch(backend, captures: captures,
             candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: {})
         if complete {
-            _ = try store.advanceMachineUpdateBackendPublication(retained, operation: .begin,
-                candidate: f.newRelease, directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+            func advance(_ previous: MachineUpdateBackendEpochRecord, _ operation: MachineUpdateBackendPublicationOperation)
+                throws -> MachineUpdateBackendEpochRecord {
+                try store.advanceMachineUpdateBackendPublication(previous, operation: operation, candidate: f.newRelease,
+                    directory: f.directory, quiescence: f.quiet, verifyCurrent: { _ in })
+            }
+            var record = try advance(retained, .begin)
+            if gateway != nil {
+                for file in MachineUpdateBackendPublicationProgress.File.allCases {
+                    record = try advance(record, .prepare(account, file))
+                    record = try advance(record, .complete(account, file))
+                }
+            }
         }
         let restart = try f.quiet.releaseActivityForRestart()
         do {
@@ -1477,8 +1522,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let inventory: MachineUpdateHealthInventory
         let boundary: AuthorityJournal.MachineUpdatePolicyBoundary
 
-        func openPolicyPair(readOnly: Bool) throws -> AuthorityJournal {
-            let account = try XCTUnwrap(snapshot.source.accounts.first { $0.accountID == boundary.accountID })
+        func openPolicyPair(readOnly: Bool, accountID: Data? = nil) throws -> AuthorityJournal {
+            let account = try XCTUnwrap(snapshot.source.accounts.first { $0.accountID == (accountID ?? boundary.accountID) })
             let initial = try XCTUnwrap(account.initialization)
             let fixture = files.f.f
             let prefix = fixture.root.path + "/"
@@ -1541,12 +1586,58 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func registerSecondForeground(_ files: BoundAdmissionRegistrationFixture) throws -> RuntimeActivationPlan {
+        let store = files.machine.store
+        let account = try reserveRestartAccount(files, complete: true)
+        let services = try ServiceAccountPlan(account: account, planID: AccountPreparationIntent.randomID(), claims: [
+            .init(accountID: account.accountID, role: .transport, number: 20002, userID: UUID(), groupID: UUID()),
+            .init(accountID: account.accountID, role: .gateway, number: 20003, userID: UUID(), groupID: UUID())])
+        try store.retainServiceAccountPlan(services)
+        try store.completeServiceAccountPlan(services)
+        let activity = try ServiceReleaseActivityReference(services: services,
+            identities: [.transport: .init(device: 1, inode: 102), .gateway: .init(device: 1, inode: 103)])
+        let now = Date()
+        let material = try RuntimePreparationMaterial.create(services: services, notValidBefore: now.addingTimeInterval(-60),
+            notValidAfter: now.addingTimeInterval(600), serviceActivity: activity, auditDeliveryVersion: 1)
+        try store.retainRuntimeMaterial(material.reference)
+        try store.completeRuntimePublication(material.reference)
+        let plan = try RuntimeActivationPlan(account: account,
+            initialization: XCTUnwrap(store.initialization(accountID: account.accountID)),
+            runtime: store.runtimePreparation(accountID: account.accountID), inventory: XCTUnwrap(store.inventory()),
+            gatewaySettingsRelease: files.machine.release)
+        try store.retainRuntimeActivation(plan)
+        _ = try store.enrollRuntimeActivation(plan)
+        try store.markRuntimeJobsRegistered(plan)
+        return plan
+    }
+
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
+        registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
+        readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false,
+        beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
-        let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true, beforeActivation: { files in
-            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        var gateway: GatewayJournalSetupExchangeTests.Fixture?
+        var additionalForeground: [RuntimeActivationPlan] = []
+        let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
+            admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled, beforeActivation: { files in
+            if registerSecondForeground { additionalForeground = [try self.registerSecondForeground(files)] }
+            let store = files.machine.store
+            if registerForeground { try store.markRuntimeJobsRegistered(files.machine.f.plan) }
+            if registerGateway || publishGatewayWithoutRegistration {
+                let setup = try GatewayJournalSetupExchangeTests.Fixture(runtime: files.machine.f)
+                try setup.retainCompletion(.decode(setup.initialize()))
+                let activation = try GatewayRuntimeActivationPlan(journal: setup.state(),
+                    foreground: setup.runtime.plan, inventory: XCTUnwrap(store.inventory()))
+                try store.retainGatewayRuntimeActivation(activation)
+                try store.markGatewayRuntimePublished(activation)
+                _ = try store.enrollGatewayRuntimeActivation(activation)
+                if registerGateway { try store.markGatewayRuntimeRegistered(activation) }
+                gateway = setup
+            }
+            try beforeActivation(files)
         })
-        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true, gateway: gateway,
+            additionalForeground: additionalForeground)
         defer { restart.close() }
         let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
         let inventory = try MachineUpdateHealthInventory(plan: .init(snapshot: snapshot, candidate: f.newRelease))
@@ -2143,6 +2234,551 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
+        registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false,
+        beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
+        _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
+            registerForeground: registerForeground, registerGateway: registerGateway,
+            registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
+            beforeActivation: beforeActivation) { fixture in
+            let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
+            let directory = fixture.directory, restart = fixture.restart
+            func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
+                let journal = try fixture.openPolicyPair(readOnly: true, accountID: accountID)
+                defer { try? journal.close() }
+                let value = try journal.captureMachineUpdatePolicyBoundaryForRecoveryRead()
+                try journal.close()
+                return value
+            }
+            let accounts = snapshot.configuration.record.accounts.filter(\.configurationPublished).map(\.accountID)
+            let prepared = try MachineUpdateCompletionIntentProposal.make(snapshot: snapshot, candidate: candidate,
+                inventory: fixture.inventory, policies: accounts.map(readPair), targetRevision: Data(repeating: 249, count: 16))
+            _ = try machine.retainMachineUpdateCompletionIntent(prepared, snapshot: snapshot, candidate: candidate,
+                directory: directory, restart: restart) { _, scope in _ = try scope.read() }
+            let recorded = try MachineUpdateCompletionRecoverySequence.resumePrepared(prepared, snapshot: snapshot,
+                candidate: candidate, machine: machine, directory: directory, restart: restart,
+                verify: { _, scope in _ = try scope.read() }, boundary: { accountID, _ in try readPair(accountID) }, commit: { permit, scope in
+                    let writer = try fixture.openPolicyPair(readOnly: false, accountID: permit.accountID)
+                    defer { try? writer.close() }
+                    let result = try writer.commitMachineUpdateCompletionPolicy(permit, scope: scope, candidate: candidate,
+                        verifyNative: { _ in _ = try scope.read() })
+                    try writer.close()
+                    return result
+                })
+            let boundaries = try accounts.map(readPair)
+            let boundary = try XCTUnwrap(boundaries.first { $0.accountID == fixture.boundary.accountID })
+            let completion = MachineUpdateCompletionSnapshot(restart: snapshot, intent: recorded)
+            let plan = try MachineUpdateCompletionPublicationPlan(snapshot: completion, candidate: candidate,
+                currentSourceDigest: snapshot.backend.record.currentSourceDigest, boundaries: boundaries)
+            let publication = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            let root = fixture.files.f.f.root.path
+            XCTAssertEqual(chmod(root, 0o755), 0)
+            var directories: [Data: ProtectedSetupDirectory] = [:]
+            defer { directories.values.forEach { $0.close() } }
+            for accountID in accounts {
+                let suffix = accountID.map { String(format: "%02x", $0) }.joined()
+                directories[accountID] = try ProtectedSetupDirectory(anchor: root, relativePath: "CompletionPublication-" + suffix,
+                    owner: getuid(), visibility: .sharedMetadata)
+            }
+            func files(_ entry: MachineUpdateCompletionPublicationPlan.Entry) throws -> ProtectedSetupDirectory {
+                try XCTUnwrap(directories[entry.accountID])
+            }
+            // Publication recovery is exercised separately. Start the finishing tests with the completed files and record.
+            var published = try machine.retainMachineUpdateCompletionPublication(publication, plan: plan, expected: recorded,
+                restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart) { _, scope in _ = try scope.read() }
+            for entry in plan.entries {
+                published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .writing)
+                _ = try AdministrativeSetupPublication.publish(entry.completion, file: entry.artifact, directory: files(entry), owner: getuid())
+                published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .published)
+            }
+            try machine.close()
+            let revision = published.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let record = try published.encoded.map { String(format: "%02x", $0) }.joined()
+            try fixture.files.sql("UPDATE machine_update_completion_publication_v1 SET revision=X'\(revision)',record=X'\(record)' WHERE singleton=1")
+            try fixture.files.reopen()
+
+            let retained = try fixture.machine.machineUpdateCompletionPublicationRecoverySnapshot(candidate: candidate, directory: directory)
+            let installed = try MachineUpdateInstalledReleaseEpoch.Archive(snapshot: retained, candidate: candidate,
+                currentSourceDigest: snapshot.backend.record.currentSourceDigest, boundaries: boundaries)
+            let finishing = try fixture.machine.finalizeMachineUpdateCompletion(installed, publication: published, plan: plan,
+                expected: recorded, restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart,
+                ownedFileDirectory: files) { _, scope in _ = try scope.read() }
+            try body(fixture, finishing, boundary)
+        }
+    }
+
+    func testInstalledRuntimeSourceBindsHistoryAndRejectsMachineReentry() throws {
+        try withFinishingFixture { fixture, finishing, _ in
+            let source = try fixture.machine.installedRuntimeSource(candidate: fixture.candidate, directory: fixture.directory)
+            try source.actual.requireSame(as: finishing)
+            XCTAssertEqual(source.historicalInventory, fixture.snapshot.source.replacement.inventory)
+            XCTAssertEqual(source.historicalSchemaVersion, 20)
+            XCTAssertEqual(source.historicalSourceDigest, fixture.snapshot.backend.record.currentSourceDigest)
+            let expired = try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    try scope.readRetainedSource().requireSame(as: source)
+                    XCTAssertThrowsError(try fixture.machine.installedRuntimeSource(candidate: fixture.candidate,
+                        directory: fixture.directory)) {
+                            XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+                        }
+                    return scope
+                }
+            XCTAssertThrowsError(try expired.readRetainedSource()) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+        }
+    }
+
+    func testInstalledRuntimeSourceRejectsChangedRuntimeAndExtraPreparationRows() throws {
+        try withFinishingFixture { fixture, finishing, _ in
+            let candidate = fixture.candidate, directory = fixture.directory
+            let source = try fixture.machine.installedRuntimeSource(candidate: candidate, directory: directory)
+            func reject(_ edit: String, undo: String) throws {
+                try fixture.machine.close()
+                try fixture.files.sql(edit)
+                try fixture.files.reopen()
+                try fixture.machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory).requireSame(as: finishing)
+                XCTAssertThrowsError(try fixture.machine.installedRuntimeSource(candidate: candidate, directory: directory)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+                try fixture.machine.close()
+                try fixture.files.sql(undo)
+                try fixture.files.reopen()
+                try fixture.machine.installedRuntimeSource(candidate: candidate, directory: directory).requireSame(as: source)
+            }
+            let flip = "UPDATE runtime_activation_v1 SET registered=1-registered"
+            try reject(flip, undo: flip)
+            let extra = try PreparationIntentRecord(id: UUID(), revision: UUID(), parent: fixture.files.destination.path,
+                ancestry: fixture.files.destination.preparationAncestry(), phase: .abandoned)
+            let id = extra.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = extra.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let bytes = try extra.encoded.map { String(format: "%02x", $0) }.joined()
+            try reject("INSERT INTO preparation_intents_v1 VALUES(x'\(id)',x'\(revision)',x'\(bytes)')",
+                undo: "DELETE FROM preparation_intents_v1 WHERE id=x'\(id)'")
+        }
+    }
+
+    func testInstalledRuntimeSourceRejectsAnUnsupportedRetainedSchema() throws {
+        try withFinishingFixture { fixture, finishing, _ in
+            let archive = finishing.installed
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: archive.artifact(4)) as? [String: Any])
+            fields["sourceSchemaVersion"] = 21
+            let bytes = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+            let intent = try MachineUpdateCompletionIntentRecord.decode(bytes)
+            XCTAssertEqual(intent.sourceSchemaVersion, 21)
+            let changedIntent = try MachineUpdateCompletionIntentArchive(record: intent, policies: archive.completionIntent().policies)
+            let plan = try MachineUpdateCompletionPublicationPlan(retainedConfiguration: archive.configuration(),
+                retainedBackend: archive.backend(), intent: changedIntent, candidate: fixture.candidate)
+            var publicationFields = try XCTUnwrap(JSONSerialization.jsonObject(with: archive.artifact(5)) as? [String: Any])
+            publicationFields["intentDigest"] = try plan.completionIntentDigest.base64EncodedString()
+            publicationFields["planFingerprint"] = try plan.fingerprint.base64EncodedString()
+            let publicationBytes = try JSONSerialization.data(withJSONObject: publicationFields,
+                options: [.sortedKeys, .withoutEscapingSlashes])
+            let publication = try MachineUpdateCompletionPublicationRecord.decode(publicationBytes)
+            try publication.requirePlan(plan)
+            let artifacts = archive.artifacts.map { operand in
+                let replacements: [Int64: Data] = [4: bytes, 5: publicationBytes]
+                return MachineUpdateInstalledReleaseEpoch.Artifact(kind: operand.kind, accountID: operand.accountID,
+                    bytes: replacements[operand.kind] ?? operand.bytes)
+            }
+            let header = try MachineUpdateInstalledReleaseRecord(sourceSchemaVersion: archive.record.sourceSchemaVersion,
+                activationAttempt: finishing.activation.attemptID, inventory: finishing.inventory,
+                publication: publication, artifacts: artifacts)
+            func replace(_ kind: Int64, _ bytes: Data) throws {
+                let hex = bytes.map { String(format: "%02x", $0) }.joined()
+                try fixture.files.sql("UPDATE installed_release_state_v1 SET record=x'\(hex)' WHERE kind=\(kind)")
+            }
+            try fixture.machine.close()
+            try replace(4, bytes)
+            try replace(5, publicationBytes)
+            try replace(0, header.encoded)
+            try fixture.files.reopen()
+            let frame = try fixture.machine.machineUpdateFinalizationSnapshot(candidate: fixture.candidate, directory: fixture.directory)
+            XCTAssertEqual(try frame.installed.completionIntent().record.sourceSchemaVersion, 21)
+            XCTAssertThrowsError(try fixture.machine.installedRuntimeSource(candidate: fixture.candidate, directory: fixture.directory)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+            }
+        }
+    }
+
+    func testInstalledPolicyReadUsesThePairedJournalsAndClosesThem() throws {
+        try withFinishingFixture { fixture, _, boundary in
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let reader = try fixture.openPolicyPair(readOnly: true)
+                    defer { try? reader.close() }
+                    let paired = try MachineUpdateInstalledPolicyRead.read(scope: scope, candidate: fixture.candidate,
+                        verifyCurrent: { _ = try scope.read() }, openReadOnly: { selected in
+                            XCTAssertEqual(selected.accountID, boundary.accountID)
+                            XCTAssertEqual(selected.service.macID, boundary.macID)
+                            return reader
+                        })
+                    XCTAssertEqual(paired, [boundary])
+                    XCTAssertThrowsError(try reader.captureMachineUpdatePolicyBoundaryForRecoveryRead()) {
+                        XCTAssertEqual($0 as? ContinuityStoreError, .closed)
+                    }
+                    let candidate = fixture.candidate
+                    let wrongRelease = try SignedReleaseEvidence(manifest: .init(release: "fixture-wrong-candidate",
+                        build: candidate.manifest.build, components: candidate.manifest.components, dependencies: candidate.manifest.dependencies),
+                        codeDirectoryHashes: candidate.codeDirectoryHashes, dependencyCodeDirectoryHashes: candidate.dependencyCodeDirectoryHashes)
+                    var opened = false
+                    XCTAssertThrowsError(try MachineUpdateInstalledPolicyRead.read(scope: scope, candidate: wrongRelease,
+                        verifyCurrent: { _ = try scope.read() }, openReadOnly: { _ in
+                            opened = true
+                            throw ReplacementFixtureError.injected
+                        })) {
+                            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                        }
+                    XCTAssertFalse(opened)
+                    let writer = try fixture.openPolicyPair(readOnly: false)
+                    defer { try? writer.close() }
+                    XCTAssertThrowsError(try MachineUpdateInstalledPolicyRead.read(scope: scope, candidate: fixture.candidate,
+                        verifyCurrent: { _ = try scope.read() }, openReadOnly: { _ in writer })) {
+                            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+                        }
+                    XCTAssertThrowsError(try writer.read { _ in true }) {
+                        XCTAssertEqual($0 as? ContinuityStoreError, .closed)
+                    }
+                    let reopened = try fixture.openPolicyPair(readOnly: true)
+                    defer { try? reopened.close() }
+                    XCTAssertEqual(try reopened.captureMachineUpdatePolicyBoundaryForRecoveryRead(), boundary)
+                }
+        }
+    }
+
+    func testInstalledCompatibilityKeepsTheHistoricalRuntimeAndSelectsTheCompletionPlan() throws {
+        try withFinishingFixture { fixture, finishing, boundary in
+            XCTAssertThrowsError(try fixture.machine.retainedRuntimeCompatibilityInputs()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let compatibility = try scope.readCompatibility()
+                    XCTAssertEqual(compatibility.runtime.inputs.schemaVersion, 23)
+                    XCTAssertEqual(compatibility.runtime.inputs.inventory, finishing.inventory.canonicalBytes)
+                    let view = try MachineUpdateInstalledRuntimeView(compatibility: compatibility, candidate: fixture.candidate)
+                    let selected = try view.account(boundary.accountID)
+                    XCTAssertEqual(view.sourceInventory, fixture.snapshot.source.replacement.inventory)
+                    XCTAssertEqual(view.installedInventory, finishing.inventory)
+                    XCTAssertEqual(selected.configuration?.policyStage, .completion)
+                    XCTAssertEqual(selected.provisioning?.reference.services.releaseDigest, view.sourceInventory.releaseDigest)
+                    XCTAssertThrowsError(try view.account(Data(repeating: 255, count: 16))) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .notFound)
+                    }
+                    try view.requireCurrent(scope: scope, candidate: fixture.candidate)
+                }
+        }
+    }
+
+    private func restoreFinalizationOwner(_ finishing: MachineUpdateFinalizationSnapshot, fixture: CompletionFixture) throws
+        -> (MachineUpdateFinalizationRecoveryOwner, UpdateAdmissionBarrier) {
+        let state = try fixture.machine.updateAdmissionState()
+        let macID = finishing.inventory.macID, anchor = fixture.files.f.f.root.path
+        try fixture.machine.close()
+        fixture.restart.close()
+        let coordinator = try UpdateActivationAdmission(anchor: anchor, relativeDirectory: "machine",
+            owner: getuid(), expected: finishing.admission.machine)
+        let recovery = try MachineUpdateAdmissionRecovery(initial: state, macID: macID,
+            installationID: finishing.inventory.installationID, accountID: fixture.boundary.accountID,
+            coordinator: coordinator, readCurrent: {
+                let store = try PreparationIntentStore(lease: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                    macID: macID, maximumRecords: 64, initialize: false)
+                defer { try? store.close() }
+                return try store.updateAdmissionState()
+            })
+        defer { recovery.close() }
+        let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+            owner: getuid(), expected: finishing.admission.machine)
+        let drain = try recovery.takeRestoredDrain(expected: finishing.activation)
+        return (MachineUpdateFinalizationRecoveryOwner(snapshot: finishing, candidate: fixture.candidate, drain: drain), gate)
+    }
+
+    func testFinalizationRecoveryWaitsForActivityAndClosesTheWriterBeforeTransfer() throws {
+        try withFinishingFixture { fixture, finishing, _ in
+            let source = try fixture.machine.installedRuntimeSource(candidate: fixture.candidate, directory: fixture.directory)
+            let (owner, ordinary) = try restoreFinalizationOwner(finishing, fixture: fixture)
+            defer { owner.close() }
+            let existing = try ReleaseActivityBarrier(directory: .init(anchor: fixture.files.f.f.root.path,
+                relativeDirectory: "machine", owner: getuid()), owner: getuid()).acquireShared()
+            defer { existing.close() }
+            try fixture.files.reopen()
+            var stages: [MachineUpdateFinalizationRecoveryOwner.Stage] = []
+            func verifyStage(_ stage: MachineUpdateFinalizationRecoveryOwner.Stage) throws {
+                stages.append(stage)
+                try owner.validateAdmission(directory: fixture.directory)
+                XCTAssertThrowsError(try ordinary.acquireAdmission()) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+                if stage == .writerClosed || stage == .admissionTransferred {
+                    XCTAssertThrowsError(try fixture.machine.inventory()) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .closed)
+                    }
+                }
+            }
+            XCTAssertFalse(try owner.resumeInLease(machine: fixture.machine, directory: fixture.directory, verifyStage: verifyStage))
+            XCTAssertEqual(stages, [.beforeQuiescence])
+            XCTAssertEqual(try fixture.machine.inventory(), finishing.inventory)
+            existing.close()
+            stages.removeAll()
+            XCTAssertTrue(try owner.resumeInLease(machine: fixture.machine, directory: fixture.directory, verifyStage: verifyStage))
+            XCTAssertEqual(stages, [.beforeQuiescence, .withQuiescence, .writerClosed, .admissionTransferred])
+            try fixture.files.reopen()
+            let escaped = try owner.withSnapshotInLease(machine: fixture.machine, directory: fixture.directory) { scope in
+                try scope.readRetainedSource().requireSame(as: source)
+                XCTAssertThrowsError(try owner.withSnapshotInLease(machine: fixture.machine, directory: fixture.directory) { _ in
+                    XCTFail("Reentrant owner lent another finishing scope")
+                }) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+                return scope
+            }
+            XCTAssertThrowsError(try escaped.read()) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+        }
+    }
+
+    func testFinalizationRecoveryRetainsAdmissionAfterEitherTransferFailure() throws {
+        for failure in [MachineUpdateFinalizationRecoveryOwner.Stage.writerClosed, .admissionTransferred] {
+            try withFinishingFixture { fixture, finishing, _ in
+                let (owner, ordinary) = try restoreFinalizationOwner(finishing, fixture: fixture)
+                defer { owner.close() }
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try owner.resumeInLease(machine: fixture.machine, directory: fixture.directory) { stage in
+                    guard stage == failure else { return }
+                    XCTAssertThrowsError(try fixture.machine.inventory()) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .closed)
+                    }
+                    throw ReplacementFixtureError.injected
+                }) {
+                    XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+                }
+                try owner.validateAdmission(directory: fixture.directory)
+                XCTAssertThrowsError(try ordinary.acquireAdmission()) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try owner.resumeInLease(machine: fixture.machine, directory: fixture.directory) { _ in
+                    XCTFail("Retired owner ran another recovery stage")
+                }) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                }
+                XCTAssertThrowsError(try owner.withSnapshotInLease(machine: fixture.machine, directory: fixture.directory) { _ in
+                    XCTFail("Retired owner lent another finishing scope")
+                }) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                }
+                try fixture.machine.machineUpdateFinalizationSnapshot(candidate: fixture.candidate, directory: fixture.directory).requireSame(as: finishing)
+                owner.close()
+                let rawAdmission = try ordinary.acquireAdmission()
+                rawAdmission.close()
+                XCTAssertEqual(try fixture.machine.machineUpdateActivation()?.phase, .finishing)
+            }
+        }
+    }
+
+    func testNativeFinishingRefusesOrdinaryIdentityAndLeavesTheOwnerUsable() throws {
+        try XCTSkipIf(getuid() == 0 || geteuid() == 0, "Requires an ordinary user to check the native identity guard")
+        try withFinishingFixture { fixture, finishing, _ in
+            let (owner, _) = try restoreFinalizationOwner(finishing, fixture: fixture)
+            defer { owner.close() }
+            try fixture.files.reopen()
+            XCTAssertTrue(try owner.resumeInLease(machine: fixture.machine, directory: fixture.directory) { _ in })
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try owner.captureNativeFinalization(configurationPath: "/nonexistent-finishing-host",
+                machine: fixture.machine, directory: fixture.directory)) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+                }
+            try owner.validateAdmission(directory: fixture.directory)
+            try owner.withSnapshotInLease(machine: fixture.machine, directory: fixture.directory) { scope in
+                let current = try scope.read()
+                XCTAssertThrowsError(try MachineUpdateNativeFinalization.capture(
+                    configurationPath: "/nonexistent-finishing-host", scope: scope)) {
+                        XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+                    }
+                XCTAssertThrowsError(try MachineUpdateInstalledPolicyRead.readNative(scope: scope,
+                    candidate: fixture.candidate, verifyCurrent: { XCTFail("Ordinary user reached native policy verification") })) {
+                        XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+                    }
+                try scope.read().requireSame(as: current)
+            }
+            try fixture.machine.machineUpdateFinalizationSnapshot(candidate: fixture.candidate, directory: fixture.directory).requireSame(as: finishing)
+        }
+    }
+
+    func testInstalledReadinessPreservesUnregisteredAccountsAndSelectsCompletedRoles() throws {
+        var pending: AccountPreparationIntent?
+        try withFinishingFixture(registerGateway: true, beforeActivation: { pending = try self.reserveRestartAccount($0) }) {
+            fixture, _, boundary in
+            let unregistered = try XCTUnwrap(pending)
+            let account = boundary.accountID, candidate = fixture.candidate
+            let (readiness, expired) = try fixture.machine.withCurrentMachineUpdateFinalization(candidate: candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let readiness = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)
+                    let (active, _) = try readiness.select(accountID: account, role: .authority)
+                    let transport = try XCTUnwrap(active.configuration.transport.settingsHost)
+                    let gateway = try XCTUnwrap(active.backend).gateway
+                    let roles = readiness.inventory.requirements
+                    XCTAssertEqual(roles.map(\.role), [.authority, .transport, .notificationGateway])
+                    XCTAssertEqual(roles.map(\.executionUID), [0, transport.serviceUID, gateway.serviceUID])
+                    XCTAssertEqual(roles.map(\.publicKey), [transport.runtime.services.authorityPublicKey,
+                        try transport.runtime.transportPublicKeyX963, gateway.receiptPublicKey])
+                    let configuration = fixture.snapshot.configuration.record, backend = fixture.snapshot.backend.record
+                    for role in roles {
+                        XCTAssertEqual(role.binding, active.configuration.binding)
+                        XCTAssertEqual(role.code, active.configuration.host.codePolicy.entries.first { $0.role == role.role && $0.active })
+                        XCTAssertEqual(role.configurationEpoch, configuration.id)
+                        XCTAssertEqual(role.configurationRevision, configuration.revision)
+                        XCTAssertEqual(role.backendEpoch, backend.id)
+                        XCTAssertEqual(role.backendRevision, backend.revision)
+                    }
+                    XCTAssertEqual(readiness.inventory.accountIDs, [account])
+                    XCTAssertEqual(readiness.inventory.preservedAccounts, fixture.inventory.preservedAccounts)
+                    XCTAssertEqual(readiness.inventory.preservedAccounts, [unregistered.accountID])
+                    let retained = try readiness.view.account(unregistered.accountID)
+                    XCTAssertFalse(retained.scope.inInventory)
+                    XCTAssertEqual(retained.preparation, unregistered)
+                    XCTAssertThrowsError(try readiness.select(accountID: unregistered.accountID, role: .authority)) {
+                        XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                    }
+                    let selected = try MachineUpdateNativeFinalization.selectReadiness(host: active.configuration.host,
+                        compatibility: readiness.view.compatibility, scope: scope, candidate: candidate)
+                    XCTAssertEqual(selected?.focusedAccountID, account)
+                    XCTAssertEqual(selected?.inventory.requirements, roles)
+                    try readiness.requireCurrent(scope: scope, candidate: candidate)
+                    return (readiness, scope)
+                }
+            XCTAssertThrowsError(try readiness.requireCurrent(scope: expired, candidate: candidate)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    try readiness.requireCurrent(scope: scope, candidate: candidate)
+                }
+        }
+    }
+
+    func testNativeFinishingReadinessSelectionRejectsItsOwnPreservedHost() throws {
+        try withFinishingFixture(registerForeground: false) { fixture, _, boundary in
+            let configuration = try XCTUnwrap(fixture.snapshot.configuration.configuration(accountID: boundary.accountID))
+            let host = configuration.completion.host
+            XCTAssertTrue(host.installedReadinessEnabled)
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let compatibility = try scope.readCompatibility()
+                    XCTAssertNil(try MachineUpdateNativeFinalization.selectReadiness(host: configuration.startup.host,
+                        compatibility: compatibility, scope: scope, candidate: fixture.candidate))
+                    let plan = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: fixture.candidate)
+                    XCTAssertEqual(plan.inventory.preservedAccounts, [boundary.accountID])
+                    XCTAssertThrowsError(try MachineUpdateNativeFinalization.selectReadiness(host: host,
+                        compatibility: compatibility, scope: scope, candidate: fixture.candidate)) {
+                            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                        }
+                }
+        }
+    }
+
+    func testNativeFinishingReadinessSelectsItsHostAmongTwoRegisteredHostsWithMixedReadiness() throws {
+        try withFinishingFixture(registerSecondForeground: true) { fixture, finishing, boundary in
+            let candidate = fixture.candidate
+            let enabledID = boundary.accountID
+            let disabledID = try XCTUnwrap(finishing.inventory.accounts.first { $0.accountID != enabledID }).accountID
+            XCTAssertEqual(finishing.inventory.accounts.count, 2)
+            XCTAssertEqual(Set(fixture.inventory.accountIDs), Set([enabledID, disabledID]))
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let compatibility = try scope.readCompatibility()
+                    let view = try MachineUpdateInstalledRuntimeView(compatibility: compatibility, candidate: candidate)
+                    let enabled = try XCTUnwrap(view.account(enabledID).configuration).host
+                    let disabled = try XCTUnwrap(view.account(disabledID).configuration).host
+                    XCTAssertTrue(enabled.installedReadinessEnabled)
+                    XCTAssertFalse(disabled.installedReadinessEnabled)
+                    XCTAssertEqual(try view.account(enabledID).provisioning?.jobsRegistered, true)
+                    XCTAssertEqual(try view.account(disabledID).provisioning?.jobsRegistered, true)
+                    let selected = try XCTUnwrap(MachineUpdateNativeFinalization.selectReadiness(host: enabled,
+                        compatibility: compatibility, scope: scope, candidate: candidate))
+                    XCTAssertEqual(selected.focusedAccountID, enabledID)
+                    XCTAssertEqual(selected.inventory.accountIDs, [enabledID])
+                    XCTAssertTrue(selected.inventory.preservedAccounts.isEmpty)
+                    XCTAssertEqual(selected.unselectedRegisteredAccounts, [disabledID])
+                    XCTAssertThrowsError(try MachineUpdateNativeInstalledReadiness.coordinator(plan: selected, candidate: candidate,
+                        withCurrentScope: { _ in XCTFail("Focused plan reached the machine loan") },
+                        acquireActivity: { XCTFail("Focused plan reached activity"); throw ReplacementFixtureError.injected })) {
+                            XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                        }
+                    try selected.requireCurrent(scope: scope, candidate: candidate)
+                    XCTAssertNil(try MachineUpdateNativeFinalization.selectReadiness(host: disabled,
+                        compatibility: compatibility, scope: scope, candidate: candidate))
+                    XCTAssertThrowsError(try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)) {
+                        XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                    }
+                }
+        }
+    }
+
+    func testInstalledNativeOwnerSelectionUsesOnlyRegisteredCompletionPeers() throws {
+        for registered in [false, true] {
+            try withFinishingFixture(registerGateway: registered, publishGatewayWithoutRegistration: !registered) { fixture, _, boundary in
+                try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                    directory: fixture.directory, restart: fixture.restart) { scope in
+                        let plan = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: fixture.candidate)
+                        let selected = try MachineUpdateNativeInstalledReadiness.select(accountID: boundary.accountID, plan: plan)
+                        XCTAssertEqual(selected.authority, try plan.selectAuthority(host: selected.host))
+                        XCTAssertEqual(selected.transport.policyStage, .completion)
+                        XCTAssertEqual(selected.transport.releaseBinding, selected.authority.binding)
+                        if registered {
+                            let (account, _) = try plan.select(accountID: boundary.accountID, role: .notificationGateway)
+                            let gateway = try XCTUnwrap(account.backend).gateway
+                            XCTAssertEqual(selected.gateway, account.configuration.gateway)
+                            XCTAssertEqual(selected.registration, gateway.registration)
+                        } else {
+                            let retained = try plan.view.account(boundary.accountID)
+                            XCTAssertEqual(retained.gateway?.configurationPublished, true)
+                            XCTAssertEqual(retained.gateway?.jobRegistered, false)
+                            XCTAssertNil(selected.gateway)
+                            XCTAssertNil(selected.registration)
+                        }
+                        XCTAssertThrowsError(try MachineUpdateNativeInstalledReadiness.select(
+                            accountID: Data(repeating: 255, count: 16), plan: plan)) {
+                                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                            }
+                    }
+            }
+        }
+    }
+
+    func testStableReleaseRecordBindsTheFinishingArchiveAndRejectsFocusedReadiness() throws {
+        try withFinishingFixture { fixture, finishing, boundary in
+            let candidate = fixture.candidate
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: candidate,
+                directory: fixture.directory, restart: fixture.restart) { scope in
+                    let plan = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)
+                    let completed = try finishing.activation.completing()
+                    let proposal = try MachineUpdateStableReleaseRecord(readiness: plan, completed: completed, candidate: candidate)
+                    let decoded = try MachineUpdateStableReleaseRecord.decode(proposal.encoded)
+                    XCTAssertEqual(try decoded.encoded, try proposal.encoded)
+                    XCTAssertEqual(decoded.completed, completed)
+                    XCTAssertEqual(decoded.finishing, finishing.activation)
+                    XCTAssertEqual(decoded.historicalSourceDigest, fixture.snapshot.backend.record.currentSourceDigest)
+                    try decoded.requireCurrentInventory(finishing.inventory, epoch: finishing.installed, candidate: candidate)
+                    XCTAssertThrowsError(try decoded.requireCurrentInventory(fixture.snapshot.source.replacement.inventory,
+                        epoch: finishing.installed, candidate: candidate)) {
+                            XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                        }
+                    let focused = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate,
+                        focusedAccountID: boundary.accountID)
+                    XCTAssertThrowsError(try MachineUpdateStableReleaseRecord(readiness: focused, completed: completed, candidate: candidate)) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                    }
+                    XCTAssertThrowsError(try MachineUpdateStableReleaseRecord.requireFormats(candidate)) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                    }
+                    try scope.readRetainedSource().actual.requireSame(as: finishing)
+                }
+        }
+    }
+
     func testCompletionStorageRefusesAnUnknownSchemaAndRetainsItsArchive() throws {
         try withCompletionFixture { fixture in
             let archive = try fixture.intent()
@@ -2645,6 +3281,21 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
             }
+        }
+    }
+
+    func testCompletionPublicationKeepsAnAlreadyEnabledReadinessJob() throws {
+        try withCompletionFixture(installedReadiness: true, readinessAlreadyEnabled: true) { fixture in
+            let accountID = fixture.boundary.accountID
+            let configuration = try XCTUnwrap(fixture.snapshot.configuration.configuration(accountID: accountID))
+            XCTAssertTrue(configuration.startup.host.installedReadinessEnabled)
+            XCTAssertTrue(configuration.completion.host.installedReadinessEnabled)
+            let plan = try fixture.plan(fixture.recorded())
+            XCTAssertTrue(plan.entries.contains { $0.accountID == accountID && $0.file == .host })
+            XCTAssertFalse(plan.entries.contains { $0.file == .authorityJob })
+            let record = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            XCTAssertEqual(record.formatVersion, 1)
+            try MachineUpdateCompletionPublicationRecord.decode(record.encoded).requirePlan(plan)
         }
     }
 

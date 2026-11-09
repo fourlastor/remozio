@@ -104,7 +104,7 @@ struct RuntimeReleaseBackendSource: CustomStringConvertible, CustomDebugStringCo
 }
 
 /// Proposed backend values. The machine owner must retain the plan and recheck every source before publication.
-struct RuntimeReleaseBackendPlan: CustomStringConvertible, CustomDebugStringConvertible {
+struct RuntimeReleaseBackendPlan: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let formatName = "runtime.release-backend-plan"
     static let maximumBytes = 2_097_152
     var configuration: RuntimeReleaseConfigurationPlan { storage.configuration }

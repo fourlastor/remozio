@@ -39,11 +39,12 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let machineUpdateBackendEpoch: Data?
         private(set) var completionIntent: Data?
         private(set) var completionPublication: Data?
+        let installedRelease: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
              updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil, machineUpdateBackendEpoch: Data? = nil,
-             completionIntent: Data? = nil, completionPublication: Data? = nil) {
+             completionIntent: Data? = nil, completionPublication: Data? = nil, installedRelease: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
@@ -52,6 +53,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             self.machineUpdateBackendEpoch = machineUpdateBackendEpoch
             self.completionIntent = completionIntent
             self.completionPublication = completionPublication
+            self.installedRelease = installedRelease
         }
         /// Projects the historical restart source from a verified completion frame.
         func completionSourceInputs() -> Self {
@@ -71,7 +73,10 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
     private var native: Bool { (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty || !inputs.auditGraphs.isEmpty || !inputs.auditCutovers.isEmpty) }
 
     static func capture(machine: PreparationIntentStore) throws -> Self {
-        let inputs = try machine.retainedRuntimeCompatibilityInputs()
+        try describe(inputs: machine.retainedRuntimeCompatibilityInputs())
+    }
+
+    static func describe(inputs: Inputs) throws -> Self {
         let native = (inputs.runtimes.contains { $0.reference.serviceActivity != nil } || !inputs.auditUpgrades.isEmpty || !inputs.auditGraphs.isEmpty || !inputs.auditCutovers.isEmpty)
         var formats = try native ? GatewaySettingsNativeHostPlan.releaseRequirements.formats : []
         func include(_ role: AuthorityCodeRole, _ name: String, _ reads: Set<UInt64>, _ writes: Set<UInt64>) throws {
@@ -138,6 +143,13 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             for item in try MachineUpdateCompletionPublicationRecord.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
+        }
+        if inputs.schemaVersion == 23 {
+            guard let encoded = inputs.installedRelease else { throw PreparationStoreError.corruptRecord }
+            let record = try MachineUpdateInstalledReleaseRecord.decode(encoded)
+            var installed = try MachineUpdateInstalledReleaseRecord.requirements + MachineUpdateActivationRecord.finalizationRequirements
+            if record.formatVersion == 2 { installed += try MachineUpdateInstalledReleaseRecord.provenanceRequirements }
+            for item in installed { try include(item.role, item.name, item.readVersions, item.writeVersions) }
         }
         if native {
             for item in try CommandMonitorActivityContract.requirements {
