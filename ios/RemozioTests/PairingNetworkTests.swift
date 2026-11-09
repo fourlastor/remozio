@@ -94,6 +94,28 @@ final class PairingNetworkTests: XCTestCase {
         XCTAssertEqual(events.closedCount, 1)
     }
 
+    func testATypedAddressWinsOverTheDebugOverride() {
+        XCTAssertEqual(NativePhoneServices.endpoint(address: ComputerAddress(host: "192.0.2.10", port: 7443), override: "198.51.100.1:9"),
+                       .hostPort(host: "192.0.2.10", port: 7443))
+        XCTAssertEqual(NativePhoneServices.endpoint(address: ComputerAddress(host: "fd7a:115c:a1e0::1", port: 7443), override: nil),
+                       .hostPort(host: NWEndpoint.Host("fd7a:115c:a1e0::1"), port: 7443))
+    }
+
+    func testTheDebugOverrideAppliesOnlyWithoutAnAddress() {
+        XCTAssertEqual(NativePhoneServices.endpoint(address: nil, override: "[fd7a::1]:7443"),
+                       .hostPort(host: NWEndpoint.Host("fd7a::1"), port: 7443))
+    }
+
+    func testAnOutOfRangeTypedPortNeverFallsBackToBonjour() {
+        XCTAssertEqual(NativePhoneServices.endpoint(address: ComputerAddress(host: "192.0.2.10", port: 70_000), override: "[fd7a::1]:7443"),
+                       .hostPort(host: "192.0.2.10", port: .any))
+    }
+
+    func testNoAddressMeansBonjourDiscovery() {
+        XCTAssertNil(NativePhoneServices.endpoint(address: nil, override: nil))
+        XCTAssertNil(NativePhoneServices.endpoint(address: nil, override: "no-port"))
+    }
+
     func testCancelBeforeStartReportsClosedOnStart() {
         let events = Recorder(self, expectOpen: false)
         let transport = NetworkPairingTransport(target: .fixed(.hostPort(host: "127.0.0.1", port: 9)),

@@ -9,17 +9,33 @@ final class NativePhoneServices: NSObject, PhoneServices {
         UIPasteboard.general.string
     }
 
-    func pairingKeys() -> PlatformPairingKeys {
+    func pairingKeys(address: ComputerAddress?) -> PlatformPairingKeys {
+        var override: String?
         #if DEBUG
         // Debug builds only: a test harness can name the computer's address instead of Bonjour discovery.
-        // The value is host:port, or [IPv6]:port.
-        if let value = ProcessInfo.processInfo.environment["REMOZIO_PAIRING_ENDPOINT"],
-           let colon = value.lastIndex(of: ":"), let port = NWEndpoint.Port(String(value[value.index(after: colon)...])) {
-            let host = value[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
-            return NativePairingKeys(endpoint: .hostPort(host: NWEndpoint.Host(host), port: port))
-        }
+        override = ProcessInfo.processInfo.environment["REMOZIO_PAIRING_ENDPOINT"]
         #endif
-        return NativePairingKeys()
+        return NativePairingKeys(endpoint: Self.endpoint(address: address, override: override))
+    }
+
+    /// Where a connection test goes: the address the user typed, else the debug override (host:port or
+    /// [IPv6]:port), else nil for Bonjour discovery. Either address is only a route: the transport still
+    /// requires the pinned key and the ALPN.
+    static func endpoint(address: ComputerAddress?, override: String?) -> NWEndpoint? {
+        if let address {
+            // ComputerAddress.parse already limits the port to 1...65535. If that ever breaks, a typed address
+            // must still never turn into Bonjour discovery, so the route points at a port that cannot answer.
+            guard (1...65_535).contains(Int(address.port)), let port = NWEndpoint.Port(rawValue: UInt16(address.port)) else {
+                return .hostPort(host: NWEndpoint.Host(address.host), port: NWEndpoint.Port(rawValue: 0) ?? .any)
+            }
+            return .hostPort(host: NWEndpoint.Host(address.host), port: port)
+        }
+        if let value = override, let colon = value.lastIndex(of: ":"),
+           let port = NWEndpoint.Port(String(value[value.index(after: colon)...])) {
+            let host = value[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            return .hostPort(host: NWEndpoint.Host(host), port: port)
+        }
+        return nil
     }
 
     func scanQrCode(onResult: @escaping (String?) -> Void) {

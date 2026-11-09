@@ -32,6 +32,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -64,8 +67,11 @@ interface PhoneServices {
     /** Opens the camera scanner; [onResult] receives the QR text, or null when the user cancels or nothing is read. */
     fun scanQrCode(onResult: (String?) -> Unit)
     fun pasteText(): String?
-    /** Fresh in-memory keys and a pinned network transport for one connection attempt. */
-    fun pairingKeys(): PlatformPairingKeys
+    /**
+     * Fresh in-memory keys and a pinned network transport for one connection attempt. With an [address], the
+     * transport connects there instead of searching the local network.
+     */
+    fun pairingKeys(address: ComputerAddress?): PlatformPairingKeys
 }
 
 private enum class Screen { Computers, AddComputer }
@@ -222,10 +228,20 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, se
     // invitation or a closed screen cancels it and its network work.
     var test by remember(text) { mutableStateOf<ConnectionTestState>(ConnectionTestState.Idle) }
     var attempt by remember(text) { mutableStateOf(0) }
+    // Optional: empty searches the local network. The address lives only in this screen's state.
+    var addressText by remember(text) { mutableStateOf("") }
+    val route = ConnectionRoute.of(addressText)
+    val addressValid = route != ConnectionRoute.Invalid
     LaunchedEffect(text, attempt) {
         if (attempt == 0) return@LaunchedEffect
+        val address = when (route) {
+            ConnectionRoute.Discover -> null
+            is ConnectionRoute.Direct -> route.address
+            // The button is disabled for an invalid address; never fall back to discovery.
+            ConnectionRoute.Invalid -> return@LaunchedEffect
+        }
         test = ConnectionTestState.Connecting
-        test = testConnection(this, text, services.pairingKeys())
+        test = testConnection(this, text, services.pairingKeys(address))
     }
     LaunchedEffect(test) { if (test != ConnectionTestState.Idle) onChange() }
     Column(Modifier.testTag("parsed"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -258,10 +274,16 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, se
                 if (current == ConnectionTestState.Failed) {
                     Column(Modifier.testTag("connection-failed")) {
                         Note(Icons.error, palette.error, palette.errorSoft, "Could not reach the computer.",
-                            "Make sure that the computer is waiting for a phone and is on the same network, then try again.")
+                            "Make sure that the computer is waiting for a phone and is on the same network, or enter its address, then try again.")
                     }
                 }
-                PrimaryButton("Test connection", "test-connection") { attempt++ }
+                AddressField(addressText, addressValid) { input ->
+                    addressText = input
+                    // A new address needs a new tap. Resetting the attempt also cancels any test still running.
+                    attempt = 0
+                    test = ConnectionTestState.Idle
+                }
+                PrimaryButton("Test connection", "test-connection", enabled = addressValid) { attempt++ }
             }
             ConnectionTestState.Connecting -> Card {
                 BasicText("Looking for the computer…", Modifier.testTag("connecting"), style = Type.body.copy(color = palette.text))
@@ -273,6 +295,36 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, se
                 BasicText("The computer proved the key in the invitation. Compare this code with the one on the computer. " +
                     "This test does not pair: it sent no proof, and the computer saved nothing.", style = Type.caption.copy(color = palette.secondary))
             }
+        }
+    }
+}
+
+@Composable
+private fun AddressField(value: String, valid: Boolean, onChange: (String) -> Unit) {
+    val palette = LocalPalette.current
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        BasicText("Computer address (optional)", Modifier.padding(start = 4.dp), style = Type.caption.copy(color = palette.secondary))
+        Box(Modifier.fillMaxWidth().clip(CardShape).background(palette.surface).padding(14.dp)) {
+            // A documentation address (RFC 5737), never a real one.
+            if (value.isEmpty()) BasicText("192.0.2.10:7443", style = Type.code.copy(color = palette.secondary))
+            BasicTextField(
+                value = value,
+                onValueChange = onChange,
+                singleLine = true,
+                // Autocorrect and capitals would change an address the user typed exactly.
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false,
+                    keyboardType = KeyboardType.Uri),
+                textStyle = Type.code.copy(color = palette.text),
+                cursorBrush = SolidColor(palette.link),
+                modifier = Modifier.fillMaxWidth().testTag("computer-address"),
+            )
+        }
+        if (valid) {
+            BasicText("Leave it empty to search this network. Over Tailscale or another network, enter the address and port that the computer prints.",
+                Modifier.padding(start = 4.dp), style = Type.caption.copy(color = palette.secondary))
+        } else {
+            BasicText("Enter the address as host:port, for example 192.0.2.10:7443.",
+                Modifier.padding(start = 4.dp).testTag("address-invalid"), style = Type.caption.copy(color = palette.error))
         }
     }
 }

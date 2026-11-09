@@ -27,6 +27,32 @@ appId: dev.sebastiano.remozio.ios
 - scrollUntilVisible:
     element:
       id: "test-connection"
+# The optional address: without a port it is rejected and the test cannot start; host:port is accepted.
+- tapOn:
+    id: "computer-address"
+- inputText: "192.0.2.10"
+- tapOn: "Computer address (optional)"
+- scrollUntilVisible:
+    element:
+      id: "address-invalid"
+- scrollUntilVisible:
+    element:
+      id: "test-connection"
+- assertVisible:
+    id: "test-connection"
+    enabled: false
+- tapOn:
+    id: "computer-address"
+- inputText: ":7443"
+- tapOn: "Computer address (optional)"
+- assertNotVisible:
+    id: "address-invalid"
+- scrollUntilVisible:
+    element:
+      id: "test-connection"
+- assertVisible:
+    id: "test-connection"
+    enabled: true
 # A new Add computer screen starts empty; eraseText removes only the text before the cursor.
 # Tags, not text: "Add computer" is also the title of this screen.
 - tapOn:
