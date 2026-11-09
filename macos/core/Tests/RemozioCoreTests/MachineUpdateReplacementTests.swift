@@ -1741,6 +1741,172 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testCompletionProfileClassifiesOnlyExactRetainedBoundaries() throws {
+        try withCompletionFixture { fixture in
+            let prepared = try fixture.intent(), source = fixture.boundary
+            let writing = try prepared.preparingWrite(accountID: source.accountID, expected: source)
+            let commit = try fixture.committedBoundary(for: writing)
+            let recorded = try writing.recordingRecoveredBoundary(commit)
+            let digest = fixture.snapshot.backend.record.currentSourceDigest
+            func snapshot(_ intent: MachineUpdateCompletionIntentArchive) -> MachineUpdateCompletionSnapshot {
+                .init(restart: fixture.snapshot, intent: intent)
+            }
+            func classify(_ intent: MachineUpdateCompletionIntentArchive, _ boundary: AuthorityJournal.MachineUpdatePolicyBoundary)
+                throws -> MachineUpdateCompletionPolicyProfile.State {
+                let profile = try MachineUpdateCompletionPolicyProfile(snapshot: snapshot(intent),
+                    candidate: fixture.candidate, currentSourceDigest: digest)
+                let accounts = try profile.requireBoundaries([boundary])
+                return try XCTUnwrap(accounts.first).state
+            }
+            XCTAssertEqual(try classify(prepared, source), .prepared)
+            XCTAssertEqual(try classify(writing, source), .unresolvedSource)
+            XCTAssertEqual(try classify(writing, commit), .unrecordedCommit)
+            XCTAssertEqual(try classify(recorded, commit), .recorded)
+
+            let wrongPolicy = AuthorityJournal.MachineUpdatePolicyBoundary(macID: commit.macID, accountID: commit.accountID,
+                policy: source.policy, checkpoint: commit.checkpoint)
+            let wrongCheckpoint = AuthorityJournal.MachineUpdatePolicyBoundary(macID: commit.macID, accountID: commit.accountID,
+                policy: commit.policy, checkpoint: source.checkpoint)
+            let wrongMac = AuthorityJournal.MachineUpdatePolicyBoundary(macID: Data(repeating: 200, count: 16), accountID: commit.accountID,
+                policy: commit.policy, checkpoint: commit.checkpoint)
+            let unknownAccount = AuthorityJournal.MachineUpdatePolicyBoundary(macID: commit.macID, accountID: Data(repeating: 200, count: 16),
+                policy: commit.policy, checkpoint: commit.checkpoint)
+            for (intent, boundary) in [(prepared, commit), (writing, wrongCheckpoint), (recorded, wrongPolicy),
+                                       (recorded, wrongCheckpoint), (recorded, wrongMac), (recorded, unknownAccount)] {
+                XCTAssertThrowsError(try classify(intent, boundary)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+            }
+            XCTAssertThrowsError(try MachineUpdateCompletionPolicyProfile(snapshot: snapshot(prepared),
+                candidate: fixture.candidate, currentSourceDigest: Data(repeating: 199, count: 32))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+    }
+
+    func testCompletionProfileRefusesDuplicateAndPartiallyRecordedTwoAccountSets() throws {
+        try withCompletionFixture { fixture in
+            let prepared = try fixture.intent(), first = try XCTUnwrap(prepared.policies.first)
+            let writing = try prepared.preparingWrite(accountID: first.binding.accountID, expected: fixture.boundary)
+            let committed = try fixture.committedBoundary(for: writing)
+            let recorded = try writing.recordingRecoveredBoundary(committed)
+            let other = Data(repeating: first.binding.accountID.first == 250 ? 251 : 250, count: 16)
+            let id = UUID()
+            var row = try XCTUnwrap(JSONSerialization.jsonObject(with: first.encoded) as? [String: Any])
+            var binding = try XCTUnwrap(row["binding"] as? [String: Any])
+            binding["accountID"] = other.base64EncodedString()
+            row["binding"] = binding
+            row["id"] = id.uuidString
+            let otherPolicy = try MachineUpdatePolicyIntentRecord.decode(JSONSerialization.data(withJSONObject: row,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            var header = try XCTUnwrap(JSONSerialization.jsonObject(with: recorded.record.encoded) as? [String: Any])
+            let rows = try XCTUnwrap(header["accounts"] as? [[String: Any]])
+            let original = try XCTUnwrap(rows.first)
+            let owner = try XCTUnwrap(recorded.record.accounts.first?.ownerUID)
+            let added: [String: Any] = ["accountID": other.base64EncodedString(), "ownerUID": owner == 20010 ? 20011 : 20010,
+                "sourceDigest": otherPolicy.binding.sourceAccountDigest.base64EncodedString(), "inInventory": false,
+                "policyRecordID": id.uuidString,
+                "policyRecordDigest": try MachineUpdateActivationRecord.digest(otherPolicy.encoded).base64EncodedString()]
+            header["accounts"] = first.binding.accountID.lexicographicallyPrecedes(other) ? [original, added] : [added, original]
+            let record = try MachineUpdateCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: header,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            let archive = try MachineUpdateCompletionIntentArchive(record: record, policies: recorded.policies + [otherPolicy])
+            let profile = try MachineUpdateCompletionPolicyProfile(archive: archive)
+            let otherSource = AuthorityJournal.MachineUpdatePolicyBoundary(macID: fixture.boundary.macID, accountID: other,
+                policy: fixture.boundary.policy, checkpoint: fixture.boundary.checkpoint)
+            XCTAssertEqual(try profile.requireBoundaries([committed, otherSource]).first(where: { $0.accountID == other })?.state, .prepared)
+            XCTAssertThrowsError(try profile.requireBoundaries([committed, committed])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try profile.requireRecorded([committed, otherSource])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            let unresolved = try archive.preparingWrite(accountID: other, expected: otherSource)
+            let unresolvedProfile = try MachineUpdateCompletionPolicyProfile(archive: unresolved)
+            XCTAssertEqual(try unresolvedProfile.requireBoundaries([committed, otherSource]).first(where: {
+                $0.accountID == other
+            })?.state, .unresolvedSource)
+            XCTAssertThrowsError(try unresolvedProfile.requireRecorded([committed, otherSource])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+        }
+    }
+
+    func testCompletionPublicationSnapshotPinsItsIntentAndPlan() throws {
+        try withCompletionFixture { fixture in
+            let recorded = try fixture.recorded()
+            let completion = MachineUpdateCompletionSnapshot(restart: fixture.snapshot, intent: recorded)
+            let plan = try fixture.plan(recorded)
+            let progress = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            let pending = try MachineUpdateCompletionPublicationSnapshot(completion: completion, publication: nil,
+                candidate: fixture.candidate)
+            let retained = try MachineUpdateCompletionPublicationSnapshot(completion: completion, publication: progress,
+                candidate: fixture.candidate)
+            try retained.requireSame(as: retained)
+            XCTAssertThrowsError(try retained.requireSame(as: pending)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let otherIntent = try fixture.recorded(revision: 248)
+            let other = MachineUpdateCompletionSnapshot(restart: fixture.snapshot, intent: otherIntent)
+            XCTAssertThrowsError(try completion.requireSame(as: other)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try MachineUpdateCompletionPublicationSnapshot(completion: other, publication: progress,
+                candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: progress.encoded) as? [String: Any])
+            fields["planFingerprint"] = Data(repeating: 97, count: 32).base64EncodedString()
+            let changed = try MachineUpdateCompletionPublicationRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertThrowsError(try MachineUpdateCompletionPublicationSnapshot(completion: completion, publication: changed,
+                candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            try withCompletionFixture { different in
+                let foreign = MachineUpdateCompletionSnapshot(restart: different.snapshot, intent: recorded)
+                XCTAssertThrowsError(try completion.requireSame(as: foreign)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+                XCTAssertThrowsError(try MachineUpdateCompletionPublicationPlan(snapshot: foreign, candidate: different.candidate,
+                    currentSourceDigest: fixture.snapshot.backend.record.currentSourceDigest, boundaries: [])) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+            }
+        }
+    }
+
+    func testCompletionPublicationRequiresFreshRecordedPolicyBoundaries() throws {
+        try withCompletionFixture { fixture in
+            let source = fixture.boundary, digest = fixture.snapshot.backend.record.currentSourceDigest
+            let prepared = try fixture.intent()
+            let pending = try prepared.preparingWrite(accountID: source.accountID, expected: source)
+            let committed = try fixture.committedBoundary(for: pending)
+            let recorded = try pending.recordingRecoveredBoundary(committed)
+            func build(_ intent: MachineUpdateCompletionIntentArchive, _ facts: [AuthorityJournal.MachineUpdatePolicyBoundary],
+                       digest: Data) throws -> MachineUpdateCompletionPublicationPlan {
+                let snapshot = MachineUpdateCompletionSnapshot(restart: fixture.snapshot, intent: intent)
+                return try .init(snapshot: snapshot, candidate: fixture.candidate, currentSourceDigest: digest, boundaries: facts)
+            }
+            let plan = try build(recorded, [committed], digest: digest)
+            XCTAssertEqual(try plan.fingerprint, try fixture.plan(recorded).fingerprint)
+            for (intent, boundary) in [(prepared, source), (pending, source), (pending, committed)] {
+                XCTAssertThrowsError(try build(intent, [boundary], digest: digest)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                }
+            }
+            XCTAssertThrowsError(try build(recorded, [source], digest: digest)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try build(recorded, [], digest: digest)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try build(recorded, [committed], digest: Data(repeating: 211, count: 32))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+    }
+
     func testCompletionPublicationRecordsReadinessJobInVersionTwo() throws {
         try withCompletionFixture(installedReadiness: true) { fixture in
             let plan = try fixture.plan(fixture.recorded())
