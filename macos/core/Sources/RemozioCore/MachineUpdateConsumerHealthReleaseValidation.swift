@@ -1,3 +1,8 @@
+/// Startup health and installed readiness use distinct retained policy stages.
+enum MachineUpdateConsumerHealthPurpose: Sendable {
+    case startup, installedReadiness
+}
+
 /// Both participants must declare the distinct health codec before a native health connection can open.
 enum MachineUpdateConsumerHealthReleaseValidation {
     static let formatName = "runtime.machine-update-consumer-health"
@@ -7,8 +12,18 @@ enum MachineUpdateConsumerHealthReleaseValidation {
             try .init(role: $0, name: formatName, readVersions: [version], writeVersions: [version])
         }
     } }
-    static func validate(_ release: SignedReleaseEvidence, host: GatewaySettingsConsumerHostConfiguration) throws {
-        try host.requireUpdateHealthStartupSupported()
+    static func validate(_ release: SignedReleaseEvidence, host: GatewaySettingsConsumerHostConfiguration,
+                         purpose: MachineUpdateConsumerHealthPurpose = .startup) throws {
+        switch purpose {
+        case .startup:
+            try host.requireUpdateHealthStartupSupported()
+        case .installedReadiness:
+            guard host.formatVersion == GatewaySettingsConsumerHostConfiguration.releaseBoundVersion,
+                  let binding = host.releaseBinding, binding.formatVersion == GatewaySettingsConsumerHostConfiguration.releaseBoundVersion,
+                  host.policyStage == .completion else { throw GatewayPreparationError.changedScope }
+            try binding.requireHistoricalRuntime(host.runtime)
+            try binding.requireCompletionPolicy(host.codePolicy)
+        }
         try host.validateRelease(release)
         let authority = release.manifest.components.first { $0.role == .authority }
         let hostFormat = authority?.formats.first { $0.name == GatewaySettingsConsumerHostConfiguration.formatName }
