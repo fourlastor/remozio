@@ -2,10 +2,15 @@ import Darwin
 import Dispatch
 import Foundation
 import RemozioProtocol
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
 private enum ReplacementFixtureError: Error { case injected, signature }
+
+private struct SharedRestartSnapshot: @unchecked Sendable {
+    let value: MachineUpdateRestartSnapshot
+}
 
 /// Owns synthetic application trees and real SQLite files. It grants no installed Root authority.
 private final class MachineReplacementFixture {
@@ -786,6 +791,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try MachineUpdateConfigurationFiles.publishInLease(writing, accountID: accountID, file: file,
                 directory: directory, owner: getuid(), verify: {})
             XCTAssertEqual(try Data(contentsOf: url), target)
+            XCTAssertThrowsError(try MachineUpdateConfigurationFiles.requirePublishedInLease(writing, accountID: accountID,
+                file: file, directory: directory, owner: getuid(), verify: {})) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
             var first = stat(), replay = stat()
             XCTAssertEqual(lstat(url.path, &first), 0)
             try MachineUpdateConfigurationFiles.publishInLease(writing, accountID: accountID, file: file,
@@ -799,6 +808,17 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         XCTAssertEqual(record.publication?.complete, true)
         XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)), Set(files.map { $0.1.name }))
+        let published = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+        for (file, _) in files {
+            try MachineUpdateConfigurationFiles.requirePublishedInLease(published, accountID: accountID,
+                file: file, directory: directory, owner: getuid(), verify: {})
+        }
+        let gateway = URL(fileURLWithPath: directory.path).appendingPathComponent(AdministrativeSetupPublication.File.gatewaySettingsHost.name)
+        let oldGateway = try configuration.bytes(.gateway, target: false)
+        try oldGateway.write(to: gateway)
+        XCTAssertThrowsError(try MachineUpdateConfigurationFiles.requirePublishedInLease(published, accountID: accountID,
+            file: .gateway, directory: directory, owner: getuid(), verify: {}))
+        XCTAssertEqual(try Data(contentsOf: gateway), oldGateway)
     }
 
     func testConfigurationEpochRejectsATamperedSQLiteOperand() throws {
@@ -1100,6 +1120,22 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try verify(XCTUnwrap(store.machineUpdateBackendEpoch()))
         }
         XCTAssertEqual(record.publication?.complete, true)
+        let restart = try f.quiet.releaseActivityForRestart(); defer { restart.close() }
+        let checking = try store.markMachineUpdateRestartChecking(f.activation, directory: f.directory,
+            restart: restart, verifyCurrent: {})
+        let current = try store.machineUpdateRestartSource(checking, directory: f.directory)
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: current, directory: f.directory, restart: restart)
+        let loan = try verifierLoan(f, snapshot: snapshot, restart: restart); defer { loan.close() }
+        func verifyBackend(_ selected: Data, _ boundary: () throws -> Void) throws {
+            XCTAssertEqual(selected, account)
+            try MachineUpdateBackendPublicationFiles.requireInLease(snapshot.backend, configuration: snapshot.configuration,
+                accountID: selected, directory: directory, owner: getuid(), readFence: readFence, verifyCurrent: boundary)
+        }
+        try verifyRestart(f, snapshot: snapshot, loan: loan, backend: verifyBackend)
+        _ = try AdministrativeSetupPublication.publish(fence.encoded, file: fenceFile, directory: directory, owner: getuid())
+        XCTAssertThrowsError(try verifyRestart(f, snapshot: snapshot, loan: loan, backend: verifyBackend)) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
     }
 
     func testBackendPublicationAdvancesOperandsAboveTheOrdinaryRecordLimit() throws {
@@ -1230,6 +1266,140 @@ final class MachineUpdateReplacementTests: XCTestCase {
             installed: f.installed, prepared: f.machine.destination)) {
             XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding)
         }
+    }
+
+    private func verifierLoan(_ f: Fixture, snapshot: MachineUpdateRestartSnapshot,
+        restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartReadinessLoan {
+        let source = snapshot.source.replacement, activation = source.activation
+        let access = try MachineUpdateRestartSharedActivity(restart: restart, activity: f.files.activity(),
+            directory: f.directory, expectedMachine: source.admission.machine, macID: activation.macID,
+            installationID: activation.installationID, activationAttempt: activation.attemptID)
+        return try access.acquireShared()
+    }
+
+    private func verifyRestart(_ f: Fixture, snapshot: MachineUpdateRestartSnapshot,
+        loan: MachineUpdateRestartReadinessLoan, sourceAccess: MachineUpdateHealthSourceAccess = .init(),
+        read: (() throws -> MachineUpdateRestartSnapshot)? = nil, inspect: ((URL) throws -> SignedReleaseEvidence)? = nil,
+        configuration: (Data, () throws -> Void) throws -> Void = { _, verify in try verify() },
+        backend: (Data, () throws -> Void) throws -> Void = { _, verify in try verify() }) throws {
+        let selected = try XCTUnwrap(snapshot.configuration.configuration(accountID: f.machine.account))
+        try MachineUpdateNativeRestartVerifier.requireInLease(snapshot, host: selected.startup.host,
+            installed: f.installed, prepared: f.machine.destination, loan: loan, sourceAccess: sourceAccess,
+            readCurrent: read ?? {
+                try f.machine.store.machineUpdateRestartSnapshot(expected: snapshot.source, directory: f.directory, readiness: loan)
+            }, inspect: inspect ?? { try f.inspect($0, "", "") }, requireConfiguration: configuration, requireBackend: backend)
+    }
+
+    func testRestartResourceOpenUsesTheVerifierBeforeReadingTheSigner() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true); defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let loan = try verifierLoan(f, snapshot: snapshot, restart: restart); defer { loan.close() }
+        let host = try XCTUnwrap(snapshot.configuration.configuration(accountID: f.machine.account)).startup.host
+        let shared = SharedRestartSnapshot(value: snapshot), release = Mutex(f.oldRelease), calls = Mutex([String]())
+        let verifier = MachineUpdateNativeRestartVerifier(snapshot: snapshot, host: host, sourceAccess: .init(),
+            readCurrent: { _ in shared.value }, owned: .init(installed: f.installed, prepared: f.machine.destination,
+                inspect: { _ in release.withLock { $0 } },
+                requireConfiguration: { _, check in try check() }, requireBackend: { _, check in try check() }))
+        let verify = verifier.verification(loan: loan) { calls.withLock { $0.append("verify") } }
+        func open(invalidateAfterJournal: Bool = false) throws -> (String, String) {
+            try MachineUpdateAuthorityHealthOwner.openVerifiedRestartResources(verify: verify, openJournal: {
+                calls.withLock { $0.append("journal") }
+                if invalidateAfterJournal { release.withLock { $0 = f.oldRelease } }
+                return "journal"
+            }, openSigner: {
+                calls.withLock { $0.append("signer") }; return "signer"
+            }, closeJournal: { journal in
+                XCTAssertEqual(journal, "journal")
+                calls.withLock { $0.append("close") }
+            })
+        }
+        XCTAssertThrowsError(try open()) { XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease) }
+        XCTAssertEqual(calls.withLock { $0 }, ["verify"])
+        calls.withLock { $0.removeAll() }
+        var dependencies = f.newRelease.dependencyCodeDirectoryHashes
+        dependencies["Contents/Frameworks/ForeignFixture"] = Data(repeating: 9, count: 20)
+        let invalid = SignedReleaseEvidence(manifest: f.newRelease.manifest,
+            codeDirectoryHashes: f.newRelease.codeDirectoryHashes, dependencyCodeDirectoryHashes: dependencies)
+        XCTAssertEqual(try DurableReleasePreparation.digest(invalid), snapshot.source.replacement.activation.updateID)
+        release.withLock { $0 = invalid }
+        XCTAssertThrowsError(try open()) { XCTAssertEqual($0 as? InstallationInventoryError, .releaseMismatch) }
+        XCTAssertEqual(calls.withLock { $0 }, ["verify"])
+        calls.withLock { $0.removeAll() }
+        release.withLock { $0 = f.newRelease }
+        XCTAssertThrowsError(try open(invalidateAfterJournal: true)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+        }
+        XCTAssertEqual(calls.withLock { $0 }, ["verify", "journal", "verify", "close"])
+        calls.withLock { $0.removeAll() }
+        release.withLock { $0 = f.newRelease }
+        let (journal, signer) = try open()
+        XCTAssertEqual(journal, "journal")
+        XCTAssertEqual(signer, "signer")
+        XCTAssertEqual(calls.withLock { $0 }, ["verify", "journal", "verify", "signer", "verify"])
+    }
+
+    func testRestartVerifierRejectsASwappedPreparedIdentityBeforeInspection() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true); defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let loan = try verifierLoan(f, snapshot: snapshot, restart: restart); defer { loan.close() }
+        let moved = f.preparedURL.appendingPathExtension("moved")
+        try FileManager.default.moveItem(at: f.preparedURL, to: moved)
+        try FileManager.default.copyItem(at: moved, to: f.preparedURL)
+        XCTAssertThrowsError(try verifyRestart(f, snapshot: snapshot, loan: loan, inspect: { _ in
+            XCTFail("Changed placement reached signed inspection"); throw ReplacementFixtureError.signature
+        })) { XCTAssertEqual($0 as? MachineUpdateReplacementError, .changedBinding) }
+    }
+
+    func testRestartVerifierRejectsThePreviousSignedReleaseBeforeReadingPublishedFiles() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true); defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let loan = try verifierLoan(f, snapshot: snapshot, restart: restart); defer { loan.close() }
+        XCTAssertThrowsError(try verifyRestart(f, snapshot: snapshot, loan: loan, inspect: { _ in f.oldRelease },
+            configuration: { _, _ in XCTFail("The previous release reached the file reader") })) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+        }
+    }
+
+    func testRestartVerifierUsesABorrowedSnapshotAndRejectsChangedPublishedBytes() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true); defer { restart.close() }
+        let store = f.machine.store
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let loan = try verifierLoan(f, snapshot: snapshot, restart: restart); defer { loan.close() }
+        let access = MachineUpdateHealthSourceAccess(), account = f.machine.account
+        let configuration = try XCTUnwrap(snapshot.configuration.configuration(accountID: account))
+        XCTAssertEqual(chmod(f.files.root.path, 0o755), 0)
+        let files = try ProtectedSetupDirectory(anchor: f.files.root.path, relativePath: "VerifierConfiguration",
+            owner: getuid(), visibility: .sharedMetadata)
+        defer { files.close() }
+        _ = try AdministrativeSetupPublication.publish(configuration.bytes(.gateway, target: true),
+            file: .gatewaySettingsHost, directory: files, owner: getuid())
+        func verifyFiles(_ selected: Data, _ verify: () throws -> Void) throws {
+            XCTAssertEqual(selected, account)
+            try MachineUpdateConfigurationFiles.requirePublishedInLease(snapshot.configuration, accountID: selected,
+                file: .gateway, directory: files, owner: getuid(), verify: verify)
+        }
+        let escaped = try store.withCurrentMachineUpdateRestartSnapshot(snapshot, directory: f.directory, readiness: loan) { scope in
+            try access.withScope(scope, expected: snapshot) {
+                try verifyRestart(f, snapshot: snapshot, loan: loan, sourceAccess: access, read: {
+                    XCTFail("The verifier reentered the machine store"); throw ReplacementFixtureError.injected
+                }, configuration: verifyFiles)
+            }
+            return scope
+        }
+        XCTAssertThrowsError(try access.withScope(escaped, expected: snapshot) {
+            XCTFail("Expired scope reached the verifier")
+        }) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        let previous = try configuration.bytes(.gateway, target: false)
+        let file = URL(fileURLWithPath: files.path).appendingPathComponent(AdministrativeSetupPublication.File.gatewaySettingsHost.name)
+        try previous.write(to: file)
+        XCTAssertThrowsError(try verifyRestart(f, snapshot: snapshot, loan: loan, configuration: verifyFiles)) {
+            XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .conflictingConfiguration)
+        }
+        XCTAssertEqual(try Data(contentsOf: file), previous)
     }
 
     func testRestartHealthSelectsExactForegroundCodeKeysAndEpochs() throws {
@@ -1428,6 +1598,74 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         try access.requireCurrent(snapshot, read: fresh)
         XCTAssertEqual(freshReads, 2)
+    }
+
+    func testHealthSourceRefusesCrossThreadBorrowAndRecoversAfterItEnds() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true); defer { restart.close() }
+        let store = f.machine.store, directory = f.directory
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: directory, restart: restart)
+        let shared = SharedRestartSnapshot(value: snapshot), access = MachineUpdateHealthSourceAccess()
+        let finished = DispatchSemaphore(value: 0)
+        try store.withCurrentMachineUpdateRestartSnapshot(snapshot, directory: directory, restart: restart) { scope in
+            try access.withScope(scope, expected: snapshot) {
+                DispatchQueue.global().async {
+                    defer { finished.signal() }
+                    do {
+                        try access.requireCurrent(shared.value, read: {
+                            XCTFail("The off-thread reader attempted to enter the open transaction")
+                            throw ReplacementFixtureError.injected
+                        })
+                        XCTFail("The off-thread reader accepted the borrowed scope")
+                    } catch {
+                        XCTAssertEqual(error as? MachineUpdateHealthSourceError, .busy)
+                    }
+                }
+                XCTAssertEqual(finished.wait(timeout: .now() + .seconds(5)), .success)
+                try access.requireCurrent(snapshot, read: { throw ReplacementFixtureError.injected })
+            }
+        }
+        XCTAssertThrowsError(try access.requireCurrent(snapshot, read: { throw UpdateAdmissionBarrierError.busy })) {
+            XCTAssertEqual($0 as? MachineUpdateHealthSourceError, .busy)
+        }
+        XCTAssertThrowsError(try access.requireCurrent(snapshot, read: { throw PreparationStoreError.transactionActive })) {
+            XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+        }
+        try access.requireCurrent(snapshot, read: {
+            try store.machineUpdateRestartSnapshot(expected: source, directory: directory, restart: restart)
+        })
+    }
+
+    func testHealthSnapshotUsesTheOriginalReadinessLoan() throws {
+        let f = try Fixture(backendEpoch: true)
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let store = f.machine.store, directory = f.directory
+        let snapshot = try store.machineUpdateRestartSnapshot(expected: source, directory: directory, restart: restart)
+        let activation = source.replacement.activation
+        let access = try MachineUpdateRestartSharedActivity(restart: restart, activity: f.files.activity(), directory: directory,
+            expectedMachine: source.replacement.admission.machine, macID: activation.macID,
+            installationID: activation.installationID, activationAttempt: activation.attemptID)
+        defer { access.close() }
+        let loan = try access.acquireShared(); defer { loan.close() }
+        XCTAssertThrowsError(try store.machineUpdateRestartSnapshot(expected: source, directory: directory, restart: restart)) {
+            XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+        }
+        let fresh = try store.machineUpdateRestartSnapshot(expected: source, directory: directory, readiness: loan)
+        try fresh.requireSame(as: snapshot)
+        let borrowed = MachineUpdateHealthSourceAccess()
+        let scope = try store.withCurrentMachineUpdateRestartSnapshot(snapshot, directory: directory, readiness: loan) { scope in
+            try borrowed.withScope(scope, expected: snapshot) {
+                try borrowed.requireCurrent(snapshot) {
+                    XCTFail("A callback must use the existing machine snapshot")
+                    throw ReplacementFixtureError.injected
+                }
+            }
+            return scope
+        }
+        XCTAssertThrowsError(try scope.read())
+        access.close()
+        XCTAssertThrowsError(try store.machineUpdateRestartSnapshot(expected: source, directory: directory, readiness: loan))
     }
 
     func testReleaseBoundGatewayCommitStaysOutOfOrdinaryReader() throws {
