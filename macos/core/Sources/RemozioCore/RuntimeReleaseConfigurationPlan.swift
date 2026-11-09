@@ -91,8 +91,21 @@ struct RuntimeReleaseConfigurationPlan: CustomStringConvertible, CustomDebugStri
                                     gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients) throws {
         let proposed = try Self(accountID: binding.accountID, source: source, currentPolicy: currentPolicy,
             candidate: candidate, host: host, transport: transport, gateway: gateway, clients: clients, stage: policyStage)
-        guard try proposed.encoded == encoded else { throw RuntimeActivationError.changedScope }
+        let retained = self.host.installedReadinessEnabled && !proposed.host.installedReadinessEnabled
+            ? try proposed.selectingInstalledRootReadiness(candidate: candidate) : proposed
+        guard try retained.encoded == encoded else { throw RuntimeActivationError.changedScope }
     }
+
+    /// Selects readiness for the completion plan. The caller still owns file publication and job settlement.
+    func selectingInstalledRootReadiness(candidate: SignedReleaseEvidence) throws -> Self {
+        guard policyStage == .completion else { throw RuntimeActivationError.changedScope }
+        try MachineUpdateAuthorityReadinessJobTransition.requireRelease(candidate, policy: host.codePolicy)
+        let selected = try host.enablingInstalledReadiness(release: candidate)
+        try selected.validateRelease(candidate, bundlePath: gateway.bundlePath)
+        return try .init(binding: binding, stage: policyStage, sourceDigest: sourceDigest,
+            host: selected, transport: transport, gateway: gateway, clients: clients)
+    }
+
     private static func code(_ role: AuthorityCodeRole, _ policy: AuthorityCodePolicy) throws -> AuthorityCodeEntry {
         guard let code = policy.entries.first(where: { $0.role == role && $0.active }) else { throw RuntimeActivationError.changedScope }
         return code

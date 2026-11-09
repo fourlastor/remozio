@@ -533,17 +533,33 @@ public final class AuthorityJournal: @unchecked Sendable {
                   commandExecutions.isEmpty, !commandExchanges.hasActive else {
                 throw JournalDatabaseError.unavailable
             }
-            let before = try storage.continuity.read()
-            let value = try validatedRead { transaction in
-                guard let policy = try transaction.codePolicy() else { throw AuthoritySelfValidationError.unconfigured }
-                guard let epoch = try transaction.epoch(before.committed.journalEpoch) else { throw JournalDatabaseError.unavailable }
-                return (policy, epoch.descriptor.macID, epoch.descriptor.accountID)
-            }
-            guard !before.recoveryRequired, before.pending == nil, try storage.continuity.read() == before else {
-                throw JournalDatabaseError.unavailable
-            }
-            return .init(macID: value.1, accountID: value.2, policy: value.0, checkpoint: before.committed)
+            return try validatedMachineUpdatePolicyBoundary(storage)
         }
+    }
+
+    /// Captures policy and checkpoint facts from an existing read-only pair without starting recovery.
+    func captureMachineUpdatePolicyBoundaryForRecoveryRead() throws -> MachineUpdatePolicyBoundary {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard updateHealthOnly, let storage,
+                  storage.journal.readOnlyForCutover, storage.continuity.readOnlyForCutover,
+                  requests == nil, !requestStartupAttempted, commandExecutions.isEmpty,
+                  !commandExchanges.hasActive else { throw JournalDatabaseError.readOnly }
+            return try validatedMachineUpdatePolicyBoundary(storage)
+        }
+    }
+
+    private func validatedMachineUpdatePolicyBoundary(_ storage: AuthorityStorage) throws -> MachineUpdatePolicyBoundary {
+        let before = try storage.continuity.read()
+        let value = try validatedRead { transaction in
+            guard let policy = try transaction.codePolicy() else { throw AuthoritySelfValidationError.unconfigured }
+            guard let epoch = try transaction.epoch(before.committed.journalEpoch) else { throw JournalDatabaseError.unavailable }
+            return (policy, epoch.descriptor.macID, epoch.descriptor.accountID)
+        }
+        guard !before.recoveryRequired, before.pending == nil, try storage.continuity.read() == before else {
+            throw JournalDatabaseError.unavailable
+        }
+        return .init(macID: value.1, accountID: value.2, policy: value.0, checkpoint: before.committed)
     }
 
     private func requireMachineUpdateInstalledGatewayReadiness(_ proof: MachineUpdateConsumerHealthProof,

@@ -23,13 +23,15 @@ private final class MachineReplacementFixture {
     let policySnapshot: AuthorityCodePolicySnapshot
     let oldRelease: SignedReleaseEvidence
     let newRelease: SignedReleaseEvidence
+    let installedReadiness: Bool
     var quiet: UpdateQuiescenceLease
     let oldIdentity: PreparationFileIdentity
     let newIdentity: PreparationFileIdentity
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
-    init(configurationEpoch: Bool = false, backendEpoch: Bool = false,
+    init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
+        self.installedReadiness = installedReadiness
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true))
         try beforeActivation(files)
@@ -57,6 +59,7 @@ private final class MachineReplacementFixture {
                 requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
                 requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements
             }
+            if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
@@ -720,7 +723,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try .init(accountID: accountID, source: source, currentPolicy: policy, candidate: f.newRelease,
                 host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients, stage: stage)
         }
-        let startup = try plan(.startup), completion = try plan(.completion)
+        let startup = try plan(.startup), proposedCompletion = try plan(.completion)
+        let completion = f.installedReadiness
+            ? try proposedCompletion.selectingInstalledRootReadiness(candidate: f.newRelease) : proposedCompletion
         XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup.gateway.encoded))
         XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(startup.transport.canonicalBytes))
         XCTAssertEqual(try RuntimeReleaseConfigurationPlan.decode(startup.encoded).encoded, try startup.encoded)
@@ -1438,6 +1443,367 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertNil(selected.gateway)
         XCTAssertThrowsError(try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
             accountID: Data(repeating: 99, count: 16)))
+    }
+
+    private struct CompletionFixture {
+        let snapshot: MachineUpdateRestartSnapshot
+        let candidate: SignedReleaseEvidence
+        let previousRelease: SignedReleaseEvidence
+        let inventory: MachineUpdateHealthInventory
+        let boundary: AuthorityJournal.MachineUpdatePolicyBoundary
+
+        func intent(revision: UInt8 = 249) throws -> MachineUpdateCompletionIntentArchive {
+            try MachineUpdateCompletionIntentProposal.make(snapshot: snapshot, candidate: candidate, inventory: inventory,
+                policies: [boundary], targetRevision: Data(repeating: revision, count: 16))
+        }
+
+        func committedBoundary(for pending: MachineUpdateCompletionIntentArchive,
+            changeLedger: Bool = false) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
+            let row = try XCTUnwrap(pending.policies.first)
+            let target = try AuthorityCodePolicy.decode(row.completionPolicy)
+            let policy = boundary.policy
+            let roles = try Dictionary(uniqueKeysWithValues: zip(policy.policy.entries, target.entries).map { previous, current in
+                (current.role, previous == current ? try XCTUnwrap(policy.roleRevisions[current.role]) : UUID())
+            })
+            let written = AuthorityCodePolicySnapshot(revision: UUID(), policy: target, roleRevisions: roles)
+            let checkpoint = boundary.checkpoint
+            let successor = try checkpoint.successor(authorityDigest: Data(repeating: 9, count: 32),
+                ledgerDigest: changeLedger ? Data(repeating: 99, count: 32) : checkpoint.ledgerDigest,
+                journalEpoch: checkpoint.journalEpoch, journalHead: checkpoint.journalHead)
+            return .init(macID: boundary.macID, accountID: boundary.accountID, policy: written, checkpoint: successor)
+        }
+
+        func recorded(revision: UInt8 = 249) throws -> MachineUpdateCompletionIntentArchive {
+            let pending = try intent(revision: revision).preparingWrite(accountID: boundary.accountID, expected: boundary)
+            return try pending.recordingRecoveredBoundary(committedBoundary(for: pending))
+        }
+
+        func plan(_ intent: MachineUpdateCompletionIntentArchive) throws -> MachineUpdateCompletionPublicationPlan {
+            try .init(retainedConfiguration: snapshot.configuration, retainedBackend: snapshot.backend,
+                intent: intent, candidate: candidate)
+        }
+    }
+
+    private func withCompletionFixture(installedReadiness: Bool = false, _ body: (CompletionFixture) throws -> Void) throws {
+        let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, beforeActivation: { files in
+            try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
+        })
+        let (source, restart) = try restartWithRetainedBackend(f, complete: true)
+        defer { restart.close() }
+        let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
+        let inventory = try MachineUpdateHealthInventory(plan: .init(snapshot: snapshot, candidate: f.newRelease))
+        let account = f.machine.account
+        let policy = try XCTUnwrap(snapshot.configuration.policy(accountID: account))
+        let checkpoint = try ContinuityCheckpoint(generation: 1, authorityDigest: Data(repeating: 2, count: 32),
+            ledgerDigest: Data(repeating: 3, count: 32), journalEpoch: Data(repeating: 4, count: 16), journalHead: 0)
+        let boundary = AuthorityJournal.MachineUpdatePolicyBoundary(macID: source.replacement.inventory.macID,
+            accountID: account, policy: policy, checkpoint: checkpoint)
+        try body(.init(snapshot: snapshot, candidate: f.newRelease, previousRelease: f.oldRelease,
+            inventory: inventory, boundary: boundary))
+    }
+
+    func testCompletionIntentBindsTheRestartSnapshotAndExactPolicyRows() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.intent()
+            let record = try MachineUpdateCompletionIntentRecord.decode(archive.record.encoded)
+            let row = try MachineUpdatePolicyIntentRecord.decode(XCTUnwrap(archive.policies.first).encoded)
+            XCTAssertEqual(try MachineUpdateCompletionIntentArchive(record: record, policies: [row]), archive)
+            XCTAssertEqual(row.phase, .prepared)
+            try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
+                currentSourceDigest: fixture.snapshot.backend.record.currentSourceDigest)
+            XCTAssertThrowsError(try archive.requireSnapshot(fixture.snapshot, candidate: fixture.candidate,
+                currentSourceDigest: Data(repeating: 249, count: 32))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try MachineUpdateCompletionIntentArchive(record: record, policies: [])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            XCTAssertThrowsError(try MachineUpdateCompletionIntentProposal.make(snapshot: fixture.snapshot, candidate: fixture.candidate,
+                inventory: fixture.inventory, policies: [fixture.boundary, fixture.boundary], targetRevision: Data(repeating: 249, count: 16))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+    }
+
+    func testCompletionIntentRejectsAnotherSnapshotCandidateAndTargetRevision() throws {
+        try withCompletionFixture { fixture in
+            let intent = try fixture.intent(), snapshot = fixture.snapshot
+            let digest = snapshot.backend.record.currentSourceDigest
+            XCTAssertThrowsError(try intent.requireSnapshot(snapshot, candidate: fixture.previousRelease, currentSourceDigest: digest))
+            XCTAssertThrowsError(try MachineUpdateCompletionIntentProposal.make(snapshot: snapshot, candidate: fixture.candidate,
+                inventory: fixture.inventory, policies: [fixture.boundary],
+                targetRevision: snapshot.source.replacement.inventory.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try withCompletionFixture { other in
+                XCTAssertNotEqual(snapshot.configuration.record.id, other.snapshot.configuration.record.id)
+                XCTAssertThrowsError(try intent.requireSnapshot(other.snapshot, candidate: other.candidate, currentSourceDigest: digest)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+            }
+        }
+    }
+
+    func testCompletionIntentKeepsAnUnresolvedWriteAndRejectsChangedLedgerFacts() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.intent(), boundary = fixture.boundary
+            let pending = try archive.preparingWrite(accountID: boundary.accountID, expected: boundary)
+            XCTAssertEqual(pending.policies.first?.phase, .writing)
+            let reopened = try MachineUpdateCompletionIntentArchive(record: .decode(pending.record.encoded),
+                policies: pending.policies.map { try .decode($0.encoded) })
+            XCTAssertEqual(reopened, pending)
+            XCTAssertThrowsError(try pending.preparingWrite(accountID: boundary.accountID, expected: boundary)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertThrowsError(try pending.recordingRecoveredBoundary(boundary)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertThrowsError(try pending.recordingRecoveredBoundary(fixture.committedBoundary(for: pending, changeLedger: true))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            XCTAssertThrowsError(try fixture.plan(pending)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let ready = try pending.recordingRecoveredBoundary(fixture.committedBoundary(for: pending))
+            XCTAssertTrue(ready.policyMarkersRecorded)
+            XCTAssertEqual(pending.policies.first?.phase, .writing)
+        }
+    }
+
+    func testCompletionPublicationProgressCannotSkipOrRewindAWrite() throws {
+        try withCompletionFixture { fixture in
+            let plan = try fixture.plan(fixture.recorded())
+            let initial = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            let first = try XCTUnwrap(plan.entries.first)
+            let bytes = try initial.encoded
+            try MachineUpdateCompletionPublicationRecord.decode(bytes).requirePlan(plan)
+            XCTAssertThrowsError(try MachineUpdateCompletionPublicationRecord.decode(bytes + Data([0x20]))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            try initial.requireInventory(fixture.snapshot.source.replacement.inventory.canonicalBytes)
+            XCTAssertThrowsError(try initial.requireInventory(plan.inventory.canonicalBytes)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let second = try XCTUnwrap(plan.entries.dropFirst().first)
+            XCTAssertThrowsError(try initial.advancing(accountID: second.accountID, file: second.file, to: .writing)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertThrowsError(try initial.advancingInventory(to: .writing)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertThrowsError(try initial.advancing(accountID: first.accountID, file: first.file, to: .published)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+
+            var progress = initial
+            for entry in plan.entries {
+                progress = try progress.advancing(accountID: entry.accountID, file: entry.file, to: .writing)
+                progress = try progress.advancing(accountID: entry.accountID, file: entry.file, to: .published)
+            }
+            XCTAssertThrowsError(try progress.advancing(accountID: first.accountID, file: first.file, to: .pending)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertTrue(progress.filesPublished)
+            XCTAssertFalse(progress.complete)
+            progress = try progress.advancingInventory(to: .writing)
+            let sourceBytes = fixture.snapshot.source.replacement.inventory.canonicalBytes
+            try progress.requireInventory(sourceBytes)
+            try progress.requireInventory(plan.inventory.canonicalBytes)
+            progress = try progress.advancingInventory(to: .published)
+            XCTAssertTrue(progress.complete)
+            XCTAssertThrowsError(try progress.requireInventory(sourceBytes)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        }
+    }
+
+    func testCompletionPublicationPinsRetainedOperandsAndPermitsOnlyExpectedBytes() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.recorded()
+            let plan = try fixture.plan(archive)
+            let retained = try MachineUpdateCompletionIntentArchive(record: .decode(archive.record.encoded),
+                policies: archive.policies.map { try .decode($0.encoded) })
+            let reconstructed = try fixture.plan(retained)
+            XCTAssertEqual(try reconstructed.fingerprint, try plan.fingerprint)
+            XCTAssertEqual(reconstructed.entries, plan.entries)
+
+            let record = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            let other = try fixture.plan(fixture.recorded(revision: 248))
+            XCTAssertThrowsError(try record.requirePlan(other)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let entry = try XCTUnwrap(plan.entries.first(where: { $0.startup != $0.completion }))
+            try entry.requireActual(entry.startup, state: .pending)
+            try entry.requireActual(entry.startup, state: .writing)
+            try entry.requireActual(entry.completion, state: .writing)
+            try entry.requireActual(entry.completion, state: .published)
+            for (bytes, state) in [(entry.completion, MachineUpdatePublicationProgress.State.pending),
+                                   (Data([0]), .writing), (entry.startup, .published)] {
+                XCTAssertThrowsError(try entry.requireActual(bytes, state: state)) {
+                    XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+                }
+            }
+        }
+    }
+
+    func testCompletionIntentRetainsOutsideInventoryAccountsAndRejectsForeignPolicyRows() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.intent(), policy = try XCTUnwrap(archive.policies.first)
+            let bytes = try archive.record.encoded
+            let original = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+            let originalRows = try XCTUnwrap(original["accounts"] as? [[String: Any]])
+            let first = try XCTUnwrap(originalRows.first)
+            let account = try XCTUnwrap(archive.record.accounts.first)
+            var outsideID = Data(repeating: 250, count: 16)
+            if outsideID == account.accountID { outsideID = Data(repeating: 251, count: 16) }
+            let otherUID: UInt32 = account.ownerUID == 20010 ? 20011 : 20010
+            let outside: [String: Any] = ["accountID": outsideID.base64EncodedString(), "ownerUID": otherUID,
+                "sourceDigest": Data(repeating: 7, count: 32).base64EncodedString(), "inInventory": false]
+            func record(_ rows: [[String: Any]]) throws -> MachineUpdateCompletionIntentRecord {
+                var fields = original
+                fields["accounts"] = rows
+                return try MachineUpdateCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                    options: [.sortedKeys, .withoutEscapingSlashes]))
+            }
+            let retained = try record(account.accountID.lexicographicallyPrecedes(outsideID) ? [first, outside] : [outside, first])
+            let expanded = try MachineUpdateCompletionIntentArchive(record: retained, policies: [policy])
+            XCTAssertEqual(expanded.record.accounts.count, 2)
+            XCTAssertEqual(expanded.record.accounts.first(where: { !$0.inInventory })?.accountID, outsideID)
+
+            var duplicateOwner = outside
+            duplicateOwner["ownerUID"] = account.ownerUID
+            let duplicateRows = account.accountID.lexicographicallyPrecedes(outsideID)
+                ? [first, duplicateOwner] : [duplicateOwner, first]
+            XCTAssertThrowsError(try record(duplicateRows)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            for (key, value) in [("policyRecordID", UUID().uuidString),
+                                 ("policyRecordDigest", Data(repeating: 13, count: 32).base64EncodedString())] {
+                var changed = first
+                changed[key] = value
+                let tampered = try record([changed])
+                XCTAssertThrowsError(try MachineUpdateCompletionIntentArchive(record: tampered, policies: [policy])) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+            }
+        }
+    }
+
+    func testCompletionIntentCannotDecodeAnArchiveWithTwoWritingAccounts() throws {
+        try withCompletionFixture { fixture in
+            let account = fixture.boundary.accountID
+            let pending = try fixture.intent().preparingWrite(accountID: account, expected: fixture.boundary)
+            let first = try XCTUnwrap(pending.policies.first)
+            var policy = try XCTUnwrap(JSONSerialization.jsonObject(with: first.encoded) as? [String: Any])
+            var binding = try XCTUnwrap(policy["binding"] as? [String: Any])
+            let other = Data(repeating: account.first == 251 ? 250 : 251, count: 16)
+            let identifier = UUID()
+            binding["accountID"] = other.base64EncodedString()
+            policy["binding"] = binding
+            policy["id"] = identifier.uuidString
+            let second = try MachineUpdatePolicyIntentRecord.decode(JSONSerialization.data(withJSONObject: policy,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertEqual(second.phase, .writing)
+            var header = try XCTUnwrap(JSONSerialization.jsonObject(with: pending.record.encoded) as? [String: Any])
+            let rows = try XCTUnwrap(header["accounts"] as? [[String: Any]])
+            let original = try XCTUnwrap(rows.first)
+            let owner = try XCTUnwrap(pending.record.accounts.first?.ownerUID)
+            let added: [String: Any] = ["accountID": other.base64EncodedString(), "ownerUID": owner == 20010 ? 20011 : 20010,
+                "sourceDigest": second.binding.sourceAccountDigest.base64EncodedString(), "inInventory": false,
+                "policyRecordID": identifier.uuidString,
+                "policyRecordDigest": try MachineUpdateActivationRecord.digest(second.encoded).base64EncodedString()]
+            header["accounts"] = account.lexicographicallyPrecedes(other) ? [original, added] : [added, original]
+            let record = try MachineUpdateCompletionIntentRecord.decode(JSONSerialization.data(withJSONObject: header,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            XCTAssertThrowsError(try MachineUpdateCompletionIntentArchive(record: record, policies: [first, second])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testCompletionReconciliationRecordsAnUnchangedTargetOnlyWhenItIsTheSourcePolicy() throws {
+        try withCompletionFixture { fixture in
+            let archive = try fixture.intent(), first = try XCTUnwrap(archive.policies.first)
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: first.encoded) as? [String: Any])
+            var binding = try XCTUnwrap(fields["binding"] as? [String: Any])
+            let target = try fixture.boundary.policy.policy.bytes
+            binding["completionPolicyDigest"] = MachineUpdateActivationRecord.digest(target).base64EncodedString()
+            fields["completionPolicy"] = target.base64EncodedString()
+            fields["binding"] = binding
+            let noOp = try MachineUpdatePolicyIntentRecord.decode(JSONSerialization.data(withJSONObject: fields,
+                options: [.sortedKeys, .withoutEscapingSlashes]))
+            let writing = try noOp.preparingWrite(expected: fixture.boundary)
+            guard case .recorded(let recorded) = try writing.reconciling(fixture.boundary) else {
+                return XCTFail("An exact no-op did not record its retained boundary")
+            }
+            XCTAssertEqual(recorded.phase, .recorded)
+            XCTAssertEqual(recorded.committedCheckpoint, try fixture.boundary.checkpoint.bytes)
+        }
+    }
+
+    func testCompletionPublicationRecordsReadinessJobInVersionTwo() throws {
+        try withCompletionFixture(installedReadiness: true) { fixture in
+            let plan = try fixture.plan(fixture.recorded())
+            let job = try XCTUnwrap(plan.entries.first(where: { $0.file == .authorityJob }))
+            let account = try XCTUnwrap(fixture.snapshot.configuration.configuration(accountID: job.accountID))
+            XCTAssertFalse(account.startup.host.installedReadinessEnabled)
+            XCTAssertTrue(account.completion.host.installedReadinessEnabled)
+            XCTAssertNotEqual(job.startup, job.completion)
+            let record = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            XCTAssertEqual(record.formatVersion, 2)
+            try MachineUpdateCompletionPublicationRecord.decode(record.encoded).requirePlan(plan)
+            let formats = try MachineUpdateCompletionPublicationRecord.requirements.filter {
+                $0.name == MachineUpdateCompletionPublicationRecord.formatName
+            }
+            XCTAssertEqual(formats.count, 2)
+            for format in formats {
+                XCTAssertEqual(format.readVersions, [1, 2])
+                XCTAssertEqual(format.writeVersions, [1, 2])
+            }
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: record.encoded) as? [String: Any])
+            fields["formatVersion"] = 1
+            XCTAssertThrowsError(try MachineUpdateCompletionPublicationRecord.decode(JSONSerialization.data(
+                withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testCompletionReconciliationRefusesForeignPolicyAndCheckpointChanges() throws {
+        try withCompletionFixture { fixture in
+            let source = fixture.boundary
+            let pending = try fixture.intent().preparingWrite(accountID: source.accountID, expected: source)
+            let valid = try fixture.committedBoundary(for: pending)
+            let checkpoint = valid.checkpoint
+            let foreignPolicy = AuthorityCodePolicySnapshot(revision: UUID(), policy: source.policy.policy,
+                roleRevisions: source.policy.roleRevisions)
+            let staleRoles = AuthorityCodePolicySnapshot(revision: valid.policy.revision, policy: valid.policy.policy,
+                roleRevisions: source.policy.roleRevisions)
+            for policy in [foreignPolicy, staleRoles] {
+                let wrong = AuthorityJournal.MachineUpdatePolicyBoundary(macID: valid.macID, accountID: valid.accountID,
+                    policy: policy, checkpoint: checkpoint)
+                XCTAssertThrowsError(try pending.recordingRecoveredBoundary(wrong)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+            }
+            let authority = checkpoint.currentAuthorityGeneration
+            let cases = [
+                (checkpoint.generation + 1, authority, checkpoint.journalEpoch, checkpoint.journalHead),
+                (checkpoint.generation, authority + 1, checkpoint.journalEpoch, checkpoint.journalHead),
+                (checkpoint.generation, authority, Data(repeating: 99, count: 16), checkpoint.journalHead),
+                (checkpoint.generation, authority, checkpoint.journalEpoch, checkpoint.journalHead + 1)
+            ]
+            for (generation, authorityGeneration, epoch, head) in cases {
+                let wrong = try AuthorityJournal.MachineUpdatePolicyBoundary(macID: valid.macID, accountID: valid.accountID,
+                    policy: valid.policy, checkpoint: .init(generation: generation, authorityDigest: checkpoint.authorityDigest,
+                        ledgerDigest: checkpoint.ledgerDigest, journalEpoch: epoch, journalHead: head,
+                        authorityGeneration: authorityGeneration))
+                XCTAssertThrowsError(try pending.recordingRecoveredBoundary(wrong)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+            }
+            XCTAssertTrue(try pending.recordingRecoveredBoundary(valid).policyMarkersRecorded)
+        }
     }
 
     func testRestartHealthPlanRejectsACandidateWithoutTheSelectedConsumerFormat() throws {
