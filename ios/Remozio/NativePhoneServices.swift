@@ -23,8 +23,10 @@ final class NativePhoneServices: NSObject, PhoneServices {
     /// requires the pinned key and the ALPN.
     static func endpoint(address: ComputerAddress?, override: String?) -> NWEndpoint? {
         if let address {
+            // ComputerAddress.parse already limits the port to 1...65535. If that ever breaks, a typed address
+            // must still never turn into Bonjour discovery, so the route points at a port that cannot answer.
             guard (1...65_535).contains(Int(address.port)), let port = NWEndpoint.Port(rawValue: UInt16(address.port)) else {
-                return nil
+                return .hostPort(host: NWEndpoint.Host(address.host), port: NWEndpoint.Port(rawValue: 0) ?? .any)
             }
             return .hostPort(host: NWEndpoint.Host(address.host), port: port)
         }

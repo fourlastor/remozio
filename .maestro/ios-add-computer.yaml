@@ -35,6 +35,9 @@ appId: dev.sebastiano.remozio.ios
 - scrollUntilVisible:
     element:
       id: "address-invalid"
+- scrollUntilVisible:
+    element:
+      id: "test-connection"
 - assertVisible:
     id: "test-connection"
     enabled: false

@@ -106,6 +106,11 @@ final class PairingNetworkTests: XCTestCase {
                        .hostPort(host: NWEndpoint.Host("fd7a::1"), port: 7443))
     }
 
+    func testAnOutOfRangeTypedPortNeverFallsBackToBonjour() {
+        XCTAssertEqual(NativePhoneServices.endpoint(address: ComputerAddress(host: "192.0.2.10", port: 70_000), override: "[fd7a::1]:7443"),
+                       .hostPort(host: "192.0.2.10", port: .any))
+    }
+
     func testNoAddressMeansBonjourDiscovery() {
         XCTAssertNil(NativePhoneServices.endpoint(address: nil, override: nil))
         XCTAssertNil(NativePhoneServices.endpoint(address: nil, override: "no-port"))

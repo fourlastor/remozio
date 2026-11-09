@@ -12,6 +12,29 @@ class ComputerAddressTest {
     @Test fun readsABracketedIPv6Address(): Unit =
         assertEquals(ComputerAddress("fd7a:115c:a1e0::1", 7443), ComputerAddress.parse("[fd7a:115c:a1e0::1]:7443"))
 
+    @Test fun readsCompressedAndMappedIPv6() {
+        for (host in listOf("::1", "1::", "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7::", "::ffff:192.0.2.1", "64:ff9b::192.0.2.1"))
+            assertEquals(ComputerAddress(host, 7443), ComputerAddress.parse("[$host]:7443"), host)
+    }
+
+    @Test fun rejectsMalformedIPv6() {
+        for (host in listOf(":::", "::::", "1::2::3", "1:2", "12345::1", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7:8::",
+            ":1::", "1:2:3:4:5:6:7:192.0.2.1", "::192.0.2.256", "::1.2.3", "g::1", "::1%en0"))
+            assertNull(ComputerAddress.parse("[$host]:7443"), host)
+    }
+
+    @Test fun rejectsNonAsciiDigitsInThePortWithoutThrowing() {
+        assertNull(ComputerAddress.parse("host:٧٤٤٣"))
+        assertNull(ComputerAddress.parse("host:７４４３"))
+    }
+
+    @Test fun theRouteFollowsTheField() {
+        assertEquals(ConnectionRoute.Discover, ConnectionRoute.of(""))
+        assertEquals(ConnectionRoute.Discover, ConnectionRoute.of("   "))
+        assertEquals(ConnectionRoute.Direct(ComputerAddress("192.0.2.10", 7443)), ConnectionRoute.of("192.0.2.10:7443"))
+        assertEquals(ConnectionRoute.Invalid, ConnectionRoute.of("192.0.2.10"))
+    }
+
     @Test fun acceptsThePortLimits() {
         assertEquals(1, ComputerAddress.parse("host:1")?.port)
         assertEquals(65_535, ComputerAddress.parse("host:65535")?.port)

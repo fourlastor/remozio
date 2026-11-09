@@ -230,10 +230,16 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, se
     var attempt by remember(text) { mutableStateOf(0) }
     // Optional: empty searches the local network. The address lives only in this screen's state.
     var addressText by remember(text) { mutableStateOf("") }
-    val address = ComputerAddress.parse(addressText)
-    val addressValid = addressText.isBlank() || address != null
+    val route = ConnectionRoute.of(addressText)
+    val addressValid = route != ConnectionRoute.Invalid
     LaunchedEffect(text, attempt) {
         if (attempt == 0) return@LaunchedEffect
+        val address = when (route) {
+            ConnectionRoute.Discover -> null
+            is ConnectionRoute.Direct -> route.address
+            // The button is disabled for an invalid address; never fall back to discovery.
+            ConnectionRoute.Invalid -> return@LaunchedEffect
+        }
         test = ConnectionTestState.Connecting
         test = testConnection(this, text, services.pairingKeys(address))
     }
