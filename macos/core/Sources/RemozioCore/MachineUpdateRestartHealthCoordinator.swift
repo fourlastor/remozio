@@ -31,6 +31,8 @@ final class MachineUpdateVerifiedInstalledReadinessScope: @unchecked Sendable {
         }
     }
 
+    var isExpired: Bool { lock.withLock { verify == nil } }
+
     fileprivate func expire() {
         lock.withLock { verify = nil }
     }
@@ -54,18 +56,28 @@ actor MachineUpdateRestartHealthCoordinator {
     private var settlement: Task<Void, Error>?
 
     init(inventory: MachineUpdateHealthInventory, verifyCurrent: @escaping @Sendable () throws -> Void,
-        installedActivity: (any OwnedReleaseActivity)? = nil,
         makeAccount: @escaping @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateRestartAccount,
         recoverOrdinary: @escaping @Sendable (Data) async throws -> Void) {
         self.inventory = inventory
-        self.installedActivity = installedActivity
-        self.verifyCurrent = {
-            try installedActivity?.validate()
-            try verifyCurrent()
-            try installedActivity?.validate()
-        }
+        self.installedActivity = nil
+        self.verifyCurrent = verifyCurrent
         self.makeAccount = makeAccount
         self.recoverOrdinary = recoverOrdinary
+    }
+
+    init(plan: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        terminal: MachineUpdateInstalledTerminalReadBridge, activity: any OwnedReleaseActivity,
+        makeAccount: @escaping @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateInstalledReadinessAccount) throws {
+        try terminal.requirePlan(plan, candidate: candidate)
+        inventory = plan.inventory
+        installedActivity = activity
+        verifyCurrent = {
+            try activity.validate()
+            try terminal.requireCurrent()
+            try activity.validate()
+        }
+        self.makeAccount = { try await makeAccount($0, $1) }
+        recoverOrdinary = { _ in throw MachineUpdateHealthCoordinatorError.installedGatewayRecoveryRequired }
     }
 
     func check() async throws {

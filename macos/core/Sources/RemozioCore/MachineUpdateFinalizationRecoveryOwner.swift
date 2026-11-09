@@ -86,13 +86,20 @@ final class MachineUpdateFinalizationRecoveryOwner: @unchecked Sendable {
     func makeNativeSettlementOwner(configurationPath: String, machine: PreparationIntentStore,
         directory: ReleaseDestinationLease) throws -> MachineUpdateInstalledSettlementOwner {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        guard getppid() > 1 else { throw JournalLeaseError.unsafeMetadata }
+        let parent = getppid()
+        func requireParent() throws {
+            guard parent > 1, getppid() == parent else { throw JournalLeaseError.unsafeMetadata }
+        }
+        try requireParent()
         let selected = try withSnapshotInLease(machine: machine, directory: directory) { scope in
+            try requireParent()
             let observed = try MachineUpdateNativeFinalization.capture(configurationPath: configurationPath, scope: scope)
             guard observed.readiness != nil else { throw PreparationStoreError.invalidTransition }
             let plan = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: observed.candidate)
+            try requireParent()
             return (plan, observed.candidate)
         }
+        try requireParent()
         try machine.close()
         return try withOperation {
             guard ready, let admission, directory.path == MachineBootstrap.machineDirectory else {
@@ -104,8 +111,9 @@ final class MachineUpdateFinalizationRecoveryOwner: @unchecked Sendable {
             let access = try MachineUpdateRestartSharedActivity(restart: admission, activity: activity, directory: nativeDirectory,
                 expectedMachine: snapshot.admission.machine, macID: snapshot.inventory.macID,
                 installationID: snapshot.inventory.installationID, activationAttempt: snapshot.activation.attemptID)
+            try requireParent()
             return try MachineUpdateInstalledSettlementOwner.open(configurationPath: configurationPath, plan: selected.0,
-                candidate: selected.1, directory: nativeDirectory, access: access, recovery: self)
+                candidate: selected.1, directory: nativeDirectory, access: access, recovery: self, parent: parent)
         }
     }
 

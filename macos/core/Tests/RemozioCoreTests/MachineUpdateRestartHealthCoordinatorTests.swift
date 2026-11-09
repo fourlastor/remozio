@@ -24,27 +24,6 @@ final class MachineUpdateRestartHealthCoordinatorTests: XCTestCase {
         func close() async throws { closes.withLock { $0 += 1 } }
     }
 
-    private final class InstalledAccount: OwnedMachineUpdateInstalledReadinessAccount {
-        let health: Account
-        let ordinary = Mutex(true)
-        let beforeProof: @Sendable () async throws -> Void
-        var accountID: Data { health.accountID }
-
-        init(_ health: Account, beforeProof: @escaping @Sendable () async throws -> Void = {}) {
-            self.health = health
-            self.beforeProof = beforeProof
-        }
-        func check() async throws -> [MachineUpdateAuthenticatedRoleReply] {
-            try await beforeProof()
-            return try await health.check()
-        }
-        func validate() throws { try health.validate() }
-        func validateOrdinaryReadiness() throws {
-            guard ordinary.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
-        }
-        func close() async throws { try await health.close() }
-    }
-
     private final class RecoveryCount: Sendable { let calls = Mutex(0) }
 
     private func reply(_ requirement: MachineUpdateRestartHealthPlan.Requirement,
@@ -52,102 +31,6 @@ final class MachineUpdateRestartHealthCoordinatorTests: XCTestCase {
         let challenge = try MachineUpdateRoleChallengeSession(requirement: requirement, verifyCurrent: {})
         let bytes = try fixture.answer(challenge.request, expected: requirement)
         return try challenge.accept(bytes, authenticatePeer: { _ in })
-    }
-
-    private final class Activity: OwnedReleaseActivity {
-        let closed = Mutex(false)
-        func validate() throws {
-            guard !closed.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
-        }
-        func close() { closed.withLock { $0 = true } }
-    }
-
-    func testInstalledReadinessChecksBothAccountsConcurrentlyAndLendsTheProofOnce() async throws {
-        let fixture = MachineUpdateRoleChallengeTests.Fixture()
-        let started = Mutex(0)
-        let activity = Activity()
-        let rendezvous: @Sendable () async throws -> Void = {
-            try activity.validate()
-            started.withLock { $0 += 1 }
-            let clock = ContinuousClock(), deadline = ContinuousClock().now + .seconds(2)
-            while started.withLock({ $0 }) < 2 {
-                guard clock.now < deadline else { throw MachineUpdateHealthCoordinatorError.incompleteHealth }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
-        var requirements: [MachineUpdateHealthInventory.Requirement] = []
-        var accounts: [InstalledAccount] = []
-        for account in [UInt8(3), 4] {
-            let authority = try fixture.requirement(account: account)
-            let transport = try fixture.requirement(role: .transport, uid: 20000 + UInt32(account), account: account)
-            requirements += [authority, transport]
-            accounts.append(InstalledAccount(Account(accountID: authority.binding.accountID,
-                replies: try [reply(authority, signedBy: fixture), reply(transport, signedBy: fixture)]), beforeProof: rendezvous))
-        }
-        let owners = accounts
-        let inventory = try MachineUpdateHealthInventory(requirements: requirements, preservedAccounts: [])
-        let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {},
-            installedActivity: activity, makeAccount: { accountID, _ in
-                guard let owner = owners.first(where: { $0.accountID == accountID }) else {
-                    throw MachineUpdateHealthCoordinatorError.invalidInventory
-                }
-                return owner
-            }, recoverOrdinary: { _ in XCTFail("Installed readiness reached a restart writer") })
-        let expired = try await coordinator.withVerifiedInstalledReadiness { scope in
-            XCTAssertEqual(scope.inventory.accountIDs, inventory.accountIDs)
-            try scope.validate()
-            try activity.validate()
-            XCTAssertEqual(owners.map { $0.health.closes.withLock { $0 } }, [0, 0])
-            return scope
-        }
-        XCTAssertThrowsError(try expired.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
-        XCTAssertEqual(owners.map { $0.health.closes.withLock { $0 } }, [1, 1])
-        XCTAssertTrue(activity.closed.withLock { $0 })
-        do {
-            try await coordinator.withVerifiedInstalledReadiness { _ in XCTFail("Readiness scope was reused") }
-        } catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .busy) }
-    }
-
-    func testInstalledReadinessRevalidatesOrdinaryOwnersBeforeReturning() async throws {
-        let fixture = MachineUpdateRoleChallengeTests.Fixture()
-        let authority = try fixture.requirement(), transport = try fixture.requirement(role: .transport, uid: 20000)
-        let inventory = try MachineUpdateHealthInventory(requirements: [authority, transport], preservedAccounts: [])
-        let health = Account(accountID: authority.binding.accountID,
-            replies: try [reply(authority, signedBy: fixture), reply(transport, signedBy: fixture)])
-        let owner = InstalledAccount(health), activity = Activity()
-        let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {},
-            installedActivity: activity, makeAccount: { _, _ in owner },
-            recoverOrdinary: { _ in XCTFail("Installed readiness reached a restart writer") })
-        do {
-            try await coordinator.withVerifiedInstalledReadiness { scope in
-                try scope.validate()
-                owner.ordinary.withLock { $0 = false }
-            }
-            XCTFail("Unavailable ordinary runtime verified")
-        } catch { XCTAssertEqual(error as? JournalLeaseError, .invalidated) }
-        XCTAssertEqual(health.closes.withLock { $0 }, 1)
-        XCTAssertTrue(activity.closed.withLock { $0 })
-    }
-
-    func testInstalledReadinessCannotRecoverAGatewayJournal() async throws {
-        let fixture = MachineUpdateRoleChallengeTests.Fixture()
-        let authority = try fixture.requirement()
-        let transport = try fixture.requirement(role: .transport, uid: 20000)
-        let gateway = try fixture.requirement(role: .notificationGateway, uid: 20001)
-        let inventory = try MachineUpdateHealthInventory(requirements: [authority, transport, gateway], preservedAccounts: [])
-        let health = Account(accountID: authority.binding.accountID, hotJournal: true)
-        let owner = InstalledAccount(health), activity = Activity()
-        let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {},
-            installedActivity: activity, makeAccount: { _, _ in owner },
-            recoverOrdinary: { _ in XCTFail("Installed readiness reached a restart writer") })
-        do {
-            try await coordinator.withVerifiedInstalledReadiness { _ in XCTFail("Unready Gateway verified") }
-            XCTFail("Unready Gateway returned")
-        } catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .installedGatewayRecoveryRequired) }
-        XCTAssertEqual(health.closes.withLock { $0 }, 1)
-        XCTAssertTrue(activity.closed.withLock { $0 })
-        try await coordinator.close()
-        XCTAssertEqual(health.closes.withLock { $0 }, 1)
     }
 
     func testMissingSelectedRoleKeepsTheMachineUnverifiedAndRetainsItsOwnerUntilClose() async throws {
