@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Dispatch
 import Foundation
@@ -25,6 +26,7 @@ private final class MachineReplacementFixture {
     let newRelease: SignedReleaseEvidence
     let installedReadiness: Bool
     let readinessAlreadyEnabled: Bool
+    let enableSecondReadiness: Bool
     var quiet: UpdateQuiescenceLease
     let oldIdentity: PreparationFileIdentity
     let newIdentity: PreparationFileIdentity
@@ -32,10 +34,11 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false,
+         stableFormats: Bool = false, enableSecondReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
+        self.enableSecondReadiness = enableSecondReadiness
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true, installedReadiness: readinessAlreadyEnabled))
         try beforeActivation(files)
@@ -750,7 +753,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     host: original.host, transport: original.transport, gateway: original.gateway, clients: original.clients, stage: stage)
             }
             let startup = try plan(.startup), proposedCompletion = try plan(.completion)
-            let completion = f.installedReadiness && account.accountID == accountID
+            let completion = f.installedReadiness && (account.accountID == accountID || f.enableSecondReadiness)
                 ? try proposedCompletion.selectingInstalledRootReadiness(candidate: f.newRelease) : proposedCompletion
             XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(startup.gateway.encoded))
             XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(startup.transport.canonicalBytes))
@@ -1592,7 +1595,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture)
+    private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture,
+        didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
         throws -> (account: AccountPreparationIntent, reference: RuntimeMaterialReference) {
         let store = files.machine.store
         let account = try reserveRestartAccount(files, complete: true)
@@ -1608,12 +1612,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
             notValidAfter: now.addingTimeInterval(600), serviceActivity: activity, auditDeliveryVersion: 1)
         let reference = try material.reference
         try store.retainRuntimeMaterial(reference)
+        didPrepareMaterial(material)
         return (account, reference)
     }
 
-    private func registerSecondForeground(_ files: BoundAdmissionRegistrationFixture) throws -> RuntimeActivationPlan {
+    private func registerSecondForeground(_ files: BoundAdmissionRegistrationFixture,
+        didPrepareMaterial: (RuntimePreparationMaterial) -> Void) throws -> RuntimeActivationPlan {
         let store = files.machine.store
-        let (account, reference) = try prepareSecondForeground(files)
+        let (account, reference) = try prepareSecondForeground(files, didPrepareMaterial: didPrepareMaterial)
         try store.completeRuntimePublication(reference)
         let plan = try RuntimeActivationPlan(account: account,
             initialization: XCTUnwrap(store.initialization(accountID: account.accountID)),
@@ -1628,14 +1634,17 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
+        enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, beforeActivation: { files in
-            if registerSecondForeground { additionalForeground = [try self.registerSecondForeground(files)] }
+            stableFormats: stableFormats, enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
+            if registerSecondForeground {
+                additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
+            }
             let store = files.machine.store
             if registerForeground { try store.markRuntimeJobsRegistered(files.machine.f.plan) }
             if registerGateway || publishGatewayWithoutRegistration {
@@ -2251,12 +2260,15 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
+        enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
+        didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, beforeActivation: beforeActivation) { fixture in
+            stableFormats: stableFormats, enableSecondReadiness: enableSecondReadiness,
+            didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
             func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
@@ -2299,19 +2311,48 @@ final class MachineUpdateReplacementTests: XCTestCase {
             func files(_ entry: MachineUpdateCompletionPublicationPlan.Entry) throws -> ProtectedSetupDirectory {
                 try XCTUnwrap(directories[entry.accountID])
             }
-            // Publication recovery is exercised separately. Start the finishing tests with the completed files and record.
             var published = try machine.retainMachineUpdateCompletionPublication(publication, plan: plan, expected: recorded,
                 restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart) { _, scope in _ = try scope.read() }
-            for entry in plan.entries {
-                published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .writing)
-                _ = try AdministrativeSetupPublication.publish(entry.completion, file: entry.artifact, directory: files(entry), owner: getuid())
-                published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .published)
+            if publishCompletionFiles {
+                XCTAssertEqual(accounts.count, 2)
+                XCTAssertEqual(Set(directories.values.map(\.path)).count, 2)
+                for entry in plan.entries {
+                    _ = try AdministrativeSetupPublication.publish(entry.startup, file: entry.artifact, directory: files(entry), owner: getuid())
+                }
+                var acknowledgments: [Data: Set<MachineUpdateCompletionPublicationPlan.File>] = [:]
+                // The coordinator checks the store scope around each step. Check the completed file set once below.
+                published = try MachineUpdateCompletionFileCoordinator.publish(published, plan: plan, expected: recorded,
+                    restart: snapshot, candidate: candidate, machine: machine, directory: directory, admission: restart,
+                    validate: { _ in }, publishFile: { current, entry, _, didStage in
+                        try MachineUpdateCompletionPublicationFiles.publishInLease(plan, publication: current,
+                            accountID: entry.accountID, file: entry.file, directory: files(entry), owner: getuid(),
+                            verifyCurrent: {}, didStage: didStage)
+                    }, didStage: { stage in
+                        if case .acknowledged(let account, let file) = stage {
+                            XCTAssertTrue(acknowledgments[account, default: []].insert(file).inserted)
+                        }
+                    })
+                XCTAssertTrue(published.filesPublished)
+                XCTAssertEqual(Set(acknowledgments.keys), Set(accounts))
+                XCTAssertEqual(try machine.machineUpdateCompletionPublication(), published)
+                for entry in plan.entries {
+                    XCTAssertTrue(acknowledgments[entry.accountID, default: []].contains(entry.file))
+                }
+                try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: published,
+                    owner: getuid(), directory: files, verifyCurrent: {})
+            } else {
+                // Other finishing tests start with completed files and a matching record.
+                for entry in plan.entries {
+                    published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .writing)
+                    _ = try AdministrativeSetupPublication.publish(entry.completion, file: entry.artifact, directory: files(entry), owner: getuid())
+                    published = try published.advancing(accountID: entry.accountID, file: entry.file, to: .published)
+                }
+                try machine.close()
+                let revision = published.revision.uuidString.replacingOccurrences(of: "-", with: "")
+                let record = try published.encoded.map { String(format: "%02x", $0) }.joined()
+                try fixture.files.sql("UPDATE machine_update_completion_publication_v1 SET revision=X'\(revision)',record=X'\(record)' WHERE singleton=1")
+                try fixture.files.reopen()
             }
-            try machine.close()
-            let revision = published.revision.uuidString.replacingOccurrences(of: "-", with: "")
-            let record = try published.encoded.map { String(format: "%02x", $0) }.joined()
-            try fixture.files.sql("UPDATE machine_update_completion_publication_v1 SET revision=X'\(revision)',record=X'\(record)' WHERE singleton=1")
-            try fixture.files.reopen()
 
             let retained = try fixture.machine.machineUpdateCompletionPublicationRecoverySnapshot(candidate: candidate, directory: directory)
             let installed = try MachineUpdateInstalledReleaseEpoch.Archive(snapshot: retained, candidate: candidate,
@@ -2721,19 +2762,209 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     XCTAssertEqual(selected.inventory.accountIDs, [enabledID])
                     XCTAssertTrue(selected.inventory.preservedAccounts.isEmpty)
                     XCTAssertEqual(selected.unselectedRegisteredAccounts, [disabledID])
-                    XCTAssertThrowsError(try MachineUpdateNativeInstalledReadiness.coordinator(plan: selected, candidate: candidate,
-                        withCurrentScope: { _ in XCTFail("Focused plan reached the machine loan") },
-                        acquireActivity: { XCTFail("Focused plan reached activity"); throw ReplacementFixtureError.injected })) {
+                    XCTAssertThrowsError(try MachineUpdateInstalledTerminalReadBridge(plan: selected, candidate: candidate,
+                        readFinishing: { XCTFail("A focused plan reached the finishing reader"); throw ReplacementFixtureError.injected },
+                        readStable: { XCTFail("A focused plan reached the stable reader"); throw ReplacementFixtureError.injected })) {
                             XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
                         }
                     try selected.requireCurrent(scope: scope, candidate: candidate)
                     XCTAssertNil(try MachineUpdateNativeFinalization.selectReadiness(host: disabled,
                         compatibility: compatibility, scope: scope, candidate: candidate))
                     XCTAssertThrowsError(try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)) {
-                        XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                        XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .installedReadinessDisabled)
                     }
                 }
         }
+    }
+
+    func testCompletionFileCoordinatorPublishesBothAccounts() throws {
+        try withFinishingFixture(registerSecondForeground: true, publishCompletionFiles: true) { _, finishing, _ in
+            XCTAssertEqual(finishing.inventory.accounts.count, 2)
+        }
+    }
+
+    private final class InstalledActivity: OwnedReleaseActivity {
+        let closed = Mutex(false)
+        func validate() throws {
+            guard !closed.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
+        }
+        func close() { closed.withLock { $0 = true } }
+    }
+
+    private final class InstalledAccount: OwnedMachineUpdateInstalledReadinessAccount {
+        let accountID: Data
+        let replies: [MachineUpdateAuthenticatedRoleReply]
+        let ordinary = Mutex(true)
+        let closes = Mutex(0)
+        let beforeProof: @Sendable () async throws -> Void
+
+        init(accountID: Data, replies: [MachineUpdateAuthenticatedRoleReply] = [],
+            beforeProof: @escaping @Sendable () async throws -> Void = {}) {
+            self.accountID = accountID
+            self.replies = replies
+            self.beforeProof = beforeProof
+        }
+        func check() async throws -> [MachineUpdateAuthenticatedRoleReply] {
+            try await beforeProof()
+            return replies
+        }
+        func validate() throws {}
+        func validateOrdinaryReadiness() throws {
+            guard ordinary.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
+        }
+        func close() async throws { closes.withLock { $0 += 1 } }
+    }
+
+    private func installedReadinessFixture(twoAccounts: Bool = false, gateway: Bool = false) throws
+        -> (MachineUpdateInstalledReadinessPlan, SignedReleaseEvidence, [Data: [MachineUpdateAuthenticatedRoleReply]]) {
+        var second: RuntimePreparationMaterial?
+        var result: (MachineUpdateInstalledReadinessPlan, SignedReleaseEvidence, [Data: [MachineUpdateAuthenticatedRoleReply]])?
+        try withFinishingFixture(registerGateway: gateway, registerSecondForeground: twoAccounts, enableSecondReadiness: twoAccounts,
+            didPrepareSecondMaterial: { second = $0 }) { fixture, _, _ in
+                let plan = try fixture.machine.withCurrentMachineUpdateFinalization(candidate: fixture.candidate,
+                    directory: fixture.directory, restart: fixture.restart) {
+                        try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: fixture.candidate)
+                    }
+                let runtime = fixture.files.f
+                var replies: [Data: [MachineUpdateAuthenticatedRoleReply]] = [:]
+                if !gateway {
+                    let limits = try CBORLimits(maxBytes: 16_384, maxDepth: 1, maxItems: 9)
+                    for requirement in plan.inventory.requirements {
+                        let account = requirement.binding.accountID
+                        let key: P256.Signing.PrivateKey
+                        if requirement.role == .authority {
+                            key = runtime.f.signingKey
+                        } else {
+                            XCTAssertEqual(requirement.role, .transport)
+                            let material = account == runtime.account.accountID ? runtime.material : try XCTUnwrap(second)
+                            guard case .map(let fields) = try DeterministicCBOR.decode(material.transportIdentity, limits: limits),
+                                  case .bytes(let privateKey) = fields[2] else { throw ReplacementFixtureError.signature }
+                            key = try .init(x963Representation: privateKey)
+                        }
+                        let challenge = try MachineUpdateRoleChallengeSession(requirement: requirement, verifyCurrent: {})
+                        let reply = try MachineUpdateRoleChallengeSession.answer(challenge.request, expected: requirement,
+                            verifyCurrent: {}, sign: { try key.signature(for: $0).rawRepresentation })
+                        replies[account, default: []].append(try challenge.accept(reply, authenticatePeer: { _ in }))
+                    }
+                }
+                result = (plan, fixture.candidate, replies)
+            }
+        return try XCTUnwrap(result)
+    }
+
+    func testInstalledReadinessChecksBothAccountsConcurrentlyAndLendsTheProofOnce() async throws {
+        let (plan, candidate, replies) = try installedReadinessFixture(twoAccounts: true)
+        let activity = InstalledActivity()
+        let terminal = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: candidate,
+            readFinishing: { plan }, readStable: { throw ReplacementFixtureError.injected })
+        let started = Mutex(0)
+        let owners = try plan.inventory.accountIDs.map { account in
+            InstalledAccount(accountID: account, replies: try XCTUnwrap(replies[account]), beforeProof: {
+                try activity.validate()
+                started.withLock { $0 += 1 }
+                let clock = ContinuousClock()
+                let deadline = clock.now + .seconds(2)
+                while started.withLock({ $0 }) < 2 {
+                    guard clock.now < deadline else { throw MachineUpdateHealthCoordinatorError.incompleteHealth }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            })
+        }
+        XCTAssertEqual(owners.count, 2)
+        let coordinator = try MachineUpdateInstalledReadinessCoordinator(plan: plan, candidate: candidate,
+            terminal: terminal, activity: activity, makeAccount: { account, _ in
+                try XCTUnwrap(owners.first { $0.accountID == account })
+            })
+        let expired = try await coordinator.withVerifiedReadiness { scope in
+            XCTAssertEqual(scope.inventory.accountIDs, plan.inventory.accountIDs)
+            XCTAssertFalse(scope.isExpired)
+            try scope.validate()
+            try activity.validate()
+            XCTAssertEqual(owners.map { $0.closes.withLock { $0 } }, [0, 0])
+            return scope
+        }
+        XCTAssertTrue(expired.isExpired)
+        XCTAssertEqual(owners.map { $0.closes.withLock { $0 } }, [0, 0])
+        XCTAssertFalse(activity.closed.withLock { $0 })
+        do {
+            try await coordinator.withVerifiedReadiness { _ in XCTFail("Readiness scope was reused") }
+            XCTFail("The coordinator lent readiness twice")
+        } catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .busy) }
+        try await coordinator.close()
+        XCTAssertEqual(owners.map { $0.closes.withLock { $0 } }, [1, 1])
+        XCTAssertTrue(activity.closed.withLock { $0 })
+    }
+
+    func testInstalledReadinessWrapperRejectsAnUnboundPlanAndAChangedRead() async throws {
+        let (plan, candidate, _) = try installedReadinessFixture()
+        let (other, otherCandidate, _) = try installedReadinessFixture()
+        let reads = Mutex(0)
+        let terminal = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: candidate,
+            readFinishing: {
+                reads.withLock { $0 += 1 }
+                return other
+            }, readStable: { throw ReplacementFixtureError.injected })
+        let activity = InstalledActivity()
+        let makeAccount: @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateInstalledReadinessAccount = { _, _ in
+            XCTFail("A changed plan reached the peer owner")
+            throw ReplacementFixtureError.injected
+        }
+        XCTAssertThrowsError(try MachineUpdateInstalledReadinessCoordinator(plan: other, candidate: otherCandidate,
+            terminal: terminal, activity: activity, makeAccount: makeAccount)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+        XCTAssertEqual(reads.withLock { $0 }, 0)
+        let coordinator = try MachineUpdateInstalledReadinessCoordinator(plan: plan, candidate: candidate,
+            terminal: terminal, activity: activity, makeAccount: makeAccount)
+        do {
+            try await coordinator.withVerifiedReadiness { _ in XCTFail("A changed plan verified") }
+            XCTFail("The coordinator accepted a changed plan")
+        } catch { XCTAssertEqual(error as? PreparationStoreError, .staleRevision) }
+        XCTAssertEqual(reads.withLock { $0 }, 1)
+        try await coordinator.close()
+        XCTAssertTrue(activity.closed.withLock { $0 })
+    }
+
+    func testInstalledReadinessRevalidatesOrdinaryOwnersBeforeReturning() async throws {
+        let (plan, candidate, replies) = try installedReadinessFixture()
+        let account = try XCTUnwrap(plan.inventory.accountIDs.first)
+        let owner = InstalledAccount(accountID: account, replies: try XCTUnwrap(replies[account]))
+        let activity = InstalledActivity()
+        let terminal = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: candidate,
+            readFinishing: { plan }, readStable: { throw ReplacementFixtureError.injected })
+        let coordinator = try MachineUpdateRestartHealthCoordinator(plan: plan, candidate: candidate,
+            terminal: terminal, activity: activity, makeAccount: { _, _ in owner })
+        do {
+            try await coordinator.withVerifiedInstalledReadiness { scope in
+                try scope.validate()
+                owner.ordinary.withLock { $0 = false }
+            }
+            XCTFail("Unavailable ordinary runtime verified")
+        } catch { XCTAssertEqual(error as? JournalLeaseError, .invalidated) }
+        XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+        XCTAssertTrue(activity.closed.withLock { $0 })
+    }
+
+    func testInstalledReadinessCannotRecoverAGatewayJournal() async throws {
+        let (plan, candidate, _) = try installedReadinessFixture(gateway: true)
+        let account = try XCTUnwrap(plan.inventory.accountIDs.first)
+        XCTAssertTrue(plan.inventory.requirements(accountID: account).contains { $0.role == .notificationGateway })
+        let owner = InstalledAccount(accountID: account, beforeProof: {
+            throw MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired
+        })
+        let activity = InstalledActivity()
+        let terminal = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: candidate,
+            readFinishing: { plan }, readStable: { throw ReplacementFixtureError.injected })
+        let coordinator = try MachineUpdateRestartHealthCoordinator(plan: plan, candidate: candidate,
+            terminal: terminal, activity: activity, makeAccount: { _, _ in owner })
+        do {
+            try await coordinator.withVerifiedInstalledReadiness { _ in XCTFail("Unready Gateway verified") }
+            XCTFail("Unready Gateway returned")
+        } catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .installedGatewayRecoveryRequired) }
+        XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+        XCTAssertTrue(activity.closed.withLock { $0 })
+        try await coordinator.close()
+        XCTAssertEqual(owner.closes.withLock { $0 }, 1)
     }
 
     func testInstalledNativeOwnerSelectionUsesOnlyRegisteredCompletionPeers() throws {

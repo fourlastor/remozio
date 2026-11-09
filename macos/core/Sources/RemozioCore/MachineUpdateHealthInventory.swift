@@ -3,7 +3,7 @@ import Foundation
 enum MachineUpdateHealthCoordinatorError: Error, Equatable {
     case invalidInventory, incompleteHealth, busy, changedScope, duplicateOwner, closed
     case recoveryCompletedNeedsFreshCheck
-    case installedGatewayRecoveryRequired
+    case installedGatewayRecoveryRequired, installedReadinessDisabled
 }
 
 /// Exact selected checks and preserved accounts. These values grant no startup, journal writer or completion authority.

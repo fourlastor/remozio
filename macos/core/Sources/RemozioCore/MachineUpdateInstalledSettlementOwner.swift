@@ -18,10 +18,9 @@ final class MachineUpdateInstalledSettlementOwner: Sendable {
 
     static func open(configurationPath: String, plan: MachineUpdateInstalledReadinessPlan,
         candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
-        access: MachineUpdateRestartSharedActivity, recovery: MachineUpdateFinalizationRecoveryOwner) throws -> Self {
+        access: MachineUpdateRestartSharedActivity, recovery: MachineUpdateFinalizationRecoveryOwner, parent: pid_t) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let parent = getppid()
-        guard parent > 1 else { throw JournalLeaseError.unsafeMetadata }
+        guard parent > 1, getppid() == parent else { throw JournalLeaseError.unsafeMetadata }
         try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         let reader = try MachineUpdateInstalledSettlementReader(configurationPath: configurationPath,
             plan: plan, candidate: candidate, directory: directory, access: access, recovery: recovery, parent: parent)

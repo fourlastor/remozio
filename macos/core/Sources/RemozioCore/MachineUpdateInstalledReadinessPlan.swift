@@ -46,7 +46,11 @@ struct MachineUpdateInstalledReadinessPlan: Sendable {
                   let transportHost = configuration.transport.settingsHost else {
                 throw RuntimePreparationError.changedScope
             }
-            guard configuration.host.installedReadinessEnabled else { throw RuntimePreparationError.changedScope }
+            // Every registered account must prove readiness before settlement can reopen machine admission.
+            // Mixed readiness prevents the settlement owner from opening. The update stays in finishing with admission closed.
+            guard configuration.host.installedReadinessEnabled else {
+                throw MachineUpdateHealthCoordinatorError.installedReadinessDisabled
+            }
             _ = try configuration.host.validate(inventory: view.installedInventory, release: candidate,
                 bundlePath: view.installedInventory.bundlePath)
             try MachineUpdateConsumerHealthReleaseValidation.validate(candidate, host: transportHost, purpose: .installedReadiness)

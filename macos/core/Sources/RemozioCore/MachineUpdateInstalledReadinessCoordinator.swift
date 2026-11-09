@@ -1,17 +1,14 @@
 import Foundation
 
-/// Checks the installed cohort and joins owner cleanup. The caller retains closed admission.
+/// Lends the verified installed cohort for settlement. The caller closes the owners after resolving the commit.
 struct MachineUpdateInstalledReadinessCoordinator: Sendable {
     private let health: MachineUpdateRestartHealthCoordinator
 
-    init(plan: MachineUpdateInstalledReadinessPlan, activity: any OwnedReleaseActivity,
-        verifyCurrent: @escaping @Sendable () throws -> Void,
+    init(plan: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        terminal: MachineUpdateInstalledTerminalReadBridge, activity: any OwnedReleaseActivity,
         makeAccount: @escaping @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateInstalledReadinessAccount) throws {
-        guard plan.focusedAccountID == nil else { throw PreparationStoreError.invalidTransition }
-        health = MachineUpdateRestartHealthCoordinator(inventory: plan.inventory, verifyCurrent: verifyCurrent,
-            installedActivity: activity, makeAccount: { accountID, requirements in
-                try await makeAccount(accountID, requirements)
-            }, recoverOrdinary: { _ in throw MachineUpdateHealthCoordinatorError.installedGatewayRecoveryRequired })
+        health = try MachineUpdateRestartHealthCoordinator(plan: plan, candidate: candidate, terminal: terminal,
+            activity: activity, makeAccount: makeAccount)
     }
 
     func withVerifiedReadiness<Value: Sendable>(
