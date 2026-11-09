@@ -20,6 +20,8 @@ jobs:
     name: Linux Swift protocol
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    outputs:
+      gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install pinned Swift toolchain
@@ -118,6 +120,8 @@ jobs:
     name: Mac build
     runs-on: macos-26
     timeout-minutes: 120
+    outputs:
+      build-key: ${{ steps.build-cache-key.outputs.key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -193,6 +197,8 @@ jobs:
     name: Mac experiments
     runs-on: macos-26
     timeout-minutes: 60
+    outputs:
+      build-key: ${{ steps.build-cache-key.outputs.key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Identify compatible Mac experiments cache
@@ -269,6 +275,9 @@ jobs:
     name: Mac interoperability
     runs-on: macos-26
     timeout-minutes: 20
+    outputs:
+      build-key: ${{ steps.build-cache-key.outputs.key }}
+      gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -351,6 +360,8 @@ jobs:
     name: iOS build
     runs-on: macos-26
     timeout-minutes: 45
+    outputs:
+      gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -396,6 +407,8 @@ jobs:
     name: Kotlin protocol
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -435,6 +448,8 @@ jobs:
     name: Android build
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    outputs:
+      gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -472,3 +487,37 @@ jobs:
             ~/.gradle/wrapper/dists
             ~/.gradle/caches/modules-2
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+  cache-cleanup:
+    name: Prune superseded main caches
+    # Each main push saves new Mac outputs, and Gradle downloads when build files change. Two generations exceed the
+    # 10 GB budget, so GitHub evicted entries, sometimes the Gradle ones that keep services.gradle.org out of a run.
+    # This keeps the newest entry of each family plus every key this run saved, and deletes only main's entries.
+    needs: [linux-protocol, mac, mac-experiments, mac-interop, ios, kotlin, android]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: scripts/prune-ci-caches.py
+          sparse-checkout-cone-mode: false
+      - name: Delete superseded main cache entries
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_KEYS: >-
+            ${{ needs.linux-protocol.outputs.gradle-key }}
+            ${{ needs.mac.outputs.build-key }}
+            ${{ needs.mac-experiments.outputs.build-key }}
+            ${{ needs.mac-interop.outputs.build-key }}
+            ${{ needs.mac-interop.outputs.gradle-key }}
+            ${{ needs.ios.outputs.gradle-key }}
+            ${{ needs.kotlin.outputs.gradle-key }}
+            ${{ needs.android.outputs.gradle-key }}
+        run: |
+          set -- --repository "$GITHUB_REPOSITORY"
+          for key in $KEEP_KEYS; do set -- "$@" --keep "$key"; done
+          python3 scripts/prune-ci-caches.py "$@"
