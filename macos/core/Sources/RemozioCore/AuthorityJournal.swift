@@ -636,6 +636,39 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Reads the retained policy from the original journal and continuity paths.
+    func captureRetainedSetupPolicyBoundary(expected: AuthorityInitializationIntent) throws -> MachineUpdatePolicyBoundary {
+        try lock.withLock {
+            guard let storage, expected.complete else { throw AuthorityInitializationError.invalidBoundary }
+            try storage.journal.requireInitializationPath(expected.journalPath)
+            try storage.continuity.requireInitializationScope(path: expected.continuityPath,
+                mac: expected.macID, account: expected.accountID)
+            let current = try captureMachineUpdatePolicyBoundaryForRecoveryRead()
+            guard current.macID == expected.macID, current.accountID == expected.accountID else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            return current
+        }
+    }
+
+    /// Verifies the original initialization and untouched journal pair before retained Setup can select a policy.
+    func captureUnactivatedSetupPolicySource(expected: AuthorityInitializationIntent) throws -> MachineUpdatePolicyBoundary {
+        try lock.withLock {
+            let before = try captureMachineUpdatePolicyBoundaryForRecoveryRead()
+            guard let storage, expected.complete, let checkpoint = expected.checkpoint,
+                  before.macID == expected.macID, before.accountID == expected.accountID,
+                  before.checkpoint == checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+            try storage.continuity.requireInitializationScope(path: expected.continuityPath,
+                mac: expected.macID, account: expected.accountID)
+            guard try storage.journal.initialAuthorityCheckpoint(initial: expected.initialAuthority,
+                databasePath: expected.journalPath) == checkpoint,
+                  try captureMachineUpdatePolicyBoundaryForRecoveryRead() == before else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            return before
+        }
+    }
+
     private func validatedMachineUpdatePolicyBoundary(_ storage: AuthorityStorage) throws -> MachineUpdatePolicyBoundary {
         let before = try storage.continuity.read()
         let value = try validatedRead { transaction in

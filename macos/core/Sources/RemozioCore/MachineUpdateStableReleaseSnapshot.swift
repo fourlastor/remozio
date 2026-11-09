@@ -8,20 +8,21 @@ struct MachineUpdateStableReleaseSnapshot: Sendable {
     let candidate: UpdateSchedulingCandidateRecord
     let installed: MachineUpdateInstalledReleaseEpoch.Archive
     let seal: MachineUpdateStableReleaseRecord
-    let historicalSourceDigest: Data
+    let currentRowsDigest: Data
 
+    /// Only the first stable frame can continue the original finishing readiness proof.
     func requireInitialTransition(from expected: MachineUpdateInstalledReadinessPlan, release: SignedReleaseEvidence) throws {
         let before = expected.view.compatibility.source.actual
         let proposed = try MachineUpdateStableReleaseRecord(readiness: expected, completed: activation, candidate: release)
         guard inventory == before.inventory, admission == before.admission, candidate == before.candidate,
-              historicalSourceDigest == expected.view.compatibility.source.historicalSourceDigest,
+              currentRowsDigest == expected.view.compatibility.source.historicalSourceDigest,
               installed.record == before.installed.record, installed.artifacts == before.installed.artifacts,
               try seal.encoded == proposed.encoded else { throw PreparationStoreError.staleRevision }
     }
 
     func requireSame(as other: Self) throws {
         guard inventory == other.inventory, activation == other.activation, admission == other.admission,
-              candidate == other.candidate, historicalSourceDigest == other.historicalSourceDigest,
+              candidate == other.candidate, currentRowsDigest == other.currentRowsDigest,
               installed.record == other.installed.record, installed.artifacts == other.installed.artifacts,
               try seal.encoded == other.seal.encoded else { throw PreparationStoreError.staleRevision }
     }
