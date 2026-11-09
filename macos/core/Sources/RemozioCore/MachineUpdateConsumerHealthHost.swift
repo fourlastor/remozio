@@ -8,6 +8,20 @@ protocol OwnedSettingsConsumerHost: Sendable {
 extension GatewaySettingsConsumerHost: OwnedSettingsConsumerHost {}
 extension TransportSettingsConsumerHost: OwnedSettingsConsumerHost {}
 
+/// Distinguishes the currently supported consumer startup stages without opening either owner.
+enum GatewaySettingsConsumerStartupMode: Equatable {
+    case ordinary
+    case updateHealth
+
+    static func select(_ host: GatewaySettingsConsumerHostConfiguration) throws -> Self {
+        if host.formatVersion == GatewaySettingsConsumerHostConfiguration.version {
+            return .ordinary
+        }
+        try host.requireUpdateHealthStartupSupported()
+        return .updateHealth
+    }
+}
+
 protocol OwnedMachineUpdateConsumerHealthListener: Sendable {
     func start() throws
     func close()
@@ -22,6 +36,13 @@ actor MachineUpdateConsumerHealthHost: OwnedSettingsConsumerHost {
     private var started = false, retiring = false, settled = false
     private var closing: (id: UUID, task: Task<Void, Error>)?
 
+    static func open(path: String, scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence) throws -> MachineUpdateConsumerHealthHost {
+        do {
+            let listener = try MachineUpdateConsumerHealthXPCListener(configurationPath: path, scope: scope, release: release)
+            return .init(listener: listener, activity: scope)
+        } catch { scope.close(); throw error }
+    }
     init(listener: any OwnedMachineUpdateConsumerHealthListener, activity: any OwnedReleaseActivity) {
         self.listener = listener; self.activity = activity
     }

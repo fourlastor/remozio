@@ -65,6 +65,18 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
             relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
             build: component.build, teamID: component.teamID, formats: value)
     }
+    func testStartupModeKeepsCompletionOutOfTheCurrentNativePaths() throws {
+        let fixture = try Fixture()
+        for role in GatewaySettingsConsumerRole.allCases {
+            let ordinary = try select(role, from: fixture.original)
+            let startup = try select(role, from: fixture.startup)
+            let completion = try select(role, from: fixture.completion)
+            XCTAssertEqual(try GatewaySettingsConsumerStartupMode.select(ordinary), .ordinary)
+            XCTAssertEqual(try GatewaySettingsConsumerStartupMode.select(startup), .updateHealth)
+            XCTAssertThrowsError(try GatewaySettingsConsumerStartupMode.select(completion))
+        }
+    }
+
     func testGatewayHealthReaderAcceptsOnlyTheProtectedStartupHost() throws {
         let fixture = try Fixture()
         let startup = try fixture.startup.encoded
@@ -75,6 +87,13 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(ordinary))
         XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decodeForUpdateHealthStartup(completion))
         XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(completion))
+        let path = try fixture.startup.gatewayConfigurationPath
+        let selected = try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(startup, path: path)
+        XCTAssertEqual(selected.host, fixture.startup)
+        XCTAssertEqual(selected.mode, .updateHealth)
+        XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(ordinary, path: path).mode, .ordinary)
+        XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(completion, path: path))
+        XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(startup, path: path + ".other"))
     }
 
     func testTransportHealthReaderPreservesTheStartupHostAndRejectsOrdinaryAndCompletion() throws {
@@ -94,6 +113,13 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(ordinary))
         XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decodeForUpdateHealthStartup(completion))
         XCTAssertThrowsError(try TransportSettingsConsumerBootstrap.decode(completion))
+        let path = try decoded.configurationPath
+        let selected = try GatewaySettingsConsumerNativeScope.decodeTransportStartup(startup, path: path)
+        XCTAssertEqual(selected.bootstrap.base.canonicalBytes, startup)
+        XCTAssertEqual(selected.mode, .updateHealth)
+        XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(ordinary, path: path).mode, .ordinary)
+        XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(completion, path: path))
+        XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(startup, path: path + ".other"))
     }
 
     func testHealthPeerPolicyUsesTheSuccessorReleaseAndRetainedConsumerAccount() throws {

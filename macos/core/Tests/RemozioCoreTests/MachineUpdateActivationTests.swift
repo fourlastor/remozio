@@ -9,8 +9,12 @@ final class MachineUpdateActivationFixture {
     let registration: UpdateAdmissionRegistrationRecord
     var machine: UpdateCandidateStorageFixture { files.machine }
     let candidate: UpdateSchedulingCandidateRecord
-    init(enable: Bool = true, candidateRelease: SignedReleaseEvidence? = nil) throws {
-        files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true)); registration = try files.prepare()
+    init(enable: Bool = true, candidateRelease: SignedReleaseEvidence? = nil,
+         beforeCandidateSelection: (UpdateCandidateStorageFixture) throws -> Void = { _ in }) throws {
+        let machine = try UpdateCandidateStorageFixture(admission: true, activation: true)
+        files = try .init(machine: machine)
+        try beforeCandidateSelection(machine)
+        registration = try files.prepare()
         if enable {
             try MachineUpdateActivationStorage.enableInLease(installedRelease: files.machine.release,
                 policy: files.machine.policy, store: files.machine.store)

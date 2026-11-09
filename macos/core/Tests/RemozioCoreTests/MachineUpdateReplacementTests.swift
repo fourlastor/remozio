@@ -24,7 +24,6 @@ private final class MachineReplacementFixture {
     var oldURL: URL { URL(fileURLWithPath: installed.path).appendingPathComponent("Remozio.app") }
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false,
-         omitHealthFormatFor: AuthorityCodeRole? = nil,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         files = try .init(machine: UpdateCandidateStorageFixture(admission: true, activation: true,
             replacement: true, ownedInstalledBundle: true))
@@ -51,9 +50,7 @@ private final class MachineReplacementFixture {
             }
             if backendEpoch {
                 requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
-                requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements.filter {
-                    $0.role != omitHealthFormatFor
-                }
+                requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements
             }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
@@ -1263,17 +1260,42 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         XCTAssertThrowsError(try plan.select(accountID: account, role: .notificationGateway))
         XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.oldRelease))
+        let selected = try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
+            accountID: account)
+        XCTAssertEqual(selected.requirement, authority)
+        XCTAssertEqual(selected.host.canonicalBytes, configuration.configuration.host.canonicalBytes)
+        XCTAssertEqual(selected.policy, try snapshot.configuration.policy(accountID: account))
+        XCTAssertNil(selected.gateway)
+        XCTAssertThrowsError(try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
+            accountID: Data(repeating: 99, count: 16)))
     }
 
     func testRestartHealthPlanRejectsACandidateWithoutTheSelectedConsumerFormat() throws {
-        let f = try Fixture(backendEpoch: true, omitHealthFormatFor: .transport, beforeActivation: { files in
+        let f = try Fixture(backendEpoch: true, beforeActivation: { files in
             try files.machine.store.markRuntimeJobsRegistered(files.machine.f.plan)
         })
         let (source, restart) = try restartWithRetainedBackend(f, complete: true)
         defer { restart.close() }
         let snapshot = try f.machine.store.machineUpdateRestartSnapshot(expected: source, directory: f.directory, restart: restart)
-        XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)) {
+        let components = try f.newRelease.manifest.components.map { component in
+            guard component.role == .transport else { return component }
+            return try ReleaseComponent(role: component.role, identifier: component.identifier, generation: component.generation,
+                relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash, build: component.build,
+                teamID: component.teamID, formats: component.formats.filter { $0.name != MachineUpdateConsumerHealthReleaseValidation.formatName },
+                requests: component.requests)
+        }
+        let manifest = try ReleaseManifest(release: f.newRelease.manifest.release,
+            build: f.newRelease.manifest.build, components: components)
+        let missing = SignedReleaseEvidence(manifest: manifest, codeDirectoryHashes: f.newRelease.codeDirectoryHashes)
+        let current = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: f.newRelease)
+        let (selected, _) = try current.select(accountID: f.machine.account, role: .transport)
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthReleaseValidation.validateDeclarations(missing,
+            policy: selected.configuration.host.codePolicy, consumer: .transport)) {
             XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
+        // Changing a signed declaration also changes the release identity retained by the restart snapshot.
+        XCTAssertThrowsError(try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: missing)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
         }
     }
 
@@ -1326,6 +1348,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(gateway.executionUID, startup.gateway.serviceUID)
         XCTAssertEqual(gateway.publicKey, startup.gateway.receiptPublicKey)
         XCTAssertEqual(gateway.backendRevision, record.revision)
+        let selection = try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
+            accountID: account)
+        XCTAssertEqual(selection.gateway?.requirement, gateway)
+        XCTAssertEqual(selection.gateway?.registration, startup.gateway.registration)
+        XCTAssertNotNil(selection.gatewayPolicy)
     }
 
     func testHealthInventoryRejectsDuplicateRolesAndSplitForegroundPairs() throws {
