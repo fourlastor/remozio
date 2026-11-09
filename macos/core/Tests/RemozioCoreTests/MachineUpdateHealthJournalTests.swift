@@ -268,6 +268,70 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         XCTAssertEqual(try bytes(fixture.files), before)
     }
 
+    func testRecoveryPolicyBoundaryReadsOnlyTheRetainedPair() throws {
+        let fixture = try ContractFixture(), ordinary = try ContractFixture(updateHealthOnly: false)
+        defer { try? fixture.journal.close(); try? ordinary.journal.close() }
+        let before = try bytes(fixture.files)
+        let captured = try fixture.journal.captureMachineUpdatePolicyBoundaryForRecoveryRead()
+        XCTAssertEqual(captured.macID, fixture.configuration.macID)
+        XCTAssertEqual(captured.accountID, fixture.configuration.accountID)
+        XCTAssertEqual(captured.policy, fixture.policy)
+        XCTAssertEqual(captured.checkpoint.journalEpoch, fixture.files.epoch)
+        XCTAssertEqual(try bytes(fixture.files), before)
+        XCTAssertThrowsError(try ordinary.journal.captureMachineUpdatePolicyBoundaryForRecoveryRead()) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+    }
+
+    func testCompletionReconcilesPolicyFromAReopenedReadOnlyJournal() throws {
+        let fixture = try ContractFixture()
+        let source = try fixture.journal.captureMachineUpdatePolicyBoundaryForRecoveryRead()
+        try fixture.journal.close()
+        let authority = try XCTUnwrap(source.policy.policy.entries.first(where: { $0.role == .authority }))
+        let generation = authority.installedGeneration + 1
+        let appHash = Data(repeating: 11, count: 20), authorityHash = Data(repeating: 12, count: 20)
+        let app = try ReleaseComponent(role: .app, identifier: "dev.remozio.fixture.app", generation: generation,
+            relativePath: "Contents/MacOS/app", codeDirectoryHash: nil, build: "2", teamID: authority.teamID, formats: [])
+        let executable = try ReleaseComponent(role: .authority, identifier: authority.identifier, generation: generation,
+            relativePath: InstalledAuthorityCommandConfiguration.executablePath, codeDirectoryHash: authorityHash,
+            build: "2", teamID: authority.teamID, formats: [])
+        let candidate = try SignedReleaseEvidence(manifest: .init(release: "2", build: "2", components: [app, executable]),
+            codeDirectoryHashes: [.app: appHash, .authority: authorityHash])
+        let plan = try MachineUpdatePolicyPlan(source: source.policy, candidate: candidate)
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: fixture.binding.encoded) as? [String: Any])
+        fields["sourcePolicyRevision"] = source.policy.revision.uuidString
+        fields["sourcePolicyDigest"] = try MachineUpdateActivationRecord.digest(source.policy.storedBytes).base64EncodedString()
+        fields["installedReleaseDigest"] = plan.releaseDigest.base64EncodedString()
+        fields["startupPolicyDigest"] = try MachineUpdateActivationRecord.digest(plan.startupPolicy.bytes).base64EncodedString()
+        fields["completionPolicyDigest"] = try MachineUpdateActivationRecord.digest(plan.completionPolicy.bytes).base64EncodedString()
+        let binding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+            options: [.sortedKeys, .withoutEscapingSlashes]))
+        let digest = Data(repeating: 14, count: 32)
+        let epochs = MachineUpdatePolicyIntentRecord.EpochScope(configurationID: UUID(), configurationRevision: UUID(),
+            configurationDigest: digest, backendID: UUID(), backendRevision: UUID(), backendDigest: digest)
+        let pending = try MachineUpdatePolicyIntentRecord(binding: binding, epochs: epochs, source: source, plan: plan)
+            .preparingWrite(expected: source)
+        let retained = try MachineUpdatePolicyIntentRecord.decode(pending.encoded)
+
+        try fixture.files.reopen()
+        let writer = CheckpointedJournal(journal: fixture.files.journal, continuity: fixture.files.store)
+        let target = plan.completionPolicy
+        _ = try writer.write(epoch: fixture.files.epoch) {
+            try $0.installCodePolicy(target, expectedRevision: source.policy.revision)
+        }
+        try close(fixture.files)
+        let beforeRead = try bytes(fixture.files)
+        let reader = try open(fixture.files)
+        let committed = try reader.captureMachineUpdatePolicyBoundaryForRecoveryRead()
+        guard case .recorded(let recovered) = try retained.reconciling(committed) else {
+            return XCTFail("The committed journal did not reconcile")
+        }
+        XCTAssertEqual(recovered.committedPolicy?.revision, committed.policy.revision)
+        XCTAssertEqual(recovered.committedCheckpoint, try committed.checkpoint.bytes)
+        try reader.close()
+        XCTAssertEqual(try bytes(fixture.files), beforeRead)
+    }
+
     func testHealthJournalRejectsAStalePolicyAndForeignBinding() throws {
         let fixture = try ContractFixture()
         let request = try fixture.declaration()
