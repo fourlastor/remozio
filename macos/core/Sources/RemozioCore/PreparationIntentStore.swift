@@ -11,7 +11,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -221,6 +221,8 @@ public final class PreparationIntentStore {
     private func loadRetainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
+        // The installed frame must be read through the dedicated finishing reader.
+        guard schema <= 22 else { throw PreparationStoreError.invalidTransition }
         let inventory = try schema >= 2 ? loadInventoryRecord() : nil
         let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
         guard schema >= 6 else {
@@ -322,7 +324,8 @@ public final class PreparationIntentStore {
             machineUpdateReplacement: schema >= 18 ? loadMachineUpdateReplacement()?.encoded : nil,
             machineUpdateConfigurationEpoch: schema >= 19 ? loadMachineUpdateConfigurationEpoch()?.record.encoded : nil,
             machineUpdateBackendEpoch: schema >= 20 ? loadRequiredMachineUpdateBackendEpochHeader() : nil,
-            completionIntent: schema >= 21 ? completionIntentFingerprint() : nil)
+            completionIntent: schema >= 21 ? completionIntentFingerprint() : nil,
+            completionPublication: schema >= 22 ? MachineUpdateActivationRecord.digest(loadCompletionPublication().encoded) : nil)
     }
     func runtimeActivation(accountID: Data) throws -> RuntimeActivationState {
         guard accountID.count == 16 else { throw RuntimeActivationError.invalidPlan }
@@ -2187,7 +2190,7 @@ public final class PreparationIntentStore {
             admission: admission, replacement: nil, runtime: runtime)
         let accounts = try loadMachineUpdateAccounts(context)
         // These schemas cannot contain an installed-release archive. Later readers must load its exact history.
-        guard try [Int64(17), 18, 19, 20, 21].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        guard try [Int64(17), 18, 19, 20, 21, 22].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -2274,8 +2277,7 @@ public final class PreparationIntentStore {
 
     private func loadMachineUpdateActivation() throws -> MachineUpdateActivationRecord? {
         guard let value = try loadMachineUpdateActivationRecord() else { return nil }
-        // Stable-state readers and their schema writer must qualify this marker before the store can accept it.
-        guard value.phase != .finishing, value.phase != .completed else { throw PreparationStoreError.incompatibleStore }
+        guard value.phase != .completed else { throw PreparationStoreError.incompatibleStore }
         if value.phase.blocksMachineWrites {
             guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
                   let admission = try loadUpdateAdmissionRegistration(),
@@ -2283,15 +2285,23 @@ public final class PreparationIntentStore {
                 throw PreparationStoreError.corruptRecord
             }
             do {
-                try value.requireScope(candidate: candidate, inventory: inventory, admission: admission)
+                if value.phase == .finishing {
+                    try requireFinishingActivation(value, inventory: inventory, candidate: candidate, admission: admission)
+                } else {
+                    try value.requireScope(candidate: candidate, inventory: inventory, admission: admission)
+                }
             } catch { throw PreparationStoreError.corruptRecord }
         }
         return value
     }
 
     private func writeMachineUpdateActivation(_ value: MachineUpdateActivationRecord,
-        replacing previous: MachineUpdateActivationRecord?) throws {
-        guard value.phase != .finishing, value.phase != .completed else { throw PreparationStoreError.invalidTransition }
+        replacing previous: MachineUpdateActivationRecord?, allowFinishing: Bool = false) throws {
+        guard value.phase != .completed else { throw PreparationStoreError.invalidTransition }
+        if value.phase == .finishing {
+            guard allowFinishing, let previous else { throw PreparationStoreError.invalidTransition }
+            try value.requireFinalizationSource(previous)
+        }
         if let previous {
             try statement("UPDATE machine_update_activation_v1 SET revision=?,record=? WHERE id=1 AND revision=?") { row in
                 try bind(bytes(value.revision), column: 1, row: row); try bind(value.encoded, column: 2, row: row)
@@ -2539,7 +2549,7 @@ public final class PreparationIntentStore {
         directory: ReleaseDestinationLease, allowCompletionSchema: Bool = false) throws -> MachineUpdateRestartSource {
         try identity(macID); try requireUpdateAdmissionDirectory(directory)
         let schema = try scalar("PRAGMA user_version")
-        guard schema == 19 || schema == 20 || (allowCompletionSchema && schema == 21), let epoch = try loadMachineUpdateConfigurationEpoch(), epoch.record == expected,
+        guard schema == 19 || schema == 20 || (allowCompletionSchema && (schema == 21 || schema == 22)), let epoch = try loadMachineUpdateConfigurationEpoch(), epoch.record == expected,
               let activation = try loadMachineUpdateActivation(), activation.phase.irreversible else { throw PreparationStoreError.staleRevision }
         let source = try loadMachineUpdateRestartSource(activation), context = source.replacement
         if schema >= 20 {
@@ -2856,6 +2866,504 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// This callback lends one finalization frame on its opening thread while admission stays closed.
+    final class CompletionFinalizationScope: @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private let frame: MachineUpdateFinalizationFrame
+        private var verifyCurrent: (() throws -> Void)?
+        fileprivate init(frame: MachineUpdateFinalizationFrame, verifyCurrent: @escaping () throws -> Void) {
+            self.frame = frame; self.verifyCurrent = verifyCurrent
+        }
+        func read() throws -> MachineUpdateFinalizationFrame {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
+                throw JournalLeaseError.invalidated
+            }
+            return try lock.withLock {
+                guard let verifyCurrent else { throw JournalLeaseError.invalidated }
+                do { try verifyCurrent(); return frame }
+                catch { expire(); throw error }
+            }
+        }
+        fileprivate func expire() { lock.withLock { verifyCurrent = nil } }
+    }
+
+    private static let completionRetirementTables = ["machine_update_completion_publication_v1",
+        "machine_update_completion_intent_v1", "machine_update_backend_epoch_v1",
+        "machine_update_configuration_epoch_v1", "machine_update_replacement_v1"]
+
+    private func withFinalizationScope<Value>(_ capture: @escaping () throws -> MachineUpdateFinalizationFrame,
+        _ body: (CompletionFinalizationScope) throws -> Value) throws -> Value {
+        let frame = try capture()
+        let scope = CompletionFinalizationScope(frame: frame, verifyCurrent: { [weak self] in
+            guard let self, self.active else { throw JournalLeaseError.invalidated }
+            try capture().requireSame(as: frame)
+        })
+        defer { scope.expire() }
+        _ = try scope.read()
+        let result = try body(scope)
+        _ = try scope.read()
+        return result
+    }
+
+    /// Commits the inventory and retained operands together. The finishing phase keeps admission closed.
+    func finalizeMachineUpdateCompletion(_ installed: MachineUpdateInstalledReleaseEpoch.Archive,
+        publication: MachineUpdateCompletionPublicationRecord, plan: MachineUpdateCompletionPublicationPlan,
+        expected: MachineUpdateCompletionIntentArchive, restartSnapshot: MachineUpdateRestartSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        ownedFileDirectory: ((MachineUpdateCompletionPublicationPlan.Entry) throws -> ProtectedSetupDirectory)? = nil,
+        verifyScoped: (CompletionIntentStorageStage, CompletionFinalizationScope) throws -> Void) throws -> MachineUpdateFinalizationSnapshot {
+        try requireInstalledReleaseFormats(candidate)
+        try installed.validate(candidate: candidate)
+        guard publication.filesPublished, publication.inventoryState == .pending,
+              try installed.publicationSource() == publication, installed.record.sourceSchemaVersion == 22,
+              try installed.completionIntent() == expected, try installed.inventory() == plan.inventory,
+              try installed.configuration().record == restartSnapshot.configuration.record,
+              try installed.configuration().artifacts == restartSnapshot.configuration.artifacts,
+              try installed.backend().record == restartSnapshot.backend.record,
+              try installed.backend().artifacts == restartSnapshot.backend.artifacts else { throw PreparationStoreError.staleRevision }
+        func verifyFiles() throws {
+            func verifyAdmission() throws {
+                try restart.validate()
+                try restart.validateMachineBoundary(directory: directory, expected: restartSnapshot.source.replacement.admission.machine)
+            }
+            if let ownedFileDirectory {
+                try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: publication, owner: getuid(),
+                    directory: ownedFileDirectory, verifyCurrent: verifyAdmission)
+            } else {
+                try MachineUpdateCompletionPublicationFiles.requireBackendMetadataNative(restartSnapshot, verifyCurrent: verifyAdmission)
+                try MachineUpdateCompletionPublicationFiles.requireNative(plan, publication: publication, verifyCurrent: verifyAdmission)
+            }
+        }
+        let before: () throws -> MachineUpdateFinalizationFrame = {
+            guard try self.scalar("PRAGMA user_version") == 22 else { throw PreparationStoreError.staleRevision }
+            let current = try self.completionPublicationSnapshot(expected: expected, publication: publication, plan: plan,
+                restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart)
+            try verifyFiles()
+            return .publication(current)
+        }
+        let after: () throws -> MachineUpdateFinalizationFrame = {
+            try self.requireUpdateAdmissionDirectory(directory)
+            let actual = try self.loadMachineUpdateFinalization(candidate: candidate)
+            guard actual.installed.record == installed.record, actual.installed.artifacts == installed.artifacts else {
+                throw PreparationStoreError.staleRevision
+            }
+            try restart.validate()
+            try restart.validateMachineBoundary(directory: directory, expected: actual.admission.machine)
+            try verifyFiles()
+            return .installed(actual)
+        }
+        return try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try withFinalizationScope(before) { try verifyScoped(.beforeTransaction, $0) }
+            }
+            try transaction(write: true, activationWrite: true) {
+                try withFinalizationScope(before) { try verifyScoped(.inTransaction, $0) }
+                let context = restartSnapshot.source.replacement, next = try context.activation.finalizing()
+                let retired = try UpdateSchedulingCandidateRecord(macID: context.candidate.macID,
+                    installationID: context.candidate.installationID, inventoryRevision: context.candidate.inventoryRevision,
+                    preparation: context.candidate.preparation, generation: context.candidate.generation, selected: false)
+                try exec("CREATE TABLE installed_release_state_v1(kind INTEGER NOT NULL CHECK(kind IN(0,1,2,3,4,5,101,102,103,104,105,106,107,108,109,201,202,203,300)),account BLOB NOT NULL CHECK(length(account)=CASE WHEN kind IN(0,1,2,3,4,5,105,106,107,108,109) THEN 1 ELSE 16 END),id BLOB NOT NULL CHECK(length(id)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND CASE WHEN kind=1 THEN 65536 WHEN kind IN(2,3,4) THEN 131072 WHEN kind=5 THEN 524288 WHEN kind=201 THEN 1048576 WHEN kind IN(202,203) THEN 2097152 ELSE 262400 END),PRIMARY KEY(kind,account)) STRICT")
+                try writeInstalledReleaseRow(kind: 0, account: MachineUpdateInstalledReleaseEpoch.global,
+                    record: installed.record.encoded, header: installed.record)
+                for artifact in installed.artifacts {
+                    try writeInstalledReleaseRow(kind: artifact.kind, account: artifact.accountID,
+                        record: artifact.bytes, header: installed.record)
+                }
+                try writeMachineUpdateActivation(next, replacing: context.activation, allowFinishing: true)
+                try writeUpdateCandidate(retired, replacing: context.candidate)
+                guard try loadInventoryRecord() == context.inventory else { throw PreparationStoreError.staleRevision }
+                try statement("UPDATE installation_inventory_v1 SET revision=?,record=? WHERE id=1 AND installation=? AND revision=?") { row in
+                    try bind(plan.inventory.revision, column: 1, row: row); try bind(plan.inventory.canonicalBytes, column: 2, row: row)
+                    try bind(context.inventory.installationID, column: 3, row: row); try bind(context.inventory.revision, column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                for table in Self.completionRetirementTables { try exec("DELETE FROM \(table)") }
+                try exec("PRAGMA user_version=23")
+                try withFinalizationScope(after) { try verifyScoped(.afterMutation, $0) }
+            }
+            do {
+                return try transaction(write: false) {
+                    try withFinalizationScope(after) { scope in
+                        try verifyScoped(.afterCommit, scope)
+                        guard case .installed(let actual) = try scope.read() else { throw PreparationStoreError.staleRevision }
+                        return actual
+                    }
+                }
+            } catch { unavailable = true; shutdown(); throw error }
+        }
+    }
+
+    func machineUpdateFinalizationSnapshot(candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease) throws -> MachineUpdateFinalizationSnapshot {
+        try transaction(write: false) {
+            try requireUpdateAdmissionDirectory(directory)
+            return try loadMachineUpdateFinalization(candidate: candidate)
+        }
+    }
+
+    func withCurrentMachineUpdateFinalization<Value>(candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        _ body: (CompletionFinalizationScope) throws -> Value) throws -> Value {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try withFinalizationScope({
+                    try self.requireUpdateAdmissionDirectory(directory)
+                    let current = try self.loadMachineUpdateFinalization(candidate: candidate)
+                    try restart.validateMachineBoundary(directory: directory, expected: current.admission.machine)
+                    return .installed(current)
+                }, body)
+            }
+        }
+    }
+
+    private func requireInstalledReleaseFormats(_ candidate: SignedReleaseEvidence) throws {
+        for requirement in try MachineUpdateInstalledReleaseRecord.requirements + MachineUpdateActivationRecord.finalizationRequirements {
+            guard let format = candidate.manifest.components.first(where: { $0.role == requirement.role })?.formats.first(where: { $0.name == requirement.name }),
+                  requirement.readVersions.isSubset(of: format.readers), requirement.writeVersions.isSubset(of: format.writers) else {
+                throw PreparationStoreError.incompatibleStore
+            }
+        }
+    }
+
+    private func writeInstalledReleaseRow(kind: Int64, account: Data, record: Data,
+        header: MachineUpdateInstalledReleaseRecord) throws {
+        try withBackendRecordLimit {
+            try statement("INSERT INTO installed_release_state_v1 VALUES(?,?,?,?,?)") { row in
+                try bind(kind, column: 1, row: row); try bind(account, column: 2, row: row)
+                try bind(bytes(header.id), column: 3, row: row); try bind(bytes(header.revision), column: 4, row: row)
+                try bind(record, column: 5, row: row)
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+    }
+
+    private func loadInstalledReleaseRows() throws -> (MachineUpdateInstalledReleaseRecord, [MachineUpdateInstalledReleaseEpoch.Artifact]) {
+        try withBackendRecordLimit {
+            try statement("SELECT kind,account,id,revision,record FROM installed_release_state_v1 ORDER BY kind,account") { row in
+                guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                      sqlite3_column_int64(row, 0) == 0,
+                      try blob(row, column: 1, maximum: 16) == MachineUpdateInstalledReleaseEpoch.global else { throw PreparationStoreError.corruptRecord }
+                let header = try MachineUpdateInstalledReleaseRecord.decode(blob(row, column: 4, maximum: MachineUpdateInstalledReleaseRecord.maximumBytes))
+                guard try blob(row, column: 2, maximum: 16) == bytes(header.id),
+                      try blob(row, column: 3, maximum: 16) == bytes(header.revision) else { throw PreparationStoreError.corruptRecord }
+                var rows: [MachineUpdateInstalledReleaseEpoch.Artifact] = []
+                for operand in header.operands {
+                    guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                          sqlite3_column_int64(row, 0) == operand.kind,
+                          try blob(row, column: 1, maximum: 16) == operand.accountID,
+                          try blob(row, column: 2, maximum: 16) == bytes(header.id),
+                          try blob(row, column: 3, maximum: 16) == bytes(header.revision) else { throw PreparationStoreError.corruptRecord }
+                    let data = try blob(row, column: 4, maximum: MachineUpdateInstalledReleaseRecord.maximumArtifactBytes(kind: operand.kind))
+                    guard data.count == operand.length, MachineUpdateActivationRecord.digest(data) == operand.digest else { throw PreparationStoreError.corruptRecord }
+                    rows.append(.init(kind: operand.kind, accountID: operand.accountID, bytes: data))
+                }
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                return (header, rows)
+            }
+        }
+    }
+
+    private func requireFinishingActivation(_ value: MachineUpdateActivationRecord, inventory: InstallationInventory,
+        candidate: UpdateSchedulingCandidateRecord, admission: UpdateAdmissionRegistrationRecord) throws {
+        guard try scalar("PRAGMA user_version") == 23, !candidate.selected else { throw PreparationStoreError.corruptRecord }
+        let (header, rows) = try loadInstalledReleaseRows()
+        func artifact(_ kind: Int64) throws -> Data {
+            guard let value = rows.first(where: { $0.kind == kind && $0.accountID == MachineUpdateInstalledReleaseEpoch.global }) else {
+                throw PreparationStoreError.corruptRecord
+            }
+            return value.bytes
+        }
+        let intent = try MachineUpdateCompletionIntentRecord.decode(artifact(4))
+        let historical = try UpdateSchedulingCandidateRecord.decode(artifact(106))
+        try value.requireFinalizationSource(.decode(intent.activation))
+        guard header.macID == macID, header.installationID == inventory.installationID,
+              header.inventoryRevision == inventory.revision, header.releaseDigest == inventory.releaseDigest,
+              header.activationAttempt == value.attemptID, inventory.canonicalBytes == intent.targetInventory,
+              try artifact(1) == inventory.canonicalBytes, try artifact(107) == admission.encoded,
+              historical.macID == candidate.macID, historical.installationID == candidate.installationID,
+              historical.inventoryRevision == candidate.inventoryRevision, historical.preparation == candidate.preparation,
+              historical.generation == candidate.generation, historical.updateID == value.updateID,
+              try MachineUpdateActivationRecord.digest(historical.encoded) == value.candidateDigest,
+              try MachineUpdateActivationRecord.digest(admission.encoded) == value.admissionDigest,
+              admission.machine == value.machineAdmission else { throw PreparationStoreError.corruptRecord }
+    }
+
+    private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {
+        try identity(macID); try requireInstalledReleaseFormats(release)
+        guard try scalar("PRAGMA user_version") == 23, let inventory = try loadInventoryRecord(),
+              let candidate = try loadUpdateCandidate(), let activation = try loadMachineUpdateActivation(),
+              let admission = try loadUpdateAdmissionRegistration(), activation.phase == .finishing,
+              try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
+            throw PreparationStoreError.staleRevision
+        }
+        for table in Self.completionRetirementTables {
+            guard try scalar("SELECT COUNT(*) FROM \(table)") == 0 else { throw PreparationStoreError.corruptRecord }
+        }
+        let (header, rows) = try loadInstalledReleaseRows()
+        let archive = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
+        guard try archive.inventory() == inventory else { throw PreparationStoreError.staleRevision }
+        let intent = try archive.completionIntent()
+        var preparations: [AccountPreparationIntent] = []
+        for account in intent.record.accounts {
+            if let preparation = try loadAccountPreparation(ownerUID: account.ownerUID) {
+                guard preparation.accountID == account.accountID, preparation.macID == macID,
+                      preparation.installationID == inventory.installationID else { throw PreparationStoreError.staleRevision }
+                preparations.append(preparation)
+            }
+        }
+        var initializations: [AuthorityInitializationIntent] = []
+        for policy in intent.policies {
+            guard let initial = try loadInitialization(accountID: policy.binding.accountID), initial.complete,
+                  initial.installationID == inventory.installationID,
+                  let preparation = preparations.first(where: { $0.accountID == initial.accountID }),
+                  initial.releaseDigest == preparation.releaseDigest, initial.initializationBytes == preparation.initializationBytes,
+                  let account = intent.record.accounts.first(where: { $0.accountID == initial.accountID }),
+                  account.inInventory == inventory.accounts.contains(where: { $0.accountID == initial.accountID }),
+                  !account.inInventory || inventory.accounts.contains(where: { $0.accountID == initial.accountID && $0.ownerUID == account.ownerUID }) else {
+                throw PreparationStoreError.staleRevision
+            }
+            initializations.append(initial)
+        }
+        return .init(schemaVersion: 23, inventory: inventory, candidate: candidate, activation: activation,
+            admission: admission, installed: archive, preparations: preparations, initializations: initializations)
+    }
+
+    /// Lends one exact publication frame. This loan grants no native file writer or metadata retirement authority.
+    final class CompletionPublicationScope: @unchecked Sendable {
+        private let lock = NSRecursiveLock()
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private let snapshot: MachineUpdateCompletionPublicationSnapshot
+        private var verifyCurrent: (() throws -> Void)?
+        private var active = true
+        fileprivate init(snapshot: MachineUpdateCompletionPublicationSnapshot, verifyCurrent: @escaping () throws -> Void) {
+            self.snapshot = snapshot; self.verifyCurrent = verifyCurrent
+        }
+        func read() throws -> MachineUpdateCompletionPublicationSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            return try lock.withLock {
+                guard active, let verifyCurrent else { throw JournalLeaseError.invalidated }
+                do { try verifyCurrent(); guard active else { throw JournalLeaseError.invalidated }; return snapshot }
+                catch { expire(); throw error }
+            }
+        }
+        fileprivate func expire() { lock.withLock { active = false; verifyCurrent = nil } }
+    }
+    enum CompletionPublicationOperation {
+        case prepare(Data, MachineUpdateCompletionPublicationPlan.File)
+        case complete(Data, MachineUpdateCompletionPublicationPlan.File)
+    }
+    func machineUpdateCompletionPublication() throws -> MachineUpdateCompletionPublicationRecord? {
+        try transaction(write: false) {
+            try identity(macID)
+            guard try scalar("PRAGMA user_version") == 22 else { return nil }
+            return try loadCompletionPublication()
+        }
+    }
+    func withCurrentMachineUpdateCompletionPublication<Value>(expected: MachineUpdateCompletionIntentArchive,
+        publication: MachineUpdateCompletionPublicationRecord?, plan: MachineUpdateCompletionPublicationPlan,
+        restartSnapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        _ body: (CompletionPublicationScope) throws -> Value) throws -> Value {
+        try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try withCompletionPublicationScope(expected: expected, publication: publication, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart, body)
+            }
+        }
+    }
+    private func completionPublicationSnapshot(expected: MachineUpdateCompletionIntentArchive,
+        publication: MachineUpdateCompletionPublicationRecord?, plan: MachineUpdateCompletionPublicationPlan,
+        restartSnapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease) throws -> MachineUpdateCompletionPublicationSnapshot {
+        try requireCompletionPublicationFormats(candidate)
+        try restart.validate()
+        let completion = try loadCompletionRecoverySnapshot(candidate: candidate, directory: directory, allowPublication: true)
+        try completion.requireSame(as: .init(restart: restartSnapshot, intent: expected))
+        try restart.validateMachineBoundary(directory: directory, expected: restartSnapshot.source.replacement.admission.machine)
+        guard expected.policyMarkersRecorded else { throw PreparationStoreError.invalidTransition }
+        let version = try scalar("PRAGMA user_version")
+        if let publication {
+            guard version == 22, try loadCompletionPublication() == publication else { throw PreparationStoreError.staleRevision }
+            try publication.requirePlan(plan)
+        } else {
+            guard version == 21 else { throw PreparationStoreError.staleRevision }
+            let retainedPlan = try MachineUpdateCompletionPublicationPlan(retainedConfiguration: completion.restart.configuration,
+                retainedBackend: completion.restart.backend, intent: completion.intent, candidate: candidate)
+            guard try retainedPlan.fingerprint == plan.fingerprint else { throw PreparationStoreError.staleRevision }
+        }
+        return try .init(completion: completion, publication: publication, candidate: candidate)
+    }
+    private func withCompletionPublicationScope<Value>(expected: MachineUpdateCompletionIntentArchive,
+        publication: MachineUpdateCompletionPublicationRecord?, plan: MachineUpdateCompletionPublicationPlan,
+        restartSnapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        _ body: (CompletionPublicationScope) throws -> Value) throws -> Value {
+        let value = try completionPublicationSnapshot(expected: expected, publication: publication, plan: plan,
+            restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart)
+        let scope = CompletionPublicationScope(snapshot: value, verifyCurrent: { [weak self] in
+            guard let self, self.active else { throw JournalLeaseError.invalidated }
+            try self.completionPublicationSnapshot(expected: expected, publication: publication, plan: plan,
+                restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart).requireSame(as: value)
+        })
+        defer { scope.expire() }
+        _ = try scope.read(); let result = try body(scope); _ = try scope.read(); return result
+    }
+    /// Retains the first publication intent in one explicit schema transition. It changes no policy or external file.
+    func retainMachineUpdateCompletionPublication(_ publication: MachineUpdateCompletionPublicationRecord,
+        plan: MachineUpdateCompletionPublicationPlan, expected: MachineUpdateCompletionIntentArchive,
+        restartSnapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, CompletionPublicationScope) throws -> Void) throws -> MachineUpdateCompletionPublicationRecord {
+        try publication.requirePlan(plan)
+        guard publication.inventoryState == .pending, publication.entries.allSatisfy({ $0.state == .pending }) else {
+            throw PreparationStoreError.invalidTransition
+        }
+        return try restart.withClosedAdmission {
+            let previous: MachineUpdateCompletionPublicationRecord? = try transaction(write: false) {
+                let version = try scalar("PRAGMA user_version")
+                let retained = try version == 22 ? loadCompletionPublication() : nil
+                guard retained == nil || retained == publication else { throw PreparationStoreError.staleRevision }
+                try withCompletionPublicationScope(expected: expected, publication: retained, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.beforeTransaction, $0)
+                }
+                return retained
+            }
+            let result = try transaction(write: previous == nil, activationWrite: true) {
+                try withCompletionPublicationScope(expected: expected, publication: previous, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.inTransaction, $0)
+                }
+                if previous != nil { return publication }
+                try exec("CREATE TABLE machine_update_completion_publication_v1(singleton INTEGER PRIMARY KEY CHECK(singleton=1),id BLOB NOT NULL CHECK(length(id)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 524288)) STRICT")
+                try exec("PRAGMA user_version=22"); try identity(macID)
+                try writeCompletionPublication(publication, replacing: nil)
+                try withCompletionPublicationScope(expected: expected, publication: publication, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.afterMutation, $0)
+                }
+                return publication
+            }
+            return try finishCompletionPublication(result, plan: plan, expected: expected, restartSnapshot: restartSnapshot,
+                candidate: candidate, directory: directory, restart: restart, verifyScoped: verifyScoped)
+        }
+    }
+    func advanceMachineUpdateCompletionPublication(_ publication: MachineUpdateCompletionPublicationRecord,
+        operation: CompletionPublicationOperation, plan: MachineUpdateCompletionPublicationPlan,
+        expected: MachineUpdateCompletionIntentArchive, restartSnapshot: MachineUpdateRestartSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, CompletionPublicationScope) throws -> Void) throws -> MachineUpdateCompletionPublicationRecord {
+        let next: MachineUpdateCompletionPublicationRecord
+        switch operation {
+        case .prepare(let account, let file): next = try publication.advancing(accountID: account, file: file, to: .writing)
+        case .complete(let account, let file): next = try publication.advancing(accountID: account, file: file, to: .published)
+        }
+        try next.requirePlan(plan)
+        return try restart.withClosedAdmission {
+            try transaction(write: false) {
+                try withCompletionPublicationScope(expected: expected, publication: publication, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.beforeTransaction, $0)
+                }
+            }
+            let result = try transaction(write: true, activationWrite: true) {
+                try withCompletionPublicationScope(expected: expected, publication: publication, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.inTransaction, $0)
+                }
+                try writeCompletionPublication(next, replacing: publication)
+                try withCompletionPublicationScope(expected: expected, publication: next, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.afterMutation, $0)
+                }
+                return next
+            }
+            return try finishCompletionPublication(result, plan: plan, expected: expected, restartSnapshot: restartSnapshot,
+                candidate: candidate, directory: directory, restart: restart, verifyScoped: verifyScoped)
+        }
+    }
+    private func finishCompletionPublication(_ publication: MachineUpdateCompletionPublicationRecord,
+        plan: MachineUpdateCompletionPublicationPlan, expected: MachineUpdateCompletionIntentArchive,
+        restartSnapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, CompletionPublicationScope) throws -> Void) throws -> MachineUpdateCompletionPublicationRecord {
+        do {
+            return try transaction(write: false) {
+                try withCompletionPublicationScope(expected: expected, publication: publication, plan: plan,
+                    restartSnapshot: restartSnapshot, candidate: candidate, directory: directory, restart: restart) {
+                    try verifyScoped(.afterCommit, $0)
+                }
+                return publication
+            }
+        } catch { unavailable = true; shutdown(); throw error }
+    }
+    /// Reads the publication frame without claiming file publication or admission authority.
+    func machineUpdateCompletionPublicationRecoverySnapshot(candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease) throws -> MachineUpdateCompletionPublicationSnapshot {
+        try transaction(write: false) {
+            try requireCompletionPublicationFormats(candidate)
+            guard try scalar("PRAGMA user_version") == 22 else { throw PreparationStoreError.invalidTransition }
+            let completion = try loadCompletionRecoverySnapshot(candidate: candidate, directory: directory, allowPublication: true)
+            return try .init(completion: completion, publication: loadCompletionPublication(), candidate: candidate)
+        }
+    }
+
+    private func requireCompletionPublicationFormats(_ candidate: SignedReleaseEvidence) throws {
+        try requireCompletionIntentFormats(candidate)
+        for requirement in try MachineUpdateCompletionPublicationRecord.requirements {
+            guard let format = candidate.manifest.components.first(where: { $0.role == requirement.role })?.formats.first(where: { $0.name == requirement.name }),
+                  requirement.readVersions.isSubset(of: format.readers), requirement.writeVersions.isSubset(of: format.writers) else {
+                throw RuntimePreparationError.changedScope
+            }
+        }
+    }
+    private func writeCompletionPublication(_ publication: MachineUpdateCompletionPublicationRecord,
+        replacing previous: MachineUpdateCompletionPublicationRecord?) throws {
+        if let previous { guard try loadCompletionPublication() == previous else { throw PreparationStoreError.staleRevision } }
+        let sql = previous == nil ? "INSERT INTO machine_update_completion_publication_v1 VALUES(1,?,?,?)" :
+            "UPDATE machine_update_completion_publication_v1 SET id=?,revision=?,record=? WHERE singleton=1"
+        try withCompletionPublicationRecordLimit {
+            try statement(sql) { row in
+                try bind(bytes(publication.id), column: 1, row: row); try bind(bytes(publication.revision), column: 2, row: row)
+                try bind(publication.encoded, column: 3, row: row)
+                guard try step(row) == SQLITE_DONE, let db, sqlite3_changes(db) == 1 else { throw PreparationStoreError.corruptRecord }
+            }
+        }
+        guard try loadCompletionPublication() == publication else { throw PreparationStoreError.staleRevision }
+    }
+    private func loadCompletionPublication() throws -> MachineUpdateCompletionPublicationRecord {
+        let value: MachineUpdateCompletionPublicationRecord = try withCompletionPublicationRecordLimit {
+            try statement("SELECT singleton,id,revision,record FROM machine_update_completion_publication_v1 ORDER BY singleton") { row in
+                guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                      sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.corruptRecord }
+                let id = try blob(row, column: 1, maximum: 16), revision = try blob(row, column: 2, maximum: 16)
+                let record = try blob(row, column: 3, maximum: MachineUpdateCompletionPublicationRecord.maximumBytes)
+                let value = try MachineUpdateCompletionPublicationRecord.decode(record)
+                guard id == bytes(value.id), revision == bytes(value.revision), try step(row) == SQLITE_DONE else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                return value
+            }
+        }
+        let intent = try loadMachineUpdateCompletionIntent()
+        let activation = try MachineUpdateActivationRecord.decode(intent.record.activation)
+        guard intent.policyMarkersRecorded, try value.intentDigest == MachineUpdateActivationRecord.digest(intent.record.encoded),
+              value.sourceInventoryDigest == activation.inventoryDigest,
+              value.targetInventoryDigest == MachineUpdateActivationRecord.digest(intent.record.targetInventory) else {
+            throw PreparationStoreError.corruptRecord
+        }
+        return value
+    }
+    private func withCompletionPublicationRecordLimit<Value>(_ body: () throws -> Value) throws -> Value {
+        guard let db else { throw PreparationStoreError.closed }
+        let previous = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, Int32(MachineUpdateCompletionPublicationRecord.maximumBytes + 4096))
+        defer { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, previous) }
+        return try body()
+    }
+
     /// A synchronous loan of one verified completion read. The loan expires before a later machine write can start.
     final class CompletionSnapshotScope: @unchecked Sendable {
         private let lock = NSRecursiveLock()
@@ -3027,9 +3535,10 @@ public final class PreparationIntentStore {
     }
 
     private func loadCompletionRecoverySnapshot(candidate: SignedReleaseEvidence,
-        directory: ReleaseDestinationLease) throws -> MachineUpdateCompletionSnapshot {
+        directory: ReleaseDestinationLease, allowPublication: Bool = false) throws -> MachineUpdateCompletionSnapshot {
         try identity(macID); try requireUpdateAdmissionDirectory(directory)
-        guard try scalar("PRAGMA user_version") == 21,
+        let schema = try scalar("PRAGMA user_version")
+        guard schema == 21 || (allowPublication && schema == 22),
               let activation = try loadMachineUpdateActivation(), activation.phase == .restartChecking,
               let configuration = try loadMachineUpdateConfigurationEpoch(), configuration.record.publication?.complete == true,
               let backend = try loadMachineUpdateBackendEpoch(epoch: configuration),
@@ -3039,7 +3548,7 @@ public final class PreparationIntentStore {
         try requireCompletionIntentFormats(candidate)
         let current = try requireCurrentConfigurationEpoch(configuration.record, directory: directory, allowCompletionSchema: true)
         let actual = current.replacement
-        guard actual.runtime.schemaVersion == 21, actual.runtime.completionIntent != nil else {
+        guard actual.runtime.schemaVersion == schema, actual.runtime.completionIntent != nil else {
             throw PreparationStoreError.staleRevision
         }
         let historical = MachineUpdateReplacementContext(activation: actual.activation, inventory: actual.inventory,
@@ -3284,7 +3793,7 @@ public final class PreparationIntentStore {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
         let digestSchema = normalizedSchema ?? schema
-        guard [Int64(19), 20, 21].contains(schema), [Int64(19), 20].contains(digestSchema),
+        guard [Int64(19), 20, 21, 22].contains(schema), [Int64(19), 20].contains(digestSchema),
               digestSchema <= schema else {
             throw PreparationStoreError.incompatibleStore
         }
@@ -3303,7 +3812,7 @@ public final class PreparationIntentStore {
         hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
         for table in tables where table != "machine_update_configuration_epoch_v1" &&
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
-            table != "machine_update_completion_intent_v1" {
+            table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" {
             hash.update(data: try machineTableDigest(table))
         }
         return Data(hash.finalize())
@@ -3520,7 +4029,7 @@ public final class PreparationIntentStore {
         let context = try loadMachineUpdateReplacementContext(activation)
         guard context.replacement != nil else { throw MachineUpdateReplacementError.changedBinding }
         let accounts = try loadMachineUpdateAccounts(context)
-        guard try [Int64(17), 18, 19, 20, 21].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
+        guard try [Int64(17), 18, 19, 20, 21, 22].contains(scalar("PRAGMA user_version")) else { throw PreparationStoreError.incompatibleStore }
         let history: MachineUpdateProvisioningHistory? = nil
         return .init(replacement: context, accounts: accounts, provisioningHistory: history)
     }
@@ -3548,6 +4057,8 @@ public final class PreparationIntentStore {
         if version >= 19 { expected.append("machine_update_configuration_epoch_v1") }
         if version >= 20 { expected.append("machine_update_backend_epoch_v1") }
         if version >= 21 { expected.append("machine_update_completion_intent_v1") }
+        if version >= 22 { expected.append("machine_update_completion_publication_v1") }
+        if version >= 23 { expected.append("installed_release_state_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {

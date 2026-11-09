@@ -334,6 +334,16 @@ public enum AdministrativeSetupPublication {
             owner: owner, verify: verify, didStage: didStage)
     }
 
+    /// The bound publication ID and entry select a private staging namespace for this exact replacement.
+    static func replaceMachineUpdateCompletion(_ entry: MachineUpdateCompletionPublicationPlan.Entry, publicationID: UUID,
+        directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,
+        didStage: (Stage) throws -> Void) throws {
+        let file = entry.artifact
+        let staging = ".remozio-completion-" + publicationID.uuidString.lowercased() + "-" + file.name
+        _ = try replaceSettingsRecord(entry.completion, expected: entry.startup, file: file, directory: directory,
+            owner: owner, verify: verify, didStage: didStage, completionStaging: staging)
+    }
+
     /// The update owner retains exact source and target bytes before this backend exchange.
     static func replaceMachineUpdateBackend(_ bytes: Data, expected: Data, file: File,
         directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,
@@ -349,7 +359,8 @@ public enum AdministrativeSetupPublication {
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
                                               didStage: (Stage) throws -> Void,
-                                              expectedIdentity: ProtectedStorageLease.DirectoryIdentity? = nil) throws -> GatewayRuntimeSettingsFileResult {
+                                              expectedIdentity: ProtectedStorageLease.DirectoryIdentity? = nil,
+                                              completionStaging: String? = nil) throws -> GatewayRuntimeSettingsFileResult {
         guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         guard let expected else {
@@ -362,7 +373,8 @@ public enum AdministrativeSetupPublication {
         }
         guard !expected.isEmpty, expected.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         try file.validate(); try verify(); try directory.validate()
-        let body: (Int32) throws -> GatewayRuntimeSettingsFileResult = { parent in
+        func exchange(parent: Int32, stagingParent: Int32, staging: String, verifyStaging: () throws -> Void)
+            throws -> GatewayRuntimeSettingsFileResult {
             do {
                 try match(bytes, file: file, directory: directory, owner: owner)
                 try synchronizeRetained(parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
@@ -381,20 +393,20 @@ public enum AdministrativeSetupPublication {
             }
             try requireSourceIdentity()
             try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
-            let staging = ".remozio-settings-" + UUID().uuidString
-            let fd = openat(parent, staging, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+            try verifyStaging()
+            let fd = openat(stagingParent, staging, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw JournalLeaseError.system(errno) }
             var exchanged = false
             defer {
                 // Remove only the exact owned staging inode. Preserve an unexpected displaced file for diagnosis.
                 if exchanged {
-                    if (try? validateNamedFile(fd: old, parent: parent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)) != nil {
-                        _ = unlinkat(parent, staging, 0); _ = fsync(parent)
+                    if (try? validateNamedFile(fd: old, parent: stagingParent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)) != nil {
+                        _ = unlinkat(stagingParent, staging, 0); _ = fsync(stagingParent)
                     }
                 } else {
                     var held = stat(), named = stat()
-                    if fstat(fd, &held) == 0, fstatat(parent, staging, &named, AT_SYMLINK_NOFOLLOW) == 0,
-                       held.st_dev == named.st_dev, held.st_ino == named.st_ino { _ = unlinkat(parent, staging, 0) }
+                    if fstat(fd, &held) == 0, fstatat(stagingParent, staging, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                       held.st_dev == named.st_dev, held.st_ino == named.st_ino { _ = unlinkat(stagingParent, staging, 0) }
                 }
                 _ = Darwin.close(fd)
             }
@@ -412,21 +424,74 @@ public enum AdministrativeSetupPublication {
             }
             guard fchmod(fd, file.mode) == 0, fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
             try didStage(.staged); try verify(); try directory.validate()
-            try validateNamedFile(fd: fd, parent: parent, name: staging, bytes: bytes, owner: owner, mode: file.mode, group: nil)
+            try validateNamedFile(fd: fd, parent: stagingParent, name: staging, bytes: bytes, owner: owner, mode: file.mode, group: nil)
             try validateNamedFile(fd: old, parent: parent, name: file.name, bytes: expected, owner: owner, mode: file.mode, group: nil)
-            try requireSourceIdentity()
-            guard renameatx_np(parent, staging, parent, file.name, UInt32(RENAME_SWAP)) == 0 else { throw JournalLeaseError.system(errno) }
+            try requireSourceIdentity(); try verifyStaging()
+            guard renameatx_np(stagingParent, staging, parent, file.name, UInt32(RENAME_SWAP)) == 0 else { throw JournalLeaseError.system(errno) }
             exchanged = true
             try requireSourceIdentity()
-            try validateNamedFile(fd: old, parent: parent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)
+            try validateNamedFile(fd: old, parent: stagingParent, name: staging, bytes: expected, owner: owner, mode: file.mode, group: nil)
             try validateNamedFile(fd: fd, parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
-            try didStage(.published)
-            guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+            if completionStaging == nil { try didStage(.published) }
+            guard fsync(parent) == 0, stagingParent == parent || fsync(stagingParent) == 0 else {
+                throw JournalLeaseError.system(errno)
+            }
             try match(bytes, file: file, directory: directory, owner: owner)
-            try verify(); try directory.validate(); return .replaced
+            try verify(); try directory.validate()
+            if completionStaging != nil { try didStage(.published) }
+            return .replaced
+        }
+        let body: (Int32) throws -> GatewayRuntimeSettingsFileResult = { parent in
+            if let completionStaging {
+                return try withCompletionStaging(parent: parent, name: completionStaging, owner: owner, verify: verify) { stagingParent, verifyStaging in
+                    try exchange(parent: parent, stagingParent: stagingParent, staging: "payload", verifyStaging: verifyStaging)
+                }
+            }
+            return try exchange(parent: parent, stagingParent: parent, staging: ".remozio-settings-" + UUID().uuidString,
+                verifyStaging: {})
         }
         if file.requiresSharedDirectory { return try directory.withSharedDirectory(body) }
         return try directory.withDirectory(body)
+    }
+
+
+    /// Reclaims only this publication entry's private staging file. The named target is checked separately.
+    private static func withCompletionStaging<Value>(parent: Int32, name: String, owner: uid_t, verify: () throws -> Void,
+        _ body: (Int32, () throws -> Void) throws -> Value) throws -> Value {
+        try verify()
+        guard mkdirat(parent, name, 0o700) == 0 || errno == EEXIST else { throw JournalLeaseError.system(errno) }
+        let staging = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard staging >= 0 else { throw JournalLeaseError.system(errno) }
+        defer { _ = Darwin.close(staging) }
+        func verifyStaging(_ verify: () throws -> Void) throws {
+            try verify()
+            var held = stat(), named = stat()
+            guard fstat(staging, &held) == 0, fstatat(parent, name, &named, AT_SYMLINK_NOFOLLOW) == 0,
+                  held.st_dev == named.st_dev, held.st_ino == named.st_ino,
+                  held.st_mode & 0o777 == 0o700 else { throw JournalLeaseError.unsafeMetadata }
+            try ProtectedStorageMetadata.validate(staging, held, directory: true, privateObject: true,
+                owner: owner, ancestorOwner: owner)
+        }
+        try verifyStaging(verify)
+        let stale = openat(staging, "payload", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if stale >= 0 {
+            defer { _ = Darwin.close(stale) }
+            var held = stat(), named = stat()
+            guard fstat(stale, &held) == 0, fstatat(staging, "payload", &named, AT_SYMLINK_NOFOLLOW) == 0,
+                  held.st_dev == named.st_dev, held.st_ino == named.st_ino else { throw JournalLeaseError.identityChanged }
+            try ProtectedStorageMetadata.validate(stale, held, directory: false, privateObject: false,
+                owner: owner, ancestorOwner: owner)
+            try verifyStaging(verify)
+            guard unlinkat(staging, "payload", 0) == 0, fsync(staging) == 0 else { throw JournalLeaseError.system(errno) }
+        } else if errno != ENOENT { throw JournalLeaseError.system(errno) }
+        guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+        let result = try withoutActuallyEscaping(verify) { scopedVerify in
+            try body(staging) { try verifyStaging(scopedVerify) }
+        }
+        try verifyStaging(verify)
+        guard unlinkat(parent, name, AT_REMOVEDIR) == 0, fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+        try verify()
+        return result
     }
 
     // Read-only retention check. Missing established artifacts never become implicit creation here.
