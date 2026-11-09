@@ -82,6 +82,33 @@ final class MachineUpdateFinalizationRecoveryOwner: @unchecked Sendable {
         }
     }
 
+    /// Captures protected finishing facts before transferring live peer verification to the asynchronous owner.
+    func makeNativeSettlementOwner(configurationPath: String, machine: PreparationIntentStore,
+        directory: ReleaseDestinationLease) throws -> MachineUpdateInstalledSettlementOwner {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard getppid() > 1 else { throw JournalLeaseError.unsafeMetadata }
+        let selected = try withSnapshotInLease(machine: machine, directory: directory) { scope in
+            let observed = try MachineUpdateNativeFinalization.capture(configurationPath: configurationPath, scope: scope)
+            guard observed.readiness != nil else { throw PreparationStoreError.invalidTransition }
+            let plan = try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: observed.candidate)
+            return (plan, observed.candidate)
+        }
+        try machine.close()
+        return try withOperation {
+            guard ready, let admission, directory.path == MachineBootstrap.machineDirectory else {
+                throw PreparationStoreError.invalidTransition
+            }
+            try requireBoundary(directory)
+            let nativeDirectory = try ReleaseDestinationLease.acquire(path: MachineBootstrap.machineDirectory)
+            let activity = try ReleaseActivityBarrier.open(machineDirectory: MachineBootstrap.machineDirectory)
+            let access = try MachineUpdateRestartSharedActivity(restart: admission, activity: activity, directory: nativeDirectory,
+                expectedMachine: snapshot.admission.machine, macID: snapshot.inventory.macID,
+                installationID: snapshot.inventory.installationID, activationAttempt: snapshot.activation.attemptID)
+            return try MachineUpdateInstalledSettlementOwner.open(configurationPath: configurationPath, plan: selected.0,
+                candidate: selected.1, directory: nativeDirectory, access: access, recovery: self)
+        }
+    }
+
     /// A retired owner can still prove that its admission lease remains held.
     func validateAdmission(directory: ReleaseDestinationLease) throws {
         try requireThread()

@@ -187,7 +187,7 @@ actor MachineUpdateRestartHealthCoordinator {
     }
 
     /// The installed cohort can lend its proof once. The scope expires before cleanup begins.
-    func withVerifiedInstalledReadiness<Value: Sendable>(
+    func withVerifiedInstalledReadiness<Value: Sendable>(joinCleanup: Bool = true,
         _ body: @Sendable (MachineUpdateVerifiedInstalledReadinessScope) throws -> Value
     ) async throws -> Value {
         guard installedActivity != nil, phase == .new, !installedScopeClaimed else {
@@ -212,7 +212,7 @@ actor MachineUpdateRestartHealthCoordinator {
             try scope.validate()
             result = .success(value)
         } catch { result = .failure(error) }
-        try await close()
+        if joinCleanup { try await close() }
         return try result.get()
     }
 

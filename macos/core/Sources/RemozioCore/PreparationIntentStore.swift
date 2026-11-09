@@ -6,12 +6,13 @@ import SQLite3
 enum PreparationStoreError: Error, Equatable {
     case invalidConfiguration, incompatibleStore, wrongMac, closed, unavailable, transactionActive
     case capacity, notFound, staleRevision, invalidTransition, corruptRecord, inventoryNotEnabled, wrongInstallation
+    case stableCommitUnconfirmed
     case storage(Int32)
 }
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -3054,6 +3055,24 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Supplies a new finishing read to one live readiness owner under its shared admission loan.
+    func withCurrentMachineUpdateReadiness<Value>(candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, loan: MachineUpdateRestartReadinessLoan,
+        _ body: (CompletionFinalizationScope) throws -> Value) throws -> Value {
+        try loan.withClosedAdmission {
+            try transaction(write: false) {
+                try withFinalizationScope({
+                    try self.requireUpdateAdmissionDirectory(directory)
+                    let actual = try self.loadMachineUpdateFinalization(candidate: candidate)
+                    try loan.requireScope(macID: actual.inventory.macID, installationID: actual.inventory.installationID,
+                        activationAttempt: actual.activation.attemptID)
+                    try loan.validateMachineBoundary(directory: directory, expected: actual.admission.machine)
+                    return .installed(actual)
+                }, body)
+            }
+        }
+    }
+
     func machineUpdateFinalizationSnapshot(candidate: SignedReleaseEvidence,
         directory: ReleaseDestinationLease) throws -> MachineUpdateFinalizationSnapshot {
         try transaction(write: false) {
@@ -3073,6 +3092,163 @@ public final class PreparationIntentStore {
                     try restart.validateMachineBoundary(directory: directory, expected: current.admission.machine)
                     return .installed(current)
                 }, body)
+            }
+        }
+    }
+
+    /// The transaction lends its actual current frame. It grants no admission release.
+    final class StableCompletionScope: @unchecked Sendable {
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private let lock = NSRecursiveLock()
+        private let expected: MachineUpdateStableCompletionFrame
+        private var capture: (() throws -> MachineUpdateStableCompletionFrame)?
+
+        fileprivate init(expected: MachineUpdateStableCompletionFrame,
+            capture: @escaping () throws -> MachineUpdateStableCompletionFrame) {
+            self.expected = expected
+            self.capture = capture
+        }
+
+        func read() throws -> MachineUpdateStableCompletionFrame {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            return try lock.withLock {
+                guard let capture else { throw JournalLeaseError.invalidated }
+                do {
+                    let current = try capture()
+                    try current.requireSame(as: expected)
+                    return current
+                } catch {
+                    self.capture = nil
+                    throw error
+                }
+            }
+        }
+
+        fileprivate func expire() { lock.withLock { capture = nil } }
+    }
+
+    /// Confirms the exact durable stable state and the checks run during its read. It grants no admission.
+    final class StableCompletionCommit: Sendable {
+        private let processID = getpid()
+        private let snapshot: MachineUpdateStableReleaseSnapshot
+
+        fileprivate init(snapshot: MachineUpdateStableReleaseSnapshot) { self.snapshot = snapshot }
+
+        func read() throws -> MachineUpdateStableReleaseSnapshot {
+            guard getpid() == processID else { throw JournalLeaseError.invalidated }
+            return snapshot
+        }
+
+        func requireSource(_ plan: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence) throws {
+            try read().requireInitialTransition(from: plan, release: candidate)
+        }
+
+        func requireCurrent(machine: PreparationIntentStore, candidate: SignedReleaseEvidence) throws {
+            try machine.stableMachineUpdateSnapshot(candidate: candidate).requireSame(as: read())
+        }
+    }
+
+    /// Native readiness is checked against both sides of the transition under the original admission loan.
+    func commitStableMachineUpdate(expected: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, loan: MachineUpdateRestartReadinessLoan,
+        verifyScoped: (CompletionIntentStorageStage, StableCompletionScope) throws -> Void) throws -> StableCompletionCommit {
+        try MachineUpdateStableReleaseRecord.requireFormats(candidate)
+        let source = expected.view.compatibility.source.actual
+        let completed = try source.activation.completing()
+        let seal = try MachineUpdateStableReleaseRecord(readiness: expected, completed: completed, candidate: candidate)
+
+        func verifyAdmission() throws {
+            try requireUpdateAdmissionDirectory(directory)
+            try loan.requireScope(macID: source.inventory.macID, installationID: source.inventory.installationID,
+                activationAttempt: source.activation.attemptID)
+            try loan.validateMachineBoundary(directory: directory, expected: source.admission.machine)
+        }
+
+        func before() throws -> MachineUpdateStableCompletionFrame {
+            try verifyAdmission()
+            let plan = try withFinalizationScope({
+                .installed(try self.loadMachineUpdateFinalization(candidate: candidate))
+            }) { scope in
+                try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)
+            }
+            try plan.requireSame(as: expected)
+            try verifyAdmission()
+            return .finishing(plan)
+        }
+
+        func after() throws -> MachineUpdateStableCompletionFrame {
+            try verifyAdmission()
+            let snapshot = try loadStableMachineUpdate(candidate: candidate)
+            try snapshot.requireInitialTransition(from: expected, release: candidate)
+            guard try snapshot.seal.encoded == seal.encoded else { throw PreparationStoreError.staleRevision }
+            try verifyAdmission()
+            return .stable(snapshot)
+        }
+
+        func verify(_ stage: CompletionIntentStorageStage,
+            capture: @escaping () throws -> MachineUpdateStableCompletionFrame) throws -> MachineUpdateStableCompletionFrame {
+            let scope = try StableCompletionScope(expected: capture(), capture: capture)
+            defer { scope.expire() }
+            try verifyScoped(stage, scope)
+            return try scope.read()
+        }
+
+        var commitAttempted = false
+        do {
+            try loan.withClosedAdmission {
+                try transaction(write: false) { _ = try verify(.beforeTransaction, capture: before) }
+                try transaction(write: true, activationWrite: true, willCommit: { commitAttempted = true }) {
+                    _ = try verify(.inTransaction, capture: before)
+                    try exec("CREATE TABLE stable_release_state_v1(id INTEGER PRIMARY KEY CHECK(id=1),epoch BLOB NOT NULL CHECK(length(epoch)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 16384)) STRICT")
+                    try statement("INSERT INTO stable_release_state_v1 VALUES(1,?,?,?)") { row in
+                        try bind(bytes(seal.id), column: 1, row: row)
+                        try bind(bytes(seal.revision), column: 2, row: row)
+                        try bind(seal.encoded, column: 3, row: row)
+                        guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                    }
+                    try statement("UPDATE machine_update_activation_v1 SET revision=?,record=? WHERE id=1 AND revision=? AND record=?") { row in
+                        try bind(bytes(completed.revision), column: 1, row: row)
+                        try bind(completed.encoded, column: 2, row: row)
+                        try bind(bytes(source.activation.revision), column: 3, row: row)
+                        try bind(source.activation.encoded, column: 4, row: row)
+                        guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                    }
+                    try exec("PRAGMA user_version=24")
+                    _ = try verify(.afterMutation, capture: after)
+                }
+            }
+            return try adoptStableMachineUpdate(expected: expected, candidate: candidate, directory: directory,
+                loan: loan, verifyScoped: verifyScoped)
+        } catch {
+            guard commitAttempted else { throw error }
+            unavailable = true
+            shutdown()
+            throw PreparationStoreError.stableCommitUnconfirmed
+        }
+    }
+
+    /// Verifies the expected finishing plan and durable stable rows under the original loan before issuing a receipt.
+    /// The native caller must check the live installation in the scoped callback. This path never writes.
+    func adoptStableMachineUpdate(expected: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, loan: MachineUpdateRestartReadinessLoan,
+        verifyScoped: (CompletionIntentStorageStage, StableCompletionScope) throws -> Void) throws -> StableCompletionCommit {
+        try loan.withClosedAdmission {
+            try transaction(write: false) {
+                func read() throws -> MachineUpdateStableCompletionFrame {
+                    try self.requireUpdateAdmissionDirectory(directory)
+                    let snapshot = try self.loadStableMachineUpdate(candidate: candidate)
+                    try loan.requireScope(macID: snapshot.inventory.macID, installationID: snapshot.inventory.installationID,
+                        activationAttempt: snapshot.activation.attemptID)
+                    try loan.validateMachineBoundary(directory: directory, expected: snapshot.admission.machine)
+                    try snapshot.requireInitialTransition(from: expected, release: candidate)
+                    return .stable(snapshot)
+                }
+                let scope = try StableCompletionScope(expected: read(), capture: read)
+                defer { scope.expire() }
+                try verifyScoped(.afterCommit, scope)
+                guard case .stable(let snapshot) = try scope.read() else { throw PreparationStoreError.invalidTransition }
+                return StableCompletionCommit(snapshot: snapshot)
             }
         }
     }
@@ -3115,13 +3291,20 @@ public final class PreparationIntentStore {
               actual.activation.phase == .finishing, try loadInventoryRecord() == actual.inventory else {
             throw PreparationStoreError.staleRevision
         }
-        let installed = actual.installed
+        let historical = try historicalInstalledRuntimeSource(inventory: actual.inventory, installed: actual.installed, schema: 23)
+        return .init(actual: actual, historicalInventory: historical.inventory, historicalSchemaVersion: historical.schema,
+            historicalSourceDigest: historical.digest)
+    }
+
+    private func historicalInstalledRuntimeSource(inventory: InstallationInventory,
+        installed: MachineUpdateInstalledReleaseEpoch.Archive, schema: Int64)
+        throws -> (inventory: InstallationInventory, schema: Int64, digest: Data) {
         let configuration = try installed.configuration(), intent = try installed.completionIntent()
         guard intent.record.sourceSchemaVersion == 20 else { throw PreparationStoreError.incompatibleStore }
         let historical = try InstallationInventory.decode(configuration.artifact(5), expectedMacID: macID)
         let candidate = try UpdateSchedulingCandidateRecord.decode(configuration.artifact(6))
         let replacement = try MachineUpdateReplacementRecord.decode(configuration.artifact(9))
-        guard historical.installationID == actual.inventory.installationID,
+        guard historical.installationID == inventory.installationID,
               historical.revision == candidate.inventoryRevision,
               historical.revision == intent.record.sourceInventoryRevision else { throw PreparationStoreError.staleRevision }
 
@@ -3133,12 +3316,11 @@ public final class PreparationIntentStore {
             "machine_update_replacement_v1": try historicalSingletonTableDigest("machine_update_replacement_v1", columns: [
                 .integer(1), .blob(bytes(replacement.revision)), .blob(replacement.encoded)]),
         ]
-        let digest = try machineEpochSourceDigest(schema: 23, digestSchema: intent.record.sourceSchemaVersion,
-            installationID: actual.inventory.installationID, historicalTables: historicalTables)
+        let digest = try machineEpochSourceDigest(schema: schema, digestSchema: intent.record.sourceSchemaVersion,
+            installationID: inventory.installationID, historicalTables: historicalTables)
         guard try digest == installed.backend().record.currentSourceDigest,
               digest == intent.record.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
-        return .init(actual: actual, historicalInventory: historical, historicalSchemaVersion: intent.record.sourceSchemaVersion,
-            historicalSourceDigest: digest)
+        return (historical, intent.record.sourceSchemaVersion, digest)
     }
 
     private func requireInstalledReleaseFormats(_ candidate: SignedReleaseEvidence) throws {
@@ -3189,8 +3371,8 @@ public final class PreparationIntentStore {
     }
 
     private func requireFinishingActivation(_ value: MachineUpdateActivationRecord, inventory: InstallationInventory,
-        candidate: UpdateSchedulingCandidateRecord, admission: UpdateAdmissionRegistrationRecord) throws {
-        guard try scalar("PRAGMA user_version") == 23, !candidate.selected else { throw PreparationStoreError.corruptRecord }
+        candidate: UpdateSchedulingCandidateRecord, admission: UpdateAdmissionRegistrationRecord, schema: Int64 = 23) throws {
+        guard try scalar("PRAGMA user_version") == schema, !candidate.selected else { throw PreparationStoreError.corruptRecord }
         let (header, rows) = try loadInstalledReleaseRows()
         func artifact(_ kind: Int64) throws -> Data {
             guard let value = rows.first(where: { $0.kind == kind && $0.accountID == MachineUpdateInstalledReleaseEpoch.global }) else {
@@ -3213,9 +3395,56 @@ public final class PreparationIntentStore {
               admission.machine == value.machineAdmission else { throw PreparationStoreError.corruptRecord }
     }
 
+    /// Reads the terminal release without granting ordinary startup or write authority.
+    func stableMachineUpdateSnapshot(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableReleaseSnapshot {
+        try transaction(write: false) { try loadStableMachineUpdate(candidate: candidate) }
+    }
+
+    private func loadStableReleaseRecord() throws -> MachineUpdateStableReleaseRecord {
+        try statement("SELECT id,epoch,revision,record FROM stable_release_state_v1 ORDER BY id") { row in
+            guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
+                  sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.corruptRecord }
+            let seal = try MachineUpdateStableReleaseRecord.decode(blob(row, column: 3, maximum: MachineUpdateStableReleaseRecord.maximumBytes))
+            guard try blob(row, column: 1, maximum: 16) == bytes(seal.id),
+                  try blob(row, column: 2, maximum: 16) == bytes(seal.revision),
+                  try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+            return seal
+        }
+    }
+
+    private func loadStableMachineUpdate(candidate release: SignedReleaseEvidence) throws -> MachineUpdateStableReleaseSnapshot {
+        try identity(macID)
+        guard try scalar("PRAGMA user_version") == 24 else { throw PreparationStoreError.invalidTransition }
+        try MachineUpdateStableReleaseRecord.requireFormats(release)
+        guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
+              let activation = try loadMachineUpdateActivationRecord(), let admission = try loadUpdateAdmissionRegistration(),
+              try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
+            throw PreparationStoreError.corruptRecord
+        }
+        for table in Self.completionRetirementTables {
+            guard try scalar("SELECT COUNT(*) FROM \(table)") == 0 else { throw PreparationStoreError.corruptRecord }
+        }
+        let seal = try loadStableReleaseRecord()
+        guard activation == seal.completed else { throw PreparationStoreError.corruptRecord }
+        try requireFinishingActivation(seal.finishing, inventory: inventory, candidate: candidate, admission: admission, schema: 24)
+        let (header, rows) = try loadInstalledReleaseRows()
+        let installed = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
+        guard try installed.inventory() == inventory else { throw PreparationStoreError.corruptRecord }
+        try seal.requireCurrentInventory(inventory, epoch: installed, candidate: release)
+        let historical = try historicalInstalledRuntimeSource(inventory: inventory, installed: installed, schema: 24)
+        guard historical.digest == seal.historicalSourceDigest, historical.schema == seal.historicalSourceSchemaVersion else {
+            throw PreparationStoreError.staleRevision
+        }
+        return .init(inventory: inventory, activation: activation, admission: admission, candidate: candidate,
+            installed: installed, seal: seal, historicalSourceDigest: historical.digest)
+    }
+
     private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {
-        try identity(macID); try requireInstalledReleaseFormats(release)
-        guard try scalar("PRAGMA user_version") == 23, let inventory = try loadInventoryRecord(),
+        try identity(macID)
+        let schema = try scalar("PRAGMA user_version")
+        guard schema != 24 else { throw PreparationStoreError.invalidTransition }
+        try requireInstalledReleaseFormats(release)
+        guard schema == 23, let inventory = try loadInventoryRecord(),
               let candidate = try loadUpdateCandidate(), let activation = try loadMachineUpdateActivation(),
               let admission = try loadUpdateAdmissionRegistration(), activation.phase == .finishing,
               try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
@@ -3941,7 +4170,7 @@ public final class PreparationIntentStore {
         for table in tables where table != "machine_update_configuration_epoch_v1" &&
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
             table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" &&
-            table != "installed_release_state_v1" {
+            table != "installed_release_state_v1" && table != "stable_release_state_v1" {
             hash.update(data: try historicalTables[table] ?? machineTableDigest(table))
         }
         return Data(hash.finalize())
@@ -4192,6 +4421,7 @@ public final class PreparationIntentStore {
         if version >= 21 { expected.append("machine_update_completion_intent_v1") }
         if version >= 22 { expected.append("machine_update_completion_publication_v1") }
         if version >= 23 { expected.append("installed_release_state_v1") }
+        if version >= 24 { expected.append("stable_release_state_v1") }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
@@ -4229,7 +4459,8 @@ public final class PreparationIntentStore {
             return result
         }
     }
-    private func transaction<T>(write: Bool, activationWrite: Bool = false, _ body: () throws -> T) throws -> T {
+    private func transaction<T>(write: Bool, activationWrite: Bool = false, willCommit: () -> Void = {},
+        _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
@@ -4241,13 +4472,19 @@ public final class PreparationIntentStore {
         }
         active = true; defer { active = false }
         do {
+            // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
+            if write, try scalar("PRAGMA user_version") == 24 { throw PreparationStoreError.invalidTransition }
             if write && !activationWrite, try scalar("PRAGMA user_version") >= 17,
                try loadMachineUpdateActivation()?.phase.blocksMachineWrites == true {
                 throw PreparationStoreError.invalidTransition
             }
             let value = try body()
             try lease.validate()
-            do { try exec("COMMIT"); if write { try didCommit?() } } catch { unavailable = true; throw error }
+            do {
+                if write { willCommit() }
+                try exec("COMMIT")
+                if write { try didCommit?() }
+            } catch { unavailable = true; throw error }
             try lease.validate()
             return value
         } catch {

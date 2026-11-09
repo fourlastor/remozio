@@ -103,6 +103,14 @@ struct MachineUpdateInstalledReadinessPlan: Sendable {
         return requirement
     }
 
+    func requireSame(as expected: Self) throws {
+        try view.requireSame(as: expected.view)
+        guard focusedAccountID == expected.focusedAccountID,
+              unselectedRegisteredAccounts == expected.unselectedRegisteredAccounts,
+              inventory.requirements == expected.inventory.requirements,
+              inventory.preservedAccounts == expected.inventory.preservedAccounts else { throw PreparationStoreError.staleRevision }
+    }
+
     func requireCurrent(scope: PreparationIntentStore.CompletionFinalizationScope, candidate: SignedReleaseEvidence) throws {
         try view.requireCurrent(scope: scope, candidate: candidate)
     }

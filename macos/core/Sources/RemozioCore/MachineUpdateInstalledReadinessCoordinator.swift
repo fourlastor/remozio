@@ -17,7 +17,8 @@ struct MachineUpdateInstalledReadinessCoordinator: Sendable {
     func withVerifiedReadiness<Value: Sendable>(
         _ body: @Sendable (MachineUpdateVerifiedInstalledReadinessScope) throws -> Value
     ) async throws -> Value {
-        try await health.withVerifiedInstalledReadiness(body)
+        // The settlement owner joins cleanup after resolving a possible durable commit.
+        try await health.withVerifiedInstalledReadiness(joinCleanup: false, body)
     }
 
     func close() async throws {
