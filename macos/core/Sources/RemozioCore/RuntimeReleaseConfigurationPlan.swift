@@ -2,7 +2,7 @@ import Foundation
 import RemozioProtocol
 
 /// Proposed configuration values. Fresh protected source checks and the machine owner remain mandatory before publication.
-struct RuntimeReleaseConfigurationPlan: CustomStringConvertible, CustomDebugStringConvertible {
+struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     static let formatName = "runtime.release-configuration"
     private final class Storage: Sendable {
         let binding: RuntimeReleaseBinding
