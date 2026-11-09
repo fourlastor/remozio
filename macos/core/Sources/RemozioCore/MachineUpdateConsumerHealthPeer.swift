@@ -32,6 +32,14 @@ final class MachineUpdateConsumerHealthPeer: @unchecked Sendable {
             })
     }
 
+    static func native(connection: NSXPCConnection, authority scope: MachineUpdateAuthorityReadinessScope) throws -> Self {
+        try scope.validate(); scope.rootPolicy.configure(connection)
+        let native = NativeConnection(connection: connection, policy: scope.rootPolicy)
+        return Self(authenticateInvocation: { try native.authenticateInvocation() }, verifyPeer: { try native.validate() },
+            verifyCurrent: { try scope.validate() }, authorityInstalledReadiness: true,
+            requireScope: { guard $0 == scope.requirement else { throw MachineUpdateRoleChallengeError.changedScope } })
+    }
+
     /// Injected checks exercise local ordering only. This factory does not authenticate a native connection.
     static func owned(expected: Requirement, authorityInstalledReadiness: Bool = false, authenticateInvocation: @escaping @Sendable () throws -> Void,
         verifyPeer: @escaping @Sendable () throws -> Void, verifyCurrent: @escaping @Sendable () throws -> Void) -> Self {

@@ -127,6 +127,7 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
                   try requirement.binding.sourcePolicyDigest == MachineUpdateActivationRecord.digest(policy.storedBytes) else {
                 throw RuntimePreparationError.changedScope
             }
+            if let restartGateway { try restartGateway.requireSelection(for: requirement) }
             try validate()
         } catch { try? close(); throw error }
     }
@@ -139,8 +140,25 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
         }
     }
 
+    /// Compares the selected Gateway proof with the paired read under the original restart scope.
+    func requireGatewayHealth(_ proof: MachineUpdateConsumerHealthProof) throws {
+        try lock.withLock {
+            do {
+                guard let restartGateway else { throw RuntimePreparationError.incomplete }
+                try validate(gateway: restartGateway, proof: proof)
+            } catch MachineUpdateHealthSourceError.busy { throw MachineUpdateHealthSourceError.busy }
+            catch { sign = nil; throw error }
+        }
+    }
+
     func answer(_ request: Data) throws -> Data {
         try answer(request, gateway: nil, makeProof: { nil })
+    }
+
+    /// The restart owner uses its protected Gateway selection, even when the caller supplies no exchange.
+    func answerRestartReadiness(_ request: MachineUpdateAuthorityReadinessRequest) throws -> Data {
+        let clock = try AuthorityClock()
+        return try answerReadiness(request, gateway: restartGateway, now: clock.now())
     }
 
     /// Installed readiness supplies the protected Gateway selection, if registered, and the current clock.
@@ -157,16 +175,7 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
             do {
                 try requireAvailable()
                 guard gateway == restartGateway else { throw MachineUpdateRoleChallengeError.changedScope }
-                if let gateway {
-                    let selected = gateway.requirement
-                    guard selected.binding == requirement.binding, selected.configurationEpoch == requirement.configurationEpoch,
-                          selected.configurationRevision == requirement.configurationRevision,
-                          selected.backendEpoch == requirement.backendEpoch, selected.backendRevision == requirement.backendRevision,
-                          selected.code.role == .notificationGateway, selected.code.active, selected.executionUID > 0,
-                          selected.executionUID < UInt32.max, gateway.registration.rootPublicKey == requirement.publicKey else {
-                        throw MachineUpdateRoleChallengeError.changedScope
-                    }
-                }
+                if let gateway { try gateway.requireSelection(for: requirement) }
                 let proof = try makeProof()
                 return try MachineUpdateRoleChallengeSession.answer(request, expected: requirement,
                     verifyCurrent: { try self.validate(gateway: gateway, proof: proof) }, sign: { bytes in

@@ -204,7 +204,8 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         let binding: RuntimeReleaseBinding
         let policy: AuthorityCodePolicySnapshot
 
-        init(registration: GatewayRegistrationIdentity? = nil, updateHealthOnly: Bool = true) throws {
+        init(registration: GatewayRegistrationIdentity? = nil, updateHealthOnly: Bool = true,
+             gatewayCode: AuthorityCodeEntry? = nil) throws {
             let files = try Fixture()
             let requirement = try MachineUpdateRoleChallengeTests.Fixture().requirement(mac: 1, account: 2)
             let gatewayPolicy: GatewayAuthorityPolicy?
@@ -217,7 +218,7 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
                 gatewayPolicy = nil
             }
             let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 1)
-            let code = try AuthorityCodePolicy(entries: [requirement.code])
+            let code = try AuthorityCodePolicy(entries: [requirement.code] + (gatewayCode.map { [$0] } ?? []))
             let commits = CheckpointedJournal(journal: files.journal, continuity: files.store)
             let policy = try commits.write(epoch: files.epoch) {
                 _ = try $0.configureApprovalAuthority(capabilities: ContractCapabilities(contracts: [contract: [1]]),
@@ -500,7 +501,7 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         XCTAssertEqual(fixture.state.releases.withLock { $0 }, 1)
     }
 
-    private struct GatewayFixture {
+    private struct GatewayFixture: @unchecked Sendable {
         let paired: ContractFixture
         let signer: MachineUpdateRoleChallengeTests.Fixture
         let gateway: GatewayServiceConfiguration
@@ -508,17 +509,20 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         let state = ScopeState()
         let rootSigner = AuthoritySigner()
 
-        init(updateHealthOnly: Bool = true) throws {
+        init(updateHealthOnly: Bool = true, liveAuthority: Bool = false, includesGatewayCode: Bool = true) throws {
             let signer = MachineUpdateRoleChallengeTests.Fixture()
             let seed = try signer.requirement(role: .notificationGateway, uid: 20001, mac: 1, account: 2)
             let registration = try GatewayRegistrationIdentity(ownerID: Data(repeating: 1, count: 16),
                 macID: seed.binding.macID, accountID: seed.binding.accountID,
                 gatewayID: Data(repeating: 4, count: 16), lifecycleEpoch: Data(repeating: 5, count: 16),
                 rootPublicKey: rootSigner.publicKey)
-            let paired = try ContractFixture(registration: registration, updateHealthOnly: updateHealthOnly)
+            let paired = try ContractFixture(registration: registration, updateHealthOnly: updateHealthOnly,
+                gatewayCode: liveAuthority && includesGatewayCode ? seed.code : nil)
+            if liveAuthority { try paired.journal.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16384) }
             var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: seed.binding.encoded) as? [String: Any])
             fields["sourcePolicyRevision"] = paired.policy.revision.uuidString
             fields["sourcePolicyDigest"] = try MachineUpdateActivationRecord.digest(paired.policy.storedBytes).base64EncodedString()
+            fields["completionPolicyDigest"] = try MachineUpdateActivationRecord.digest(paired.policy.policy.bytes).base64EncodedString()
             let binding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
                 options: [.sortedKeys, .withoutEscapingSlashes]))
             let settings = try GatewayServiceSettings(delivery: .init(maximumFlights: 1, minimumSendIntervalMillis: 1000),
@@ -550,12 +554,16 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
                 }, release: { state.releases.withLock { $0 += 1 } })
         }
 
-        func authority() throws -> (MachineUpdateAuthorityHealthOwner, MachineUpdateRoleChallengeSession) {
+        func authorityRequirement() throws -> MachineUpdateRestartHealthPlan.Requirement {
             let seed = try signer.requirement(mac: 1, account: 2, publicKey: rootSigner.publicKey)
-            let root = MachineUpdateRestartHealthPlan.Requirement(binding: requirement.binding,
+            return .init(binding: requirement.binding,
                 configurationEpoch: requirement.configurationEpoch, configurationRevision: requirement.configurationRevision,
                 backendEpoch: requirement.backendEpoch, backendRevision: requirement.backendRevision,
                 role: .authority, executionUID: 0, code: seed.code, publicKey: rootSigner.publicKey)
+        }
+
+        func authority() throws -> (MachineUpdateAuthorityHealthOwner, MachineUpdateRoleChallengeSession) {
+            let root = try authorityRequirement()
             let owner = try MachineUpdateAuthorityHealthOwner(journal: paired.journal, configuration: paired.configuration,
                 requirement: root, policy: paired.policy, requests: [paired.declaration()], keyPublicKey: rootSigner.publicKey,
                 restartGateway: .init(requirement: requirement, registration: gateway.registration),
@@ -579,6 +587,18 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
                 clock: { moment }, verifyCurrent: {})
             let request = try session.makeRequest()
             return try session.accept(packet(request), authenticatePeer: { _ in })
+        }
+
+        func connection(_ selected: MachineUpdateRestartHealthPlan.Requirement, authorityChallenge: Data?) throws -> ReadinessConnection {
+            let moment = AuthorityMoment(epoch: UUID(), milliseconds: 100)
+            let session = try MachineUpdateConsumerHealthChallengeSession(requirement: selected,
+                registration: selected.role == .notificationGateway ? gateway.registration : nil,
+                authorityReadinessRequest: authorityChallenge, clock: { moment }, verifyCurrent: {})
+            let request = try session.makeRequest()
+            let response = try selected.role == .notificationGateway ? packet(request)
+                : MachineUpdateConsumerHealthPacket(roleReply: signer.answer(request, expected: selected), gatewayHead: nil).encoded
+            return try ReadinessConnection(proof: session.accept(response, authenticatePeer: { _ in }),
+                exchange: .init(request: request, response: response))
         }
 
         private func packet(_ request: Data, aheadOfJournal: Bool = false) throws -> Data {
@@ -605,6 +625,20 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             return try MachineUpdateConsumerHealthPacket(roleReply: role,
                 gatewayHead: .init(canonicalPayload: payload, signature: signature)).encoded
         }
+    }
+
+    func testRestartAuthorityChecksTheSelectedGatewayProofWithoutWritingOrSigning() throws {
+        let fixture = try GatewayFixture(), before = try bytes(fixture.paired.files)
+        let (owner, _) = try fixture.authority()
+        defer { try? owner.close() }
+        let proof = try fixture.proof()
+        try owner.requireGatewayHealth(proof)
+        try owner.requireGatewayHealth(proof)
+        XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+        XCTAssertEqual(try bytes(fixture.paired.files), before)
+        let foreign = try GatewayFixture()
+        XCTAssertThrowsError(try owner.requireGatewayHealth(foreign.proof()))
+        XCTAssertThrowsError(try owner.requireGatewayHealth(proof))
     }
 
     func testAuthorityReadinessReconcilesTheFreshGatewayProofBeforeSigning() throws {
@@ -679,6 +713,131 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             }
             XCTAssertThrowsError(try owner.answerReadiness(complete, gateway: selected, now: now))
             XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+        }
+    }
+
+    private final class ReadinessConnection: OwnedMachineUpdateHealthConnection {
+        let proof: MachineUpdateConsumerHealthProof
+        let exchange: MachineUpdateConsumerHealthExchange
+        init(proof: MachineUpdateConsumerHealthProof, exchange: MachineUpdateConsumerHealthExchange) {
+            self.proof = proof; self.exchange = exchange
+        }
+        func validate() throws {}
+        func close() async {}
+    }
+
+    func testNativeAccountChecksTheGatewayBeforeTheRealAuthorityOwnerSigns() async throws {
+        let fixture = try GatewayFixture()
+        let (owner, _) = try fixture.authority(), authority = try fixture.authorityRequirement(), gateway = fixture.requirement
+        let seed = try fixture.signer.requirement(role: .transport, uid: 20000)
+        let transport = MachineUpdateRestartHealthPlan.Requirement(binding: authority.binding,
+            configurationEpoch: authority.configurationEpoch, configurationRevision: authority.configurationRevision,
+            backendEpoch: authority.backendEpoch, backendRevision: authority.backendRevision,
+            role: .transport, executionUID: seed.executionUID, code: seed.code, publicKey: seed.publicKey)
+        let account = try MachineUpdateNativeHealthAccount(accountID: authority.binding.accountID,
+            requirements: [authority, transport, gateway], operations: .init(verifyCurrent: {},
+                makeAuthority: { owner }, makeGatewayReader: { throw Failure.injected },
+                makeConnection: { requirement, challenge in
+                    XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+                    if requirement.role == .notificationGateway { XCTAssertNotNil(challenge) }
+                    return try fixture.connection(requirement, authorityChallenge: challenge)
+                }))
+        do {
+            let replies = try await account.check()
+            XCTAssertEqual(replies.map(\.requirement), [authority, transport, gateway])
+            XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 1)
+            try await account.close()
+        } catch { try? await account.close(); throw error }
+    }
+
+    func testLiveAuthorityRejectsASignedHeadAheadOfItsJournalOrAnAbsentGatewayCode() throws {
+        for includesGatewayCode in [true, false] {
+            let fixture = try GatewayFixture(updateHealthOnly: false, liveAuthority: true, includesGatewayCode: includesGatewayCode)
+            let journal = fixture.paired.journal; defer { try? journal.close() }
+            let expected = try fixture.authorityRequirement()
+            let gateway = try MachineUpdateAuthorityReadinessGateway(requirement: fixture.requirement,
+                registration: fixture.gateway.registration)
+            let peer = MachineUpdateConsumerHealthPeer.owned(expected: expected, authorityInstalledReadiness: true,
+                authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+            defer { peer.close() }
+            let challenge = try MachineUpdateRoleChallengeSession(requirement: expected, verifyCurrent: {}).request
+            let envelope = try fixture.readiness(challenge: challenge, aheadOfJournal: includesGatewayCode)
+            let request = try peer.accept(envelope.encoded)
+            XCTAssertThrowsError(try journal.answerMachineUpdateInstalledReadiness(request, expected: expected,
+                macID: expected.binding.macID, accountID: expected.binding.accountID, keyPublicKey: fixture.rootSigner.publicKey,
+                gateway: gateway, now: .init(epoch: UUID(), milliseconds: 100), verifyCurrent: {}, sign: fixture.rootSigner.sign)) {
+                if includesGatewayCode { XCTAssertEqual($0 as? GatewayAuthorityError, .headMismatch) }
+                else { XCTAssertEqual($0 as? RuntimePreparationError, .changedScope) }
+            }
+            XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+        }
+    }
+
+    func testLiveAuthorityRequiresAndReconcilesTheGatewayProofBeforeSigning() throws {
+        let fixture = try GatewayFixture(updateHealthOnly: false, liveAuthority: true)
+        let journal = fixture.paired.journal; defer { try? journal.close() }
+        let expected = try fixture.authorityRequirement()
+        let gateway = try MachineUpdateAuthorityReadinessGateway(requirement: fixture.requirement,
+            registration: fixture.gateway.registration)
+        let before = try journal.captureMachineUpdateInstalledReadinessBoundary()
+        func answer(_ session: MachineUpdateRoleChallengeSession, includeGateway: Bool) throws -> Data {
+            let peer = MachineUpdateConsumerHealthPeer.owned(expected: expected, authorityInstalledReadiness: true,
+                authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+            defer { peer.close() }
+            let challenge = try session.request
+            let envelope = try includeGateway ? fixture.readiness(challenge: challenge)
+                : MachineUpdateAuthorityReadinessRequest(challenge: challenge, gateway: nil)
+            return try journal.answerMachineUpdateInstalledReadiness(peer.accept(envelope.encoded), expected: expected,
+                macID: expected.binding.macID, accountID: expected.binding.accountID, keyPublicKey: fixture.rootSigner.publicKey,
+                gateway: gateway, now: .init(epoch: UUID(), milliseconds: 100), verifyCurrent: {}, sign: fixture.rootSigner.sign)
+        }
+        let missing = try MachineUpdateRoleChallengeSession(requirement: expected, verifyCurrent: {})
+        XCTAssertThrowsError(try answer(missing, includeGateway: false)) {
+            XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope)
+        }
+        XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+        let complete = try MachineUpdateRoleChallengeSession(requirement: expected, verifyCurrent: {})
+        let reply = try answer(complete, includeGateway: true)
+        XCTAssertEqual(try complete.accept(reply, authenticatePeer: { _ in }).requirement, expected)
+        XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 1)
+        XCTAssertEqual(try journal.captureMachineUpdateInstalledReadinessBoundary(), before)
+    }
+
+    func testLiveAuthorityDiscardsTheSignatureIfThePolicyBoundaryChangesDuringSigning() throws {
+        let fixture = try GatewayFixture(updateHealthOnly: false, liveAuthority: true)
+        let journal = fixture.paired.journal; defer { try? journal.close() }
+        let expected = try fixture.authorityRequirement()
+        let peer = MachineUpdateConsumerHealthPeer.owned(expected: expected, authorityInstalledReadiness: true,
+            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+        defer { peer.close() }
+        let challenge = try MachineUpdateRoleChallengeSession(requirement: expected, verifyCurrent: {})
+        let envelope = try MachineUpdateAuthorityReadinessRequest(challenge: challenge.request, gateway: nil)
+        let request = try peer.accept(envelope.encoded)
+        let before = try journal.captureMachineUpdateInstalledReadinessBoundary()
+        let revised = AuthorityCodePolicySnapshot(revision: UUID(), policy: before.policy.policy,
+            roleRevisions: before.policy.roleRevisions)
+        let changed = AuthorityJournal.MachineUpdatePolicyBoundary(macID: before.macID, accountID: before.accountID,
+            policy: revised, checkpoint: before.checkpoint)
+        let state = ScopeState(), signer = fixture.rootSigner
+        XCTAssertThrowsError(try MachineUpdateLiveAuthorityProof.answer(request, expected: expected,
+            macID: before.macID, accountID: before.accountID, keyPublicKey: signer.publicKey,
+            now: .init(epoch: UUID(), milliseconds: 100),
+            capture: { state.valid.withLock { $0 } ? before : changed }, verifyCurrent: {}, sign: { data in
+                let signature = try signer.sign(data)
+                state.valid.withLock { $0 = false }
+                return signature
+            })) { XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope) }
+        XCTAssertEqual(signer.count.withLock { $0 }, 1)
+        XCTAssertEqual(try journal.captureMachineUpdateInstalledReadinessBoundary(), before)
+    }
+
+    func testLiveAuthorityBoundaryRefusesReadOnlyAndUnstartedJournals() throws {
+        let health = try GatewayFixture(), unstarted = try GatewayFixture(updateHealthOnly: false)
+        defer { try? health.paired.journal.close(); try? unstarted.paired.journal.close() }
+        for journal in [health.paired.journal, unstarted.paired.journal] {
+            XCTAssertThrowsError(try journal.captureMachineUpdateInstalledReadinessBoundary()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .unavailable)
+            }
         }
     }
 
