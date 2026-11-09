@@ -1406,20 +1406,25 @@ public final class PreparationIntentStore {
         try transaction(write: false) {
             try identity(macID)
             if try scalar("PRAGMA user_version") < 5 { return [] }
-            return try statement("SELECT account FROM service_accounts_v1 ORDER BY account LIMIT 65") { row in
-                var numbers = Set<UInt32>(), count = 0
-                while try step(row) == SQLITE_ROW {
-                    guard count < 64 else { throw PreparationStoreError.corruptRecord }; count += 1
-                    let account = try blob(row, column: 0, maximum: 16)
-                    guard let plan = try loadServiceAccountPlan(accountID: account).plan else { throw PreparationStoreError.corruptRecord }
-                    for claim in plan.claims {
-                        guard numbers.insert(claim.number).inserted else { throw PreparationStoreError.corruptRecord }
-                    }
-                }
-                return numbers
-            }
+            return try loadReservedServiceAccountNumbers()
         }
     }
+
+    private func loadReservedServiceAccountNumbers() throws -> Set<UInt32> {
+        try statement("SELECT account FROM service_accounts_v1 ORDER BY account LIMIT 65") { row in
+            var numbers = Set<UInt32>(), count = 0
+            while try step(row) == SQLITE_ROW {
+                guard count < 64 else { throw PreparationStoreError.corruptRecord }; count += 1
+                let account = try blob(row, column: 0, maximum: 16)
+                guard let plan = try loadServiceAccountPlan(accountID: account).plan else { throw PreparationStoreError.corruptRecord }
+                for claim in plan.claims {
+                    guard numbers.insert(claim.number).inserted else { throw PreparationStoreError.corruptRecord }
+                }
+            }
+            return numbers
+        }
+    }
+
     func retainServiceAccountPlan(_ plan: ServiceAccountPlan) throws {
         try transaction(write: true) {
             try requireInventorySchema(); try requireServiceAccountScope(plan)
@@ -2336,8 +2341,8 @@ public final class PreparationIntentStore {
         }
     }
 
-    private func loadMachineUpdateAccounts(_ context: MachineUpdateReplacementContext) throws -> [MachineUpdateRestartSource.Account] {
-        let reservations: [AccountPreparationIntent] = try statement("SELECT owner FROM account_preparation_v1 ORDER BY owner LIMIT 65") { row in
+    private func loadAccountPreparations() throws -> [AccountPreparationIntent] {
+        try statement("SELECT owner FROM account_preparation_v1 ORDER BY owner LIMIT 65") { row in
             var values: [AccountPreparationIntent] = []
             while try step(row) == SQLITE_ROW {
                 guard values.count < 64, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
@@ -2347,6 +2352,10 @@ public final class PreparationIntentStore {
             }
             return values
         }
+    }
+
+    private func loadMachineUpdateAccounts(_ context: MachineUpdateReplacementContext) throws -> [MachineUpdateRestartSource.Account] {
+        let reservations = try loadAccountPreparations()
         var owners = Dictionary(uniqueKeysWithValues: context.inventory.accounts.map { ($0.accountID, $0.ownerUID) })
         for account in reservations {
             guard account.macID == context.inventory.macID, account.installationID == context.inventory.installationID,
@@ -3291,14 +3300,21 @@ public final class PreparationIntentStore {
               actual.activation.phase == .finishing, try loadInventoryRecord() == actual.inventory else {
             throw PreparationStoreError.staleRevision
         }
-        let historical = try historicalInstalledRuntimeSource(inventory: actual.inventory, installed: actual.installed, schema: 23)
-        return .init(actual: actual, historicalInventory: historical.inventory, historicalSchemaVersion: historical.schema,
-            historicalSourceDigest: historical.digest)
+        let current = try installedCurrentSourceProjection(inventory: actual.inventory, installed: actual.installed, schema: 23)
+        guard try current.digest == actual.installed.backend().record.currentSourceDigest,
+              try current.digest == actual.installed.completionIntent().record.sourceMachineDigest else {
+            throw PreparationStoreError.staleRevision
+        }
+        return .init(actual: actual, historicalInventory: current.historicalInventory,
+            historicalSchemaVersion: current.historicalSchemaVersion, historicalSourceDigest: current.digest)
     }
 
-    private func historicalInstalledRuntimeSource(inventory: InstallationInventory,
+    /// Hashes the current protected rows with the original inventory, candidate and replacement operands.
+    private func installedCurrentSourceProjection(inventory: InstallationInventory,
         installed: MachineUpdateInstalledReleaseEpoch.Archive, schema: Int64)
-        throws -> (inventory: InstallationInventory, schema: Int64, digest: Data) {
+        throws -> (historicalInventory: InstallationInventory, historicalSchemaVersion: Int64, digest: Data) {
+        guard [23, 24].contains(schema), try scalar("PRAGMA user_version") == schema,
+              try loadInventoryRecord() == inventory else { throw PreparationStoreError.staleRevision }
         let configuration = try installed.configuration(), intent = try installed.completionIntent()
         guard intent.record.sourceSchemaVersion == 20 else { throw PreparationStoreError.incompatibleStore }
         let historical = try InstallationInventory.decode(configuration.artifact(5), expectedMacID: macID)
@@ -3318,8 +3334,6 @@ public final class PreparationIntentStore {
         ]
         let digest = try machineEpochSourceDigest(schema: schema, digestSchema: intent.record.sourceSchemaVersion,
             installationID: inventory.installationID, historicalTables: historicalTables)
-        guard try digest == installed.backend().record.currentSourceDigest,
-              digest == intent.record.sourceMachineDigest else { throw PreparationStoreError.staleRevision }
         return (historical, intent.record.sourceSchemaVersion, digest)
     }
 
@@ -3400,6 +3414,64 @@ public final class PreparationIntentStore {
         try transaction(write: false) { try loadStableMachineUpdate(candidate: candidate) }
     }
 
+    /// Captures the exact account rows and sealed release in one read transaction.
+    func stableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
+        try transaction(write: false) { try loadStableRuntimeSource(candidate: candidate) }
+    }
+
+    private func loadStableRuntimeSource(candidate: SignedReleaseEvidence) throws -> MachineUpdateStableRuntimeSource {
+        let actual = try loadStableMachineUpdate(candidate: candidate)
+        let preparations = try loadAccountPreparations()
+        let initializations: [AuthorityInitializationIntent] = try statement(
+            "SELECT account FROM authority_initialization_v1 ORDER BY account LIMIT 65") { row in
+                var values: [AuthorityInitializationIntent] = []
+                while try step(row) == SQLITE_ROW {
+                    guard values.count < 64,
+                          let value = try loadInitialization(accountID: blob(row, column: 0, maximum: 16)) else {
+                        throw PreparationStoreError.corruptRecord
+                    }
+                    values.append(value)
+                }
+                return values
+            }
+        let source = try MachineUpdateStableRuntimeSource(actual: actual, preparations: preparations,
+            initializations: initializations, candidate: candidate)
+        try loadStableMachineUpdate(candidate: candidate).requireSame(as: actual)
+        return source
+    }
+
+    func stableAccountSetupSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableAccountSetupSnapshot {
+        try .init(source: stableRuntimeSource(candidate: candidate), owner: owner)
+    }
+
+    /// Reads the retained service claims and runtime reference under the same sealed account snapshot.
+    func stableRuntimePreparationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableRuntimePreparationSnapshot {
+        try transaction(write: false) { try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadStableRuntimePreparationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableRuntimePreparationSnapshot {
+        let setup = try MachineUpdateStableAccountSetupSnapshot(source: loadStableRuntimeSource(candidate: candidate), owner: owner)
+        guard let preparation = setup.preparation else { throw AccountPreparationError.missing }
+        let account = preparation.accountID
+        let result = try MachineUpdateStableRuntimePreparationSnapshot(setup: setup,
+            services: loadServiceAccountPlan(accountID: account), state: loadRuntimePreparation(accountID: account),
+            reservedNumbers: loadReservedServiceAccountNumbers())
+        try loadStableMachineUpdate(candidate: candidate).requireSame(as: setup.source.actual)
+        return result
+    }
+
+    /// Reads policy operands and the activation row in one transaction.
+    func retainedSetupPolicyMaterial(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPolicyMaterial {
+        try transaction(write: false) {
+            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+            return try .init(runtime: runtime, activation: loadRuntimeActivation(accountID: runtime.preparation.accountID))
+        }
+    }
+
     private func loadStableReleaseRecord() throws -> MachineUpdateStableReleaseRecord {
         try statement("SELECT id,epoch,revision,record FROM stable_release_state_v1 ORDER BY id") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
@@ -3431,12 +3503,9 @@ public final class PreparationIntentStore {
         let installed = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
         guard try installed.inventory() == inventory else { throw PreparationStoreError.corruptRecord }
         try seal.requireCurrentInventory(inventory, epoch: installed, candidate: release)
-        let historical = try historicalInstalledRuntimeSource(inventory: inventory, installed: installed, schema: 24)
-        guard historical.digest == seal.historicalSourceDigest, historical.schema == seal.historicalSourceSchemaVersion else {
-            throw PreparationStoreError.staleRevision
-        }
+        let current = try installedCurrentSourceProjection(inventory: inventory, installed: installed, schema: 24)
         return .init(inventory: inventory, activation: activation, admission: admission, candidate: candidate,
-            installed: installed, seal: seal, historicalSourceDigest: historical.digest)
+            installed: installed, seal: seal, currentRowsDigest: current.digest)
     }
 
     private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {

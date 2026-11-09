@@ -9,9 +9,10 @@ final class AuthorityAccountInitializationTests: XCTestCase {
     private struct Interrupted: Error {}
     private let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), epoch = Data(repeating: 3, count: 16)
     private var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 8, maxItems: 512) } }
-    private func initial(replay: Bool = true, feature: UInt64? = nil) throws -> AuthorityJournalInitialization {
+    private func initial(replay: Bool = true, feature: UInt64? = nil,
+        macID: Data? = nil, accountID: Data? = nil) throws -> AuthorityJournalInitialization {
         let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
-            0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(epoch), 4: .unsigned(1),
+            0: .unsigned(1), 1: .bytes(macID ?? mac), 2: .bytes(accountID ?? account), 3: .bytes(epoch), 4: .unsigned(1),
             5: .unsigned(1), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
         let contract = try RequestContract(requestKind: .command, wireVersion: 1, schemaVersion: 3)
         let policy = try AuthorityCodePolicy(entries: [.init(role: .authority, teamID: "ABCDEFGHIJ", identifier: "dev.sebastiano.remozio.macos.authority",
@@ -138,6 +139,64 @@ final class AuthorityAccountInitializationTests: XCTestCase {
             XCTAssertTrue(try journal.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
         }
     }
+    func testRetainedPolicyBoundaryRequiresTheOriginalPairedPaths() throws {
+        let limits = try self.limits, mac = self.mac, account = self.account
+        func reader(_ root: URL) throws -> AuthorityJournal {
+            let anchor = root.path
+            return try AuthorityJournal(updateHealthStorage: AuthorityStorage(openJournal: {
+                try JournalDatabase(lease: .init(anchor: anchor, relativeDirectory: "journal", owner: getuid()),
+                    macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
+                    maximumConsumptions: 10, busyMilliseconds: 100, initialize: false, readOnlyForCutover: true)
+            }, openContinuity: { excluded in
+                try ContinuityStore(lease: .init(anchor: anchor, relativeDirectory: "continuity", owner: getuid(),
+                    excludingDirectory: excluded), macID: mac, accountID: account, initialize: nil, readOnlyForCutover: true)
+            }), validateSelf: { _ in })
+        }
+        try fixture { root in
+            let machine = try store(root, initialize: true)
+            defer { try? machine.close() }
+            let completed = try resume(root, machine: machine, expected: begin(root, machine, inventory(machine)))
+            let original = try reader(root)
+            defer { try? original.close() }
+            let boundary = try original.captureRetainedSetupPolicyBoundary(expected: completed)
+            XCTAssertEqual(boundary.checkpoint, completed.checkpoint)
+            XCTAssertEqual(boundary.accountID, account)
+
+            try fixture { otherRoot in
+                let otherMachine = try store(otherRoot, initialize: true)
+                defer { try? otherMachine.close() }
+                let other = try resume(otherRoot, machine: otherMachine,
+                    expected: begin(otherRoot, otherMachine, inventory(otherMachine)))
+                let replacement = try reader(otherRoot)
+                defer { try? replacement.close() }
+                XCTAssertEqual(try replacement.captureRetainedSetupPolicyBoundary(expected: other).accountID, account)
+                func expectedScope(continuityPath: String, initial: AuthorityJournalInitialization)
+                    throws -> AuthorityInitializationIntent {
+                    try .init(setupID: completed.setupID, revision: completed.revision,
+                        installationID: completed.installationID, macID: initial.descriptor.macID,
+                        accountID: initial.descriptor.accountID, releaseDigest: completed.releaseDigest,
+                        initializationDigest: initial.initializationDigest, initializationBytes: initial.initializationBytes,
+                        journalPath: completed.journalPath, continuityPath: continuityPath,
+                        checkpoint: completed.checkpoint, complete: true)
+                }
+                let wrongContinuity = try expectedScope(continuityPath: other.continuityPath, initial: completed.initialAuthority)
+                XCTAssertThrowsError(try original.captureRetainedSetupPolicyBoundary(expected: wrongContinuity)) {
+                    XCTAssertEqual($0 as? AuthorityInitializationError, .conflictingIntent)
+                }
+                let foreignID = Data(repeating: 9, count: 16)
+                for initial in [try self.initial(macID: foreignID), try self.initial(accountID: foreignID)] {
+                    let foreign = try expectedScope(continuityPath: completed.continuityPath, initial: initial)
+                    XCTAssertThrowsError(try original.captureRetainedSetupPolicyBoundary(expected: foreign)) {
+                        XCTAssertEqual($0 as? AuthorityInitializationError, .conflictingIntent)
+                    }
+                }
+                XCTAssertThrowsError(try replacement.captureRetainedSetupPolicyBoundary(expected: completed)) {
+                    XCTAssertEqual($0 as? AuthorityInitializationError, .conflictingIntent)
+                }
+            }
+        }
+    }
+
     func testEveryStageInterruptionReleasesStoresAndResumesRetainedProgress() throws {
         for stage in AuthorityAccountInitialization.Stage.allCases {
             try fixture { root in
