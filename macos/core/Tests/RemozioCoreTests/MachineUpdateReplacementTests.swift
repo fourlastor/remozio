@@ -60,7 +60,11 @@ private final class MachineReplacementFixture {
                 requiredFormats += try MachineUpdateBackendEpochRecord.requirements + MachineUpdateBackendEpochRecord.publicationRequirements
                 requiredFormats += try MachineUpdateConsumerHealthReleaseValidation.formatRequirements
             }
-            if completionIntent { requiredFormats += try MachineUpdateCompletionIntentRecord.requirements }
+            if completionIntent {
+                requiredFormats += try MachineUpdateCompletionIntentRecord.requirements
+                    + MachineUpdateCompletionPublicationRecord.requirements + MachineUpdateInstalledReleaseRecord.requirements
+                    + MachineUpdateInstalledReleaseRecord.provenanceRequirements + MachineUpdateActivationRecord.finalizationRequirements
+            }
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
@@ -1139,8 +1143,23 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 accountID: selected, directory: directory, owner: getuid(), readFence: readFence, verifyCurrent: boundary)
         }
         try verifyRestart(f, snapshot: snapshot, loan: loan, backend: verifyBackend)
+        func verifyCompletionMetadata() throws {
+            try MachineUpdateCompletionPublicationFiles.requireBackendMetadataInLease(snapshot, accountID: account,
+                directory: directory, owner: getuid(), readFence: readFence, verifyCurrent: {})
+        }
+        try verifyCompletionMetadata()
         _ = try AdministrativeSetupPublication.publish(fence.encoded, file: fenceFile, directory: directory, owner: getuid())
         XCTAssertThrowsError(try verifyRestart(f, snapshot: snapshot, loan: loan, backend: verifyBackend)) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
+        XCTAssertThrowsError(try verifyCompletionMetadata()) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
+        try FileManager.default.removeItem(at: fenceURL)
+        XCTAssertNil(source.revision)
+        _ = try AdministrativeSetupPublication.publish(revision.encoded, file: .gatewaySettingsRevision,
+            directory: directory, owner: getuid())
+        XCTAssertThrowsError(try verifyCompletionMetadata()) {
             XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
         }
     }
@@ -1876,6 +1895,254 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testCompletionPublicationStorageRetainsOnlyTheExactRecordedPlan() throws {
+        try withCompletionFixture(installedReadiness: true) { fixture in
+            let prepared = try fixture.intent()
+            let snapshot = fixture.snapshot
+            let candidate = fixture.candidate
+            let directory = fixture.directory
+            let restart = fixture.restart
+            let account = fixture.boundary.accountID
+            _ = try fixture.machine.retainMachineUpdateCompletionIntent(prepared, snapshot: snapshot,
+                candidate: candidate, directory: directory, restart: restart) { _, scope in _ = try scope.read() }
+            let authorized = try fixture.machine.authorizeMachineUpdatePolicyWrite(expected: prepared, accountID: account,
+                boundary: fixture.boundary, snapshot: snapshot, candidate: candidate, directory: directory,
+                restart: restart, readBoundary: { _ in fixture.boundary }) { _, scope in _ = try scope.read() }
+            let boundary = try fixture.committedBoundary(for: authorized.archive)
+            let recorded = try MachineUpdateCompletionRecoverySequence.reconcileConclusive(authorized.archive,
+                snapshot: snapshot, candidate: candidate, machine: fixture.machine, directory: directory, restart: restart,
+                verify: { _, scope in _ = try scope.read() }, boundary: { _, _ in boundary })
+            let plan = try MachineUpdateCompletionPublicationPlan(snapshot: .init(restart: snapshot, intent: recorded),
+                candidate: candidate, currentSourceDigest: snapshot.backend.record.currentSourceDigest, boundaries: [boundary])
+            let publication = try MachineUpdateCompletionPublicationRecord(plan: plan)
+            XCTAssertEqual(publication.formatVersion, 2)
+            typealias Stage = PreparationIntentStore.CompletionIntentStorageStage
+            var escaped: PreparationIntentStore.CompletionPublicationScope?
+            func retain(failure: Stage? = nil) throws -> MachineUpdateCompletionPublicationRecord {
+                try fixture.machine.retainMachineUpdateCompletionPublication(publication, plan: plan, expected: recorded,
+                    restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart) { stage, scope in
+                        let actual = try scope.read()
+                        XCTAssertEqual(actual.completion.intent, recorded)
+                        if stage == failure { throw ReplacementFixtureError.injected }
+                        escaped = scope
+                    }
+            }
+
+            XCTAssertNil(try fixture.machine.machineUpdateCompletionPublication())
+            for stage in [Stage.beforeTransaction, .inTransaction, .afterMutation] {
+                XCTAssertThrowsError(try retain(failure: stage)) {
+                    XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+                }
+                XCTAssertEqual(try fixture.machine.retainedRuntimeCompatibilityInputs().schemaVersion, 21)
+                XCTAssertNil(try fixture.machine.machineUpdateCompletionPublication())
+            }
+            XCTAssertThrowsError(try retain(failure: .afterCommit)) {
+                XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+            }
+            try fixture.files.reopen()
+            XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), publication)
+            XCTAssertEqual(try retain(), publication)
+            XCTAssertEqual(try retain(), publication)
+            XCTAssertThrowsError(try XCTUnwrap(escaped).read()) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+            let actual = try fixture.machine.machineUpdateCompletionPublicationRecoverySnapshot(candidate: candidate, directory: directory)
+            try actual.requireSame(as: .init(completion: .init(restart: snapshot, intent: recorded),
+                publication: publication, candidate: candidate))
+
+            let file = try XCTUnwrap(plan.entries.first?.file)
+            let other = try XCTUnwrap(plan.entries.last?.file)
+            func advance(_ publication: MachineUpdateCompletionPublicationRecord,
+                _ operation: PreparationIntentStore.CompletionPublicationOperation, failure: Stage? = nil) throws
+                -> MachineUpdateCompletionPublicationRecord {
+                try fixture.machine.advanceMachineUpdateCompletionPublication(publication, operation: operation,
+                    plan: plan, expected: recorded, restartSnapshot: snapshot, candidate: candidate, directory: directory,
+                    restart: restart) { stage, scope in
+                        _ = try scope.read()
+                        if stage == failure { throw ReplacementFixtureError.injected }
+                    }
+            }
+            XCTAssertNotEqual(file, other)
+            XCTAssertThrowsError(try advance(publication, .prepare(account, other))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            for stage in [Stage.beforeTransaction, .inTransaction] {
+                XCTAssertThrowsError(try advance(publication, .prepare(account, file), failure: stage)) {
+                    XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+                }
+                XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), publication)
+            }
+            XCTAssertThrowsError(try advance(publication, .prepare(account, file), failure: .afterCommit)) {
+                XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+            }
+            try fixture.files.reopen()
+            let writing = try XCTUnwrap(fixture.machine.machineUpdateCompletionPublication())
+            XCTAssertEqual(try writing.state(accountID: account, file: file), .writing)
+            XCTAssertThrowsError(try advance(publication, .prepare(account, file))) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            let root = fixture.files.f.f.root.path
+            XCTAssertEqual(chmod(root, 0o755), 0)
+            let files = try ProtectedSetupDirectory(anchor: root, relativePath: "CompletionPublication",
+                owner: getuid(), visibility: .sharedMetadata)
+            defer { files.close() }
+            for entry in plan.entries {
+                _ = try AdministrativeSetupPublication.publish(entry.startup, file: entry.artifact, directory: files, owner: getuid())
+            }
+            let first = try XCTUnwrap(plan.entries.first)
+            XCTAssertNotEqual(first.startup, first.completion)
+            let path = URL(fileURLWithPath: files.path).appendingPathComponent(first.artifact.name)
+            let staging = URL(fileURLWithPath: files.path).appendingPathComponent(
+                ".remozio-completion-" + publication.id.uuidString.lowercased() + "-" + first.artifact.name)
+            let orphan = staging.appendingPathComponent("payload")
+            func leaveOrphan(_ bytes: Data) throws {
+                if !FileManager.default.fileExists(atPath: staging.path) {
+                    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false,
+                        attributes: [.posixPermissions: 0o700])
+                }
+                try bytes.write(to: orphan)
+                XCTAssertEqual(chmod(orphan.path, 0o600), 0)
+            }
+            XCTAssertThrowsError(try MachineUpdateCompletionPublicationFiles.publishInLease(plan, publication: publication,
+                accountID: first.accountID, file: first.file, directory: files, owner: getuid(), verifyCurrent: {})) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try leaveOrphan(first.completion.prefix(8))
+            XCTAssertEqual(try Data(contentsOf: path), first.startup)
+            func publish(_ current: MachineUpdateCompletionPublicationRecord, stopAfterSwap: Bool,
+                loseFirstAcknowledgment: Bool = false) throws -> MachineUpdateCompletionPublicationRecord {
+                try MachineUpdateCompletionFileCoordinator.publish(current, plan: plan, expected: recorded,
+                    restart: snapshot, candidate: candidate, machine: fixture.machine, directory: directory,
+                    admission: restart, validate: { scope in
+                        let publication = try XCTUnwrap(scope.read().publication)
+                        try MachineUpdateCompletionPublicationFiles.requireInLeases(plan, publication: publication,
+                            owner: getuid(), directory: { _ in files }, verifyCurrent: { _ = try scope.read() })
+                    }, publishFile: { publication, entry, scope, didStage in
+                        try MachineUpdateCompletionPublicationFiles.publishInLease(plan, publication: publication,
+                            accountID: entry.accountID, file: entry.file, directory: files, owner: getuid(),
+                            verifyCurrent: { _ = try scope.read() }, didStage: didStage)
+                    }, didStore: { stage, scope in
+                        guard loseFirstAcknowledgment, stage == .afterCommit,
+                              let stored = try scope.read().publication,
+                              try stored.state(accountID: account, file: file) == .published else { return }
+                        throw ReplacementFixtureError.injected
+                    }, didStage: { stage in
+                        if stopAfterSwap, case .published = stage { throw ReplacementFixtureError.injected }
+                    })
+            }
+            try Data("foreign contents".utf8).write(to: path)
+            XCTAssertThrowsError(try publish(writing, stopAfterSwap: false)) {
+                XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+            }
+            XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), writing)
+            try first.startup.write(to: path)
+            XCTAssertEqual(chmod(path.path, 0o666), 0)
+            XCTAssertThrowsError(try publish(writing, stopAfterSwap: false)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+            }
+            XCTAssertThrowsError(try fixture.machine.machineUpdateCompletionPublication()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
+            }
+            XCTAssertEqual(chmod(path.path, first.artifact.mode), 0)
+            try fixture.files.reopen()
+            XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), writing)
+            XCTAssertThrowsError(try publish(writing, stopAfterSwap: true)) {
+                XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+            }
+            XCTAssertEqual(try Data(contentsOf: path), first.completion)
+            var swapped = stat()
+            XCTAssertEqual(lstat(path.path, &swapped), 0)
+            try fixture.files.reopen()
+            let recoverable = try XCTUnwrap(fixture.machine.machineUpdateCompletionPublication())
+            XCTAssertEqual(recoverable, writing)
+            try leaveOrphan(first.startup)
+            XCTAssertThrowsError(try publish(recoverable, stopAfterSwap: false, loseFirstAcknowledgment: true)) {
+                XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
+            try fixture.files.reopen()
+            let acknowledged = try XCTUnwrap(fixture.machine.machineUpdateCompletionPublication())
+            XCTAssertEqual(try acknowledged.state(accountID: account, file: file), .published)
+            let published = try publish(acknowledged, stopAfterSwap: false)
+            var replayed = stat()
+            XCTAssertEqual(lstat(path.path, &replayed), 0)
+            XCTAssertEqual(swapped.st_ino, replayed.st_ino)
+            XCTAssertTrue(published.filesPublished)
+            XCTAssertEqual(published.inventoryState, .pending)
+            XCTAssertEqual(try fixture.machine.inventory(), snapshot.source.replacement.inventory)
+            let retained = try fixture.machine.machineUpdateCompletionPublicationRecoverySnapshot(candidate: candidate, directory: directory)
+            let installed = try MachineUpdateInstalledReleaseEpoch.Archive(snapshot: retained, candidate: candidate,
+                currentSourceDigest: snapshot.backend.record.currentSourceDigest, boundaries: [boundary])
+            func finalize(failure: Stage? = nil) throws -> MachineUpdateFinalizationSnapshot {
+                try fixture.machine.finalizeMachineUpdateCompletion(installed, publication: published, plan: plan,
+                    expected: recorded, restartSnapshot: snapshot, candidate: candidate, directory: directory, restart: restart,
+                    ownedFileDirectory: { _ in files }) { stage, scope in
+                        switch try scope.read() {
+                        case .publication(let current):
+                            XCTAssertEqual(current.publication, published)
+                        case .installed(let current):
+                            XCTAssertEqual(current.activation.phase, .finishing)
+                            XCTAssertFalse(current.candidate.selected)
+                            XCTAssertEqual(current.inventory, plan.inventory)
+                        }
+                        if stage == failure { throw ReplacementFixtureError.injected }
+                    }
+            }
+            try Data("unrelated file contents".utf8).write(to: path)
+            XCTAssertThrowsError(try finalize()) {
+                XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+            }
+            XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), published)
+            XCTAssertEqual(try fixture.machine.inventory(), snapshot.source.replacement.inventory)
+            try first.completion.write(to: path)
+            for stage in [Stage.beforeTransaction, .inTransaction, .afterMutation] {
+                XCTAssertThrowsError(try finalize(failure: stage)) {
+                    XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+                }
+                XCTAssertEqual(try fixture.machine.inventory(), snapshot.source.replacement.inventory)
+                XCTAssertEqual(try fixture.machine.machineUpdateCompletionPublication(), published)
+            }
+            XCTAssertThrowsError(try finalize(failure: .afterCommit)) {
+                XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+            }
+            try fixture.files.reopen()
+            let finishing = try fixture.machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory)
+            XCTAssertEqual(finishing.activation.phase, .finishing)
+            XCTAssertEqual(finishing.installed.record, installed.record)
+            XCTAssertEqual(finishing.inventory, plan.inventory)
+            XCTAssertThrowsError(try fixture.machine.retainedRuntimeCompatibilityInputs()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try fixture.machine.withCurrentMachineUpdateFinalization(candidate: candidate, directory: directory, restart: restart) { scope in
+                guard case .installed(let current) = try scope.read() else { return XCTFail("Missing finishing frame") }
+                try current.requireSame(as: finishing)
+            }
+            try restart.validate()
+            XCTAssertThrowsError(try fixture.machine.begin(parent: fixture.files.destination.path,
+                ancestry: fixture.files.destination.preparationAncestry())) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+
+            func checkCorruptFrame(edit: String, restore: String) throws {
+                try fixture.machine.close()
+                try fixture.files.sql(edit)
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try fixture.machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+                try fixture.machine.close()
+                try fixture.files.sql(restore)
+                try fixture.files.reopen()
+                let restored = try fixture.machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory)
+                try restored.requireSame(as: finishing)
+            }
+            try checkCorruptFrame(edit: "UPDATE installed_release_state_v1 SET record=CAST(record || X'01' AS BLOB) WHERE kind=1",
+                restore: "UPDATE installed_release_state_v1 SET record=substr(record,1,length(record)-1) WHERE kind=1")
+            try checkCorruptFrame(edit: "INSERT INTO machine_update_completion_publication_v1 VALUES(1,zeroblob(16),zeroblob(16),X'01')",
+                restore: "DELETE FROM machine_update_completion_publication_v1 WHERE singleton=1")
+        }
+    }
+
     func testCompletionStorageRefusesAnUnknownSchemaAndRetainsItsArchive() throws {
         try withCompletionFixture { fixture in
             let archive = try fixture.intent()
@@ -1884,11 +2151,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     _ = try scope.read()
                 }
             try fixture.machine.close()
-            try fixture.files.sql("PRAGMA user_version=22")
-            XCTAssertThrowsError(try fixture.files.reopen()) {
-                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+            // 22 is supported, but this store has no completion publication table. 24 is unsupported.
+            for version in [22, 24] {
+                try fixture.files.sql("PRAGMA user_version=\(version)")
+                XCTAssertThrowsError(try fixture.files.reopen()) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                }
+                XCTAssertEqual(try fixture.files.f.f.sql("PRAGMA user_version"), Int64(version))
             }
-            XCTAssertEqual(try fixture.files.f.f.sql("PRAGMA user_version"), 22)
             try fixture.files.sql("PRAGMA user_version=21")
             try fixture.files.reopen()
             XCTAssertEqual(try fixture.machine.machineUpdateCompletionIntent(), archive)
@@ -1960,6 +2230,56 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let ready = try pending.recordingRecoveredBoundary(fixture.committedBoundary(for: pending))
             XCTAssertTrue(ready.policyMarkersRecorded)
             XCTAssertEqual(pending.policies.first?.phase, .writing)
+        }
+    }
+
+    func testInstalledReleaseArchiveRequiresAllFilesAndFreshPairedPolicy() throws {
+        try withCompletionFixture { fixture in
+            let writing = try fixture.intent().preparingWrite(accountID: fixture.boundary.accountID, expected: fixture.boundary)
+            let boundary = try fixture.committedBoundary(for: writing)
+            let recorded = try writing.recordingRecoveredBoundary(boundary)
+            let restart = fixture.snapshot
+            let candidate = fixture.candidate
+            let sourceDigest = restart.backend.record.currentSourceDigest
+            let completion = MachineUpdateCompletionSnapshot(restart: restart, intent: recorded)
+            let plan = try fixture.plan(recorded)
+            var publication = try MachineUpdateCompletionPublicationRecord(plan: plan)
+
+            func build(boundaries: [AuthorityJournal.MachineUpdatePolicyBoundary]) throws -> MachineUpdateInstalledReleaseEpoch.Archive {
+                let snapshot = try MachineUpdateCompletionPublicationSnapshot(completion: completion,
+                    publication: publication, candidate: candidate)
+                return try .init(snapshot: snapshot, candidate: candidate, currentSourceDigest: sourceDigest, boundaries: boundaries)
+            }
+            XCTAssertThrowsError(try build(boundaries: [boundary])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            for file in plan.entries {
+                publication = try publication.advancing(accountID: file.accountID, file: file.file, to: .writing)
+                publication = try publication.advancing(accountID: file.accountID, file: file.file, to: .published)
+            }
+            XCTAssertThrowsError(try build(boundaries: [fixture.boundary])) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+
+            let archive = try build(boundaries: [boundary])
+            let encoded = try archive.record.encoded
+            let reopened = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: encoded,
+                artifacts: archive.artifacts, candidate: candidate)
+            XCTAssertEqual(reopened.record, archive.record)
+            XCTAssertEqual(try reopened.inventory(), plan.inventory)
+            XCTAssertEqual(try reopened.completionIntent(), recorded)
+            XCTAssertEqual(try reopened.publicationSource(), publication)
+
+            var tampered = archive.artifacts
+            let index = try XCTUnwrap(tampered.firstIndex { $0.kind == 300 })
+            let policy = tampered[index]
+            var bytes = policy.bytes
+            bytes[bytes.startIndex] ^= 1
+            tampered[index] = .init(kind: policy.kind, accountID: policy.accountID, bytes: bytes)
+            XCTAssertThrowsError(try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: encoded,
+                artifacts: tampered, candidate: candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
         }
     }
 

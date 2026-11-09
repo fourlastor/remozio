@@ -38,11 +38,12 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
         let machineUpdateConfigurationEpoch: Data?
         let machineUpdateBackendEpoch: Data?
         private(set) var completionIntent: Data?
+        private(set) var completionPublication: Data?
         init(schemaVersion: Int64, macID: Data, inventory: Data?, runtimes: [Runtime], gateways: [Gateway],
              sharedImport: SharedSetupImportCompatibilitySnapshot? = nil, auditUpgrades: [RuntimeAuditUpgradeRecord] = [],
              auditGraphs: [RuntimeAuditUpgradeGraphRecord] = [], auditCutovers: [RuntimeAuditUpgradeCutoverRecord] = [],
              updateAdmissionRegistration: Data? = nil, machineUpdateActivation: Data? = nil, machineUpdateReplacement: Data? = nil, machineUpdateConfigurationEpoch: Data? = nil, machineUpdateBackendEpoch: Data? = nil,
-             completionIntent: Data? = nil) {
+             completionIntent: Data? = nil, completionPublication: Data? = nil) {
             self.schemaVersion = schemaVersion; self.macID = macID; self.inventory = inventory
             self.runtimes = runtimes; self.gateways = gateways; self.sharedImport = sharedImport; self.auditUpgrades = auditUpgrades; self.auditGraphs = auditGraphs; self.auditCutovers = auditCutovers
             self.updateAdmissionRegistration = updateAdmissionRegistration; self.machineUpdateActivation = machineUpdateActivation
@@ -50,12 +51,14 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             self.machineUpdateConfigurationEpoch = machineUpdateConfigurationEpoch
             self.machineUpdateBackendEpoch = machineUpdateBackendEpoch
             self.completionIntent = completionIntent
+            self.completionPublication = completionPublication
         }
-        /// Projects the historical restart source from a verified schema 21 completion frame.
+        /// Projects the historical restart source from a verified completion frame.
         func completionSourceInputs() -> Self {
             var copy = self
             copy.schemaVersion = 20
             copy.completionIntent = nil
+            copy.completionPublication = nil
             return copy
         }
         /// Copies every field and replaces only the activation bytes, so a field added later cannot be dropped.
@@ -124,9 +127,15 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
-        if inputs.schemaVersion == 21 {
+        if inputs.schemaVersion >= 21 {
             guard inputs.completionIntent != nil else { throw PreparationStoreError.corruptRecord }
             for item in try MachineUpdateCompletionIntentRecord.requirements {
+                try include(item.role, item.name, item.readVersions, item.writeVersions)
+            }
+        }
+        if inputs.schemaVersion >= 22 {
+            guard inputs.completionPublication != nil else { throw PreparationStoreError.corruptRecord }
+            for item in try MachineUpdateCompletionPublicationRecord.requirements {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
