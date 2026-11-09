@@ -25,19 +25,32 @@ final class GatewaySettingsConsumerNativeScope: OwnedReleaseActivity, @unchecked
     private var baseline: ServiceReleaseActivityToken?
     private var closed = false
 
-    static func openGateway(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
-        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
-        let host = try GatewaySettingsConsumerHostConfiguration.decode(bytes)
+    static func decodeGatewayStartup(_ bytes: Data, path: String) throws ->
+        (host: GatewaySettingsConsumerHostConfiguration, mode: GatewaySettingsConsumerStartupMode) {
+        let host = try GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(bytes)
         guard host.role == .gateway, path == (try host.gatewayConfigurationPath) else { throw GatewayPreparationError.changedScope }
-        return try open(host: host, path: path, bytes: bytes)
+        return (host, try .select(host))
     }
-    static func openTransport(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence,
-                                                     bootstrap: TransportSettingsConsumerBootstrap) {
-        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
-        let bootstrap = try TransportSettingsConsumerBootstrap.decode(bytes)
+    static func decodeTransportStartup(_ bytes: Data, path: String) throws ->
+        (bootstrap: TransportSettingsConsumerBootstrap, mode: GatewaySettingsConsumerStartupMode) {
+        let bootstrap = try TransportSettingsConsumerBootstrap(base: .decodeForReleaseArchive(bytes))
         try bootstrap.validatePath(path)
+        return (bootstrap, try .select(bootstrap.host))
+    }
+
+    static func openGateway(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence, mode: GatewaySettingsConsumerStartupMode) {
+        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
+        let (host, mode) = try decodeGatewayStartup(bytes, path: path)
+        let opened = try open(host: host, path: path, bytes: bytes)
+        return (opened.scope, opened.release, mode)
+    }
+    static func openTransport(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence, bootstrap: TransportSettingsConsumerBootstrap, mode: GatewaySettingsConsumerStartupMode) {
+        let bytes = try ProtectedServiceConfiguration.readPublic(path: path)
+        let (bootstrap, mode) = try decodeTransportStartup(bytes, path: path)
         let opened = try open(host: bootstrap.host, path: path, bytes: bytes)
-        return (opened.scope, opened.release, bootstrap)
+        return (opened.scope, opened.release, bootstrap, mode)
     }
     static func openGatewayForUpdateHealth(path: String) throws -> (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence) {
         let bytes = try ProtectedServiceConfiguration.readPublic(path: path)

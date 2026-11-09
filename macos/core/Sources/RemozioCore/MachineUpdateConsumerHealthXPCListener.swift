@@ -13,6 +13,18 @@ protocol MachineUpdateConsumerHealthEndpointBuilding: Sendable {
         onClose: @escaping @Sendable () -> Void) throws -> any MachineUpdateHealthEndpoint
 }
 
+private struct NativeMachineUpdateHealthEndpointBuilder: MachineUpdateConsumerHealthEndpointBuilding {
+    let configurationPath: String
+    let scope: GatewaySettingsConsumerNativeScope
+    let release: SignedReleaseEvidence
+    func make(connection: NSXPCConnection, budget: AuthorityXPCWorkBudget,
+        onHandshake: @escaping @Sendable () -> Void,
+        onClose: @escaping @Sendable () -> Void) throws -> any MachineUpdateHealthEndpoint {
+        try MachineUpdateConsumerHealthXPCEndpoint(connection: connection, configurationPath: configurationPath, scope: scope, release: release,
+            budget: budget, onHandshake: onHandshake, onClose: onClose)
+    }
+}
+
 private final class NativeMachineUpdateHealthConnection: OwnedAuthorityConnection, @unchecked Sendable {
     let connection: NSXPCConnection
     let endpoint: any MachineUpdateHealthEndpoint
@@ -36,6 +48,21 @@ final class MachineUpdateConsumerHealthXPCListener: NSObject, NSXPCListenerDeleg
     private var retired: [UUID: any MachineUpdateHealthEndpoint] = [:]
     private var started = false
     private var closed = false
+
+    convenience init(configurationPath: String, scope: GatewaySettingsConsumerNativeScope,
+        release: SignedReleaseEvidence) throws {
+        try scope.validate()
+        try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: scope.configuration)
+        let pins = try GatewaySettingsRecoveryNativePolicy(host: scope.configuration, release: release)
+        let root = try XPCPeerPolicy(teamID: pins.authority.teamID, componentIdentifier: pins.authority.identifier,
+            approvedCodeDirectoryHashes: [pins.authority.codeDirectoryHash], expectedUserID: 0)
+        let host = scope.configuration
+        let serviceName = try host.role.recoveryServiceName(accountID: host.runtime.services.accountID)
+        let listener = NSXPCListener(machServiceName: serviceName)
+        root.configure(listener)
+        try self.init(listener: listener, builder: NativeMachineUpdateHealthEndpointBuilder(
+            configurationPath: configurationPath, scope: scope, release: release), verifyCurrent: { try scope.validate() })
+    }
 
     /// Anonymous listeners and owned builders prove lifecycle behavior only. They grant no native admission.
     init(listener: NSXPCListener, builder: any MachineUpdateConsumerHealthEndpointBuilding,
