@@ -19,12 +19,30 @@ final class MachineUpdateGatewayHealthOwner: @unchecked Sendable {
     private var retired = false
 
     static func openNative(configurationPath: String, request: MachineUpdateConsumerHealthRequest) throws -> MachineUpdateGatewayHealthOwner {
+        try openAdmitted(request: request) {
+            try openNativeClaimed(configurationPath: configurationPath, request: request)
+        }
+    }
+
+    /// A hot journal leaves the claimed request with the endpoint for one final authenticated failure reply.
+    static func openAdmitted(request: MachineUpdateConsumerHealthRequest,
+        open: () throws -> MachineUpdateGatewayHealthOwner) throws -> MachineUpdateGatewayHealthOwner {
         try request.claim()
+        do {
+            guard request.requirement.role == .notificationGateway else { throw MachineUpdateRoleChallengeError.changedScope }
+            return try open()
+        } catch GatewayDatabaseError.updateHealthRecoveryRequired {
+            throw GatewayDatabaseError.updateHealthRecoveryRequired
+        } catch {
+            request.close()
+            throw error
+        }
+    }
+
+    private static func openNativeClaimed(configurationPath: String,
+        request: MachineUpdateConsumerHealthRequest) throws -> MachineUpdateGatewayHealthOwner {
         let requirement = request.requirement
-        guard requirement.role == .notificationGateway else { request.close(); throw MachineUpdateRoleChallengeError.changedScope }
-        let opened: (scope: GatewaySettingsConsumerNativeScope, release: SignedReleaseEvidence)
-        do { opened = try GatewaySettingsConsumerNativeScope.openGatewayForUpdateHealth(path: configurationPath) }
-        catch { request.close(); throw error }
+        let opened = try GatewaySettingsConsumerNativeScope.openGatewayForUpdateHealth(path: configurationPath)
         let scope = opened.scope, host = scope.configuration
         var database: GatewayDatabase?
         do {
@@ -66,7 +84,7 @@ final class MachineUpdateGatewayHealthOwner: @unchecked Sendable {
                 release: { request.close(); scope.close() })
             database = nil
             return owner
-        } catch { try? database?.close(); request.close(); scope.close(); throw error }
+        } catch { try? database?.close(); scope.close(); throw error }
     }
 
     static func loadReceiptSigner(database: GatewayDatabase, configuration: GatewayServiceConfiguration,

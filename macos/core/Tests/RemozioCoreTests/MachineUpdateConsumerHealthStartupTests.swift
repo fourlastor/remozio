@@ -162,6 +162,73 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         }
     }
 
+    func testStartupChannelPinsTheSelectedTransportAndRefusesForeignIdentity() throws {
+        let fixture = try Fixture()
+        let host = try select(.transport, from: fixture.startup)
+        let binding = try XCTUnwrap(host.releaseBinding)
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement()
+        func requirement(uid: UInt32, key: Data) -> MachineUpdateRestartHealthPlan.Requirement {
+            .init(binding: binding, configurationEpoch: seed.configurationEpoch,
+                configurationRevision: seed.configurationRevision, backendEpoch: seed.backendEpoch,
+                backendRevision: seed.backendRevision, role: .transport, executionUID: uid,
+                code: host.consumerCode, publicKey: key)
+        }
+        let key = try host.runtime.transportPublicKeyX963
+        let expected = requirement(uid: host.serviceUID, key: key)
+        let pins = try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+            registration: nil, release: fixture.release)
+        XCTAssertEqual(pins.consumer, expected.code)
+        XCTAssertEqual(pins.serviceUID, expected.executionUID)
+        XCTAssertEqual(pins.authority, host.codePolicy.entries.first { $0.role == .authority && $0.active })
+        for foreign in [requirement(uid: host.serviceUID + 1, key: key),
+                        requirement(uid: host.serviceUID, key: seed.publicKey)] {
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: foreign,
+                registration: nil, release: fixture.release)) {
+                XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
+            }
+        }
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(
+            host: select(.transport, from: fixture.completion), requirement: expected, registration: nil, release: fixture.release)) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+        }
+    }
+
+    func testStartupChannelRequiresTheExactGatewayRegistration() throws {
+        let fixture = try Fixture(), host = fixture.startup
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement(role: .notificationGateway, uid: host.serviceUID)
+        let expected = try MachineUpdateRestartHealthPlan.Requirement(binding: XCTUnwrap(host.releaseBinding),
+            configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+            backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision, role: .notificationGateway,
+            executionUID: host.serviceUID, code: host.consumerCode, publicKey: seed.publicKey)
+        let registration = host.runtime.gateway
+        _ = try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+            registration: registration, release: fixture.release)
+        let wrongRole = MachineUpdateRestartHealthPlan.Requirement(binding: expected.binding,
+            configurationEpoch: expected.configurationEpoch, configurationRevision: expected.configurationRevision,
+            backendEpoch: expected.backendEpoch, backendRevision: expected.backendRevision, role: .transport,
+            executionUID: expected.executionUID, code: expected.code, publicKey: expected.publicKey)
+        let foreignCode = MachineUpdateRestartHealthPlan.Requirement(binding: expected.binding,
+            configurationEpoch: expected.configurationEpoch, configurationRevision: expected.configurationRevision,
+            backendEpoch: expected.backendEpoch, backendRevision: expected.backendRevision, role: expected.role,
+            executionUID: expected.executionUID, code: seed.code, publicKey: expected.publicKey)
+        XCTAssertNotEqual(foreignCode.code, expected.code)
+        for invalid in [wrongRole, foreignCode] {
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: invalid,
+                registration: registration, release: fixture.release)) {
+                XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
+            }
+        }
+        let foreign = try GatewayRegistrationIdentity(ownerID: registration.ownerID, macID: registration.macID,
+            accountID: registration.accountID, gatewayID: registration.gatewayID,
+            lifecycleEpoch: Data(repeating: 247, count: 16), rootPublicKey: registration.rootPublicKey)
+        for invalid in [nil, foreign] as [GatewayRegistrationIdentity?] {
+            XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.startupPeerPins(host: host, requirement: expected,
+                registration: invalid, release: fixture.release)) {
+                XCTAssertEqual($0 as? MachineUpdateConsumerHealthChannelError, .changedScope)
+            }
+        }
+    }
+
     func testBothNativeParticipantsMustDeclareTheHealthReaderAndWriter() throws {
         let fixture = try Fixture(), name = MachineUpdateConsumerHealthReleaseValidation.formatName
         for consumer in [AuthorityCodeRole.transport, .notificationGateway] {

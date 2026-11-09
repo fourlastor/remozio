@@ -319,22 +319,41 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
     }
 
     func testEndpointReportsTheRealHotGatewayJournalWithoutChangingItsBytes() async throws {
+        try await checkHotGatewayJournal(revokePeer: false)
+    }
+
+    func testEndpointSuppressesHotGatewaySignalWhenTheAdmittedPeerChanges() async throws {
+        try await checkHotGatewayJournal(revokePeer: true)
+    }
+
+    private func checkHotGatewayJournal(revokePeer: Bool) async throws {
         let fixture = try MachineUpdateGatewayHealthOwnerTests.Fixture(ordinary: true)
         try fixture.database.close()
         let crashed = try fixture.files.plantHotJournal(), store = HotGatewayStore(fixture)
         let files = try ReleaseActivityFixture(), activity = try files.open(), replies = TestState(0)
+        let currentPeer = TestState(true)
         let peer = MachineUpdateConsumerHealthPeer.owned(expected: fixture.requirement,
-            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+            authenticateInvocation: {}, verifyPeer: {
+                guard currentPeer.lock.withLock({ $0 }) else { throw MachineUpdateOwnedHealthFailure.denied }
+            }, verifyCurrent: {})
         let endpoint = MachineUpdateConsumerHealthXPCEndpoint(peer: peer, helloBytes: Data([1]), verifyCurrent: {},
-            acquireActivity: { try activity.acquireShared() }, budget: try .init(maximum: 1), invalidate: {}, makeOwner: { _ in
-                let unexpected = try store.openForHealth()
-                try unexpected.close()
-                throw MachineUpdateOwnedHealthFailure.denied
+            acquireActivity: { try activity.acquireShared() }, budget: try .init(maximum: 1), invalidate: {}, makeOwner: { request in
+                let owner = try MachineUpdateGatewayHealthOwner.openAdmitted(request: request) {
+                    do {
+                        let unexpected = try store.openForHealth()
+                        try unexpected.close()
+                        throw MachineUpdateOwnedHealthFailure.denied
+                    } catch GatewayDatabaseError.updateHealthRecoveryRequired {
+                        if revokePeer { currentPeer.lock.withLock { $0 = false } }
+                        throw GatewayDatabaseError.updateHealthRecoveryRequired
+                    }
+                }
+                return MachineUpdateGatewayHealthReply(owner: owner)
             })
         endpoint.healthHello { version, bytes in XCTAssertEqual(version, 1); XCTAssertEqual(bytes, Data([1])) }
         let session = try MachineUpdateRoleChallengeSession(requirement: fixture.requirement, verifyCurrent: {})
         endpoint.checkUpdateHealth(try session.request) { bytes in
-            XCTAssertEqual(bytes, MachineUpdateGatewayRecoverySignal.bytes)
+            XCTAssertEqual(bytes, revokePeer ? nil : MachineUpdateGatewayRecoverySignal.bytes)
             replies.lock.withLock { $0 += 1 }
         }
         try await waitUntil { replies.lock.withLock { $0 == 1 } }

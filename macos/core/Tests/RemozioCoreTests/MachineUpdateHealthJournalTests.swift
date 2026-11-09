@@ -297,6 +297,7 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
 
     private final class ScopeState: Sendable {
         let valid = Mutex(true)
+        let busy = Mutex(false)
         let releases = Mutex(0)
     }
 
@@ -354,40 +355,6 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         }
     }
 
-    func testRestartAuthorityCoordinatorBlocksOnVerifierRefusal() throws {
-        let fixture = try AuthorityFixture(), status = ScopeState()
-        let owner = try fixture.open(verify: {
-            guard status.valid.withLock({ $0 }) else { throw InstalledAuthorityCommandError.wrongRelease }
-        })
-        let coordinator = MachineUpdateRestartAuthorityCoordinator(owner: owner)
-        defer { try? coordinator.close() }
-        status.valid.withLock { $0 = false }
-        XCTAssertThrowsError(try coordinator.check()) { XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease) }
-        status.valid.withLock { $0 = true }
-        XCTAssertThrowsError(try coordinator.check())
-        XCTAssertThrowsError(try coordinator.validate())
-        XCTAssertEqual(fixture.signer.count.withLock { $0 }, 0)
-    }
-
-    func testRestartAuthorityCanRetryTransientSourceContention() throws {
-        let fixture = try AuthorityFixture(), busy = Mutex(false)
-        let owner = try fixture.open(verify: {
-            if busy.withLock({ $0 }) { throw MachineUpdateHealthSourceError.busy }
-        })
-        let coordinator = MachineUpdateRestartAuthorityCoordinator(owner: owner)
-        defer { try? coordinator.close() }
-        busy.withLock { $0 = true }
-        XCTAssertThrowsError(try coordinator.check()) { XCTAssertEqual($0 as? MachineUpdateHealthSourceError, .busy) }
-        XCTAssertEqual(fixture.signer.count.withLock { $0 }, 0)
-        busy.withLock { $0 = false }
-        XCTAssertEqual(try coordinator.check().requirement, fixture.requirement)
-        busy.withLock { $0 = true }
-        XCTAssertThrowsError(try coordinator.validate()) { XCTAssertEqual($0 as? MachineUpdateHealthSourceError, .busy) }
-        busy.withLock { $0 = false }
-        try coordinator.validate()
-        XCTAssertEqual(fixture.signer.count.withLock { $0 }, 1)
-    }
-
     func testAuthorityAnswerCanRetryWhenItsSourceIsBusy() throws {
         let fixture = try AuthorityFixture(), busy = Mutex(false)
         let owner = try fixture.open(verify: {
@@ -420,21 +387,6 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .unavailable)
         }
         XCTAssertEqual(fixture.signer.count.withLock { $0 }, 0)
-    }
-
-    func testRestartAuthorityCoordinatorDiscardsTheReplyWhenScopeExpiresDuringSigning() throws {
-        let fixture = try AuthorityFixture(), status = ScopeState()
-        let owner = try fixture.open(verify: {
-            guard status.valid.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
-        }, afterSign: { status.valid.withLock { $0 = false } })
-        let coordinator = MachineUpdateRestartAuthorityCoordinator(owner: owner)
-        defer { try? coordinator.close() }
-        XCTAssertThrowsError(try coordinator.check()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
-        XCTAssertThrowsError(try coordinator.validate())
-        XCTAssertEqual(fixture.signer.count.withLock { $0 }, 1)
-        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 0)
-        try coordinator.close()
-        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 1)
     }
 
     func testAuthorityHealthSignsFromThePairedReadWithoutChangingEitherStore() throws {
@@ -550,6 +502,7 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
                 gateway: gateway, rootPublicKey: gateway.registration.rootPublicKey,
                 policy: policy ?? paired.policy, requests: [paired.declaration()],
                 verifyCurrent: {
+                    if state.busy.withLock({ $0 }) { throw MachineUpdateHealthSourceError.busy }
                     guard state.valid.withLock({ $0 }) else { throw Failure.injected }
                 }, release: { state.releases.withLock { $0 += 1 } })
         }
@@ -713,6 +666,41 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
             }
             XCTAssertThrowsError(try owner.answerReadiness(complete, gateway: selected, now: now))
             XCTAssertEqual(fixture.rootSigner.count.withLock { $0 }, 0)
+        }
+    }
+
+    func testPairedGatewayHealthRetainsActivityUntilTheJournalCloses() throws {
+        let fixture = try GatewayFixture(), reader = try fixture.owner()
+        defer { try? reader.close() }
+        try fixture.paired.journal.readForUpdateHealth { _ in
+            XCTAssertThrowsError(try reader.close()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+        }
+        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 0)
+        try reader.close()
+        try reader.close()
+        XCTAssertEqual(fixture.state.releases.withLock { $0 }, 1)
+    }
+
+    func testPairedGatewayProofSurvivesContentionButRetiresOnSourceChange() throws {
+        let fixture = try GatewayFixture(), reader = try fixture.owner()
+        defer { try? reader.close() }
+        try reader.accept(fixture.proof())
+        fixture.state.busy.withLock { $0 = true }
+        XCTAssertThrowsError(try reader.validateHealthScope()) {
+            XCTAssertEqual($0 as? MachineUpdateHealthSourceError, .busy)
+        }
+        fixture.state.busy.withLock { $0 = false }
+        try reader.validateHealthScope()
+
+        fixture.state.valid.withLock { $0 = false }
+        XCTAssertThrowsError(try reader.validateHealthScope()) {
+            XCTAssertEqual($0 as? Failure, .injected)
+        }
+        fixture.state.valid.withLock { $0 = true }
+        XCTAssertThrowsError(try reader.validateHealthScope()) {
+            XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .unavailable)
         }
     }
 

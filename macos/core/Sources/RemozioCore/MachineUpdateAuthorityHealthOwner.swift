@@ -60,20 +60,10 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
         let host = selection.host, requirement = selection.requirement
         let verifier = MachineUpdateNativeRestartVerifier(snapshot: snapshot, host: host, sourceAccess: sourceAccess,
             readCurrent: readCurrent)
-        guard host.machineDirectory == MachineBootstrap.machineDirectory else { throw InstalledAuthorityCommandError.wrongInstallation }
-        let paths = try RuntimePreparationPaths(accountID: requirement.binding.accountID)
-        let path = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.commandHost.name
-        let codeRequirement = try AuthoritySelfValidation.requirement(for: requirement.code)
         let loan = try activity.acquireShared()
-        let verify = verifier.verification(loan: loan) {
-            try loan.requireScope(macID: requirement.binding.macID, installationID: requirement.binding.installationID,
-                activationAttempt: requirement.binding.activationAttempt)
-            guard try DynamicCodeValidation.selfPath() == MachineBootstrap.bundlePath + "/" + InstalledAuthorityCommandConfiguration.executablePath,
-                  try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == host.canonicalBytes else {
-                throw InstalledAuthorityCommandError.changedConfiguration
-            }
-            try DynamicCodeValidation.validateSelf(requirement: codeRequirement)
-        }
+        let verify: @Sendable () throws -> Void
+        do { verify = try verifier.authorityCheck(binding: requirement.binding, loan: loan) }
+        catch { loan.close(); throw error }
         let request = host.command.presence.wake.request, service = request.service
         let journal: AuthorityJournal, signer: EnclaveAuthorityRequestSigner
         do {

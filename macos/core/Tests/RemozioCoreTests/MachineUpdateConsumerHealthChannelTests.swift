@@ -323,6 +323,27 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
         await scope.close()
         XCTAssertEqual(driver.state.withLock { $0.checks }, 1); XCTAssertEqual(releases.lock.withLock { $0 }, 1)
     }
+    func testBusySourcePreservesARetainedScopeForRetry() async throws {
+        let driver = try Driver(), busy = TestState(false), releases = TestState(0)
+        let client = try channel(driver, verify: {
+            if busy.lock.withLock({ $0 }) { throw MachineUpdateHealthSourceError.busy }
+        }, release: { releases.lock.withLock { $0 += 1 } })
+        let scope = try await client.openScope()
+
+        busy.lock.withLock { $0 = true }
+        XCTAssertThrowsError(try scope.validate()) {
+            XCTAssertEqual($0 as? MachineUpdateHealthSourceError, .busy)
+        }
+        XCTAssertEqual(driver.state.withLock { $0.closes }, 0)
+        XCTAssertEqual(releases.lock.withLock { $0 }, 0)
+
+        busy.lock.withLock { $0 = false }
+        try scope.validate()
+        XCTAssertEqual(driver.state.withLock { $0.checks }, 1)
+        await scope.close()
+        XCTAssertEqual(driver.state.withLock { $0.closes }, 1)
+        XCTAssertEqual(releases.lock.withLock { $0 }, 1)
+    }
     func testChangedSourcePermanentlyRetiresARetainedScope() async throws {
         let driver = try Driver(), valid = TestState(true), releases = TestState(0)
         let client = try channel(driver, verify: { if !valid.lock.withLock({ $0 }) { throw Denied() } }, release: { releases.lock.withLock { $0 += 1 } })

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum MachineUpdateConsumerHealthCall: Sendable { case hello, check(Data) }
@@ -45,6 +46,7 @@ final class MachineUpdateConsumerHealthConnectionScope: Sendable {
     }
     func validate() throws {
         do { try verifyCurrent() }
+        catch MachineUpdateHealthSourceError.busy { throw MachineUpdateHealthSourceError.busy }
         catch { retire(); let owner = owner; Task { await owner.close() }; throw error }
     }
     func close() async { await owner.close() }
@@ -69,6 +71,70 @@ actor MachineUpdateConsumerHealthChannel {
     private var state = State.new
     private var pending: (id: UUID, continuation: CheckedContinuation<MachineUpdateConsumerHealthReply, any Error>)?
     private var timer: Task<Void, Never>?
+
+    /// Checks the retained startup selection before constructing any native connection.
+    static func startupPeerPins(host: GatewaySettingsConsumerHostConfiguration,
+        requirement: MachineUpdateRestartHealthPlan.Requirement, registration: GatewayRegistrationIdentity?,
+        release: SignedReleaseEvidence) throws -> GatewaySettingsRecoveryNativePolicy {
+        try MachineUpdateConsumerHealthReleaseValidation.validate(release, host: host)
+        let pins = try GatewaySettingsRecoveryNativePolicy(host: host, release: release)
+        guard host.releaseBinding == requirement.binding, pins.consumer == requirement.code,
+              pins.serviceUID == requirement.executionUID, host.role.codeRole == requirement.role,
+              host.runtime.services.macID == requirement.binding.macID,
+              host.runtime.services.accountID == requirement.binding.accountID else {
+            throw MachineUpdateConsumerHealthChannelError.changedScope
+        }
+        switch host.role {
+        case .transport:
+            guard registration == nil, try requirement.publicKey == host.runtime.transportPublicKeyX963 else {
+                throw MachineUpdateConsumerHealthChannelError.changedScope
+            }
+        case .gateway:
+            guard registration == host.runtime.gateway else { throw MachineUpdateConsumerHealthChannelError.changedScope }
+        }
+        return pins
+    }
+
+    /// Transfers the retained restart scope to the pinned connection. The driver activates only when an exchange opens.
+    static func nativeStartup(host: GatewaySettingsConsumerHostConfiguration,
+        requirement: MachineUpdateRestartHealthPlan.Requirement, registration: GatewayRegistrationIdentity?,
+        release: SignedReleaseEvidence, authorityReadinessRequest: Data? = nil, timeoutMilliseconds: UInt64 = 5000,
+        verifyCurrent: @escaping @Sendable () throws -> Void,
+        releaseScope: @escaping @Sendable () -> Void) throws -> MachineUpdateConsumerHealthChannel {
+        var opened: NativeMachineUpdateConsumerHealthDriver?
+        do {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try verifyCurrent()
+            guard authorityReadinessRequest == nil || requirement.role == .notificationGateway else {
+                throw MachineUpdateConsumerHealthChannelError.changedScope
+            }
+            let pins = try startupPeerPins(host: host, requirement: requirement, registration: registration, release: release)
+            let local = try AuthoritySelfValidation.requirement(for: pins.authority)
+            let peer = try XPCPeerPolicy(teamID: pins.consumer.teamID, componentIdentifier: pins.consumer.identifier,
+                approvedCodeDirectoryHashes: [pins.consumer.codeDirectoryHash], expectedUserID: pins.serviceUID)
+            let executable = host.bundlePath + "/" + InstalledAuthorityCommandConfiguration.executablePath
+            let verify: @Sendable () throws -> Void = {
+                guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+                try DynamicCodeValidation.validateSelf(requirement: local)
+                guard try DynamicCodeValidation.selfPath() == executable else {
+                    throw MachineUpdateConsumerHealthChannelError.changedScope
+                }
+                try verifyCurrent()
+            }
+            try verify()
+            let clock = try AuthorityClock()
+            let driver = NativeMachineUpdateConsumerHealthDriver(
+                serviceName: try host.role.recoveryServiceName(accountID: requirement.binding.accountID), policy: peer)
+            opened = driver
+            return try Self(driver: driver, expectedHello: host.encoded, requirement: requirement, registration: registration,
+                authorityReadinessRequest: authorityReadinessRequest, timeoutMilliseconds: timeoutMilliseconds,
+                clock: { try clock.now() }, verifyCurrent: verify, release: releaseScope)
+        } catch {
+            opened?.close()
+            releaseScope()
+            throw error
+        }
+    }
 
     /// Injected drivers exercise ordering only. They grant no native peer, store or key access.
     /// Ownership transfers on success. If initialization throws, the caller closes the driver and releases its scope.
