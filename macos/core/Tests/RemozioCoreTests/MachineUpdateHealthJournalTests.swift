@@ -283,6 +283,71 @@ final class MachineUpdateHealthJournalTests: XCTestCase {
         }
     }
 
+    func testCompletionJournalOwnsTheMutablePairWithoutOpeningRequests() throws {
+        let fixture = try ContractFixture()
+        try fixture.journal.close()
+        let before = try bytes(fixture.files)
+        let owner = try AuthorityJournal(updateCompletionStorage: fixture.files.openTransferredStorage(), validateSelf: { _ in })
+        defer { try? owner.close() }
+        XCTAssertThrowsError(try owner.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16384)) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        XCTAssertThrowsError(try owner.beginCommandExchange()) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        XCTAssertThrowsError(try owner.captureMachineUpdatePolicyBoundaryForRecoveryRead()) {
+            XCTAssertEqual($0 as? JournalDatabaseError, .readOnly)
+        }
+        try owner.close()
+        XCTAssertEqual(try bytes(fixture.files), before)
+    }
+
+    func testCompletionPolicyReadClosesThePairOnSuccessAndForeignIdentity() throws {
+        let fixture = try ContractFixture()
+        try fixture.journal.close()
+        let before = try bytes(fixture.files)
+        func openPair() throws -> AuthorityJournal {
+            try AuthorityJournal(updateHealthStorage: fixture.files.openTransferredStorage(readOnlyForCutover: true),
+                validateSelf: { _ in })
+        }
+        let reader = try openPair()
+        var checks = 0
+        let boundary = try MachineUpdateCompletionPolicyRead.readPaired(macID: fixture.configuration.macID,
+            accountID: fixture.configuration.accountID, verifyCurrent: { checks += 1 }, open: { reader })
+        XCTAssertEqual(boundary.policy, fixture.policy)
+        XCTAssertEqual(checks, 4)
+        XCTAssertThrowsError(try reader.captureMachineUpdatePolicyBoundaryForRecoveryRead()) {
+            XCTAssertEqual($0 as? ContinuityStoreError, .closed)
+        }
+
+        let foreign = Data(repeating: 255, count: 16)
+        for (macID, accountID) in [(foreign, fixture.configuration.accountID), (fixture.configuration.macID, foreign)] {
+            let reopened = try openPair()
+            XCTAssertThrowsError(try MachineUpdateCompletionPolicyRead.readPaired(macID: macID,
+                accountID: accountID, verifyCurrent: {}, open: { reopened })) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try reopened.captureMachineUpdatePolicyBoundaryForRecoveryRead()) {
+                XCTAssertEqual($0 as? ContinuityStoreError, .closed)
+            }
+        }
+        XCTAssertThrowsError(try MachineUpdateCompletionPolicyRead.readPaired(macID: fixture.configuration.macID,
+            accountID: fixture.configuration.accountID, verifyCurrent: {}, open: { throw Failure.injected })) {
+            XCTAssertEqual($0 as? Failure, .injected)
+        }
+        let busy = try openPair()
+        defer { try? busy.close() }
+        var stage = 0
+        XCTAssertThrowsError(try MachineUpdateCompletionPolicyRead.readPaired(macID: fixture.configuration.macID,
+            accountID: fixture.configuration.accountID, verifyCurrent: {
+                stage += 1
+                if stage == 3 { try busy.beginCommandExchange() }
+            }, open: { busy })) { XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive) }
+        busy.endCommandExchange()
+        try busy.close()
+        XCTAssertEqual(try bytes(fixture.files), before)
+    }
+
     func testCompletionReconcilesPolicyFromAReopenedReadOnlyJournal() throws {
         let fixture = try ContractFixture()
         let source = try fixture.journal.captureMachineUpdatePolicyBoundaryForRecoveryRead()

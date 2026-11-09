@@ -144,7 +144,7 @@ struct MachineUpdateCompletionIntentRecord: Codable, Equatable, Sendable, Custom
 
     static var requirements: [RetainedReleaseFormat] { get throws {
         try [AuthorityCodeRole.authority, .setupController].flatMap { role in
-            try [RetainedReleaseFormat(role: role, name: "authority.installation-preparation", readVersions: [20, 21, 22], writeVersions: [21]),
+            try [RetainedReleaseFormat(role: role, name: "authority.installation-preparation", readVersions: [20, 21], writeVersions: [21]),
                  RetainedReleaseFormat(role: role, name: formatName, readVersions: [1], writeVersions: [1]),
                  RetainedReleaseFormat(role: role, name: MachineUpdatePolicyIntentRecord.formatName, readVersions: [1], writeVersions: [1])]
         }
@@ -199,6 +199,14 @@ struct MachineUpdateCompletionIntentArchive: Equatable, Sendable {
             throw PreparationStoreError.invalidTransition
         }
         return try replacing(current.preparingWrite(expected: expected))
+    }
+
+    func recording(_ receipt: AuthorityJournal.MachineUpdatePolicyCommitReceipt) throws -> Self {
+        try validate()
+        guard let current = policies.first(where: { $0.binding.accountID == receipt.source.accountID }) else {
+            throw PreparationStoreError.staleRevision
+        }
+        return try replacing(current.recording(receipt))
     }
 
     /// Retains only a proven committed result. An unchanged source keeps its unresolved write marker.
