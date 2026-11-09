@@ -32,6 +32,7 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
+         stableFormats: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
@@ -75,6 +76,7 @@ private final class MachineReplacementFixture {
                     + MachineUpdateInstalledReleaseRecord.provenanceRequirements + MachineUpdateActivationRecord.finalizationRequirements
             }
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
+            if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
@@ -1613,13 +1615,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
-        readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false,
+        readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
-            admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled, beforeActivation: { files in
+            admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
+            stableFormats: stableFormats, beforeActivation: { files in
             if registerSecondForeground { additionalForeground = [try self.registerSecondForeground(files)] }
             let store = files.machine.store
             if registerForeground { try store.markRuntimeJobsRegistered(files.machine.f.plan) }
@@ -2235,13 +2238,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
-        registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false,
+        registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            beforeActivation: beforeActivation) { fixture in
+            stableFormats: stableFormats, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
             func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
@@ -2590,6 +2593,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 machine: fixture.machine, directory: fixture.directory)) {
                     XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
                 }
+            XCTAssertThrowsError(try owner.makeNativeSettlementOwner(configurationPath: "/nonexistent-finishing-host",
+                machine: fixture.machine, directory: fixture.directory)) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+                }
             try owner.validateAdmission(directory: fixture.directory)
             try owner.withSnapshotInLease(machine: fixture.machine, directory: fixture.directory) { scope in
                 let current = try scope.read()
@@ -2779,6 +2786,254 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func stableFixtureAccess(_ fixture: CompletionFixture, finishing: MachineUpdateFinalizationSnapshot)
+        throws -> MachineUpdateRestartSharedActivity {
+        let anchor = fixture.files.f.f.root.path
+        let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+            owner: getuid())
+        return try MachineUpdateRestartSharedActivity(restart: fixture.restart, activity: activity,
+            directory: fixture.directory, expectedMachine: finishing.admission.machine, macID: finishing.inventory.macID,
+            installationID: finishing.inventory.installationID, activationAttempt: finishing.activation.attemptID)
+    }
+
+    private func stableFixtureLoan(_ fixture: CompletionFixture, finishing: MachineUpdateFinalizationSnapshot)
+        throws -> MachineUpdateRestartReadinessLoan {
+        try stableFixtureAccess(fixture, finishing: finishing).acquireShared()
+    }
+
+    func testStableMachineCommitRollsBackAndLendsAnAcknowledgedReceipt() throws {
+        try withFinishingFixture(stableFormats: true) { fixture, finishing, _ in
+            let machine = fixture.machine, candidate = fixture.candidate, directory = fixture.directory
+            let loan = try stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try machine.withCurrentMachineUpdateReadiness(candidate: candidate, directory: directory, loan: loan) { scope in
+                try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)
+            }
+            let anchor = fixture.files.f.f.root.path
+            let ordinary = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                owner: getuid(), expected: finishing.admission.machine)
+            typealias Stage = PreparationIntentStore.CompletionIntentStorageStage
+            for failure in [Stage.beforeTransaction, .inTransaction, .afterMutation] {
+                XCTAssertThrowsError(try machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                    directory: directory, loan: loan) { stage, _ in
+                        if stage == failure { throw ReplacementFixtureError.injected }
+                    }) {
+                        XCTAssertEqual($0 as? ReplacementFixtureError, .injected)
+                    }
+                try machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory).requireSame(as: finishing)
+            }
+            var observed: [Stage] = []
+            var escaped: PreparationIntentStore.StableCompletionScope?
+            let receipt = try machine.commitStableMachineUpdate(expected: plan, candidate: candidate, directory: directory, loan: loan) {
+                stage, scope in
+                observed.append(stage)
+                escaped = scope
+                XCTAssertThrowsError(try ordinary.acquireAdmission()) {
+                    XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+                }
+                switch try scope.read() {
+                case .finishing(let actual):
+                    XCTAssertTrue(stage == .beforeTransaction || stage == .inTransaction)
+                    try actual.requireSame(as: plan)
+                case .stable(let actual):
+                    XCTAssertTrue(stage == .afterMutation || stage == .afterCommit)
+                    try actual.requireInitialTransition(from: plan, release: candidate)
+                }
+            }
+            XCTAssertEqual(observed, [.beforeTransaction, .inTransaction, .afterMutation, .afterCommit])
+            XCTAssertThrowsError(try XCTUnwrap(escaped).read()) {
+                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+            }
+            try receipt.requireSource(plan, candidate: candidate)
+            try receipt.requireCurrent(machine: machine, candidate: candidate)
+            XCTAssertEqual(try receipt.read().activation.phase, .completed)
+            XCTAssertThrowsError(try machine.begin(parent: fixture.files.destination.path,
+                ancestry: fixture.files.destination.preparationAncestry())) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                }
+            loan.close()
+            XCTAssertThrowsError(try ordinary.acquireAdmission()) {
+                XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+            }
+            fixture.restart.close()
+            let admitted = try ordinary.acquireAdmission()
+            admitted.close()
+        }
+    }
+
+    func testStableMachineCommitRecoversTheReceiptAfterLostAcknowledgment() throws {
+        try withFinishingFixture(stableFormats: true) { fixture, finishing, _ in
+            let machine = fixture.machine, candidate = fixture.candidate, directory = fixture.directory
+            let loan = try stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try machine.withCurrentMachineUpdateReadiness(candidate: candidate, directory: directory, loan: loan) { scope in
+                try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: candidate)
+            }
+            XCTAssertThrowsError(try machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                directory: directory, loan: loan) { stage, scope in
+                    if stage == .afterCommit {
+                        guard case .stable = try scope.read() else { throw ReplacementFixtureError.signature }
+                        throw CancellationError()
+                    }
+                }) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .stableCommitUnconfirmed)
+                }
+            XCTAssertThrowsError(try machine.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+            try fixture.files.reopen()
+            let stable = try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)
+            try stable.requireInitialTransition(from: plan, release: candidate)
+            XCTAssertEqual(stable.activation.phase, .completed)
+            var observed: [PreparationIntentStore.CompletionIntentStorageStage] = []
+            let receipt = try fixture.machine.adoptStableMachineUpdate(expected: plan, candidate: candidate,
+                directory: directory, loan: loan) { stage, scope in
+                observed.append(stage)
+                guard case .stable(let current) = try scope.read() else { return XCTFail("Missing stable frame") }
+                try current.requireSame(as: stable)
+            }
+            XCTAssertEqual(observed, [.afterCommit])
+            try receipt.requireSource(plan, candidate: candidate)
+            try receipt.requireCurrent(machine: fixture.machine, candidate: candidate)
+            XCTAssertThrowsError(try fixture.machine.machineUpdateFinalizationSnapshot(candidate: candidate, directory: directory)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            XCTAssertThrowsError(try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                directory: directory, loan: loan) { _, _ in XCTFail("The settled attempt ran again") }) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                }
+            try loan.validate()
+            try fixture.machine.close()
+            func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+            var revision = finishing.activation.revision.uuid
+            let rowRevision = withUnsafeBytes(of: &revision) { hex(Data($0)) }
+            let rowRecord = try hex(finishing.activation.encoded)
+            try fixture.files.sql("UPDATE machine_update_activation_v1 SET revision=X'\(rowRevision)',record=X'\(rowRecord)' WHERE id=1")
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    /// The bridge serializes the fixture reader and the writer on the same thread.
+    private final class TerminalBridgeFixtureReader: @unchecked Sendable {
+        let fixture: CompletionFixture
+        let loan: MachineUpdateRestartReadinessLoan
+        let reads = Mutex<[String]>([])
+
+        init(fixture: CompletionFixture, loan: MachineUpdateRestartReadinessLoan) {
+            self.fixture = fixture
+            self.loan = loan
+        }
+
+        func finishing() throws -> MachineUpdateInstalledReadinessPlan {
+            reads.withLock { $0.append("finishing") }
+            return try fixture.machine.withCurrentMachineUpdateReadiness(candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { scope in
+                    try MachineUpdateInstalledReadinessPlan(scope: scope, candidate: fixture.candidate)
+                }
+        }
+
+        func stable() throws -> MachineUpdateStableReleaseSnapshot {
+            reads.withLock { $0.append("stable") }
+            return try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+        }
+    }
+
+    func testTerminalReadBridgeUsesTheWriterFrameUntilItAdoptsTheReceipt() throws {
+        try withFinishingFixture(stableFormats: true) { fixture, finishing, _ in
+            let loan = try stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let reader = TerminalBridgeFixtureReader(fixture: fixture, loan: loan)
+            let plan = try reader.finishing()
+            let candidate = fixture.candidate
+            let bridge = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: candidate,
+                readFinishing: { try reader.finishing() }, readStable: { try reader.stable() })
+            defer { bridge.close() }
+            try bridge.requireCurrent()
+            var peerChecks = 0
+            let receipt = try bridge.settle(verifyLive: {
+                peerChecks += 1
+                try bridge.requireCurrent()
+                let acquire = MachineUpdateNativeInstalledReadiness.coordinatedActivity(terminal: bridge) {
+                    XCTFail("Settlement called the activity factory")
+                    throw ReplacementFixtureError.injected
+                }
+                XCTAssertThrowsError(try acquire()) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                }
+                XCTAssertEqual(reader.reads.withLock { $0 }, ["finishing", "finishing", "finishing"])
+            }, write: { verify in
+                let machine = fixture.machine
+                let receipt = try machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                    directory: fixture.directory, loan: loan, verifyScoped: verify)
+                try machine.close()
+                try fixture.files.reopen()
+                return receipt
+            })
+            XCTAssertEqual(peerChecks, 4)
+            XCTAssertEqual(reader.reads.withLock { $0 }, ["finishing", "finishing", "finishing", "stable"])
+            try bridge.requireCurrent()
+            try receipt.requireCurrent(machine: fixture.machine, candidate: candidate)
+            XCTAssertThrowsError(try bridge.settle(verifyLive: { XCTFail("Acknowledged settlement ran again") },
+                write: { _ in throw ReplacementFixtureError.injected })) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+                }
+        }
+    }
+
+    func testPeerLoanWaitsForCurrentFinishingRead() throws {
+        try withFinishingFixture(stableFormats: true) { fixture, finishing, _ in
+            let access = try stableFixtureAccess(fixture, finishing: finishing)
+            let readLoan = try access.acquireShared()
+            defer { readLoan.close(); access.close() }
+            let reader = TerminalBridgeFixtureReader(fixture: fixture, loan: readLoan)
+            let plan = try reader.finishing()
+            let reading = DispatchSemaphore(value: 0), continueRead = DispatchSemaphore(value: 0)
+            let contended = DispatchSemaphore(value: 0), finishedAcquiring = DispatchSemaphore(value: 0)
+            let readActive = Mutex(false)
+            let bridge = try MachineUpdateInstalledTerminalReadBridge(plan: plan, candidate: fixture.candidate,
+                readFinishing: {
+                    try readLoan.withClosedAdmission {
+                        readActive.withLock { $0 = true }
+                        defer { readActive.withLock { $0 = false } }
+                        reading.signal()
+                        guard continueRead.wait(timeout: .now() + 5) == .success else { throw ReplacementFixtureError.injected }
+                        return plan
+                    }
+                }, readStable: { try reader.stable() }, onActivityContention: { contended.signal() })
+            defer { bridge.close() }
+            let finishedReading = DispatchSemaphore(value: 0)
+            let errors = Mutex<[String]>([])
+            DispatchQueue.global().async {
+                defer { finishedReading.signal() }
+                do { try bridge.requireCurrent() }
+                catch { errors.withLock { $0.append("read: \(error)") } }
+            }
+            XCTAssertEqual(reading.wait(timeout: .now() + 2), .success)
+            // The original admission owner refuses an uncoordinated acquisition while the read is active.
+            XCTAssertThrowsError(try access.acquireShared()) {
+                XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy)
+            }
+            let acquire = MachineUpdateNativeInstalledReadiness.coordinatedActivity(terminal: bridge) {
+                guard !readActive.withLock({ $0 }) else { throw ReplacementFixtureError.injected }
+                return try access.acquireShared()
+            }
+            DispatchQueue.global().async {
+                defer { finishedAcquiring.signal() }
+                do {
+                    let peer = try acquire()
+                    defer { peer.close() }
+                    try peer.validate()
+                } catch { errors.withLock { $0.append("acquire: \(error)") } }
+            }
+            XCTAssertEqual(contended.wait(timeout: .now() + 2), .success)
+            continueRead.signal()
+            XCTAssertEqual(finishedReading.wait(timeout: .now() + 2), .success)
+            XCTAssertEqual(finishedAcquiring.wait(timeout: .now() + 2), .success)
+            XCTAssertEqual(errors.withLock { $0 }, [])
+        }
+    }
+
     func testCompletionStorageRefusesAnUnknownSchemaAndRetainsItsArchive() throws {
         try withCompletionFixture { fixture in
             let archive = try fixture.intent()
@@ -2787,7 +3042,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     _ = try scope.read()
                 }
             try fixture.machine.close()
-            // 22 is supported, but this store has no completion publication table. 24 is unsupported.
+            // The archive has neither the schema 22 publication table nor the schema 24 stable record.
             for version in [22, 24] {
                 try fixture.files.sql("PRAGMA user_version=\(version)")
                 XCTAssertThrowsError(try fixture.files.reopen()) {

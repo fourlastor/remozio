@@ -22,6 +22,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             }
             let identifier = "dev.sebastiano.remozio.macos" + (configuration == "Debug" ? ".debug" : "")
             let evidence = try inspect(app, identifier: identifier)
+            try MachineUpdateStableReleaseRecord.requireFormats(evidence)
             XCTAssertEqual(evidence.manifest.components.count, 8)
             XCTAssertEqual(evidence.codeDirectoryHashes.count, 8)
             XCTAssertFalse(evidence.manifest.absentRoles.contains(.setupController))

@@ -34,11 +34,9 @@ enum MachineUpdateNativeInstalledReadiness {
         guard try InstallationInventory.digest(candidate) == plan.view.installedInventory.releaseDigest else {
             throw PreparationStoreError.staleRevision
         }
-        let activity = try acquireActivity()
         let readLock = NSLock()
         let verify: @Sendable () throws -> Void = {
             try readLock.withLock {
-                try activity.validate()
                 var checked = false
                 try withCurrentScope { scope in
                     guard !checked else { throw PreparationStoreError.invalidTransition }
@@ -46,8 +44,35 @@ enum MachineUpdateNativeInstalledReadiness {
                     checked = true
                 }
                 guard checked else { throw JournalLeaseError.invalidated }
-                try activity.validate()
             }
+        }
+        return try makeCoordinator(plan: plan, candidate: candidate, verifyCurrent: verify,
+            acquireActivity: { try readLock.withLock { try acquireActivity() } })
+    }
+
+    /// During settlement, live peers read the actual transaction frame before switching to the acknowledged stable record.
+    static func coordinator(plan: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        terminal: MachineUpdateInstalledTerminalReadBridge,
+        acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity) throws -> MachineUpdateInstalledReadinessCoordinator {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try terminal.requirePlan(plan, candidate: candidate)
+        return try makeCoordinator(plan: plan, candidate: candidate, verifyCurrent: { try terminal.requireCurrent() },
+            acquireActivity: coordinatedActivity(terminal: terminal, acquireActivity: acquireActivity))
+    }
+
+    static func coordinatedActivity(terminal: MachineUpdateInstalledTerminalReadBridge,
+        acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity) -> @Sendable () throws -> any OwnedReleaseActivity {
+        { try terminal.acquirePeerActivity(acquireActivity) }
+    }
+
+    private static func makeCoordinator(plan: MachineUpdateInstalledReadinessPlan, candidate: SignedReleaseEvidence,
+        verifyCurrent: @escaping @Sendable () throws -> Void,
+        acquireActivity: @escaping @Sendable () throws -> any OwnedReleaseActivity) throws -> MachineUpdateInstalledReadinessCoordinator {
+        let activity = try acquireActivity()
+        let verify: @Sendable () throws -> Void = {
+            try activity.validate()
+            try verifyCurrent()
+            try activity.validate()
         }
         do {
             try verify()
