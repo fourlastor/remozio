@@ -147,9 +147,9 @@ final class MachineUpdateNativeInstalledReadinessAccount: OwnedMachineUpdateInst
     private func requireCurrent() throws {
         try lock.withLock { guard !retired, !closing, !closed else { throw MachineUpdateHealthCoordinatorError.closed } }
         try operations.verifyCurrent()
-        let now = try operations.clock()
         try lock.withLock {
             guard !retired, !closing, !closed else { throw MachineUpdateHealthCoordinatorError.closed }
+            let now = try operations.clock()
             if let deadline {
                 guard now.epoch == deadline.epoch, now.milliseconds >= deadline.last, now.milliseconds < deadline.end else {
                     retired = true; throw MachineUpdateRoleChallengeError.unavailable

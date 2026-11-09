@@ -42,6 +42,16 @@ struct MachineUpdateCompletionPublicationPlan: CustomStringConvertible, CustomDe
     var description: String { "MachineUpdateCompletionPublicationPlan(redacted)" }
     var debugDescription: String { description }
 
+    /// Checks the caller's fresh source and exact recorded account boundaries before rebuilding file operands.
+    init(snapshot: MachineUpdateCompletionSnapshot, candidate: SignedReleaseEvidence,
+         currentSourceDigest: Data, boundaries: [AuthorityJournal.MachineUpdatePolicyBoundary]) throws {
+        let profile = try MachineUpdateCompletionPolicyProfile(snapshot: snapshot, candidate: candidate,
+            currentSourceDigest: currentSourceDigest)
+        try profile.requireRecorded(boundaries)
+        try self.init(retainedConfiguration: snapshot.restart.configuration, retainedBackend: snapshot.restart.backend,
+            intent: snapshot.intent, candidate: candidate)
+    }
+
     /// Rebuilds retained operands only. Native callers must separately verify the actual machine frame and paired policy boundaries.
     init(retainedConfiguration configuration: MachineUpdateConfigurationEpoch.Archive,
         retainedBackend backend: MachineUpdateBackendEpoch.Archive, intent: MachineUpdateCompletionIntentArchive,

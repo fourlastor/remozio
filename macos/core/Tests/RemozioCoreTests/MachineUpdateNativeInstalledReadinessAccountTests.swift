@@ -1,4 +1,5 @@
 import CryptoKit
+import Dispatch
 import Foundation
 import RemozioProtocol
 import Synchronization
@@ -110,12 +111,12 @@ final class MachineUpdateNativeInstalledReadinessAccountTests: XCTestCase, @unch
                 exchange: .init(request: request, response: packet), onClose: onClose)
             peers.withLock { $0[requirement.role.rawValue] = value }; return value
         }
-        func account(lifetime: UInt64 = 30000,
+        func account(lifetime: UInt64 = 30000, readClock: (@Sendable () throws -> AuthorityMoment)? = nil,
             factory: (@Sendable (MachineUpdateRestartHealthPlan.Requirement, Data?) async throws -> any OwnedMachineUpdateHealthConnection)? = nil) throws
             -> MachineUpdateNativeInstalledReadinessAccount {
             try .init(accountID: requirements[0].binding.accountID, requirements: requirements, lifetimeMilliseconds: lifetime,
                 operations: .init(verifyCurrent: { [self] in guard valid.withLock({ $0 }) else { throw Refused() } },
-                    clock: { [self] in clock.withLock { $0 } }, makeRoot: { [self] in root },
+                    clock: readClock ?? { [self] in clock.withLock { $0 } }, makeRoot: { [self] in root },
                     makeConsumer: { [self] requirement, request in
                         if let factory { return try await factory(requirement, request) }
                         return try peer(requirement, rootRequest: request)
@@ -202,6 +203,58 @@ final class MachineUpdateNativeInstalledReadinessAccountTests: XCTestCase, @unch
         peer.state.withLock { $0.valid = true }; XCTAssertThrowsError(try owner.validate())
         try await owner.close(); f.assertClosed()
     }
+    func testConcurrentReadinessValidationsSerializeClockSampling() async throws {
+        let f = try Fixture(withGateway: false)
+        let firstRead = DispatchSemaphore(value: 0), releaseFirst = DispatchSemaphore(value: 0)
+        let secondStarted = DispatchSemaphore(value: 0), secondRead = DispatchSemaphore(value: 0)
+        let next = Mutex<Int?>(nil)
+        let owner = try f.account(readClock: {
+            let sample = next.withLock { value -> Int? in
+                guard let sample = value else { return nil }
+                value = sample + 1
+                return sample
+            }
+            switch sample {
+            case 0:
+                firstRead.signal()
+                guard releaseFirst.wait(timeout: .now() + .seconds(5)) == .success else { throw Refused() }
+            case 1:
+                secondRead.signal()
+            default:
+                break
+            }
+            return .init(epoch: f.moment.epoch, milliseconds: f.moment.milliseconds + UInt64(sample ?? 0))
+        })
+        _ = try await owner.check()
+        next.withLock { $0 = 0 }
+        func validateConcurrently() {
+            let done = DispatchGroup()
+            let failures = Mutex<[String]>([])
+            for index in 0..<2 {
+                done.enter()
+                DispatchQueue.global().async {
+                    defer { done.leave() }
+                    if index == 1 { secondStarted.signal() }
+                    do { try owner.validateOrdinaryReadiness() }
+                    catch { failures.withLock { $0.append(String(describing: error)) } }
+                }
+                if index == 0 {
+                    XCTAssertEqual(firstRead.wait(timeout: .now() + .seconds(4)), .success)
+                }
+            }
+            XCTAssertEqual(secondStarted.wait(timeout: .now() + .seconds(4)), .success)
+            // The first clock read cannot return yet. The second validator must wait before sampling.
+            XCTAssertEqual(secondRead.wait(timeout: .now() + .milliseconds(300)), .timedOut)
+            releaseFirst.signal()
+            XCTAssertEqual(done.wait(timeout: .now() + .seconds(4)), .success)
+            XCTAssertEqual(failures.withLock { $0 }, [])
+        }
+        validateConcurrently()
+        try owner.validate()
+        try await owner.close()
+        f.assertClosed()
+    }
+
     func testExpiredBackwardAndChangedEpochClocksCannotReviveTheProof() async throws {
         for variant in 0..<3 {
             let f = try Fixture(), owner = try f.account(lifetime: 1000); _ = try await owner.check()
