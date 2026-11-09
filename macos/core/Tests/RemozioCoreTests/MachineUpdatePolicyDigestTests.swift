@@ -67,6 +67,24 @@ final class MachineUpdatePolicyDigestTests: XCTestCase {
         let digest = try MachineUpdatePolicyDigest.make(activation: activation(), accounts: [account()])
         XCTAssertEqual(digest, Data([0xfe, 0x05, 0xf1, 0x5e, 0xe4, 0xbf, 0x5e, 0x56, 0xe1, 0x7d, 0xdb, 0x50, 0x8b, 0xf6, 0x95, 0x07, 0x91, 0xe1, 0x76, 0xcc, 0xd9, 0xf4, 0x0c, 0x26, 0xff, 0xf1, 0x20, 0xc6, 0x2b, 0xd9, 0xf5, 0xa3]))
     }
+    /// A configured account (two roles, one inactive, each with its own token) beside an unconfigured one.
+    /// Both expected values come from an independent CBOR encoder, so they also check DeterministicCBOR and the stored encoding.
+    func testAConfiguredPolicyMatchesAnIndependentCBORVector() throws {
+        func uuid(_ text: String) throws -> UUID { try XCTUnwrap(UUID(uuidString: text)) }
+        let team = "ABCDEFGHIJ", prefix = "dev.sebastiano.remozio.test."
+        let authority = try AuthorityCodeEntry(role: .authority, teamID: team, identifier: prefix + "authority",
+            installedGeneration: 300, minimumGeneration: 24, codeDirectoryHash: Data(repeating: 0x11, count: 20), active: true)
+        let guiAgent = try AuthorityCodeEntry(role: .guiAgent, teamID: team, identifier: prefix + "gui-agent",
+            installedGeneration: 2, minimumGeneration: 1, codeDirectoryHash: Data(repeating: 0x12, count: 20), active: false)
+        let snapshot = AuthorityCodePolicySnapshot(revision: try uuid("00000000-0000-4000-8000-000000000010"),
+            policy: try .init(entries: [guiAgent, authority]),
+            roleRevisions: [.authority: try uuid("00000000-0000-4000-8000-000000000011"),
+                .guiAgent: try uuid("00000000-0000-4000-8000-000000000012")])
+        XCTAssertEqual(MachineUpdateActivationRecord.digest(try snapshot.storedBytes), Data([0xec, 0xfd, 0x0c, 0x0e, 0xa5, 0xc3, 0x1a, 0xaf, 0x9f, 0x4d, 0x75, 0xcb, 0x55, 0x88, 0x11, 0x8b, 0xbd, 0x48, 0x30, 0x55, 0x63, 0x27, 0x32, 0x24, 0x37, 0x43, 0x9f, 0xf3, 0x4d, 0x42, 0x50, 0x34]))
+        let digest = try MachineUpdatePolicyDigest.make(activation: activation(),
+            accounts: [account(id: 10, uid: 502, digest: 11, policy: snapshot), account()])
+        XCTAssertEqual(digest, Data([0xff, 0xae, 0xeb, 0xad, 0x51, 0x84, 0xe9, 0xf1, 0x3c, 0x08, 0x23, 0x28, 0x90, 0x49, 0xea, 0xa4, 0xe3, 0x61, 0x1b, 0x94, 0xb4, 0x5f, 0x5a, 0xaa, 0x4b, 0x1f, 0xfb, 0x37, 0x2f, 0x9e, 0x04, 0x52]))
+    }
     func testAccountOrderDoesNotChangeTheDigest() throws {
         let a = try activation(), one = account(), two = account(id: 10)
         XCTAssertEqual(try MachineUpdatePolicyDigest.make(activation: a, accounts: [one, two]),
