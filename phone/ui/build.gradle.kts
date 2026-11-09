@@ -12,12 +12,15 @@ kotlin {
         target.binaries.framework {
             baseName = "RemozioUI"
             isStatic = true
+            // Swift implements the pairing transport, so its types must be visible in the framework.
+            export(project(":phone-pairing"))
         }
     }
 
     sourceSets {
         commonMain.dependencies {
             implementation(project(":protocol-kotlin"))
+            api(project(":phone-pairing"))
             implementation(libs.compose.multiplatform.runtime)
             implementation(libs.compose.multiplatform.animation)
             implementation(libs.compose.multiplatform.foundation)
