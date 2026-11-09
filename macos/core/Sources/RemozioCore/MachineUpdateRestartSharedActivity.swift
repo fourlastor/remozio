@@ -54,6 +54,7 @@ final class MachineUpdateRestartReadinessLoan: OwnedReleaseActivity, Sendable {
     func validateMachineBoundary(directory: ReleaseDestinationLease, expected: PreparationFileIdentity) throws {
         try validate(); try loan.validateMachineBoundary(directory: directory, expected: expected); try validate()
     }
+    /// Give each concurrent verifier its own loan. This callback holds the loan's lock until it returns.
     func withClosedAdmission<Value>(_ body: () throws -> Value) throws -> Value {
         try loan.withClosedAdmission { try validate(); let value = try body(); try validate(); return value }
     }

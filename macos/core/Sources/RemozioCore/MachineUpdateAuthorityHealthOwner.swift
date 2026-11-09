@@ -7,7 +7,7 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let journal: AuthorityJournal
     private let configuration: AuthorityServiceConfiguration
-    private let requirement: Requirement
+    let requirement: Requirement
     private let policy: AuthorityCodePolicySnapshot
     private let requests: [ReleaseRequestContract]
     private let restartGateway: MachineUpdateAuthorityReadinessGateway?
@@ -51,48 +51,61 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
         }
     }
 
-    /// The restart owner must revalidate the exact snapshot, signed release, and observed placement in `verifyRestart`.
-    static func openForRestart(_ selection: RestartSelection, activity: MachineUpdateRestartSharedActivity,
-        verifyRestart: @escaping @Sendable () throws -> Void) throws -> Self {
+    /// The restart coordinator supplies its own machine reader and original admission activity.
+    static func openForRestart(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence, accountID: Data,
+        activity: MachineUpdateRestartSharedActivity, sourceAccess: MachineUpdateHealthSourceAccess,
+        readCurrent: @escaping @Sendable (MachineUpdateRestartReadinessLoan) throws -> MachineUpdateRestartSnapshot) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let selection = try RestartSelection(snapshot: snapshot, candidate: candidate, accountID: accountID)
         let host = selection.host, requirement = selection.requirement
+        let verifier = MachineUpdateNativeRestartVerifier(snapshot: snapshot, host: host, sourceAccess: sourceAccess,
+            readCurrent: readCurrent)
         guard host.machineDirectory == MachineBootstrap.machineDirectory else { throw InstalledAuthorityCommandError.wrongInstallation }
         let paths = try RuntimePreparationPaths(accountID: requirement.binding.accountID)
         let path = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.commandHost.name
         let codeRequirement = try AuthoritySelfValidation.requirement(for: requirement.code)
         let loan = try activity.acquireShared()
-        let verify: @Sendable () throws -> Void = {
+        let verify = verifier.verification(loan: loan) {
             try loan.requireScope(macID: requirement.binding.macID, installationID: requirement.binding.installationID,
                 activationAttempt: requirement.binding.activationAttempt)
-            try verifyRestart()
             guard try DynamicCodeValidation.selfPath() == MachineBootstrap.bundlePath + "/" + InstalledAuthorityCommandConfiguration.executablePath,
                   try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == host.canonicalBytes else {
                 throw InstalledAuthorityCommandError.changedConfiguration
             }
             try DynamicCodeValidation.validateSelf(requirement: codeRequirement)
-            try loan.validate()
         }
         let request = host.command.presence.wake.request, service = request.service
-        let journal: AuthorityJournal
+        let journal: AuthorityJournal, signer: EnclaveAuthorityRequestSigner
         do {
-            try verify()
-            journal = try AuthorityJournal(updateHealthStorage: AuthorityStorage.openForUpdateHealth(configuration: service,
-                gatewayPolicy: selection.gatewayPolicy), validateSelf: {
-                    try MachineUpdateAuthorityHealthJournalValidation.requireCurrent($0, configuration: service,
-                        binding: requirement.binding, policy: selection.policy, requests: selection.requests)
-                })
+            (journal, signer) = try openVerifiedRestartResources(verify: verify, openJournal: {
+                try AuthorityJournal(updateHealthStorage: AuthorityStorage.openForUpdateHealth(configuration: service,
+                    gatewayPolicy: selection.gatewayPolicy), validateSelf: {
+                        try MachineUpdateAuthorityHealthJournalValidation.requireCurrent($0, configuration: service,
+                            binding: requirement.binding, policy: selection.policy, requests: selection.requests)
+                    })
+            }, openSigner: {
+                try EnclaveAuthorityRequestSigner.restore(ProtectedServiceConfiguration.read(path: request.keyRecordPath),
+                    configuration: service, expectedPublicKey: requirement.publicKey)
+            }, closeJournal: { try? $0.close() })
         } catch { loan.close(); throw error }
-        let signer: EnclaveAuthorityRequestSigner
-        do {
-            try verify()
-            signer = try EnclaveAuthorityRequestSigner.restore(ProtectedServiceConfiguration.read(path: request.keyRecordPath),
-                configuration: service, expectedPublicKey: requirement.publicKey)
-            try verify()
-        } catch { try? journal.close(); loan.close(); throw error }
         return try .init(journal: journal, configuration: service, requirement: requirement,
             policy: selection.policy, requests: selection.requests, keyPublicKey: signer.publicKey,
             restartGateway: selection.gateway,
             verifyCurrent: verify, sign: signer.sign, release: { loan.close() })
+    }
+
+    /// The native and owned fixture openers share the checks around both resource opens.
+    static func openVerifiedRestartResources<Journal, Signer>(verify: () throws -> Void,
+        openJournal: () throws -> Journal, openSigner: () throws -> Signer, closeJournal: (Journal) -> Void
+    ) throws -> (Journal, Signer) {
+        try verify()
+        let journal = try openJournal()
+        do {
+            try verify()
+            let signer = try openSigner()
+            try verify()
+            return (journal, signer)
+        } catch { closeJournal(journal); throw error }
     }
 
     /// The caller must authenticate the native scope and retain the existing Authority key.
@@ -121,6 +134,7 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
     func validateHealthScope() throws {
         try lock.withLock {
             do { try validate() }
+            catch MachineUpdateHealthSourceError.busy { throw MachineUpdateHealthSourceError.busy }
             catch { sign = nil; throw error }
         }
     }
@@ -159,7 +173,8 @@ final class MachineUpdateAuthorityHealthOwner: @unchecked Sendable {
                         guard let sign = self.sign else { throw MachineUpdateRoleChallengeError.unavailable }
                         return try sign(bytes)
                     })
-            } catch { sign = nil; throw error }
+            } catch MachineUpdateHealthSourceError.busy { throw MachineUpdateHealthSourceError.busy }
+            catch { sign = nil; throw error }
         }
     }
 

@@ -2617,7 +2617,21 @@ public final class PreparationIntentStore {
         restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
         try restart.withClosedAdmission {
             try transaction(write: false) {
-                try loadMachineUpdateRestartSnapshot(expected: expected, directory: directory, restart: restart)
+                try loadMachineUpdateRestartSnapshot(expected: expected, directory: directory) {
+                    try restart.validateMachineBoundary(directory: directory, expected: $0)
+                }
+            }
+        }
+    }
+
+    /// An active health owner must read through its loan from the original drain.
+    func machineUpdateRestartSnapshot(expected: MachineUpdateRestartSource, directory: ReleaseDestinationLease,
+        readiness: MachineUpdateRestartReadinessLoan) throws -> MachineUpdateRestartSnapshot {
+        try readiness.withClosedAdmission {
+            try transaction(write: false) {
+                try loadMachineUpdateRestartSnapshot(expected: expected, directory: directory) {
+                    try Self.requireRestartSnapshotLoan(readiness, source: expected, directory: directory, machine: $0)
+                }
             }
         }
     }
@@ -2634,10 +2648,9 @@ public final class PreparationIntentStore {
         fileprivate init(snapshot: MachineUpdateRestartSnapshot, verifyCurrent: @escaping () throws -> Void) {
             self.snapshot = snapshot; self.verifyCurrent = verifyCurrent
         }
+        var isOnOpeningThread: Bool { getpid() == processID && pthread_equal(pthread_self(), thread) != 0 }
         func read() throws -> MachineUpdateRestartSnapshot {
-            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else {
-                throw JournalLeaseError.invalidated
-            }
+            guard isOnOpeningThread else { throw JournalLeaseError.invalidated }
             return try lock.withLock {
                 guard active else { throw JournalLeaseError.invalidated }
                 do {
@@ -2654,26 +2667,54 @@ public final class PreparationIntentStore {
         directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease,
         _ body: (HealthSnapshotScope) throws -> Value) throws -> Value {
         try restart.withClosedAdmission {
-            try transaction(write: false) {
-                let initial = try loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
-                try initial.requireSame(as: expected)
-                let scope = HealthSnapshotScope(snapshot: initial, verifyCurrent: { [weak self] in
-                    guard let self, self.active else { throw JournalLeaseError.invalidated }
-                    try restart.validate()
-                    let current = try self.loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory, restart: restart)
-                    try current.requireSame(as: initial)
-                })
-                defer { scope.expire() }
-                _ = try scope.read()
-                let value = try body(scope)
-                _ = try scope.read()
-                return value
-            }
+            try withRestartSnapshotScope(expected, directory: directory, validateBoundary: {
+                try restart.validate()
+                try restart.validateMachineBoundary(directory: directory, expected: $0)
+            }, body)
+        }
+    }
+
+    func withCurrentMachineUpdateRestartSnapshot<Value>(_ expected: MachineUpdateRestartSnapshot,
+        directory: ReleaseDestinationLease, readiness: MachineUpdateRestartReadinessLoan,
+        _ body: (HealthSnapshotScope) throws -> Value) throws -> Value {
+        try readiness.withClosedAdmission {
+            try withRestartSnapshotScope(expected, directory: directory, validateBoundary: {
+                try Self.requireRestartSnapshotLoan(readiness, source: expected.source, directory: directory, machine: $0)
+            }, body)
+        }
+    }
+
+    private static func requireRestartSnapshotLoan(_ readiness: MachineUpdateRestartReadinessLoan,
+        source: MachineUpdateRestartSource, directory: ReleaseDestinationLease, machine: PreparationFileIdentity) throws {
+        let activation = source.replacement.activation
+        try readiness.requireScope(macID: activation.macID, installationID: activation.installationID,
+            activationAttempt: activation.attemptID)
+        try readiness.validateMachineBoundary(directory: directory, expected: machine)
+    }
+
+    private func withRestartSnapshotScope<Value>(_ expected: MachineUpdateRestartSnapshot,
+        directory: ReleaseDestinationLease, validateBoundary: @escaping (PreparationFileIdentity) throws -> Void,
+        _ body: (HealthSnapshotScope) throws -> Value) throws -> Value {
+        try transaction(write: false) {
+            let initial = try loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory,
+                validateBoundary: validateBoundary)
+            try initial.requireSame(as: expected)
+            let scope = HealthSnapshotScope(snapshot: initial, verifyCurrent: { [weak self] in
+                guard let self, self.active else { throw JournalLeaseError.invalidated }
+                let current = try self.loadMachineUpdateRestartSnapshot(expected: expected.source, directory: directory,
+                    validateBoundary: validateBoundary)
+                try current.requireSame(as: initial)
+            })
+            defer { scope.expire() }
+            _ = try scope.read()
+            let value = try body(scope)
+            _ = try scope.read()
+            return value
         }
     }
 
     private func loadMachineUpdateRestartSnapshot(expected: MachineUpdateRestartSource,
-        directory: ReleaseDestinationLease, restart: UpdateRestartAdmissionLease) throws -> MachineUpdateRestartSnapshot {
+        directory: ReleaseDestinationLease, validateBoundary: (PreparationFileIdentity) throws -> Void) throws -> MachineUpdateRestartSnapshot {
         try identity(macID)
         guard expected.replacement.activation.phase == .restartChecking, try scalar("PRAGMA user_version") == 20,
               let configuration = try loadMachineUpdateConfigurationEpoch(),
@@ -2686,7 +2727,7 @@ public final class PreparationIntentStore {
         guard current == expected, try machineEpochSourceDigest() == backend.record.currentSourceDigest else {
             throw PreparationStoreError.staleRevision
         }
-        try restart.validateMachineBoundary(directory: directory, expected: current.replacement.admission.machine)
+        try validateBoundary(current.replacement.admission.machine)
         return .init(source: current, configuration: configuration, backend: backend)
     }
 
