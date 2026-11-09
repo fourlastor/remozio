@@ -98,6 +98,15 @@ struct MachineUpdatePolicyIntentRecord: Codable, Equatable, Sendable, CustomStri
         try next.validate(); return next
     }
 
+    /// Proposes retained receipt facts only. The machine owner must independently persist this transition.
+    func recording(_ receipt: AuthorityJournal.MachineUpdatePolicyCommitReceipt) throws -> Self {
+        guard phase == .writing else { throw PreparationStoreError.invalidTransition }
+        try requireSource(receipt.source)
+        var next = self; next.revision = UUID(); next.phase = .recorded
+        next.committedPolicy = try StoredPolicy(receipt.policy); next.committedCheckpoint = try receipt.checkpoint.bytes
+        try next.validate(); return next
+    }
+
     /// Classifies a fresh paired read. An unchanged source grants no retry or writer authority.
     func reconciling(_ current: AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Reconciliation {
         try validate()
