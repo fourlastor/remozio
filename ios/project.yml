@@ -5,6 +5,11 @@ options:
   deploymentTarget:
     iOS: "18.5"
   createIntermediateGroups: true
+packages:
+  # The same version as macos/core: it builds the transport certificate in the profile the computers expect.
+  swift-certificates:
+    url: https://github.com/apple/swift-certificates.git
+    exactVersion: 1.21.0
 settings:
   base:
     MARKETING_VERSION: "0.1.0"
@@ -18,6 +23,9 @@ targets:
     platform: iOS
     sources:
       - path: Remozio
+    dependencies:
+      - package: swift-certificates
+        product: X509
     info:
       path: Remozio/Info.plist
       properties:
@@ -27,6 +35,8 @@ targets:
         UILaunchScreen: {}
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSCameraUsageDescription: Remozio uses the camera to scan the pairing QR code that your computer shows.
+        NSLocalNetworkUsageDescription: Remozio looks for your computer on the local network to connect to it.
+        NSBonjourServices: [_remozio-pairing._tcp]
         # Compose Multiplatform requires this key on ProMotion devices.
         CADisableMinimumFrameDurationOnPhone: true
         ITSAppUsesNonExemptEncryption: false
@@ -39,6 +49,8 @@ targets:
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         # Kotlin targets are iosArm64 and iosSimulatorArm64 only.
         "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    scheme:
+      testTargets: [RemozioTests]
     preBuildScripts:
       - name: Build the shared Kotlin framework
         basedOnDependencyAnalysis: false
@@ -51,3 +63,18 @@ targets:
           fi
           cd "$SRCROOT/.."
           ./gradlew :phone-ui:embedAndSignAppleFrameworkForXcode
+  RemozioTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: RemozioTests
+    dependencies:
+      # X509 comes from the host app; linking it here too duplicates the package frameworks.
+      - target: Remozio
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.sebastiano.remozio.ios.tests
+        TARGETED_DEVICE_FAMILY: "1"
+        FRAMEWORK_SEARCH_PATHS: $(SRCROOT)/../phone/ui/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64

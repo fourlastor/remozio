@@ -1,4 +1,5 @@
 import AVFoundation
+import Network
 import RemozioUI
 import UIKit
 
@@ -6,6 +7,19 @@ import UIKit
 final class NativePhoneServices: NSObject, PhoneServices {
     func pasteText() -> String? {
         UIPasteboard.general.string
+    }
+
+    func pairingKeys() -> PlatformPairingKeys {
+        #if DEBUG
+        // Debug builds only: a test harness can name the computer's address instead of Bonjour discovery.
+        // The value is host:port, or [IPv6]:port.
+        if let value = ProcessInfo.processInfo.environment["REMOZIO_PAIRING_ENDPOINT"],
+           let colon = value.lastIndex(of: ":"), let port = NWEndpoint.Port(String(value[value.index(after: colon)...])) {
+            let host = value[..<colon].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+            return NativePairingKeys(endpoint: .hostPort(host: NWEndpoint.Host(host), port: port))
+        }
+        #endif
+        return NativePairingKeys()
     }
 
     func scanQrCode(onResult: @escaping (String?) -> Void) {

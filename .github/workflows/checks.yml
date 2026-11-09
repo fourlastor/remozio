@@ -382,6 +382,10 @@ jobs:
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
         run: ./scripts/build-ios-app.sh
+      - name: Native iOS tests on the simulator
+        env:
+          REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
+        run: ./scripts/test-ios-app.sh
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'

@@ -24,8 +24,14 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_remozio-pairing._tcp</string>
+	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>Remozio uses the camera to scan the pairing QR code that your computer shows.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Remozio looks for your computer on the local network to connect to it.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

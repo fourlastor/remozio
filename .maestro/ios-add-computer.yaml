@@ -23,6 +23,10 @@ appId: dev.sebastiano.remozio.ios
 - assertVisible: "5F07F24D"
 - assertVisible: "E63288DF"
 - assertVisible: "These are unverified invitation claims.*"
+# The connection test is offered; this flow has no computer to reach, so it does not run it.
+- scrollUntilVisible:
+    element:
+      id: "test-connection"
 # A new Add computer screen starts empty; eraseText removes only the text before the cursor.
 # Tags, not text: "Add computer" is also the title of this screen.
 - tapOn:

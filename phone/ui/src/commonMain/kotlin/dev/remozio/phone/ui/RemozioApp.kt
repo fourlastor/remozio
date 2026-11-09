@@ -38,6 +38,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -55,12 +56,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.remozio.pairing.PlatformPairingKeys
+import kotlinx.coroutines.launch
 
 /** Native operations the shared screens need. The iOS shell implements them with AVFoundation and UIPasteboard. */
 interface PhoneServices {
     /** Opens the camera scanner; [onResult] receives the QR text, or null when the user cancels or nothing is read. */
     fun scanQrCode(onResult: (String?) -> Unit)
     fun pasteText(): String?
+    /** Fresh in-memory keys and a pinned network transport for one connection attempt. */
+    fun pairingKeys(): PlatformPairingKeys
 }
 
 private enum class Screen { Computers, AddComputer }
@@ -133,6 +138,7 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
     if (preview != null) shown = preview
     val focus = LocalFocusManager.current
     val scroll = rememberScrollState()
+    val scope = rememberCoroutineScope()
     fun show(input: String?) {
         if (input == null) return
         // Closing the keyboard keeps the result from being hidden under it.
@@ -199,7 +205,10 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
                 when (val current = shown) {
                     null -> Unit
                     InvitationPreview.Invalid -> InvalidInvitation()
-                    is InvitationPreview.Parsed -> ParsedInvitation(current)
+                    is InvitationPreview.Parsed -> ParsedInvitation(current, text, services) {
+                        // A test result appears below the fold, so the screen scrolls to it.
+                        scope.launch { withFrameNanos { }; scroll.animateScrollTo(scroll.maxValue) }
+                    }
                 }
             }
         }
@@ -207,8 +216,18 @@ private fun AddComputerScreen(services: PhoneServices, onBack: () -> Unit) {
 }
 
 @Composable
-private fun ParsedInvitation(preview: InvitationPreview.Parsed) {
+private fun ParsedInvitation(preview: InvitationPreview.Parsed, text: String, services: PhoneServices, onChange: () -> Unit) {
     val palette = LocalPalette.current
+    // A new invitation starts a new test. The attempt runs in an effect keyed on the invitation, so a changed
+    // invitation or a closed screen cancels it and its network work.
+    var test by remember(text) { mutableStateOf<ConnectionTestState>(ConnectionTestState.Idle) }
+    var attempt by remember(text) { mutableStateOf(0) }
+    LaunchedEffect(text, attempt) {
+        if (attempt == 0) return@LaunchedEffect
+        test = ConnectionTestState.Connecting
+        test = testConnection(this, text, services.pairingKeys())
+    }
+    LaunchedEffect(test) { if (test != ConnectionTestState.Idle) onChange() }
     Column(Modifier.testTag("parsed"), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Card {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -233,7 +252,28 @@ private fun ParsedInvitation(preview: InvitationPreview.Parsed) {
             Detail("Account ID", preview.accountID, "account-id")
         }
         Note(Icons.info, palette.warning, palette.warningSoft,
-            "These are unverified invitation claims. This build does not connect to the computer or save it.")
+            "These are unverified invitation claims. This build can test the connection, but it does not pair or save the computer.")
+        when (val current = test) {
+            ConnectionTestState.Idle, ConnectionTestState.Failed -> {
+                if (current == ConnectionTestState.Failed) {
+                    Column(Modifier.testTag("connection-failed")) {
+                        Note(Icons.error, palette.error, palette.errorSoft, "Could not reach the computer.",
+                            "Make sure that the computer is waiting for a phone and is on the same network, then try again.")
+                    }
+                }
+                PrimaryButton("Test connection", "test-connection") { attempt++ }
+            }
+            ConnectionTestState.Connecting -> Card {
+                BasicText("Looking for the computer…", Modifier.testTag("connecting"), style = Type.body.copy(color = palette.text))
+            }
+            is ConnectionTestState.Reached -> Card {
+                BasicText("The computer answered", style = Type.headline.copy(color = palette.text))
+                BasicText("Comparison code", style = Type.caption.copy(color = palette.secondary))
+                BasicText(current.code, Modifier.testTag("comparison-code"), style = Type.fingerprint.copy(color = palette.text))
+                BasicText("The computer proved the key in the invitation. Compare this code with the one on the computer. " +
+                    "This test does not pair: it sent no proof, and the computer saved nothing.", style = Type.caption.copy(color = palette.secondary))
+            }
+        }
     }
 }
 
