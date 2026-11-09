@@ -57,6 +57,21 @@ final class MachineUpdateConsumerHealthXPCEndpoint: NSObject, MachineUpdateConsu
         connection.invalidationHandler = { [weak self] in self?.close() }
     }
 
+    convenience init(connection: NSXPCConnection, authority scope: MachineUpdateAuthorityReadinessScope,
+        budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
+        onClose: @escaping @Sendable () -> Void,
+        answer: @escaping @Sendable (MachineUpdateConsumerHealthRequest) async throws -> Data) throws {
+        let peer = try MachineUpdateConsumerHealthPeer.native(connection: connection, authority: scope)
+        let invalidator = MachineUpdateHealthConnectionInvalidator(connection)
+        self.init(peer: peer, helloBytes: scope.host.canonicalBytes, verifyCurrent: { try scope.validate() },
+            acquireActivity: scope.acquireActivity, budget: budget, onHandshake: onHandshake,
+            invalidate: { invalidator.invalidate(); onClose() }, answerInstalledReadiness: answer)
+        connection.exportedInterface = NSXPCInterface(with: MachineUpdateConsumerHealthXPCProtocol.self)
+        connection.exportedObject = self
+        connection.interruptionHandler = { [weak self] in self?.close() }
+        connection.invalidationHandler = { [weak self] in self?.close() }
+    }
+
     /// Injected callbacks test settlement. Native construction must authenticate the connection and its completed host configuration.
     convenience init(peer: MachineUpdateConsumerHealthPeer, helloBytes: Data,
         verifyCurrent: @escaping @Sendable () throws -> Void,
@@ -122,6 +137,14 @@ final class MachineUpdateConsumerHealthXPCEndpoint: NSObject, MachineUpdateConsu
             let bytes = try opened.answer(accepted.bytes)
             try Task.checkCancellation(); try token.validate(); try accepted.validate(); try verifyCurrent()
             result = bytes
+        } catch GatewayDatabaseError.updateHealthRecoveryRequired where accepted.requirement.role == .notificationGateway {
+            do {
+                try Task.checkCancellation(); try accepted.validate(); try verifyCurrent()
+                let token = lock.withLock { activity }
+                guard let token else { throw MachineUpdateConsumerHealthChannelError.closed }
+                try token.validate()
+                result = MachineUpdateGatewayRecoverySignal.bytes
+            } catch { result = nil }
         } catch { result = nil }
         do { try settleResources(id) }
         catch { result = nil; close() }

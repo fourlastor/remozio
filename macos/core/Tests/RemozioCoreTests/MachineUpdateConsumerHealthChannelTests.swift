@@ -19,6 +19,7 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
             var greeting: Data? = Data([1, 2, 3])
             var holdHello = false, holdCheck = false, failAfterHello = false, loseAfterHello = false
             var badPeer = false, malformed = false, wrongSignature = false, duplicate = false, missingHead = false, wrongHeadNonce = false
+            var recoveryRequired = false
             var lost: (@Sendable () -> Void)?
             var held: (@Sendable (MachineUpdateConsumerHealthReply) -> Void)?
             var request: Data?
@@ -49,6 +50,7 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
         }
         func packet(_ payload: Data) throws -> Data {
             if state.withLock({ $0.malformed }) { return Data([0]) }
+            if state.withLock({ $0.recoveryRequired }) { return MachineUpdateGatewayRecoverySignal.bytes }
             let request = requirement.role == .authority
                 ? try MachineUpdateAuthorityReadinessRequest.decode(payload).challenge : payload
             var role = try fixture.answer(request, expected: requirement)
@@ -166,6 +168,36 @@ final class MachineUpdateConsumerHealthChannelTests: XCTestCase, @unchecked Send
         catch { XCTAssertEqual(error as? MachineUpdateConsumerHealthChannelError, .busy) }
         XCTAssertEqual(driver.state.withLock { $0.hellos }, 0)
         await client.close()
+    }
+
+    func testGatewayHotJournalRoutesOnlyToProtectedRecoveryAndNeverReturnsHealth() async throws {
+        for protected in [true, false] {
+            let driver = try Driver(gateway: true), recoveries = TestState(0)
+            driver.state.withLock { $0.recoveryRequired = true }
+            let client = try channel(driver)
+            do {
+                _ = try await MachineUpdateGatewayHealthRecovery.check(health: { try await client.execute() },
+                    verifyRecovery: { if !protected { throw JournalLeaseError.invalidated } },
+                    recoverOrdinary: { recoveries.lock.withLock { $0 += 1 } })
+                XCTFail("Hot journal returned a health proof")
+            } catch {
+                if protected { XCTAssertEqual(error as? MachineUpdateConsumerHealthChannelError, .gatewayRecoveryRequired) }
+                else { XCTAssertEqual(error as? JournalLeaseError, .invalidated) }
+            }
+            XCTAssertEqual(recoveries.lock.withLock { $0 }, protected ? 1 : 0)
+            XCTAssertEqual(driver.state.withLock { $0.closes }, 1)
+        }
+    }
+
+    func testTransportCannotRequestGatewayJournalRecovery() async throws {
+        let driver = try Driver(), client = try channel(driver)
+        driver.state.withLock { $0.recoveryRequired = true }
+        do {
+            _ = try await MachineUpdateGatewayHealthRecovery.check(health: { try await client.execute() },
+                verifyRecovery: { XCTFail("Transport reached recovery verification") },
+                recoverOrdinary: { XCTFail("Transport reached Gateway recovery") })
+            XCTFail("Invalid response returned health")
+        } catch { XCTAssertEqual(error as? MachineUpdateConsumerHealthChannelError, .invalidReply) }
     }
 
     func testGatewayExchangeReturnsTheFreshSignedHeadWithoutGrantingReconciliation() async throws {

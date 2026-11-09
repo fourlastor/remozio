@@ -12,6 +12,17 @@ struct MachineUpdateAuthorityReadinessGateway: Equatable, Sendable {
     let requirement: MachineUpdateRestartHealthPlan.Requirement
     let registration: GatewayRegistrationIdentity
 
+    func requireSelection(for authority: MachineUpdateRestartHealthPlan.Requirement) throws {
+        let selected = requirement
+        guard selected.binding == authority.binding, selected.configurationEpoch == authority.configurationEpoch,
+              selected.configurationRevision == authority.configurationRevision,
+              selected.backendEpoch == authority.backendEpoch, selected.backendRevision == authority.backendRevision,
+              selected.code.role == .notificationGateway, selected.code.active, selected.executionUID > 0,
+              selected.executionUID < UInt32.max, registration.rootPublicKey == authority.publicKey else {
+            throw MachineUpdateRoleChallengeError.changedScope
+        }
+    }
+
     init(requirement: MachineUpdateRestartHealthPlan.Requirement, registration: GatewayRegistrationIdentity) throws {
         guard requirement.role == .notificationGateway,
               requirement.binding.macID == registration.macID,

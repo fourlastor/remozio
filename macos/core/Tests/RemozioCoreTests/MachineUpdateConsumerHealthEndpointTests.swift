@@ -1,4 +1,5 @@
 import Foundation
+import RemozioProtocol
 import Synchronization
 import XCTest
 @testable import RemozioCore
@@ -305,6 +306,43 @@ final class MachineUpdateConsumerHealthEndpointTests: XCTestCase, @unchecked Sen
         }
         try await waitUntil { replies.lock.withLock { $0 == 1 } }; try await endpoint.closeAndWait()
     }
+    private final class HotGatewayStore: @unchecked Sendable {
+        let fixture: MachineUpdateGatewayHealthOwnerTests.Fixture
+        init(_ fixture: MachineUpdateGatewayHealthOwnerTests.Fixture) { self.fixture = fixture }
+        func openForHealth() throws -> GatewayDatabase {
+            let limits = try CBORLimits(maxBytes: 2048, maxDepth: 8, maxItems: 128)
+            return try GatewayDatabase(lease: fixture.files.lease(), identity: fixture.configuration.registration,
+                payloadLimits: limits, signingLimits: limits, maximumOperations: 10, maximumPendingPerEnrollment: 2,
+                maximumLifetimeMillis: 1000, clockEpoch: UUID(), busyMilliseconds: 100, initialize: false,
+                readOnlyForUpdateHealth: true)
+        }
+    }
+
+    func testEndpointReportsTheRealHotGatewayJournalWithoutChangingItsBytes() async throws {
+        let fixture = try MachineUpdateGatewayHealthOwnerTests.Fixture(ordinary: true)
+        try fixture.database.close()
+        let crashed = try fixture.files.plantHotJournal(), store = HotGatewayStore(fixture)
+        let files = try ReleaseActivityFixture(), activity = try files.open(), replies = TestState(0)
+        let peer = MachineUpdateConsumerHealthPeer.owned(expected: fixture.requirement,
+            authenticateInvocation: {}, verifyPeer: {}, verifyCurrent: {})
+        let endpoint = MachineUpdateConsumerHealthXPCEndpoint(peer: peer, helloBytes: Data([1]), verifyCurrent: {},
+            acquireActivity: { try activity.acquireShared() }, budget: try .init(maximum: 1), invalidate: {}, makeOwner: { _ in
+                let unexpected = try store.openForHealth()
+                try unexpected.close()
+                throw MachineUpdateOwnedHealthFailure.denied
+            })
+        endpoint.healthHello { version, bytes in XCTAssertEqual(version, 1); XCTAssertEqual(bytes, Data([1])) }
+        let session = try MachineUpdateRoleChallengeSession(requirement: fixture.requirement, verifyCurrent: {})
+        endpoint.checkUpdateHealth(try session.request) { bytes in
+            XCTAssertEqual(bytes, MachineUpdateGatewayRecoverySignal.bytes)
+            replies.lock.withLock { $0 += 1 }
+        }
+        try await waitUntil { replies.lock.withLock { $0 == 1 } }
+        try await endpoint.closeAndWait()
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.files.path)), crashed.database)
+        XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: fixture.files.path + "-journal")), crashed.journal)
+    }
+
     func testScopeChangeDuringSettlementSuppressesTheReply() async throws {
         let fixture = try MachineUpdateOwnedHealthEndpointFixture(), files = try ReleaseActivityFixture()
         let activity = try files.open(), valid = TestState(true), replies = TestState(0)

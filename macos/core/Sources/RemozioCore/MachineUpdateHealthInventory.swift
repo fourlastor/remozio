@@ -1,7 +1,7 @@
 import Foundation
 
 enum MachineUpdateHealthCoordinatorError: Error, Equatable {
-    case invalidInventory, incompleteHealth, busy
+    case invalidInventory, incompleteHealth, busy, changedScope, duplicateOwner, closed
 }
 
 /// Exact selected checks and preserved accounts. These values grant no startup, journal writer or completion authority.

@@ -2,7 +2,14 @@ import Foundation
 
 enum MachineUpdateConsumerHealthCall: Sendable { case hello, check(Data) }
 enum MachineUpdateConsumerHealthReply: Sendable { case greeting(UInt64, Data?), response(Data?), failed }
-enum MachineUpdateConsumerHealthChannelError: Error, Equatable { case closed, busy, timedOut, invalidReply, changedScope }
+enum MachineUpdateConsumerHealthChannelError: Error, Equatable {
+    case closed, busy, timedOut, invalidReply, changedScope, gatewayRecoveryRequired
+}
+
+/// An authenticated failure. This value can never serve as a signed health packet.
+enum MachineUpdateGatewayRecoverySignal {
+    static let bytes = Data("remozio:update-health-recovery-required:v1".utf8)
+}
 protocol MachineUpdateConsumerHealthDriver: AnyObject, Sendable {
     func start(closed: @escaping @Sendable () -> Void)
     func invoke(_ call: MachineUpdateConsumerHealthCall, reply: @escaping @Sendable (MachineUpdateConsumerHealthReply) -> Void)
@@ -119,6 +126,11 @@ actor MachineUpdateConsumerHealthChannel {
                 ? MachineUpdateAuthorityReadinessRequest(challenge: request, gateway: authorityGatewayExchange).encoded : request
             guard case .response(let bytes) = try await perform(.check(wireRequest)), let bytes else {
                 throw MachineUpdateConsumerHealthChannelError.invalidReply
+            }
+            if bytes == MachineUpdateGatewayRecoverySignal.bytes {
+                guard requirement.role == .notificationGateway else { throw MachineUpdateConsumerHealthChannelError.invalidReply }
+                try driver.requirePeer(); try verifyCurrent(); try Task.checkCancellation()
+                throw MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired
             }
             let expected = requirement
             let proof = try session.accept(bytes, authenticatePeer: { actual in

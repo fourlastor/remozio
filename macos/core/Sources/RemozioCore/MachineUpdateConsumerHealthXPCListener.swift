@@ -25,6 +25,17 @@ private struct NativeMachineUpdateHealthEndpointBuilder: MachineUpdateConsumerHe
     }
 }
 
+private struct NativeMachineUpdateAuthorityReadinessEndpointBuilder: MachineUpdateConsumerHealthEndpointBuilding {
+    let scope: MachineUpdateAuthorityReadinessScope
+    let answer: @Sendable (MachineUpdateConsumerHealthRequest) async throws -> Data
+    func make(connection: NSXPCConnection, budget: AuthorityXPCWorkBudget,
+        onHandshake: @escaping @Sendable () -> Void,
+        onClose: @escaping @Sendable () -> Void) throws -> any MachineUpdateHealthEndpoint {
+        try MachineUpdateConsumerHealthXPCEndpoint(connection: connection, authority: scope, budget: budget,
+            onHandshake: onHandshake, onClose: onClose, answer: answer)
+    }
+}
+
 private final class NativeMachineUpdateHealthConnection: OwnedAuthorityConnection, @unchecked Sendable {
     let connection: NSXPCConnection
     let endpoint: any MachineUpdateHealthEndpoint
@@ -62,6 +73,15 @@ final class MachineUpdateConsumerHealthXPCListener: NSObject, NSXPCListenerDeleg
         root.configure(listener)
         try self.init(listener: listener, builder: NativeMachineUpdateHealthEndpointBuilder(
             configurationPath: configurationPath, scope: scope, release: release), verifyCurrent: { try scope.validate() })
+    }
+
+    convenience init(authority scope: MachineUpdateAuthorityReadinessScope,
+        answer: @escaping @Sendable (MachineUpdateConsumerHealthRequest) async throws -> Data) throws {
+        try scope.validate()
+        let listener = NSXPCListener(machServiceName: try scope.serviceName)
+        scope.rootPolicy.configure(listener)
+        try self.init(listener: listener, builder: NativeMachineUpdateAuthorityReadinessEndpointBuilder(scope: scope, answer: answer),
+            verifyCurrent: { try scope.validate() })
     }
 
     /// Anonymous listeners and owned builders prove lifecycle behavior only. They grant no native admission.
