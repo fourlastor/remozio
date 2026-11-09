@@ -112,7 +112,8 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         case .systemAccount:
             let manifest = try InstalledAccountJobManifest(accountID: configuration.command.accountID, role: .authority,
                 executionUID: 0, userName: "root", bundlePath: bundle.path,
-                gatewaySettingsControlEnabled: configuration.gatewaySettingsControlEnabled)
+                gatewaySettingsControlEnabled: configuration.gatewaySettingsControlEnabled,
+                installedReadinessEnabled: configuration.installedReadinessEnabled)
             guard manifest.declaration == declaration, manifest.configurationPath == path else {
                 throw InstalledAuthorityCommandError.changedConfiguration
             }
@@ -193,6 +194,27 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             acquireActivity: { try barrier.acquireShared() })
         try validateRuntime(); try activity.validate()
         return listener
+    }
+
+    /// The installed restart owner supplies its retained completion selection and starts this only after ordinary Authority startup.
+    func startInstalledReadinessListener(service: AuthorityWakeService, requirement: MachineUpdateRestartHealthPlan.Requirement,
+        gateway: MachineUpdateAuthorityReadinessGateway?, phonePushCommitDigest: Data?,
+        verifySelection: @escaping @Sendable () throws -> Void) throws -> MachineUpdateConsumerHealthXPCListener {
+        try verifySelection(); try validateRuntime()
+        let app = configuration.codePolicy.entries.first { $0.role == .app && $0.active }!
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        let scope = try MachineUpdateAuthorityReadinessScope(host: configuration, requirement: requirement, release: release,
+            verifySelection: { [weak self] in
+                guard let self else { throw InstalledAuthorityCommandError.unavailable }
+                try self.validateRuntime(); try verifySelection()
+            }, acquireActivity: { [releaseActivity] in try releaseActivity.acquireShared() })
+        if let gateway { try gateway.requireSelection(for: scope.requirement) }
+        let listener = try MachineUpdateConsumerHealthXPCListener(authority: scope) { request in
+            try await service.answerInstalledReadiness(request, expected: requirement, gateway: gateway,
+                phonePushCommitDigest: phonePushCommitDigest, verifyCurrent: scope.validate)
+        }
+        do { try listener.start(); return listener }
+        catch { listener.close(); throw error }
     }
 
     /// Reads current protected state with a short writer. The caller cannot carry the writer across an await.

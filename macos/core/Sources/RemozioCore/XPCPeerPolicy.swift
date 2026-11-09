@@ -10,18 +10,9 @@ public struct XPCPeerPolicy: Sendable {
     public let expectedUserID: uid_t
     public let expectedAuditSessionID: au_asid_t?
 
-    private static let hexadecimalDigits = Array("0123456789abcdef".utf8)
     private static let compiledRequirements = AcceptedInputMemo<String>()
 
-    static func hexadecimalCodeDirectoryHash(_ value: Data) -> String {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(value.count * 2)
-        for byte in value {
-            bytes.append(hexadecimalDigits[Int(byte >> 4)])
-            bytes.append(hexadecimalDigits[Int(byte & 0x0f)])
-        }
-        return String(decoding: bytes, as: UTF8.self)
-    }
+    static func hexadecimalCodeDirectoryHash(_ value: Data) -> String { LowercaseHexadecimal.encode(value) }
 
     public init(teamID: String, componentIdentifier: String, approvedCodeDirectoryHashes: Set<Data>,
                 expectedUserID: uid_t, expectedAuditSessionID: au_asid_t? = nil) throws {

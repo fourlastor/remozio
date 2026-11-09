@@ -7,7 +7,7 @@ enum GatewayJournalSetupAddress {
     static func serviceName(accountID: Data, intentID: Data) throws -> String {
         guard intentID.count == 16 else { throw GatewayPreparationError.invalidRecord }
         let paths = try RuntimePreparationPaths(accountID: accountID)
-        return paths.namespace + ".gateway-journal-setup." + intentID.map { String(format: "%02x", $0) }.joined()
+        return paths.namespace + ".gateway-journal-setup." + LowercaseHexadecimal.encode(intentID)
     }
 }
 

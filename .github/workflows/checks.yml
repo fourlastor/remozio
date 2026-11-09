@@ -51,8 +51,28 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Pair the JVM phone client with the Linux software-key pairing tool
         run: ./gradlew :phone-core:linuxPairToolTest
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Prepare private native TPM simulator dependencies
         run: |
           sudo apt-get install --yes --no-install-recommends \
@@ -119,15 +139,19 @@ jobs:
         env:
           REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
         run: python3 scripts/ci-build-cache.py restore --scope mac
-      - name: Verify fresh-checkout cache reuse and source invalidation
-        run: python3 scripts/check-swift-cache.py
-      - run: ./scripts/check.sh
+      - name: Build the app and run the stages that inspect it or macos/core
+        env:
+          REMOZIO_CHECK_MAC_PART: app
+        run: ./scripts/check.sh
       - name: Record validated Mac cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope mac --github-output "$GITHUB_OUTPUT"
       - name: Save validated Mac compiler outputs
         timeout-minutes: 5
-        if: steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        # Only main writes. A 3.5 GB entry per pull request evicted main's entry from the 10 GB budget.
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -165,10 +189,86 @@ jobs:
                   '-XCTest', 'RemozioCoreTests.NegotiatedNetworkChannelTests/testCoalescedAndFragmentedFramesSurviveNegotiation',
                   str(bundle.resolve())], env=env, timeout=90, check=False)
           PYTHON
+  mac-experiments:
+    name: Mac experiments
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compatible Mac experiments cache
+        id: build-cache-key
+        run: python3 scripts/ci-build-cache.py key --scope experiments --github-output "$GITHUB_OUTPUT"
+      - name: Restore Mac experiments compiler outputs
+        id: build-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.build-cache-key.outputs.paths }}
+          key: ${{ steps.build-cache-key.outputs.key }}
+          restore-keys: ${{ steps.build-cache-key.outputs.restore-prefix }}
+      - name: Restore timestamps of unchanged Mac inputs
+        env:
+          REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
+        run: python3 scripts/ci-build-cache.py restore --scope experiments
+      - name: Run the Mac stages that need neither the app nor macos/core
+        env:
+          REMOZIO_CHECK_MAC_PART: experiments
+        run: ./scripts/check.sh
+      - name: Record validated Mac experiments cache inputs
+        id: build-cache-manifest
+        run: python3 scripts/ci-build-cache.py save --scope experiments --github-output "$GITHUB_OUTPUT"
+      - name: Save validated Mac experiments compiler outputs
+        timeout-minutes: 5
+        # Only main writes, as for the Mac build cache.
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.build-cache-key.outputs.paths }}
+          key: ${{ steps.build-cache-key.outputs.key }}
+  mac-core:
+    name: Mac core tests
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Identify compatible Mac build cache
+        id: build-cache-key
+        run: python3 scripts/ci-build-cache.py key --scope mac --github-output "$GITHUB_OUTPUT"
+      - name: Restore Mac compiler outputs
+        id: build-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ steps.build-cache-key.outputs.paths }}
+          key: ${{ steps.build-cache-key.outputs.key }}
+          restore-keys: ${{ steps.build-cache-key.outputs.restore-prefix }}
+      - name: Restore timestamps of unchanged Mac inputs
+        env:
+          REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
+        run: python3 scripts/ci-build-cache.py restore --scope mac
+      # Whole classes in three concurrent xctest processes. The Mac build job runs the classes that need the built app,
+      # so a skip here other than the GUI-session control means a test silently lost its fixture.
+      - name: Run macos/core tests in three concurrent class shards
+        run: |
+          python3 scripts/run-xctest-shards.py --package-path macos/core \
+            --weights .github/macos-core-test-weights.json --shards 3 --concurrent --app-dependent exclude \
+            --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
+            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
+      - name: Retain shard logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac-core-shards-${{ github.run_attempt }}
+          path: .build/xctest-shards/*.log
+          if-no-files-found: ignore
+          retention-days: 7
   mac-interop:
     name: Mac interoperability
     runs-on: macos-26
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -192,6 +292,9 @@ jobs:
         run: python3 scripts/ci-build-cache.py restore --scope interop
       - name: Build native interoperability peers from this checkout
         run: python3 scripts/build-approval-flow.py
+      # The cache smoke builds a disposable package; it needs no state from the Mac build job.
+      - name: Verify fresh-checkout cache reuse and source invalidation
+        run: python3 scripts/check-swift-cache.py
       - name: Verify wrapper JAR
         run: |
           python3 - <<'PYTHON'
@@ -200,17 +303,50 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - run: ./gradlew :phone-core:test :phone-core:approvalFlowTest
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Record validated interoperability cache inputs
         id: build-cache-manifest
         run: python3 scripts/ci-build-cache.py save --scope interop --github-output "$GITHUB_OUTPUT"
       - name: Save validated interoperability compiler outputs
-        if: steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
+        if: >-
+          github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+          steps.build-cache.outputs.cache-hit != 'true' && steps.build-cache-manifest.outputs.save == 'true'
         continue-on-error: true
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
+      - name: Retain cache smoke logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mac-cache-smoke-${{ github.run_attempt }}
+          path: |
+            .build/ci-cache-smoke/*.json
+            .build/ci-cache-smoke/*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
   ios:
     name: iOS build
     runs-on: macos-26
@@ -230,6 +366,16 @@ jobs:
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
       - run: xcodebuild -version
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Kotlin tests on the iOS simulator
         run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
@@ -240,6 +386,16 @@ jobs:
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
         run: ./scripts/test-ios-app.sh
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   kotlin:
     name: Kotlin protocol
     runs-on: ubuntu-latest
@@ -258,7 +414,27 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   android:
     name: Android build
     runs-on: ubuntu-24.04
@@ -277,6 +453,26 @@ jobs:
           actual = hashlib.sha256(Path('gradle/wrapper/gradle-wrapper.jar').read_bytes()).hexdigest()
           assert actual == '7a9ce74cff467ca1bf60a4fcd9f05185acceda4d0f382434d393e17864262c5d', actual
           PYTHON
+      - name: Restore Gradle downloads
+        id: gradle-cache
+        continue-on-error: true
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
+          restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Install Android SDK packages
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0"'
       - run: ./gradlew :android-app:testDebugUnitTest :android-app:assembleDebug :android-app:lintDebug :android-app:assembleRelease
+      - name: Save Gradle downloads
+        # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.gradle/wrapper/dists
+            ~/.gradle/caches/modules-2
+          key: ${{ steps.gradle-cache.outputs.cache-primary-key }}

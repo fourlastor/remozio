@@ -13,6 +13,9 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
     private var requestStartupAttempted = false
+    private(set) var updateHealthOnly = false
+    private var updateCompletionOnly = false
+    private var updatePolicyOperationActive = false
     private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
     private var releaseActivity: ReleaseActivityBarrier?
@@ -41,6 +44,60 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Owns existing read-only stores for update health. Recovery and request startup stay closed.
+    init(updateHealthStorage storage: sending AuthorityStorage,
+         validateSelf: (JournalTransaction) throws -> Void) throws {
+        do {
+            guard storage.journal.readOnlyForCutover, storage.continuity.readOnlyForCutover else {
+                throw JournalDatabaseError.readOnly
+            }
+            try storage.journal.read { transaction in
+                try validateSelf(transaction)
+                let state = try storage.continuity.read()
+                guard !state.recoveryRequired, state.pending == nil else { throw JournalDatabaseError.unavailable }
+                let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                    epoch: state.committed.journalEpoch, generation: state.committed.generation,
+                    authorityGeneration: state.committed.authorityGeneration)
+                guard actual == state.committed, try storage.continuity.read() == state else {
+                    throw JournalDatabaseError.unavailable
+                }
+            }
+            database = storage.journal
+            self.storage = storage
+            updateHealthOnly = true
+        } catch {
+            try? storage.close()
+            throw error
+        }
+    }
+
+    /// Owns a matching mutable pair for completion. It performs no checkpoint repair and cannot start request work.
+    init(updateCompletionStorage storage: sending AuthorityStorage,
+         validateSelf: (JournalTransaction) throws -> Void) throws {
+        do {
+            guard !storage.journal.readOnlyForCutover, !storage.continuity.readOnlyForCutover else {
+                throw JournalDatabaseError.readOnly
+            }
+            try storage.journal.read { transaction in
+                try validateSelf(transaction)
+                let state = try storage.continuity.read()
+                guard !state.recoveryRequired, state.pending == nil else { throw JournalDatabaseError.unavailable }
+                let actual = try CheckpointedJournal.checkpoint(transaction: transaction,
+                    epoch: state.committed.journalEpoch, generation: state.committed.generation,
+                    authorityGeneration: state.committed.authorityGeneration)
+                guard actual == state.committed, try storage.continuity.read() == state else {
+                    throw JournalDatabaseError.unavailable
+                }
+            }
+            database = storage.journal
+            self.storage = storage
+            updateCompletionOnly = true
+        } catch {
+            try? storage.close()
+            throw error
+        }
+    }
+
     /// Owns the configured stores for trust-only service work. Action recovery remains a separate gate.
     init(storage: sending AuthorityStorage) throws {
         do {
@@ -62,6 +119,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     func prepareRequests(clockEpoch: UUID, maximumPayloadBytes: Int) throws {
         try lock.withLock {
             try requireNoRequestOperation()
+            guard !updateHealthOnly, !updateCompletionOnly else { throw JournalDatabaseError.readOnly }
             guard let storage else { return }
             try withStorageFailureCleanup { try database.read { _ in () } }
             guard !requestStartupAttempted, requests == nil else { throw JournalStartupRecovery.Failure.alreadyStarted }
@@ -467,7 +525,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     }
 
     private func requireNoRequestOperation() throws {
-        guard !requestOperationActive else { throw JournalDatabaseError.transactionActive }
+        guard !requestOperationActive, !updatePolicyOperationActive else { throw JournalDatabaseError.transactionActive }
     }
 
     public func read<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
@@ -475,6 +533,151 @@ public final class AuthorityJournal: @unchecked Sendable {
             try requireNoRequestOperation()
             return try validatedRead(body)
         }
+    }
+
+    /// Reads paired update health state before request startup. The native owner must separately verify code and closed admission.
+    func readForUpdateHealth<Value: Sendable>(_ body: @Sendable (JournalTransaction) throws -> Value) throws -> Value {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard storage != nil, requests == nil, !requestStartupAttempted,
+                  commandExecutions.isEmpty, !commandExchanges.hasActive else { throw JournalDatabaseError.unavailable }
+            return try validatedRead(body)
+        }
+    }
+
+    enum MachineUpdatePolicyCommitStage: Sendable, Equatable { case beforeCommit, inTransaction, afterMutation, afterCommit }
+
+    struct MachineUpdatePolicyCommitReceipt: Equatable, Sendable {
+        let source: MachineUpdatePolicyBoundary
+        let policy: AuthorityCodePolicySnapshot
+        let checkpoint: ContinuityCheckpoint
+        fileprivate init(source: MachineUpdatePolicyBoundary, policy: AuthorityCodePolicySnapshot,
+                         checkpoint: ContinuityCheckpoint) {
+            self.source = source; self.policy = policy; self.checkpoint = checkpoint
+        }
+    }
+
+    /// Writes only the exact retained completion policy and only with the acknowledged, one-use marker.
+    /// The verifier checks placement and health without reentering this journal or changing external state.
+    func commitMachineUpdateCompletionPolicy(_ permit: PreparationIntentStore.PolicyWritePermit,
+        scope: PreparationIntentStore.CompletionSnapshotScope, candidate: SignedReleaseEvidence,
+        verifyNative: (MachineUpdatePolicyCommitStage) throws -> Void) throws -> MachineUpdatePolicyCommitReceipt {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard updateCompletionOnly, let storage, requests == nil, !requestStartupAttempted,
+                  commandExecutions.isEmpty, !commandExchanges.hasActive else { throw JournalDatabaseError.readOnly }
+            let record = try permit.consume(in: scope)
+            try record.requireSnapshot(scope.read().restart, candidate: candidate)
+            let source = try validatedMachineUpdatePolicyBoundary(storage)
+            try record.requireSource(source)
+            let plan = try MachineUpdatePolicyPlan(source: source.policy, candidate: candidate)
+            let target = plan.completionPolicy
+            guard try target.bytes == record.completionPolicy else { throw PreparationStoreError.staleRevision }
+            updatePolicyOperationActive = true
+            defer { updatePolicyOperationActive = false }
+            func verify(_ stage: MachineUpdatePolicyCommitStage) throws {
+                guard try scope.read().intent == permit.archive else { throw PreparationStoreError.staleRevision }
+                try verifyNative(stage)
+                guard try scope.read().intent == permit.archive else { throw PreparationStoreError.staleRevision }
+            }
+            let expected = try ContinuityState(committed: source.checkpoint, pending: nil, recoveryRequired: false)
+            try verify(.beforeCommit)
+            guard try storage.continuity.read() == expected else { throw JournalDatabaseError.unavailable }
+            if source.policy.policy != target {
+                let writer = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+                _ = try writer.write(epoch: source.checkpoint.journalEpoch, recoverRejectedBody: true) { transaction in
+                    guard try transaction.codePolicy() == source.policy,
+                          try storage.continuity.read() == expected else { throw AuthorityCodePolicyError.staleRevision }
+                    try verify(.inTransaction)
+                    let value = try transaction.installCodePolicy(target, expectedRevision: source.policy.revision)
+                    try verify(.afterMutation)
+                    return value
+                }
+            }
+            let current = try validatedMachineUpdatePolicyBoundary(storage)
+            try verify(.afterCommit)
+            guard try validatedMachineUpdatePolicyBoundary(storage) == current else { throw AuthorityCodePolicyError.staleRevision }
+            let receipt = MachineUpdatePolicyCommitReceipt(source: source, policy: current.policy, checkpoint: current.checkpoint)
+            _ = try record.recording(receipt)
+            return receipt
+        }
+    }
+
+    /// Retained facts from the running Authority. This value grants no write or publication authority.
+    struct MachineUpdatePolicyBoundary: Equatable, Sendable {
+        let macID: Data
+        let accountID: Data
+        let policy: AuthorityCodePolicySnapshot
+        let checkpoint: ContinuityCheckpoint
+    }
+
+    func captureMachineUpdateInstalledReadinessBoundary() throws -> MachineUpdatePolicyBoundary {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard !updateHealthOnly, !updateCompletionOnly, let storage,
+                  !storage.journal.readOnlyForCutover, !storage.continuity.readOnlyForCutover,
+                  requestStartupAttempted, requests != nil,
+                  commandExecutions.isEmpty, !commandExchanges.hasActive else {
+                throw JournalDatabaseError.unavailable
+            }
+            return try validatedMachineUpdatePolicyBoundary(storage)
+        }
+    }
+
+    /// Captures policy and checkpoint facts from an existing read-only pair without starting recovery.
+    func captureMachineUpdatePolicyBoundaryForRecoveryRead() throws -> MachineUpdatePolicyBoundary {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard updateHealthOnly, let storage,
+                  storage.journal.readOnlyForCutover, storage.continuity.readOnlyForCutover,
+                  requests == nil, !requestStartupAttempted, commandExecutions.isEmpty,
+                  !commandExchanges.hasActive else { throw JournalDatabaseError.readOnly }
+            return try validatedMachineUpdatePolicyBoundary(storage)
+        }
+    }
+
+    private func validatedMachineUpdatePolicyBoundary(_ storage: AuthorityStorage) throws -> MachineUpdatePolicyBoundary {
+        let before = try storage.continuity.read()
+        let value = try validatedRead { transaction in
+            guard let policy = try transaction.codePolicy() else { throw AuthoritySelfValidationError.unconfigured }
+            guard let epoch = try transaction.epoch(before.committed.journalEpoch) else { throw JournalDatabaseError.unavailable }
+            return (policy, epoch.descriptor.macID, epoch.descriptor.accountID)
+        }
+        guard !before.recoveryRequired, before.pending == nil, try storage.continuity.read() == before else {
+            throw JournalDatabaseError.unavailable
+        }
+        return .init(macID: value.1, accountID: value.2, policy: value.0, checkpoint: before.committed)
+    }
+
+    private func requireMachineUpdateInstalledGatewayReadiness(_ proof: MachineUpdateConsumerHealthProof,
+        gateway: MachineUpdateAuthorityReadinessGateway) throws {
+        try lock.withLock {
+            let before = try captureMachineUpdateInstalledReadinessBoundary()
+            let expected = gateway.requirement
+            guard before.macID == expected.binding.macID, before.accountID == expected.binding.accountID,
+                  before.policy.policy.entries.first(where: { $0.role == .notificationGateway && $0.active }) == expected.code else {
+                throw RuntimePreparationError.changedScope
+            }
+            try expected.binding.requireCompletionPolicy(before.policy.policy)
+            try validatedRead {
+                try MachineUpdateGatewayHealthReconciliation.requireCurrent(proof, expected: expected,
+                    registration: gateway.registration, transaction: $0)
+            }
+            guard try captureMachineUpdateInstalledReadinessBoundary() == before else {
+                throw RuntimePreparationError.changedScope
+            }
+        }
+    }
+
+    /// The native caller supplies the admitted request, protected role selection, and existing signer.
+    func answerMachineUpdateInstalledReadiness(_ request: MachineUpdateConsumerHealthRequest,
+        expected: MachineUpdateRestartHealthPlan.Requirement, macID: Data, accountID: Data, keyPublicKey: Data,
+        gateway: MachineUpdateAuthorityReadinessGateway?, now: AuthorityMoment,
+        verifyCurrent: @Sendable () throws -> Void, sign: @Sendable (Data) throws -> Data) throws -> Data {
+        try MachineUpdateLiveAuthorityProof.answer(request, expected: expected, macID: macID, accountID: accountID,
+            keyPublicKey: keyPublicKey, gateway: gateway, now: now,
+            reconcileGateway: { try self.requireMachineUpdateInstalledGatewayReadiness($0, gateway: $1) },
+            capture: captureMachineUpdateInstalledReadinessBoundary, verifyCurrent: verifyCurrent, sign: sign)
     }
 
     /// Internal reads remain under the journal lock. They do not clear the request reentry guard.
@@ -515,7 +718,13 @@ public final class AuthorityJournal: @unchecked Sendable {
     }
     /// Stop the authorization producer and await its post-lock callbacks before draining execution.
     func stopCommandExchanges() async { await commandExchanges.stopAndDrain() }
-    func beginCommandExchange() throws { try lock.withLock { try commandExchanges.begin() } }
+    func beginCommandExchange() throws {
+        try lock.withLock {
+            guard !updatePolicyOperationActive else { throw JournalDatabaseError.transactionActive }
+            guard !updateCompletionOnly else { throw JournalDatabaseError.readOnly }
+            try commandExchanges.begin()
+        }
+    }
     func endCommandExchange() { commandExchanges.end() }
 
     public func close() throws {

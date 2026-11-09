@@ -11,8 +11,10 @@ private final class PolicyPreflightFixture {
     let drain: UpdateAdmissionDrain
     let record: MachineUpdateActivationRecord
     let quiet: UpdateQuiescenceLease
-    init(candidate: SignedReleaseEvidence? = nil, prepare: (MachineUpdateActivationFixture) throws -> Void = { _ in }) throws {
-        f = try .init(candidateRelease: candidate); try prepare(f)
+    init(candidate: SignedReleaseEvidence? = nil,
+         beforeCandidateSelection: (UpdateCandidateStorageFixture) throws -> Void = { _ in },
+         prepare: (MachineUpdateActivationFixture) throws -> Void = { _ in }) throws {
+        f = try .init(candidateRelease: candidate, beforeCandidateSelection: beforeCandidateSelection); try prepare(f)
         directory = try f.files.directory(); drain = try f.admission().beginDrain()
         record = try f.begin(drain); quiet = try XCTUnwrap(drain.acquireQuiescence())
     }
@@ -259,6 +261,74 @@ final class MachineUpdatePolicyPreflightTests: XCTestCase {
         let f = try PolicyPreflightFixture()
         XCTAssertThrowsError(try MachineUpdatePolicyPreflight.captureNative(activation: f.record, configurationPath: "/nonexistent/root.cbor",
             machine: f.f.machine.store, directory: f.directory, quiescence: f.quiet)) { XCTAssertEqual($0 as? JournalLeaseError, .rootRequired) }
+    }
+
+    private func healthCandidate(_ base: MachineUpdateActivationFixture,
+                                 omitting role: AuthorityCodeRole? = nil) throws -> SignedReleaseEvidence {
+        try base.machine.editedRelease { component in
+            var formats = component.formats
+            if component.role != role,
+               let required = try MachineUpdateConsumerHealthReleaseValidation.formatRequirements.first(where: { $0.role == component.role }) {
+                formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
+            }
+            return try .init(role: component.role, identifier: component.identifier, generation: component.generation + 1,
+                relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
+                build: component.build, teamID: component.teamID, formats: formats, requests: component.requests)
+        }
+    }
+
+    private func assertHealthPreflightRefused(_ fixture: PolicyPreflightFixture, candidate: SignedReleaseEvidence,
+                                              file: StaticString = #filePath, line: UInt = #line) throws {
+        XCTAssertThrowsError(try fixture.capture(inspect: { candidate }), file: file, line: line) {
+            XCTAssertEqual($0 as? GatewayPreparationError, .changedScope, file: file, line: line)
+        }
+        XCTAssertEqual(try fixture.f.machine.store.machineUpdateActivation(), fixture.record, file: file, line: line)
+        XCTAssertEqual(fixture.record.phase, .draining, file: file, line: line)
+    }
+
+    func testRegisteredForegroundRequiresAuthorityAndTransportHealthDeclarationsBeforeActivation() throws {
+        let base = try MachineUpdateActivationFixture()
+        for role in [AuthorityCodeRole.authority, .transport] {
+            let candidate = try healthCandidate(base, omitting: role)
+            let fixture = try PolicyPreflightFixture(candidate: candidate, beforeCandidateSelection: {
+                try $0.store.markRuntimeJobsRegistered($0.f.plan)
+            })
+            try assertHealthPreflightRefused(fixture, candidate: candidate)
+        }
+    }
+
+    func testRegisteredGatewayRequiresItsHealthDeclarationBeforeActivation() throws {
+        let base = try MachineUpdateActivationFixture()
+        for missing in [true, false] {
+            let candidate = try healthCandidate(base, omitting: missing ? .notificationGateway : nil)
+            let fixture = try PolicyPreflightFixture(candidate: candidate, beforeCandidateSelection: { machine in
+                let store = machine.store
+                let setup = try GatewayJournalSetupExchangeTests.Fixture(runtime: machine.f)
+                try setup.retainCompletion(.decode(setup.initialize()))
+                let plan = try GatewayRuntimeActivationPlan(journal: setup.state(), foreground: setup.runtime.plan,
+                    inventory: XCTUnwrap(store.inventory()))
+                try store.retainGatewayRuntimeActivation(plan)
+                try store.markGatewayRuntimePublished(plan)
+                _ = try store.enrollGatewayRuntimeActivation(plan)
+                try store.markGatewayRuntimeRegistered(plan)
+            })
+            if missing {
+                try assertHealthPreflightRefused(fixture, candidate: candidate)
+            } else {
+                let proof = try fixture.capture(inspect: { candidate })
+                XCTAssertEqual(try fixture.start(proof).phase, .activationStarted)
+            }
+        }
+    }
+
+    func testUnregisteredGatewayDoesNotRequireItsHealthDeclarationBeforeActivation() throws {
+        let base = try MachineUpdateActivationFixture()
+        let candidate = try healthCandidate(base, omitting: .notificationGateway)
+        let fixture = try PolicyPreflightFixture(candidate: candidate, beforeCandidateSelection: {
+            try $0.store.markRuntimeJobsRegistered($0.f.plan)
+        })
+        let proof = try fixture.capture(inspect: { candidate })
+        XCTAssertEqual(try fixture.start(proof).phase, .activationStarted)
     }
 
     private func provenanceCandidate(base: MachineUpdateActivationFixture,

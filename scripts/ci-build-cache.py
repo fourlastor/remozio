@@ -14,16 +14,20 @@ import time
 
 VERSION = 1
 ROOT = Path(__file__).resolve().parents[1]
-MAC_PACKAGES = (
+# Each scope matches one CI job's part of scripts/check.sh. The Mac build job saves `mac`: the app, macos/core and
+# the release-signing experiment that inspects the app; the Mac core tests job restores it. The Mac experiments job
+# saves `experiments`: every other Mac package. A path has one saving job, except approval-flow, which interop
+# also builds.
+EXPERIMENT_PACKAGES = (
     'experiments/macos', 'experiments/key-custody', 'experiments/system-keychain', 'experiments/protected-bootstrap',
     'experiments/release-dependencies', 'experiments/release-copy', 'experiments/release-attributes',
     'experiments/sparkle-probe', 'experiments/sparkle-boundary', 'experiments/approval-flow',
     'experiments/command-frontend', 'experiments/authority-journal', 'experiments/installation-inventory',
-    'protocol/swift', 'host/shared-core', 'macos/core',
+    'protocol/swift', 'host/shared-core',
 )
 CACHE_PATHS = {
-    'mac': tuple(f'{package}/.build' for package in MAC_PACKAGES) + (
-        '.build/release-signing', '.build/packaging/DerivedData', '.build/macos-app/DerivedData'),
+    'mac': ('macos/core/.build', '.build/release-signing', '.build/macos-app/DerivedData'),
+    'experiments': tuple(f'{package}/.build' for package in EXPERIMENT_PACKAGES) + ('.build/packaging/DerivedData',),
     'interop': ('experiments/approval-flow/.build',),
 }
 

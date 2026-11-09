@@ -7,6 +7,7 @@ import Synchronization
 /// The dedicated service stores an independent software key beside its provider credential under protected Root-owned ancestors.
 final class GatewayReceiptSigner: Sendable {
     private let key: Mutex<P256.Signing.PrivateKey>
+    let publicKey: Data
 
     init(bytes: Data, expectedPublicKey: Data) throws {
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes,
@@ -18,6 +19,17 @@ final class GatewayReceiptSigner: Sendable {
               derived.publicKey.x963Representation == value.publicKey.x963Representation,
               value.publicKey.x963Representation == expectedPublicKey else { throw GatewayServiceError.invalidCredentials }
         key = Mutex(value)
+        publicKey = value.publicKey.x963Representation
+    }
+
+    static func load(configuration: GatewayServiceConfiguration) throws -> Self {
+        try configuration.requireNativeProcess()
+        return try load(configuration: configuration, read: ProtectedServiceConfiguration.readServicePrivate)
+    }
+
+    static func load(configuration: GatewayServiceConfiguration, read: (String, uid_t) throws -> Data) throws -> Self {
+        try Self(bytes: read(configuration.receiptKeyPath, configuration.serviceUID),
+                 expectedPublicKey: configuration.receiptPublicKey)
     }
 
     /// Only the gateway's typed recovery encoders receive this callback. Never expose a generic signing RPC.
@@ -42,8 +54,7 @@ struct GatewayServiceCredentials: Sendable {
             throw GatewayServiceError.invalidCredentials
         }
         let account = try FCMServiceAccount(json: provider)
-        let receipts = try GatewayReceiptSigner(bytes: read(configuration.receiptKeyPath, configuration.serviceUID),
-                                               expectedPublicKey: configuration.receiptPublicKey)
+        let receipts = try GatewayReceiptSigner.load(configuration: configuration, read: read)
         return Self(account: account, receipts: receipts)
     }
 }

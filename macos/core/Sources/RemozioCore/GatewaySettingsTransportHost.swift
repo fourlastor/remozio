@@ -52,12 +52,15 @@ private struct TransportSettingsPublication: Sendable {
 /// Starts settings control before direct routes. Optional wake work has a separate owner.
 /// Fresh activation waits for Root restart recovery and update coordination.
 public final class GatewaySettingsTransportHost: Sendable {
-    private let host: TransportSettingsConsumerHost
-    private init(host: TransportSettingsConsumerHost) { self.host = host }
+    private let host: any OwnedSettingsConsumerHost
+    private init(host: any OwnedSettingsConsumerHost) { self.host = host }
     public static func open(path: String, reportDirect: @escaping @Sendable (DirectHostState) -> Void = { _ in },
                             reportRelay: @escaping @Sendable (ApprovalRelayCoordinator.Status) -> Void = { _ in },
                             reportWake: @escaping @Sendable (TransportWakeRunner.Status) -> Void = { _ in }) throws -> GatewaySettingsTransportHost {
-        let (scope, release, bootstrap) = try GatewaySettingsConsumerNativeScope.openTransport(path: path)
+        let (scope, release, bootstrap, mode) = try GatewaySettingsConsumerNativeScope.openTransport(path: path)
+        if mode == .updateHealth {
+            return .init(host: try MachineUpdateConsumerHealthHost.open(path: path, scope: scope, release: release))
+        }
         var controlActivity: (any OwnedReleaseActivity)?
         do {
             let configuration = bootstrap.host, services = configuration.runtime.services

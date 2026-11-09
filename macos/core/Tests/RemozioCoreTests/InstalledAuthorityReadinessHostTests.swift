@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import RemozioProtocol
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -169,6 +170,125 @@ final class InstalledAuthorityReadinessHostTests: XCTestCase {
             XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
         }
     }
+    private final class ReadinessActivity: OwnedReleaseActivity, Sendable {
+        let closes = Mutex(0)
+        func validate() throws {}
+        func close() { closes.withLock { $0 += 1 } }
+    }
+
+    func testNativeRootReadinessRefusesAnOrdinaryProcessAndReleasesItsLoan() throws {
+        guard getuid() != 0 || geteuid() != 0 else { throw XCTSkip("Ordinary-owner guard") }
+        let f = try fixture(), base = try selected(f), release = try XCTUnwrap(f.nativeRelease)
+        let monitor = try XCTUnwrap(release.manifest.components.first(where: { $0.role == .commandMonitor }))
+        let child = try XCTUnwrap(release.manifest.components.first(where: { $0.role == .commandChild }))
+        let execution = try AuthorityCommandExecutionConfiguration(
+            monitorPath: MachineBootstrap.bundlePath + "/" + monitor.relativePath,
+            childPath: MachineBootstrap.bundlePath + "/" + child.relativePath)
+        let old = base.command
+        let command = try AuthorityCommandStartupConfiguration(presence: old.presence, serviceName: old.serviceName,
+            policyPath: old.policyPath, environment: old.environment, submissionLimits: old.submissionLimits,
+            captureLimits: old.captureLimits, execution: execution)
+        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: base.machineDirectory,
+            installationID: base.installationID, releaseDigest: base.releaseDigest, codePolicy: base.codePolicy,
+            command: command, label: base.label, plistName: base.plistName, jobPlacement: base.jobPlacement,
+            gatewaySettingsControlEnabled: true, installedReadinessEnabled: true)
+        let seed = try MachineUpdateRoleChallengeTests.Fixture().requirement()
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: seed.binding.encoded) as? [String: Any])
+        fields["macID"] = command.macID.base64EncodedString()
+        fields["accountID"] = command.accountID.base64EncodedString()
+        fields["installationID"] = host.installationID.base64EncodedString()
+        fields["installedReleaseDigest"] = host.releaseDigest.base64EncodedString()
+        fields["completionPolicyDigest"] = try MachineUpdateActivationRecord.digest(host.codePolicy.bytes).base64EncodedString()
+        let binding = try RuntimeReleaseBinding.decode(JSONSerialization.data(withJSONObject: fields,
+            options: [.sortedKeys, .withoutEscapingSlashes]))
+        let requirement = MachineUpdateRestartHealthPlan.Requirement(binding: binding,
+            configurationEpoch: seed.configurationEpoch, configurationRevision: seed.configurationRevision,
+            backendEpoch: seed.backendEpoch, backendRevision: seed.backendRevision, role: .authority,
+            executionUID: 0, code: try XCTUnwrap(host.codePolicy.entries.first(where: { $0.role == .authority })),
+            publicKey: command.presence.wake.request.authorityPublicKey)
+        let loan = ReadinessActivity()
+        let scope = try MachineUpdateAuthorityReadinessScope(host: host, requirement: requirement, release: release,
+            verifySelection: { XCTFail("Root check did not run first") }, acquireActivity: { loan })
+        XCTAssertThrowsError(try MachineUpdateConsumerHealthChannel.nativeAuthorityReadiness(scope: scope)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(loan.closes.withLock { $0 }, 1)
+        let consumers = try XCTUnwrap(f.plan.consumerHosts)
+        XCTAssertThrowsError(try MachineUpdateNativeInstalledReadinessAccount.native(scope: scope,
+            requirements: [requirement], transport: consumers.transport, gateway: nil, registration: nil, release: release)) {
+            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        }
+        XCTAssertEqual(loan.closes.withLock { $0 }, 1)
+    }
+
+    func testReadinessJobTransitionAddsOnlyThePinnedMachService() throws {
+        let f = try fixture(), startup = f.plan.host, completion = try selected(f)
+        let transition = try MachineUpdateAuthorityReadinessJobTransition(startup: startup,
+            completion: completion, bundlePath: f.plan.bundlePath)
+        XCTAssertEqual(transition.startup.declaration, transition.completion.declaration)
+        XCTAssertEqual(transition.startup.arguments, transition.completion.arguments)
+        XCTAssertEqual(transition.completion.machServices.subtracting(transition.startup.machServices),
+            [try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: startup.command.accountID)])
+        XCTAssertThrowsError(try MachineUpdateAuthorityReadinessJobTransition(startup: completion,
+            completion: completion, bundlePath: f.plan.bundlePath)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+        }
+    }
+
+    func testReadinessJobTransitionRejectsForeignReleasePathAndMissingVersionTwo() throws {
+        let f = try fixture(), candidate = try XCTUnwrap(f.nativeRelease), policy = f.plan.host.codePolicy
+        func edited(path: String, publicationVersions: Set<UInt64>) throws -> SignedReleaseEvidence {
+            let components = try candidate.manifest.components.map { component in
+                var formats = component.formats
+                if [.authority, .setupController].contains(component.role) {
+                    formats.append(try .init(name: MachineUpdateCompletionPublicationRecord.formatName,
+                        readers: publicationVersions, writers: publicationVersions))
+                }
+                return try ReleaseComponent(role: component.role, identifier: component.identifier,
+                    generation: component.generation, relativePath: component.role == .authority ? path : component.relativePath,
+                    codeDirectoryHash: component.codeDirectoryHash, build: component.build,
+                    teamID: component.teamID, formats: formats, requests: component.requests)
+            }
+            let manifest = try ReleaseManifest(release: candidate.manifest.release, build: candidate.manifest.build, components: components)
+            return .init(manifest: manifest, codeDirectoryHashes: candidate.codeDirectoryHashes)
+        }
+        let expected = InstalledAuthorityCommandConfiguration.executablePath
+        try MachineUpdateAuthorityReadinessJobTransition.requireRelease(edited(path: expected, publicationVersions: [1, 2]), policy: policy)
+        for (path, versions) in [(expected, Set<UInt64>([1])),
+                                 ("Contents/Library/LaunchServices/ForeignAuthority", Set<UInt64>([1, 2]))] {
+            let release = try edited(path: path, publicationVersions: versions)
+            XCTAssertThrowsError(try MachineUpdateAuthorityReadinessJobTransition.requireRelease(release, policy: policy)) {
+                XCTAssertEqual($0 as? InstalledAuthorityCommandError, .wrongRelease)
+            }
+        }
+    }
+
+    func testReadinessJobTransitionRejectsChangedHostIdentity() throws {
+        let f = try fixture(), startup = f.plan.host, completion = try selected(f)
+        let foreign = try selected(fixture())
+        let wrongInstallation = try InstalledAuthorityCommandConfiguration(machineDirectory: completion.machineDirectory,
+            installationID: Data(repeating: 77, count: 16), releaseDigest: completion.releaseDigest,
+            codePolicy: completion.codePolicy, command: completion.command, label: completion.label,
+            plistName: completion.plistName, jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true,
+            installedReadinessEnabled: true)
+        let wrongRelease = try InstalledAuthorityCommandConfiguration(machineDirectory: completion.machineDirectory,
+            installationID: completion.installationID, releaseDigest: Data(repeating: 77, count: 32),
+            codePolicy: completion.codePolicy, command: completion.command, label: completion.label,
+            plistName: completion.plistName, jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true,
+            installedReadinessEnabled: true)
+        for invalid in [foreign, wrongInstallation, wrongRelease] {
+            XCTAssertThrowsError(try MachineUpdateAuthorityReadinessJobTransition(startup: startup,
+                completion: invalid, bundlePath: f.plan.bundlePath)) {
+                XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+            }
+        }
+        let bundled = try host(startup, placement: .bundled, control: false)
+        XCTAssertThrowsError(try MachineUpdateAuthorityReadinessJobTransition(startup: bundled,
+            completion: completion, bundlePath: f.plan.bundlePath)) {
+            XCTAssertEqual($0 as? InstalledAuthorityCommandError, .changedConfiguration)
+        }
+    }
+
     func testTheNativeLoaderRefusesAnOrdinaryOwnerBeforeOpeningAPath() throws {
         guard getuid() > 0, getuid() == geteuid() else { throw XCTSkip("Ordinary-owner guard") }
         XCTAssertThrowsError(try InstalledAuthorityCommandConfiguration.load(

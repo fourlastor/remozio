@@ -138,3 +138,18 @@ extension InstalledAccountJobManifestTests {
         }
     }
 }
+
+extension InstalledAccountJobManifestTests {
+    func testInstalledReadinessAddsOnlyTheProtectedAuthorityMachService() throws {
+        let settings = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true)
+        let readiness = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true, installedReadinessEnabled: true)
+        let service = try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: account)
+        XCTAssertEqual(readiness.machServices, settings.machServices.union([service]))
+        XCTAssertEqual(readiness.arguments, settings.arguments)
+        XCTAssertThrowsError(try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, installedReadinessEnabled: true))
+        XCTAssertThrowsError(try readiness.validate(settings.bytes, inventory: inventory(), release: release()))
+    }
+}

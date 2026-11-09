@@ -65,18 +65,18 @@ public enum AdministrativeSetupPublication {
             case .gatewayRuntimeCommit: "gateway-runtime-commit.cbor"
             case .gatewaySettingsRevision: "gateway-settings-revision.cbor"
             case .gatewaySettingsFence: "gateway-settings-fence.cbor"
-            case .importRelayPlan(let account): "import-relay-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
-            case .importRelayProvisioning(let account): "import-relay-state-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
-            case .importAccessApplication(let account): "import-relay-access-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
-            case .importDNSRecord(let account): "import-relay-dns-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
-            case .importRelayRunReference(let account): "import-relay-run-" + account.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .importRelayPlan(let account): "import-relay-" + LowercaseHexadecimal.encode(account) + ".cbor"
+            case .importRelayProvisioning(let account): "import-relay-state-" + LowercaseHexadecimal.encode(account) + ".cbor"
+            case .importAccessApplication(let account): "import-relay-access-" + LowercaseHexadecimal.encode(account) + ".cbor"
+            case .importDNSRecord(let account): "import-relay-dns-" + LowercaseHexadecimal.encode(account) + ".cbor"
+            case .importRelayRunReference(let account): "import-relay-run-" + LowercaseHexadecimal.encode(account) + ".cbor"
             case .startup: URL(fileURLWithPath: AdministrativeSetupConfiguration.startupPath).lastPathComponent
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
             case .auditUpgradeStartupFence: RuntimeAuditUpgradeStartupFence.fileName
-            case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + id.map { String(format: "%02x", $0) }.joined() + "-" + digest.map { String(format: "%02x", $0) }.joined() + ".cbor"
-            case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + id.map { String(format: "%02x", $0) }.joined() + ".cbor"
+            case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + LowercaseHexadecimal.encode(id) + "-" + LowercaseHexadecimal.encode(digest) + ".cbor"
+            case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + LowercaseHexadecimal.encode(id) + ".cbor"
             case .gatewayMaterial: "gateway-material.cbor"
             case .relayRunMaterial: "relay-run-material.cbor"
             case .transportTunnelToken: "transport-tunnel.token"
@@ -91,11 +91,11 @@ public enum AdministrativeSetupPublication {
             case .commandConfiguration: "command-runtime.cbor"
             case .commandHost: "command-host.cbor"
             case .accountJob(let account, let role):
-                "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
+                "dev.remozio.account." + LowercaseHexadecimal.encode(account)
                     + (role == .authority ? ".authority.plist" : role == .notificationGateway ? ".gateway.plist" : ".transport.plist")
             case .gatewayJournalJob(let account, let intent):
-                "dev.remozio.account." + account.map { String(format: "%02x", $0) }.joined()
-                    + ".gateway-journal-setup." + intent.map { String(format: "%02x", $0) }.joined() + ".plist"
+                "dev.remozio.account." + LowercaseHexadecimal.encode(account)
+                    + ".gateway-journal-setup." + LowercaseHexadecimal.encode(intent) + ".plist"
             case .elevationPolicy: "command-policy.cbor"
             case .transportConfiguration: "transport-host.cbor"
             case .transportIdentity: "transport-identity.cbor"

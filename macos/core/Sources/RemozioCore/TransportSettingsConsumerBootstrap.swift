@@ -10,6 +10,11 @@ struct TransportSettingsConsumerBootstrap: Sendable {
         self.base = base; self.host = host
     }
     static func decode(_ bytes: Data) throws -> Self { try .init(base: .decode(bytes)) }
+    static func decodeForUpdateHealthStartup(_ bytes: Data) throws -> Self {
+        let bootstrap = try Self(base: .decodeForReleaseArchive(bytes))
+        try bootstrap.host.requireUpdateHealthStartupSupported()
+        return bootstrap
+    }
     var configurationPath: String { get throws { try RuntimePreparationPaths(accountID: host.runtime.services.accountID).transportConfiguration } }
     func validatePath(_ path: String) throws {
         guard try path == configurationPath else { throw GatewayPreparationError.changedScope }

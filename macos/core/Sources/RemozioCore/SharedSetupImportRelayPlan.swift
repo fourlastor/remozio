@@ -18,7 +18,7 @@ struct SharedSetupImportRelayPlan: Equatable, Sendable, CustomStringConvertible,
     var debugDescription: String { description }
     init(expected: SharedSetupImportIntent, port: UInt16) throws {
         guard port >= 1024, let cloud = expected.recipe.cloudflare else { throw SharedSetupImportError.invalidRecord }
-        let suffix = expected.operationID.map { String(format: "%02x", $0) }.joined()
+        let suffix = LowercaseHexadecimal.encode(expected.operationID)
         hostname = "m-" + suffix + "." + cloud.dnsSuffix
         try SetupCloudflareConfiguration.validateScope(accountID: cloud.accountID, zoneID: cloud.zoneID, dnsSuffix: hostname)
         tunnelName = "remozio-" + suffix; self.port = port
@@ -51,7 +51,7 @@ struct SharedSetupImportRelayPlan: Equatable, Sendable, CustomStringConvertible,
             throw RuntimePreparationError.changedScope
         }
         try SetupCloudflareConfiguration.validateScope(accountID: accountID, zoneID: zoneID, dnsSuffix: dnsSuffix)
-        let suffix = operation.map { String(format: "%02x", $0) }.joined()
+        let suffix = LowercaseHexadecimal.encode(operation)
         guard tunnel.accountID == accountID, tunnel.name == "remozio-" + suffix,
               try DeterministicCBOR.encode(.map(f), limits: limits) == bytes else {
             throw RuntimePreparationError.changedScope

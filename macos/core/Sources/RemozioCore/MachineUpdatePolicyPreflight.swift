@@ -106,12 +106,30 @@ struct MachineUpdatePolicyPreflight {
             component.formats.contains { $0.name == MachineUpdatePreflightCompatibility.retainedSetupFormatName }
         }
         if declaresRetainedSetup { try MachineUpdatePreflightCompatibility.requireRetainedSetupFormats(candidate) }
+        let runtime = source.replacement.runtime
+        let foreground = Set(runtime.runtimes.filter(\.jobsRegistered).map { $0.reference.services.accountID })
+        let gateways = Set(runtime.gateways.filter(\.jobRegistered).map(\.accountID))
+        guard foreground.union(gateways).isSubset(of: Set(source.accounts.map(\.accountID))) else {
+            throw MachineUpdateActivationError.changedScope
+        }
         for capture in policies {
-            if let policy = capture.snapshot {
-                _ = try MachineUpdatePolicyPlan(source: policy, candidate: candidate)
-                try snapshot.validate(candidate, policy: policy.policy, verifyCurrent: {})
-                try ReleaseCompatibilityPreflight.validate(candidate, policy: policy.policy,
-                    requirements: .init(formats: MachineUpdateActivationRecord.preflightRequirements, requests: []))
+            let requiresTransport = foreground.contains(capture.accountID)
+            let requiresGateway = gateways.contains(capture.accountID)
+            guard let policy = capture.snapshot else {
+                guard !requiresTransport, !requiresGateway else { throw AuthoritySelfValidationError.unconfigured }
+                continue
+            }
+            let plan = try MachineUpdatePolicyPlan(source: policy, candidate: candidate)
+            try snapshot.validate(candidate, policy: policy.policy, verifyCurrent: {})
+            try ReleaseCompatibilityPreflight.validate(candidate, policy: policy.policy,
+                requirements: .init(formats: MachineUpdateActivationRecord.preflightRequirements, requests: []))
+            if requiresTransport {
+                try MachineUpdateConsumerHealthReleaseValidation.validateDeclarations(candidate,
+                    policy: plan.startupPolicy, consumer: .transport)
+            }
+            if requiresGateway {
+                try MachineUpdateConsumerHealthReleaseValidation.validateDeclarations(candidate,
+                    policy: plan.startupPolicy, consumer: .notificationGateway)
             }
         }
     }
