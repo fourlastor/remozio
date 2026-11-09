@@ -113,6 +113,103 @@ final class MachineUpdateRestartHealthCoordinatorTests: XCTestCase {
         XCTAssertEqual(missing.closes.withLock { $0 }, 1)
     }
 
+    func testCompletedRecoveryRequiresFreshOwnersForTheWholeCohort() async throws {
+        let fixture = MachineUpdateRoleChallengeTests.Fixture()
+        let first = try fixture.requirement(role: .notificationGateway, uid: 20001, account: 3)
+        let second = try fixture.requirement(role: .notificationGateway, uid: 20002, account: 4)
+        let inventory = try MachineUpdateHealthInventory(requirements: [first, second], preservedAccounts: [])
+        let previous = Account(accountID: first.binding.accountID, replies: [try reply(first, signedBy: fixture)])
+        let hot = Account(accountID: second.binding.accountID, hotJournal: true)
+        let fresh = Account(accountID: first.binding.accountID, replies: [try reply(first, signedBy: fixture)])
+        let recovered = Account(accountID: second.binding.accountID, replies: [try reply(second, signedBy: fixture)])
+        let recovery = RecoveryCount()
+        let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {},
+            makeAccount: { account, _ in
+                let afterRecovery = recovery.calls.withLock { $0 > 0 }
+                if account == previous.accountID { return afterRecovery ? fresh : previous }
+                return afterRecovery ? recovered : hot
+            }, recoverOrdinary: { account in
+                XCTAssertEqual(account, hot.accountID)
+                XCTAssertEqual(previous.closes.withLock { $0 }, 1)
+                XCTAssertEqual(hot.closes.withLock { $0 }, 1)
+                recovery.calls.withLock { $0 += 1 }
+            })
+        do { try await coordinator.check(); XCTFail("Recovery produced machine health") }
+        catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .recoveryCompletedNeedsFreshCheck) }
+        do { try await coordinator.requireVerified(); XCTFail("Recovery advanced the restart") }
+        catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .incompleteHealth) }
+        try await coordinator.check()
+        try await coordinator.requireVerified()
+        try await coordinator.close()
+        XCTAssertEqual(recovery.calls.withLock { $0 }, 1)
+        XCTAssertEqual(previous.closes.withLock { $0 }, 1)
+        XCTAssertEqual(fresh.closes.withLock { $0 }, 1)
+        XCTAssertEqual(recovered.closes.withLock { $0 }, 1)
+    }
+
+    func testRecoveryFailureOrSourceInvalidationCannotRearmTheCoordinator() async throws {
+        let fixture = MachineUpdateRoleChallengeTests.Fixture()
+        let gateway = try fixture.requirement(role: .notificationGateway, uid: 20001)
+        let inventory = try MachineUpdateHealthInventory(requirements: [gateway], preservedAccounts: [])
+        for writerFails in [true, false] {
+            let owner = Account(accountID: gateway.binding.accountID, hotJournal: true)
+            let factories = Mutex(0), calls = Mutex(0)
+            let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {
+                if calls.withLock({ $0 > 0 }) { throw JournalLeaseError.invalidated }
+            }, makeAccount: { _, _ in
+                factories.withLock { $0 += 1 }
+                return owner
+            }, recoverOrdinary: { account in
+                XCTAssertEqual(account, owner.accountID)
+                XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+                calls.withLock { $0 += 1 }
+                if writerFails { throw JournalLeaseError.invalidated }
+            })
+            do { try await coordinator.check(); XCTFail("Invalid recovery passed") }
+            catch { XCTAssertEqual(error as? JournalLeaseError, .invalidated) }
+            do { try await coordinator.check(); XCTFail("Invalid recovery allowed another check") }
+            catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .busy) }
+            try await coordinator.close()
+            XCTAssertEqual(factories.withLock { $0 }, 1)
+            XCTAssertEqual(calls.withLock { $0 }, 1)
+            XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+        }
+    }
+
+    func testWriterFailuresAndPostWriterContentionNeverRearmTheCoordinator() async throws {
+        let fixture = MachineUpdateRoleChallengeTests.Fixture()
+        let gateway = try fixture.requirement(role: .notificationGateway, uid: 20001)
+        let inventory = try MachineUpdateHealthInventory(requirements: [gateway], preservedAccounts: [])
+        for scenario in 0..<3 {
+            let owner = Account(accountID: gateway.binding.accountID, hotJournal: true)
+            let factories = Mutex(0), calls = Mutex(0)
+            let coordinator = MachineUpdateRestartHealthCoordinator(inventory: inventory, verifyCurrent: {
+                if scenario == 2, calls.withLock({ $0 > 0 }) { throw MachineUpdateHealthSourceError.busy }
+            }, makeAccount: { _, _ in
+                factories.withLock { $0 += 1 }
+                return owner
+            }, recoverOrdinary: { _ in
+                calls.withLock { $0 += 1 }
+                if scenario == 0 { throw MachineUpdateHealthSourceError.busy }
+                if scenario == 1 { throw MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired }
+            })
+            do { try await coordinator.check(); XCTFail("Recovery failure passed") }
+            catch {
+                if scenario == 1 {
+                    XCTAssertEqual(error as? MachineUpdateConsumerHealthChannelError, .gatewayRecoveryRequired)
+                } else {
+                    XCTAssertEqual(error as? MachineUpdateHealthSourceError, .busy)
+                }
+            }
+            do { try await coordinator.check(); XCTFail("Recovery failure allowed a fresh check") }
+            catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .busy) }
+            try await coordinator.close()
+            XCTAssertEqual(factories.withLock { $0 }, 1)
+            XCTAssertEqual(calls.withLock { $0 }, 1)
+            XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+        }
+    }
+
     func testHotJournalClosesTheAccountBeforeRecoveryAndKeepsTheMachineUnverified() async throws {
         let fixture = MachineUpdateRoleChallengeTests.Fixture()
         let gateway = try fixture.requirement(role: .notificationGateway, uid: 20001)
@@ -126,11 +223,14 @@ final class MachineUpdateRestartHealthCoordinatorTests: XCTestCase {
                 recovered.calls.withLock { $0 += 1 }
             })
         do { try await coordinator.check(); XCTFail("Recovery produced machine health") }
+        catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .recoveryCompletedNeedsFreshCheck) }
+        XCTAssertEqual(recovered.calls.withLock { $0 }, 1)
+        do { try await coordinator.check(); XCTFail("A second hot journal passed") }
         catch { XCTAssertEqual(error as? MachineUpdateConsumerHealthChannelError, .gatewayRecoveryRequired) }
         XCTAssertEqual(recovered.calls.withLock { $0 }, 1)
         do { try await coordinator.requireVerified(); XCTFail("Recovery advanced the restart") }
         catch { XCTAssertEqual(error as? MachineUpdateHealthCoordinatorError, .incompleteHealth) }
         try await coordinator.close()
-        XCTAssertEqual(owner.closes.withLock { $0 }, 1)
+        XCTAssertEqual(owner.closes.withLock { $0 }, 2)
     }
 }

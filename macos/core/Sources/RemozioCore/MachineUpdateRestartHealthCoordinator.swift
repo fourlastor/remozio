@@ -17,28 +17,10 @@ actor MachineUpdateRestartHealthCoordinator {
     private let recoverOrdinary: @Sendable (Data) async throws -> Void
     private var phase = Phase.new
     private var accounts: [any OwnedMachineUpdateRestartAccount] = []
+    private var attemptedRecovery: Set<Data> = []
+    private var recoveryCompleted = false
     private var operation: Task<Void, Error>?
     private var settlement: Task<Void, Error>?
-
-    /// The native caller supplies the original drain, protected account owners, and the ordinary recovery operation.
-    init(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence,
-        activity: MachineUpdateRestartSharedActivity,
-        verifyCurrent: @escaping @Sendable () throws -> Void,
-        makeAccount: @escaping @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateRestartAccount,
-        recoverOrdinary: @escaping @Sendable (Data) async throws -> Void) throws {
-        let context = snapshot.source.replacement
-        let macID = context.inventory.macID
-        let installationID = context.inventory.installationID
-        let attempt = context.activation.attemptID
-        let verifyScope: @Sendable () throws -> Void = {
-            try activity.requireScope(macID: macID, installationID: installationID, activationAttempt: attempt)
-            try verifyCurrent()
-            try activity.requireScope(macID: macID, installationID: installationID, activationAttempt: attempt)
-        }
-        try verifyScope()
-        try self.init(inventory: .init(plan: MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)),
-            verifyCurrent: verifyScope, makeAccount: makeAccount, recoverOrdinary: recoverOrdinary)
-    }
 
     init(inventory: MachineUpdateHealthInventory, verifyCurrent: @escaping @Sendable () throws -> Void,
         makeAccount: @escaping @Sendable (Data, [MachineUpdateHealthInventory.Requirement]) async throws -> any OwnedMachineUpdateRestartAccount,
@@ -50,6 +32,8 @@ actor MachineUpdateRestartHealthCoordinator {
     func check() async throws {
         guard phase == .new else { throw MachineUpdateHealthCoordinatorError.busy }
         phase = .checking
+        recoveryCompleted = false
+        let recoveryCount = attemptedRecovery.count
         let task = Task { try await checkAttempt() }
         operation = task
         defer { operation = nil }
@@ -58,8 +42,17 @@ actor MachineUpdateRestartHealthCoordinator {
             try Task.checkCancellation()
             guard phase == .checking else { throw MachineUpdateHealthCoordinatorError.incompleteHealth }
             phase = .verified
+        } catch MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired {
+            if phase == .checking, recoveryCompleted {
+                phase = .new
+                throw MachineUpdateHealthCoordinatorError.recoveryCompletedNeedsFreshCheck
+            }
+            if phase == .checking { phase = .failed }
+            throw MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired
         } catch MachineUpdateHealthSourceError.busy {
-            if phase == .checking { phase = accounts.isEmpty ? .new : .failed }
+            if phase == .checking {
+                phase = accounts.isEmpty && attemptedRecovery.count == recoveryCount ? .new : .failed
+            }
             throw MachineUpdateHealthSourceError.busy
         } catch {
             if phase == .checking { phase = .failed }
@@ -96,13 +89,8 @@ actor MachineUpdateRestartHealthCoordinator {
             guard owner.accountID == accountID else { throw MachineUpdateHealthCoordinatorError.invalidInventory }
             let replies: [MachineUpdateAuthenticatedRoleReply]
             if required.contains(where: { $0.role == .notificationGateway }) {
-                let verify = verifyCurrent, recover = recoverOrdinary
                 replies = try await MachineUpdateGatewayHealthRecovery.check(health: { try await owner.check() },
-                    verifyRecovery: verify, recoverOrdinary: {
-                        try await self.settleBeforeRecovery()
-                        try Task.checkCancellation(); try verify()
-                        try await recover(accountID)
-                    })
+                    verifyRecovery: verifyCurrent, recoverOrdinary: { try await self.recoverGateway(accountID) })
             } else {
                 replies = try await owner.check()
             }
@@ -127,10 +115,23 @@ actor MachineUpdateRestartHealthCoordinator {
         try verifyCurrent(); try Task.checkCancellation()
     }
 
-    private func settleBeforeRecovery() async throws {
+    private func recoverGateway(_ accountID: Data) async throws {
         try requireChecking()
+        guard !attemptedRecovery.contains(accountID) else {
+            throw MachineUpdateConsumerHealthChannelError.gatewayRecoveryRequired
+        }
         try await settleAccounts()
         try requireChecking()
+        attemptedRecovery.insert(accountID)
+        do {
+            try await recoverOrdinary(accountID)
+        } catch {
+            // A failed writer may have changed durable state. This coordinator cannot replay it.
+            if phase == .checking { phase = .failed }
+            throw error
+        }
+        try requireChecking()
+        recoveryCompleted = true
     }
 
     private func settleAccounts() async throws {

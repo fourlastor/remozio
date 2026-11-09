@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Owns a paired journal for a registered Gateway without selecting an unregistered Authority health role.
@@ -13,6 +14,58 @@ final class MachineUpdateGatewayPairedHealthReader: @unchecked Sendable {
     private let release: @Sendable () -> Void
     private var closed = false, closing = false, retired = false, consumed = false
     private var retainedProof: MachineUpdateConsumerHealthProof?
+
+    /// Gateway-only selection deliberately excludes any account whose foreground owner already holds the paired journal.
+    struct RestartSelection {
+        let account: MachineUpdateRestartHealthPlan.Account
+        let requirement: MachineUpdateRestartHealthPlan.Requirement
+        let backend: RuntimeReleaseBackendPlan
+        let policy: AuthorityCodePolicySnapshot
+        let requests: [ReleaseRequestContract]
+
+        init(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence, accountID: Data) throws {
+            let plan = try MachineUpdateRestartHealthPlan(snapshot: snapshot, candidate: candidate)
+            let (account, requirement) = try plan.select(accountID: accountID, role: .notificationGateway)
+            guard !account.requirements.contains(where: { $0.role == .authority }),
+                  let backend = account.backend,
+                  let policy = try snapshot.configuration.policy(accountID: accountID),
+                  let authority = candidate.manifest.components.first(where: { $0.role == .authority }),
+                  backend.gateway.registration.rootPublicKey == account.configuration.host.command.presence.wake.request.authorityPublicKey else {
+                throw RuntimePreparationError.changedScope
+            }
+            self.account = account; self.requirement = requirement; self.backend = backend
+            self.policy = policy; requests = authority.requests
+        }
+    }
+
+    /// Borrows closed admission and opens only the paired read-only journal. No Authority signing key is loaded.
+    static func openForRestart(snapshot: MachineUpdateRestartSnapshot, candidate: SignedReleaseEvidence, accountID: Data,
+        activity: MachineUpdateRestartSharedActivity, sourceAccess: MachineUpdateHealthSourceAccess,
+        readCurrent: @escaping @Sendable (MachineUpdateRestartReadinessLoan) throws -> MachineUpdateRestartSnapshot) throws -> Self {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let selected = try RestartSelection(snapshot: snapshot, candidate: candidate, accountID: accountID)
+        let host = selected.account.configuration.host
+        let request = host.command.presence.wake.request
+        let service = request.service, expected = selected.requirement, policy = selected.policy, requests = selected.requests
+        let verifier = MachineUpdateNativeRestartVerifier(snapshot: snapshot, host: host, sourceAccess: sourceAccess,
+            readCurrent: readCurrent)
+        let loan = try activity.acquireShared()
+        let verify: @Sendable () throws -> Void
+        let journal: AuthorityJournal
+        do {
+            verify = try verifier.authorityCheck(binding: expected.binding, loan: loan)
+            try verify()
+            let gatewayPolicy = try selected.backend.source.pair.authority.material.phonePush.journalPolicy(clockEpoch: UUID())
+            journal = try AuthorityJournal(updateHealthStorage: AuthorityStorage.openForUpdateHealth(configuration: service,
+                gatewayPolicy: gatewayPolicy), validateSelf: {
+                    try MachineUpdateAuthorityHealthJournalValidation.requireCurrent($0, configuration: service,
+                        binding: expected.binding, policy: policy, requests: requests)
+                })
+        } catch { loan.close(); throw error }
+        return try Self(journal: journal, configuration: service, expected: expected,
+            gateway: selected.backend.gateway, rootPublicKey: request.authorityPublicKey,
+            policy: policy, requests: requests, verifyCurrent: verify, release: { loan.close() })
+    }
 
     /// The native bootstrap supplies an authenticated context. Owned tests supply a paired fixture and injected checks.
     init(journal: AuthorityJournal, configuration: AuthorityServiceConfiguration,
@@ -68,7 +121,8 @@ final class MachineUpdateGatewayPairedHealthReader: @unchecked Sendable {
                         registration: registration, transaction: transaction)
                 }
                 try validate()
-            } catch { retired = true; throw error }
+            } catch MachineUpdateHealthSourceError.busy { throw MachineUpdateHealthSourceError.busy }
+            catch { retired = true; throw error }
         }
     }
     private func validate() throws {

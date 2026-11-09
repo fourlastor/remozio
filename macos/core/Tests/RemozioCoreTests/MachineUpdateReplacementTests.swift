@@ -1518,11 +1518,26 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(gateway.executionUID, startup.gateway.serviceUID)
         XCTAssertEqual(gateway.publicKey, startup.gateway.receiptPublicKey)
         XCTAssertEqual(gateway.backendRevision, record.revision)
+        let gatewayInput = try MachineUpdateNativeRestartHealth.consumerInputs(account: selected, requirement: gateway)
+        XCTAssertEqual(gatewayInput.host, selected.configuration.gateway)
+        XCTAssertEqual(gatewayInput.registration, startup.gateway.registration)
+        let (_, transport) = try plan.select(accountID: account, role: .transport)
+        let transportInput = try MachineUpdateNativeRestartHealth.consumerInputs(account: selected, requirement: transport)
+        XCTAssertEqual(transportInput.host, selected.configuration.transport.settingsHost)
+        XCTAssertNil(transportInput.registration)
+        let (_, authority) = try plan.select(accountID: account, role: .authority)
+        XCTAssertThrowsError(try MachineUpdateNativeRestartHealth.consumerInputs(account: selected, requirement: authority)) {
+            XCTAssertEqual($0 as? MachineUpdateHealthCoordinatorError, .invalidInventory)
+        }
         let selection = try MachineUpdateAuthorityHealthOwner.RestartSelection(snapshot: snapshot, candidate: f.newRelease,
             accountID: account)
         XCTAssertEqual(selection.gateway?.requirement, gateway)
         XCTAssertEqual(selection.gateway?.registration, startup.gateway.registration)
         XCTAssertNotNil(selection.gatewayPolicy)
+        XCTAssertThrowsError(try MachineUpdateGatewayPairedHealthReader.RestartSelection(snapshot: snapshot,
+            candidate: f.newRelease, accountID: account)) {
+            XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+        }
     }
 
     func testHealthInventoryRejectsDuplicateRolesAndSplitForegroundPairs() throws {

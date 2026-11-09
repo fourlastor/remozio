@@ -36,6 +36,31 @@ final class MachineUpdateNativeRestartVerifier: @unchecked Sendable {
         }
     }
 
+    /// Binds the running Root Authority and its published command host to the borrowed restart.
+    func authorityCheck(binding: RuntimeReleaseBinding, loan: MachineUpdateRestartReadinessLoan) throws
+        -> @Sendable () throws -> Void {
+        let host = host
+        guard host.machineDirectory == MachineBootstrap.machineDirectory,
+              let selected = try snapshot.configuration.configuration(accountID: binding.accountID),
+              selected.startup.binding == binding, selected.startup.host.canonicalBytes == host.canonicalBytes,
+              let authority = host.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else {
+            throw InstalledAuthorityCommandError.wrongInstallation
+        }
+        let paths = try RuntimePreparationPaths(accountID: binding.accountID)
+        let path = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.commandHost.name
+        let codeRequirement = try AuthoritySelfValidation.requirement(for: authority)
+        return verification(loan: loan) {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try loan.requireScope(macID: binding.macID, installationID: binding.installationID,
+                activationAttempt: binding.activationAttempt)
+            guard try DynamicCodeValidation.selfPath() == MachineBootstrap.bundlePath + "/" + InstalledAuthorityCommandConfiguration.executablePath,
+                  try InstalledAuthorityCommandConfiguration.load(path: path).canonicalBytes == host.canonicalBytes else {
+                throw InstalledAuthorityCommandError.changedConfiguration
+            }
+            try DynamicCodeValidation.validateSelf(requirement: codeRequirement)
+        }
+    }
+
     func validate(_ loan: MachineUpdateRestartReadinessLoan) throws {
         if let owned {
             try Self.requireInLease(snapshot, host: host, installed: owned.installed, prepared: owned.prepared,
