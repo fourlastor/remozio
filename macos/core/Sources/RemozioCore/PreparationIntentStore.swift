@@ -12,7 +12,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -3313,7 +3313,8 @@ public final class PreparationIntentStore {
     private func installedCurrentSourceProjection(inventory: InstallationInventory,
         installed: MachineUpdateInstalledReleaseEpoch.Archive, schema: Int64)
         throws -> (historicalInventory: InstallationInventory, historicalSchemaVersion: Int64, digest: Data) {
-        guard [23, 24].contains(schema), try scalar("PRAGMA user_version") == schema,
+        guard [23, 24, MachineUpdateRetainedSetupPolicyStorage.schemaVersion].contains(schema),
+              try scalar("PRAGMA user_version") == schema,
               try loadInventoryRecord() == inventory else { throw PreparationStoreError.staleRevision }
         let configuration = try installed.configuration(), intent = try installed.completionIntent()
         guard intent.record.sourceSchemaVersion == 20 else { throw PreparationStoreError.incompatibleStore }
@@ -3466,10 +3467,59 @@ public final class PreparationIntentStore {
     /// Reads policy operands and the activation row in one transaction.
     func retainedSetupPolicyMaterial(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupPolicyMaterial {
+        try transaction(write: false) { try loadRetainedSetupPolicyMaterial(owner: owner, candidate: candidate) }
+    }
+
+    private func loadRetainedSetupPolicyMaterial(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPolicyMaterial {
+        let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+        return try .init(runtime: runtime, activation: loadRuntimeActivation(accountID: runtime.preparation.accountID))
+    }
+
+    /// Reads a durable intent for the exact owner and machine state. The paired journal still needs its own observation.
+    func retainedSetupPolicyIntent(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPolicyIntentRecord? {
         try transaction(write: false) {
-            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
-            return try .init(runtime: runtime, activation: loadRuntimeActivation(accountID: runtime.preparation.accountID))
+            let material = try loadRetainedSetupPolicyMaterial(owner: owner, candidate: candidate)
+            let stable = material.runtime.setup.source.actual
+            guard stable.schemaVersion == MachineUpdateRetainedSetupPolicyStorage.schemaVersion else { return nil }
+            let records = try loadRetainedSetupPolicyIntents(installationID: stable.inventory.installationID)
+            guard let record = records.first(where: { $0.accountID == material.runtime.preparation.accountID }) else { return nil }
+            try record.requireMaterial(material, candidate: candidate)
+            try loadRetainedSetupPolicyMaterial(owner: owner, candidate: candidate).requireSame(as: material)
+            return record
         }
+    }
+
+    private func loadRetainedSetupPolicyIntents(installationID: Data) throws -> [MachineUpdateRetainedSetupPolicyIntentRecord] {
+        try withRetainedSetupPolicyRecordLimit {
+            try statement("SELECT account,id,revision,record FROM retained_setup_policy_intents_v1 ORDER BY account LIMIT 65") { row in
+                var records: [MachineUpdateRetainedSetupPolicyIntentRecord] = []
+                var accounts = Set<Data>()
+                while try step(row) == SQLITE_ROW {
+                    guard records.count < 64 else { throw PreparationStoreError.corruptRecord }
+                    let record = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(blob(row, column: 3,
+                        maximum: MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes))
+                    guard try blob(row, column: 0, maximum: 16) == record.accountID,
+                          try blob(row, column: 1, maximum: 16) == bytes(record.id),
+                          try blob(row, column: 2, maximum: 16) == bytes(record.revision),
+                          record.macID == macID, record.installationID == installationID,
+                          accounts.insert(record.accountID).inserted else { throw PreparationStoreError.corruptRecord }
+                    records.append(record)
+                }
+                return records
+            }
+        }
+    }
+
+    private func withRetainedSetupPolicyRecordLimit<Value>(_ body: () throws -> Value) throws -> Value {
+        guard let db else { throw PreparationStoreError.closed }
+        let previous = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, -1)
+        let required = Int32(MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes + 4096)
+        guard previous < required else { return try body() }
+        _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, required)
+        defer { _ = sqlite3_limit(db, SQLITE_LIMIT_LENGTH, previous) }
+        return try body()
     }
 
     private func loadStableReleaseRecord() throws -> MachineUpdateStableReleaseRecord {
@@ -3486,8 +3536,11 @@ public final class PreparationIntentStore {
 
     private func loadStableMachineUpdate(candidate release: SignedReleaseEvidence) throws -> MachineUpdateStableReleaseSnapshot {
         try identity(macID)
-        guard try scalar("PRAGMA user_version") == 24 else { throw PreparationStoreError.invalidTransition }
+        let schema = try scalar("PRAGMA user_version")
+        let hasRetainedPolicy = schema == MachineUpdateRetainedSetupPolicyStorage.schemaVersion
+        guard schema == 24 || hasRetainedPolicy else { throw PreparationStoreError.invalidTransition }
         try MachineUpdateStableReleaseRecord.requireFormats(release)
+        if hasRetainedPolicy { try MachineUpdateRetainedSetupPolicyStorage.requireReaderFormats(release) }
         guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
               let activation = try loadMachineUpdateActivationRecord(), let admission = try loadUpdateAdmissionRegistration(),
               try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
@@ -3498,20 +3551,21 @@ public final class PreparationIntentStore {
         }
         let seal = try loadStableReleaseRecord()
         guard activation == seal.completed else { throw PreparationStoreError.corruptRecord }
-        try requireFinishingActivation(seal.finishing, inventory: inventory, candidate: candidate, admission: admission, schema: 24)
+        try requireFinishingActivation(seal.finishing, inventory: inventory, candidate: candidate, admission: admission, schema: schema)
         let (header, rows) = try loadInstalledReleaseRows()
         let installed = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
         guard try installed.inventory() == inventory else { throw PreparationStoreError.corruptRecord }
         try seal.requireCurrentInventory(inventory, epoch: installed, candidate: release)
-        let current = try installedCurrentSourceProjection(inventory: inventory, installed: installed, schema: 24)
-        return .init(inventory: inventory, activation: activation, admission: admission, candidate: candidate,
+        if hasRetainedPolicy { _ = try loadRetainedSetupPolicyIntents(installationID: inventory.installationID) }
+        let current = try installedCurrentSourceProjection(inventory: inventory, installed: installed, schema: schema)
+        return .init(schemaVersion: schema, inventory: inventory, activation: activation, admission: admission, candidate: candidate,
             installed: installed, seal: seal, currentRowsDigest: current.digest)
     }
 
     private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
-        guard schema != 24 else { throw PreparationStoreError.invalidTransition }
+        guard schema < 24 else { throw PreparationStoreError.invalidTransition }
         try requireInstalledReleaseFormats(release)
         guard schema == 23, let inventory = try loadInventoryRecord(),
               let candidate = try loadUpdateCandidate(), let activation = try loadMachineUpdateActivation(),
@@ -4240,7 +4294,11 @@ public final class PreparationIntentStore {
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
             table != "machine_update_completion_intent_v1" && table != "machine_update_completion_publication_v1" &&
             table != "installed_release_state_v1" && table != "stable_release_state_v1" {
-            hash.update(data: try historicalTables[table] ?? machineTableDigest(table))
+            if table == MachineUpdateRetainedSetupPolicyStorage.tableName {
+                hash.update(data: try withRetainedSetupPolicyRecordLimit { try machineTableDigest(table) })
+            } else {
+                hash.update(data: try historicalTables[table] ?? machineTableDigest(table))
+            }
         }
         return Data(hash.finalize())
     }
@@ -4491,6 +4549,9 @@ public final class PreparationIntentStore {
         if version >= 22 { expected.append("machine_update_completion_publication_v1") }
         if version >= 23 { expected.append("installed_release_state_v1") }
         if version >= 24 { expected.append("stable_release_state_v1") }
+        if version >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
+            expected.append(MachineUpdateRetainedSetupPolicyStorage.tableName)
+        }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
@@ -4542,7 +4603,7 @@ public final class PreparationIntentStore {
         active = true; defer { active = false }
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if write, try scalar("PRAGMA user_version") == 24 { throw PreparationStoreError.invalidTransition }
+            if write, try scalar("PRAGMA user_version") >= 24 { throw PreparationStoreError.invalidTransition }
             if write && !activationWrite, try scalar("PRAGMA user_version") >= 17,
                try loadMachineUpdateActivation()?.phase.blocksMachineWrites == true {
                 throw PreparationStoreError.invalidTransition

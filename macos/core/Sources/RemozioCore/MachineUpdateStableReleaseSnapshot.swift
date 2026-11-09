@@ -2,6 +2,7 @@ import Foundation
 
 /// Exact stable metadata. The snapshot carries no live readiness proof or admission authority.
 struct MachineUpdateStableReleaseSnapshot: Sendable {
+    let schemaVersion: Int64
     let inventory: InstallationInventory
     let activation: MachineUpdateActivationRecord
     let admission: UpdateAdmissionRegistrationRecord
@@ -14,14 +15,14 @@ struct MachineUpdateStableReleaseSnapshot: Sendable {
     func requireInitialTransition(from expected: MachineUpdateInstalledReadinessPlan, release: SignedReleaseEvidence) throws {
         let before = expected.view.compatibility.source.actual
         let proposed = try MachineUpdateStableReleaseRecord(readiness: expected, completed: activation, candidate: release)
-        guard inventory == before.inventory, admission == before.admission, candidate == before.candidate,
+        guard schemaVersion == 24, inventory == before.inventory, admission == before.admission, candidate == before.candidate,
               currentRowsDigest == expected.view.compatibility.source.historicalSourceDigest,
               installed.record == before.installed.record, installed.artifacts == before.installed.artifacts,
               try seal.encoded == proposed.encoded else { throw PreparationStoreError.staleRevision }
     }
 
     func requireSame(as other: Self) throws {
-        guard inventory == other.inventory, activation == other.activation, admission == other.admission,
+        guard schemaVersion == other.schemaVersion, inventory == other.inventory, activation == other.activation, admission == other.admission,
               candidate == other.candidate, currentRowsDigest == other.currentRowsDigest,
               installed.record == other.installed.record, installed.artifacts == other.installed.artifacts,
               try seal.encoded == other.seal.encoded else { throw PreparationStoreError.staleRevision }
