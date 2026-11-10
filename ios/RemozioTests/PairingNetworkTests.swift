@@ -23,7 +23,7 @@ final class PairingNetworkTests: XCTestCase {
     func testClientCertificateUsesTheTransportProfile() throws {
         let key = P256.Signing.PrivateKey()
         let now = Date()
-        let certificate = try Certificate(Self.certificate(of: PairingClientIdentity.make(key, now: now)))
+        let certificate = try Certificate(Self.certificate(of: PairingClientIdentity.make(key.secKey, now: now)))
         let name = try DistinguishedName { CommonName("Remozio transport") }
         XCTAssertEqual(certificate.subject, name)
         XCTAssertEqual(certificate.issuer, name)
@@ -38,8 +38,8 @@ final class PairingNetworkTests: XCTestCase {
 
     func testThePinAcceptsOnlyOneLeafWithTheExactKey() throws {
         let key = P256.Signing.PrivateKey(), other = P256.Signing.PrivateKey()
-        let leaf = try Self.certificate(of: PairingClientIdentity.make(key))
-        let second = try Self.certificate(of: PairingClientIdentity.make(other))
+        let leaf = try Self.certificate(of: PairingClientIdentity.make(key.secKey))
+        let second = try Self.certificate(of: PairingClientIdentity.make(other.secKey))
         let pin = Self.prefix + key.publicKey.x963Representation
         XCTAssertTrue(NetworkPairingTransport.matches(chain: [leaf], pin: pin, at: Date()))
         XCTAssertFalse(NetworkPairingTransport.matches(chain: [second], pin: pin, at: Date()))
@@ -49,8 +49,8 @@ final class PairingNetworkTests: XCTestCase {
         XCTAssertFalse(NetworkPairingTransport.matches(chain: [leaf], pin: pin.dropLast(), at: Date()))
         XCTAssertFalse(NetworkPairingTransport.matches(chain: [], pin: pin, at: Date()))
         // The window is now - 300 s to now + 3300 s, in whole seconds.
-        let expired = try Self.certificate(of: PairingClientIdentity.make(key, now: Date().addingTimeInterval(-7_200)))
-        let future = try Self.certificate(of: PairingClientIdentity.make(key, now: Date().addingTimeInterval(7_200)))
+        let expired = try Self.certificate(of: PairingClientIdentity.make(key.secKey, now: Date().addingTimeInterval(-7_200)))
+        let future = try Self.certificate(of: PairingClientIdentity.make(key.secKey, now: Date().addingTimeInterval(7_200)))
         XCTAssertFalse(NetworkPairingTransport.matches(chain: [expired], pin: pin, at: Date()))
         XCTAssertFalse(NetworkPairingTransport.matches(chain: [future], pin: pin, at: Date()))
     }
@@ -120,7 +120,7 @@ final class PairingNetworkTests: XCTestCase {
         let events = Recorder(self, expectOpen: false)
         let transport = NetworkPairingTransport(target: .fixed(.hostPort(host: "127.0.0.1", port: 9)),
             pin: Self.prefix + P256.Signing.PrivateKey().publicKey.x963Representation,
-            applicationProtocol: "remozio-pairing/1", identity: { try PairingClientIdentity.make(P256.Signing.PrivateKey()) })
+            applicationProtocol: "remozio-pairing/1", identity: { try PairingClientIdentity.make(P256.Signing.PrivateKey().secKey) })
         transport.cancel()
         transport.start(events: events)
         wait(for: [events.closedExpectation], timeout: 10)
@@ -128,7 +128,69 @@ final class PairingNetworkTests: XCTestCase {
         XCTAssertEqual(events.closedError, "cancelled")
     }
 
+    func testASoftwareKeyIsNotAcceptedAsAnEnclaveKey() {
+        XCTAssertThrowsError(try PairingTransportKey.requireEnclave(P256.Signing.PrivateKey().secKey))
+    }
+
+    func testTheProposedKeyIsTheKeyTheTransportPresents() throws {
+        let server = try LocalServer(alpn: "remozio-pairing/1")
+        let keys = NativePairingKeys(endpoint: try server.endpoint())
+        let events = Recorder(self, expectBytes: true)
+        let transport = keys.openTransport(macID: Self.bytes(16), accountID: Self.bytes(16),
+            pin: PairingBytesKt.pairingBytes(data: Self.prefix + server.key.publicKey.x963Representation),
+            applicationProtocol: "remozio-pairing/1")
+        transport.start(events: events)
+        wait(for: [events.openedExpectation], timeout: 10)
+        // TLS 1.3 opens the client before the server reads its certificate. The first bytes come after that.
+        transport.requestBytes()
+        wait(for: [try XCTUnwrap(events.receivedExpectation)], timeout: 10)
+        let proposed = PairingBytesKt.pairingData(bytes: keys.transportPublicKey)
+        XCTAssertEqual(proposed.count, 65)
+        XCTAssertEqual(server.clientPoint, proposed)
+        transport.cancel()
+        wait(for: [events.closedExpectation], timeout: 10)
+    }
+
+    func testNoKeyMeansNoConnectionToAnAddress() throws {
+        let server = try LocalServer(alpn: "remozio-pairing/1")
+        let keys = NativePairingKeys(endpoint: try server.endpoint(), makeTransportKey: { throw PairingTransportKey.Failure.refused })
+        XCTAssertEqual(PairingBytesKt.pairingData(bytes: keys.transportPublicKey).count, 65)
+        XCTAssertEqual(PairingBytesKt.pairingData(bytes: keys.transportPublicKey), PairingBytesKt.pairingData(bytes: keys.transportPublicKey))
+        let events = Recorder(self, expectOpen: false)
+        keys.openTransport(macID: Self.bytes(16), accountID: Self.bytes(16),
+            pin: PairingBytesKt.pairingBytes(data: Self.prefix + server.key.publicKey.x963Representation),
+            applicationProtocol: "remozio-pairing/1").start(events: events)
+        wait(for: [events.closedExpectation], timeout: 10)
+        wait(for: [events.openedExpectation], timeout: 0.5)
+        XCTAssertEqual(events.closedError, "identity failed")
+        XCTAssertEqual(server.connections, 0)
+    }
+
+    func testNoKeyStopsBeforeDiscovery() {
+        assertStopsBeforeDiscovery(NativePairingKeys(makeTransportKey: { throw PairingTransportKey.Failure.refused }))
+    }
+
+    func testAKeyWithNoP256PointStopsBeforeDiscovery() throws {
+        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits: 384]
+        let wrong = try XCTUnwrap(SecKeyCreateWithData(P384.Signing.PrivateKey().x963Representation as CFData, attributes as CFDictionary, nil))
+        assertStopsBeforeDiscovery(NativePairingKeys(makeTransportKey: { wrong }))
+    }
+
+    private func assertStopsBeforeDiscovery(_ keys: NativePairingKeys) {
+        let events = Recorder(self, expectOpen: false)
+        keys.openTransport(macID: Self.bytes(16), accountID: Self.bytes(16),
+            pin: PairingBytesKt.pairingBytes(data: Self.prefix + P256.Signing.PrivateKey().publicKey.x963Representation),
+            applicationProtocol: "remozio-pairing/1").start(events: events)
+        // Discovery would wait for a service that does not exist, so a close inside this limit means it never started.
+        wait(for: [events.closedExpectation], timeout: 2)
+        wait(for: [events.openedExpectation], timeout: 0.2)
+        XCTAssertEqual(events.closedError, "identity failed")
+    }
+
     // MARK: - Helpers
+
+    static func bytes(_ count: Int) -> KotlinByteArray { PairingBytesKt.pairingBytes(data: Data(repeating: 1, count: count)) }
 
     static func certificate(of identity: SecIdentity) throws -> SecCertificate {
         var certificate: SecCertificate?
@@ -136,6 +198,15 @@ final class PairingNetworkTests: XCTestCase {
         return try XCTUnwrap(certificate)
     }
 
+}
+
+private extension P256.Signing.PrivateKey {
+    /// The same software key as a `SecKey`, the type the production signer takes.
+    var secKey: SecKey {
+        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits: 256]
+        return SecKeyCreateWithData(x963Representation as CFData, attributes as CFDictionary, nil)!
+    }
 }
 
 private final class Recorder: NSObject, PairingTransportEvents {
@@ -175,9 +246,10 @@ private final class LocalServer {
     private let listener: NWListener
     private let box: PointBox
     var clientPoint: Data? { box.get() }
+    var connections: Int { box.connections() }
 
     init(alpn: String) throws {
-        let identity = try PairingClientIdentity.make(key)
+        let identity = try PairingClientIdentity.make(key.secKey)
         let box = PointBox()
         self.box = box
         let tls = NWProtocolTLS.Options()
@@ -200,6 +272,7 @@ private final class LocalServer {
         let ready = DispatchSemaphore(value: 0)
         listener.stateUpdateHandler = { if case .ready = $0 { ready.signal() } }
         listener.newConnectionHandler = { [queue] connection in
+            box.connected()
             connection.stateUpdateHandler = { state in
                 if case .ready = state { connection.send(content: Data("hi".utf8), completion: .idempotent) }
             }
@@ -211,16 +284,20 @@ private final class LocalServer {
 
     deinit { listener.cancel() }
 
+    func endpoint() throws -> NWEndpoint { .hostPort(host: "127.0.0.1", port: try XCTUnwrap(listener.port)) }
+
     func transport(pin: Data, key: P256.Signing.PrivateKey) throws -> NetworkPairingTransport {
-        let port = try XCTUnwrap(listener.port)
-        return NetworkPairingTransport(target: .fixed(.hostPort(host: "127.0.0.1", port: port)), pin: pin,
-            applicationProtocol: "remozio-pairing/1", identity: { try PairingClientIdentity.make(key) })
+        NetworkPairingTransport(target: .fixed(try endpoint()), pin: pin,
+            applicationProtocol: "remozio-pairing/1", identity: { try PairingClientIdentity.make(key.secKey) })
     }
 }
 
 private final class PointBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Data?
+    private var count = 0
     func set(_ point: Data) { lock.withLock { if value == nil { value = point } } }
     func get() -> Data? { lock.withLock { value } }
+    func connected() { lock.withLock { count += 1 } }
+    func connections() -> Int { lock.withLock { count } }
 }

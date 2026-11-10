@@ -1,24 +1,38 @@
 import CryptoKit
 import Foundation
 import Network
+import os
 import RemozioUI
 import Security
 import X509
 
-/// The three P-256 keys of one setup attempt. They exist only in this object: nothing goes to the keychain or to disk.
+/// Stages and error codes only. Never key data or addresses.
+private let pairingLog = Logger(subsystem: "dev.remozio.pairing", category: "transport")
+
+/// The three P-256 keys of one setup attempt, all temporary: nothing is stored in the keychain or on disk.
 /// The transport key signs the TLS client certificate, so the proposal and the handshake always carry the same key.
 final class NativePairingKeys: NSObject, PlatformPairingKeys {
-    private let transport = P256.Signing.PrivateKey()
+    private let transport: Result<SecKey, Error>
+    private let transportPoint: Data
     private let decision = P256.Signing.PrivateKey()
     private let biometric = P256.Signing.PrivateKey()
     /// Test builds may connect to a fixed address instead of browsing. Nil browses for the advertised service.
     private let endpoint: NWEndpoint?
 
-    init(endpoint: NWEndpoint? = nil) {
+    init(endpoint: NWEndpoint? = nil, makeTransportKey: () throws -> SecKey = PairingTransportKey.make) {
         self.endpoint = endpoint
+        do {
+            let key = try makeTransportKey()
+            transportPoint = try PairingTransportKey.point(of: key)
+            transport = .success(key)
+        } catch {
+            // This point only fills the proposal object. The transport stops before it opens, so it never leaves the phone.
+            transportPoint = P256.Signing.PrivateKey().publicKey.x963Representation
+            transport = .failure(error)
+        }
     }
 
-    var transportPublicKey: KotlinByteArray { PairingBytesKt.pairingBytes(data: transport.publicKey.x963Representation) }
+    var transportPublicKey: KotlinByteArray { PairingBytesKt.pairingBytes(data: transportPoint) }
     var decisionPublicKey: KotlinByteArray { PairingBytesKt.pairingBytes(data: decision.publicKey.x963Representation) }
     var biometricPublicKey: KotlinByteArray { PairingBytesKt.pairingBytes(data: biometric.publicKey.x963Representation) }
 
@@ -27,7 +41,7 @@ final class NativePairingKeys: NSObject, PlatformPairingKeys {
         let target = endpoint.map(NetworkPairingTransport.Target.fixed) ?? .service(PairingServiceName.make(
             macID: PairingBytesKt.pairingData(bytes: macID), accountID: PairingBytesKt.pairingData(bytes: accountID)))
         return NetworkPairingTransport(target: target, pin: PairingBytesKt.pairingData(bytes: pin),
-            applicationProtocol: applicationProtocol, identity: { [transport] in try PairingClientIdentity.make(transport) })
+            applicationProtocol: applicationProtocol, identity: { [transport] in try PairingClientIdentity.make(transport.get()) })
     }
 
     override var description: String { "NativePairingKeys(redacted)" }
@@ -50,17 +64,63 @@ enum PairingServiceName {
     }
 }
 
+/// The transport key of one setup attempt, held only in memory. On a phone it is a Secure Enclave key, and nothing
+/// replaces it: if the enclave refuses, the attempt fails. The simulator has no enclave, so it uses a software key.
+enum PairingTransportKey {
+    enum Failure: Error { case refused }
+
+    static func make() throws -> SecKey {
+        var error: Unmanaged<CFError>?
+        #if targetEnvironment(simulator)
+        let placement: [CFString: Any] = [kSecPrivateKeyAttrs: [kSecAttrIsPermanent: false]]
+        #else
+        guard let access = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                                                           .privateKeyUsage, &error) else {
+            throw refused("access control", error)
+        }
+        let placement: [CFString: Any] = [kSecAttrTokenID: kSecAttrTokenIDSecureEnclave,
+            kSecPrivateKeyAttrs: [kSecAttrIsPermanent: false, kSecAttrAccessControl: access]]
+        #endif
+        let attributes = placement.merging([kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeySizeInBits: 256]) { $1 }
+        guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else { throw refused("creation", error) }
+        #if !targetEnvironment(simulator)
+        try requireEnclave(key)
+        pairingLog.notice("transport key: in the Secure Enclave, export refused")
+        #endif
+        return key
+    }
+
+    /// The two checks of the Mac enclave probe. With them, a completed handshake on a phone proves where the key is.
+    static func requireEnclave(_ key: SecKey) throws {
+        let attributes = SecKeyCopyAttributes(key) as? [String: Any]
+        guard attributes?[kSecAttrTokenID as String] as? String == kSecAttrTokenIDSecureEnclave as String else {
+            throw refused("token check", nil)
+        }
+        guard SecKeyCopyExternalRepresentation(key, nil) == nil else { throw refused("export check", nil) }
+    }
+
+    /// The 65-byte uncompressed public point.
+    static func point(of key: SecKey) throws -> Data {
+        guard let publicKey = SecKeyCopyPublicKey(key),
+              let point = SecKeyCopyExternalRepresentation(publicKey, nil) as Data?, point.count == 65 else {
+            throw refused("public key", nil)
+        }
+        return point
+    }
+
+    private static func refused(_ stage: String, _ error: Unmanaged<CFError>?) -> Failure {
+        let code = error.map { CFErrorGetCode($0.takeRetainedValue()) } ?? 0
+        pairingLog.error("transport key: \(stage, privacy: .public) failed, code \(code, privacy: .public)")
+        return .refused
+    }
+}
+
 /// A self-signed leaf in the transport profile the computers expect, held only in memory.
 enum PairingClientIdentity {
-    enum Failure: Error { case key, certificate, identity }
+    enum Failure: Error { case certificate, identity }
 
-    static func make(_ key: P256.Signing.PrivateKey, now: Date = Date()) throws -> SecIdentity {
-        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
-            kSecAttrKeyClass: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits: 256]
-        guard let native = SecKeyCreateWithData(key.x963Representation as CFData, attributes as CFDictionary, nil) else {
-            throw Failure.key
-        }
-        let signer = Certificate.PrivateKey(key)
+    static func make(_ key: SecKey, now: Date = Date()) throws -> SecIdentity {
+        let signer = try Certificate.PrivateKey(key)
         let name = try DistinguishedName { CommonName("Remozio transport") }
         // Whole seconds, with a small margin for clock skew between the phone and the computer.
         let start = Date(timeIntervalSince1970: (now.timeIntervalSince1970 - 300).rounded(.down))
@@ -72,7 +132,7 @@ enum PairingClientIdentity {
                 try ExtendedKeyUsage([.serverAuth, .clientAuth])
             }, issuerPrivateKey: signer)
         guard let native509 = try? SecCertificate.makeWithCertificate(certificate) else { throw Failure.certificate }
-        guard let identity = SecIdentityCreate(nil, native509, native) else { throw Failure.identity }
+        guard let identity = SecIdentityCreate(nil, native509, key) else { throw Failure.identity }
         return identity
     }
 }
@@ -99,6 +159,7 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     private var events: PairingTransportEvents?
     private var browser: NWBrowser?
     private var connection: NWConnection?
+    private var clientIdentity: sec_identity_t?
     private var cancelled = false
     private var finished = false
     private var open = false
@@ -117,6 +178,14 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
             self.events = events
             guard !cancelled else { return finish("cancelled") }
             guard pin.count == 91, pin.prefix(26) == Self.spkiPrefix else { return finish("invalid pin") }
+            // Before discovery: a phone with no key stops now, not at the end of the setup budget.
+            do {
+                guard let made = sec_identity_create(try identity()) else { throw PairingClientIdentity.Failure.identity }
+                clientIdentity = made
+            } catch {
+                pairingLog.error("client identity: \(String(reflecting: type(of: error)), privacy: .public) code \((error as NSError).code, privacy: .public)")
+                return finish("identity failed")
+            }
             switch target {
             case .fixed(let endpoint): connect(endpoint)
             case .service(let name):
@@ -202,9 +271,7 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     }
 
     private func connect(_ endpoint: NWEndpoint) {
-        let local: SecIdentity
-        do { local = try identity() } catch { return finish("identity failed") }
-        guard let secIdentity = sec_identity_create(local) else { return finish("identity failed") }
+        guard let secIdentity = clientIdentity else { return finish("identity failed") }
         let tls = NWProtocolTLS.Options()
         let options = tls.securityProtocolOptions
         sec_protocol_options_set_min_tls_protocol_version(options, .TLSv13)
@@ -259,8 +326,10 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     private func finish(_ error: String?) {
         guard !finished else { return }
         finished = true
+        if let error { pairingLog.notice("transport closed: \(error, privacy: .public)") }
         browser?.cancel(); browser = nil
         connection?.cancel(); connection = nil
+        clientIdentity = nil
         events?.closed(error: error)
         events = nil
     }
