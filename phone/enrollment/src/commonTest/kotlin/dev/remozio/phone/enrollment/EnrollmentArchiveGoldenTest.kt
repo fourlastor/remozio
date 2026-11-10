@@ -6,21 +6,11 @@ import kotlin.test.*
 
 /** Runs on every target. The vector pins the archive format that Android devices already hold. */
 class EnrollmentArchiveGoldenTest {
-    private val vector = Json.parseToJsonElement(TestVectors.enrollmentArchive).jsonObject
-    private fun hex(name: String) = vector.getValue(name).jsonPrimitive.content.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    private val vector = archiveVector()
+    private fun hex(name: String) = vector.hex(name)
     private val maximumRecords = vector.getValue("maximumRecords").jsonPrimitive.int
     private val maximumBytes = vector.getValue("maximumPlaintextBytes").jsonPrimitive.int
 
-    /** Keeps the envelope layout. Real AES-GCM belongs to the platform, and the JVM test covers it. */
-    private object PlainAead : EnrollmentAead {
-        override fun seal(plaintext: ByteArray, associatedData: ByteArray) = ByteArray(12) + plaintext + ByteArray(16)
-        override fun open(sealed: ByteArray, associatedData: ByteArray) = sealed.copyOfRange(12, sealed.size - 16)
-    }
-    private class Disk(var bytes: ByteArray?) : EnrollmentStorage {
-        override fun read(maximumBytes: Int) = bytes?.copyOf()
-        override fun replace(ciphertext: ByteArray) { bytes = ciphertext.copyOf() }
-        override fun close() { }
-    }
     private val cipher = EnrollmentCipher(PlainAead, maximumBytes)
     private val limits = CborLimits(maximumBytes, 8, maximumRecords * 100 + 16)
     private fun open(disk: Disk) = EncryptedEnrollmentStore.open(disk, cipher, maximumRecords)

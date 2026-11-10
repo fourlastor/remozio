@@ -42,6 +42,22 @@ class EnrollmentCipherJvmTest {
         assertFails { EnrollmentCipher(SecretKeySpec(ByteArray(32), "AES"), maximumBytes).decrypt(archive) }
     }
 
+    @Test fun aTamperedArchiveIsRefusedAndNeverRewritten() {
+        val archive = hex("encryptedArchive").also { it[it.size - 1] = (it[it.size - 1] + 1).toByte() }
+        val storage = object : EnrollmentStorage {
+            override fun read(maximumBytes: Int) = archive
+            override fun replace(ciphertext: ByteArray) = error("A refused archive must not be rewritten")
+            override fun close() { }
+        }
+        assertFailsWith<EnrollmentStoreUnavailable> { EncryptedEnrollmentStore.open(storage, cipher, 10) }
+    }
+
+    @Test fun activationStaysHiddenFromJava() {
+        val activate = EncryptedEnrollmentStore::class.java.declaredMethods
+            .single { it.name.startsWith("activate") && !it.name.endsWith("\$default") }
+        assertTrue(activate.isSynthetic)
+    }
+
     @Test fun eachEncryptionUsesAFreshNonce() {
         assertFalse(cipher.encrypt(ByteArray(8)).copyOfRange(8, 20).contentEquals(cipher.encrypt(ByteArray(8)).copyOfRange(8, 20)))
     }
