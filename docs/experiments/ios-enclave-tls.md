@@ -1,10 +1,11 @@
 # iOS Secure Enclave TLS experiment
 
-On 10 November 2026, a temporary Secure Enclave P-256 key on a physical iPhone completed a client-authenticated
-TLS 1.3 handshake with `remozio-linux-pair`. The key signed the phone's client certificate through
-`Certificate.PrivateKey(SecKey)` (swift-certificates 1.21.0). `SecIdentityCreate` paired the key with that certificate
-in memory, and Network.framework signed the handshake with it. The peer then accepted the key as the transport key of
-the setup proposal and sent its transcript.
+On 10 November 2026, TestFlight build 4 on a physical iPhone completed a client-authenticated TLS 1.3 handshake with
+`remozio-linux-pair`, and the peer accepted the phone's TLS key as the transport key of the setup proposal. In that
+build, a device can present only a temporary Secure Enclave P-256 key that passed a token check and an export check
+(see [custody](#how-custody-is-established)). The key signed the phone's client certificate through
+`Certificate.PrivateKey(SecKey)` (swift-certificates 1.21.0), `SecIdentityCreate` paired it with that certificate in
+memory, and Network.framework signed the handshake with it.
 
 This is the device gate of the B4 key custody plan (#436). The [Mac result](macos-enclave-tls.md) is not evidence for
 iOS: before this run, no iPhone had used an enclave key in a TLS identity.
@@ -34,9 +35,10 @@ flowchart LR
 
 `PairingTransportKey.make()` in `ios/Remozio/PairingNetwork.swift` creates the transport key for each Test connection:
 
-- `kSecAttrTokenIDSecureEnclave`, `kSecAttrIsPermanent: false`, access control `.privateKeyUsage` and
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. These are the attributes of the Mac `EnclaveTLSProbe`, without
-  its authentication context: `.privateKeyUsage` has no user-authentication constraint.
+- `kSecAttrTokenIDSecureEnclave` and `kSecAttrIsPermanent: false`, with an access control object made from
+  `.privateKeyUsage` and `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. These are the attributes of the Mac
+  `EnclaveTLSProbe`, without its authentication context: `.privateKeyUsage` has no user-authentication constraint.
+  The key is never stored, and this run does not show whether the requested accessibility has any effect on it.
 - After creation, the key must carry the Secure Enclave token attribute, and `SecKeyCopyExternalRepresentation` must
   refuse to export it. A failed check is a failed key.
 - The simulator branch, which uses a software key, is chosen at compile time. A device build has no code path to a
@@ -53,19 +55,19 @@ flowchart LR
 | Phone | "The computer answered" with a 20-character comparison code |
 | Pairing | None. Test connection sends no proof, and nobody typed the code on the computer, so the peer enrolled nothing |
 
-## Why the code proves enclave custody
+## How custody is established
 
-The peer cannot tell an enclave key from a software key: it sees a P-256 public key and a valid signature. The proof
-comes from the build. In build 4 on a device, the only key that can sign the client certificate is one that passed
-the token and export checks. Any other outcome stops before a connection, so the peer would never have sent a
-transcript.
+Custody is inferred from the installed build and its code path. It was not observed on the device. The peer cannot
+tell an enclave key from a software key: it sees a P-256 public key and a valid signature. In build 4 on a device, the
+only key that can sign the client certificate is one that passed the token and export checks. Any other outcome stops
+before a connection, so the peer would never have sent a transcript.
 
-A run a few minutes earlier came from build 3 by mistake. Build 3 uses a software transport key, and it reached the
-same screen. That run does not count. It shows that the screen alone does not prove custody; the installed build
-number does.
+A run a few minutes earlier came from build 3 (`main` at 1699eb23, before #663) by mistake. Build 3 uses a software
+transport key, and it reached the same screen. That run does not count. It shows that the screen alone says nothing
+about custody; the installed build number decides which code path ran.
 
-The unified log line `transport key: in the Secure Enclave, export refused` (subsystem `dev.remozio.pairing`) was not
-collected. The result rests on the code path above.
+The unified log line `transport key: in the Secure Enclave, export refused` (subsystem `dev.remozio.pairing`) would show
+the checks directly. It was not collected in this run. A repeat should collect it.
 
 ## Not tested
 
@@ -83,6 +85,7 @@ collected. The result rests on the code path above.
    `pair --listen <IPv4>:<port> --no-advertise` with standard input held open, and type nothing.
 3. On the phone, paste the invitation, type the address and tap Test connection.
 
-Pass: the phone shows the comparison code, and the peer printed `Compare on the phone.` On a failure the screen shows
+Pass: the device reports a build that includes #663, the phone shows the comparison code, and the peer printed
+`Compare on the phone.` The log line above is the direct signal of the enclave checks. On a failure the screen shows
 only Failed. The unified log for subsystem `dev.remozio.pairing` names the failed stage and the error code, with no key
 data and no addresses.
