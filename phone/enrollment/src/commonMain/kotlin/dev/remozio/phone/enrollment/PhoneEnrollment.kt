@@ -2,6 +2,7 @@ package dev.remozio.phone.enrollment
 
 import dev.remozio.phone.transport.RelayAccessCredential
 import dev.remozio.phone.transport.RelayEndpoint
+import dev.remozio.phone.transport.p256SpkiPrefix
 import dev.remozio.phone.transport.p256TransportPin
 import dev.remozio.protocol.CborValue
 import dev.remozio.protocol.PairingTranscript
@@ -62,8 +63,7 @@ class StoredPhoneEnrollment(val enrollment: PhoneEnrollment, val phase: Enrollme
 internal fun id(bytes: ByteArray): CborValue.Bytes { require(bytes.size == 16); return CborValue.Bytes(bytes) }
 private fun point(bytes: ByteArray): ByteArray {
     require(bytes.size == 65 && bytes[0] == 4.toByte())
-    val prefix = byteArrayOf(0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86.toByte(),0x48,0xce.toByte(),0x3d,0x02,0x01,0x06,0x08,0x2a,0x86.toByte(),0x48,0xce.toByte(),0x3d,0x03,0x01,0x07,0x03,0x42,0x00)
-    p256TransportPin(prefix + bytes)
+    p256TransportPin(p256SpkiPrefix() + bytes)
     return bytes.copyOf()
 }
 

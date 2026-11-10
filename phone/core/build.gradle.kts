@@ -8,6 +8,7 @@ kotlin { jvmToolchain(21) }
 dependencies {
     implementation(project(":protocol-kotlin"))
     api(project(":phone-pairing"))
+    api(project(":phone-enrollment"))
     testFixturesImplementation(project(":protocol-kotlin"))
     implementation(libs.ktor.websockets)
     implementation(libs.kotlinx.coroutines.core)
@@ -18,6 +19,12 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.serialization.json)
+}
+
+// The enrollment model moved to a multiplatform module for iOS. This module keeps its access to the internal members,
+// and the Android app still has none.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    friendPaths.from(libraries.filter { it.name.startsWith("phone-enrollment") })
 }
 
 val capture = rootProject.layout.projectDirectory.file("android/app/src/debug/res/raw/sample_command.cbor")

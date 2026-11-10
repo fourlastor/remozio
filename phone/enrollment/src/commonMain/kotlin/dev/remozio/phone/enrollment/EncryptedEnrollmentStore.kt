@@ -1,10 +1,6 @@
 package dev.remozio.phone.enrollment
 
 import dev.remozio.protocol.*
-import java.util.Collections
-import javax.crypto.Cipher
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 
 class EnrollmentStoreUnavailable : IllegalStateException("Enrollment store unavailable")
 
@@ -15,30 +11,31 @@ interface EnrollmentStorage : AutoCloseable {
 }
 
 class EnrollmentSnapshot internal constructor(val revision: ULong, entries: List<StoredPhoneEnrollment>) {
-    val entries: List<StoredPhoneEnrollment> = Collections.unmodifiableList(entries.toList())
+    val entries: List<StoredPhoneEnrollment> = frozenList(entries)
     override fun toString() = "EnrollmentSnapshot(redacted)"
 }
 
+/** AES-256-GCM with a fresh 12-byte nonce and a 16-byte tag. Sealed output is the nonce, the ciphertext and the tag. */
+interface EnrollmentAead {
+    fun seal(plaintext: ByteArray, associatedData: ByteArray): ByteArray
+    fun open(sealed: ByteArray, associatedData: ByteArray): ByteArray
+}
+
 /** Platform code supplies a dedicated hardware key. This envelope is local storage, not a wire message. */
-class EnrollmentCipher(private val key: SecretKey, val maximumPlaintextBytes: Int) {
+class EnrollmentCipher(private val aead: EnrollmentAead, val maximumPlaintextBytes: Int) {
     init { require(maximumPlaintextBytes in 1..16_777_216) }
     val maximumCiphertextBytes get() = maximumPlaintextBytes + 36
     private val magic = "RMZENR01".encodeToByteArray()
     private val aad = "dev.remozio.phone.enrollments/v1".encodeToByteArray()
     fun encrypt(bytes: ByteArray): ByteArray {
         require(bytes.size <= maximumPlaintextBytes)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        require(cipher.iv.size == 12 && cipher.parameters.getParameterSpec(GCMParameterSpec::class.java).tLen == 128)
-        cipher.updateAAD(aad)
-        return magic + cipher.iv + cipher.doFinal(bytes)
+        val sealed = aead.seal(bytes, aad)
+        require(sealed.size == bytes.size + 28)
+        return magic + sealed
     }
     fun decrypt(bytes: ByteArray): ByteArray {
         require(bytes.size in 36..maximumCiphertextBytes && bytes.copyOfRange(0, 8).contentEquals(magic))
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, bytes.copyOfRange(8, 20)))
-        cipher.updateAAD(aad)
-        return cipher.doFinal(bytes, 20, bytes.size - 20)
+        return aead.open(bytes.copyOfRange(8, bytes.size), aad)
     }
 }
 
@@ -55,20 +52,26 @@ class EncryptedEnrollmentStore private constructor(
     private var unavailable = false
     private var closed = false
     private val limits = limits(cipher, maximumRecords)
+    private val lock = newEnrollmentLock()
 
-    @Synchronized fun snapshot(): EnrollmentSnapshot { checkAvailable(); return state }
+    private inline fun <T> locked(block: () -> T): T {
+        lock.lock()
+        try { return block() } finally { lock.unlock() }
+    }
+
+    fun snapshot(): EnrollmentSnapshot = locked { checkAvailable(); state }
 
     /** Prepared material cannot authorize a connection or a decision. It survives an interrupted setup. */
-    @Synchronized fun prepare(enrollment: PhoneEnrollment, expectedRevision: ULong): EnrollmentSnapshot {
+    fun prepare(enrollment: PhoneEnrollment, expectedRevision: ULong): EnrollmentSnapshot = locked {
         checkRevision(expectedRevision)
         require(state.entries.none { it.enrollment.recordID == enrollment.recordID })
         require(state.entries.none { it.enrollment.scope == enrollment.scope && it.phase == EnrollmentPhase.PREPARED })
-        return commit(state.entries + StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED))
+        commit(state.entries + StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED))
     }
 
     /** Call after independent Mac authentication and human transcript verification, before sending the biometric proof. */
-    @Synchronized fun preparePairing(enrollment: PhoneEnrollment, transcript: PairingTranscript,
-        expectedRevision: ULong, minimumEnvelopeVersion: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
+    fun preparePairing(enrollment: PhoneEnrollment, transcript: PairingTranscript,
+        expectedRevision: ULong, minimumEnvelopeVersion: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot = locked {
         checkRevision(expectedRevision)
         require(state.entries.none { it.enrollment.recordID == enrollment.recordID })
         require(state.entries.none { it.enrollment.scope == enrollment.scope && it.phase == EnrollmentPhase.PREPARED })
@@ -78,28 +81,28 @@ class EncryptedEnrollmentStore private constructor(
         val row = StoredPhoneEnrollment(enrollment, EnrollmentPhase.PREPARED,
             PreparedPairing(transcript, replacingRecordID, minimumEnvelopeVersion))
         PhonePairingAttempt(transcript, row, previous, minimumEnvelopeVersion)
-        return commit(state.entries + row)
+        commit(state.entries + row)
     }
 
     /** Restores only the transcript retained in the authenticated local archive. */
-    @Synchronized fun recoverPairing(recordID: ByteArray): PhonePairingAttempt {
+    fun recoverPairing(recordID: ByteArray): PhonePairingAttempt = locked {
         checkAvailable()
         val row = state.entries.single { it.enrollment.recordID == id(recordID) }
         val setup = requireNotNull(row.pairing)
         val previous = setup.replacingRecordID?.let { target -> state.entries.single { it.enrollment.recordID == target } }
-        return PhonePairingAttempt(setup.transcript, row, previous, setup.minimumEnvelopeVersion)
+        PhonePairingAttempt(setup.transcript, row, previous, setup.minimumEnvelopeVersion)
     }
 
     /** Internal transition used by the receipt-verifying pairing owner. */
-    @JvmSynthetic
-    @Synchronized internal fun activate(recordID: ByteArray, expectedRevision: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot {
+    @HiddenFromJava
+    internal fun activate(recordID: ByteArray, expectedRevision: ULong, replacingRecordID: ByteArray? = null): EnrollmentSnapshot = locked {
         checkRevision(expectedRevision)
         val identifier = id(recordID)
         val prepared = state.entries.single { it.enrollment.recordID == identifier }
         require(prepared.phase == EnrollmentPhase.PREPARED)
         val active = state.entries.singleOrNull { it.enrollment.scope == prepared.enrollment.scope && it.phase == EnrollmentPhase.ACTIVE }
         require(active?.enrollment?.recordID == replacingRecordID?.let(::id))
-        return commit(state.entries.map {
+        commit(state.entries.map {
             when {
                 it === prepared -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.ACTIVE, it.pairing)
                 it === active -> StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED, it.pairing)
@@ -109,12 +112,12 @@ class EncryptedEnrollmentStore private constructor(
     }
 
     /** Local removal is not Mac-side revocation. The host must close runtime owners and retire unused keys. */
-    @Synchronized fun remove(recordID: ByteArray, expectedRevision: ULong): EnrollmentSnapshot {
+    fun remove(recordID: ByteArray, expectedRevision: ULong): EnrollmentSnapshot = locked {
         checkRevision(expectedRevision)
         val identifier = id(recordID)
         val existing = state.entries.single { it.enrollment.recordID == identifier }
-        if (existing.phase == EnrollmentPhase.REMOVED) return state
-        return commit(state.entries.map { if (it === existing) StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED, it.pairing) else it })
+        if (existing.phase == EnrollmentPhase.REMOVED) return@locked state
+        commit(state.entries.map { if (it === existing) StoredPhoneEnrollment(it.enrollment, EnrollmentPhase.REMOVED, it.pairing) else it })
     }
 
     private fun commit(rows: List<StoredPhoneEnrollment>): EnrollmentSnapshot {
@@ -130,7 +133,7 @@ class EncryptedEnrollmentStore private constructor(
     }
     private fun checkAvailable() { if (closed || unavailable) throw EnrollmentStoreUnavailable() }
     private fun checkRevision(revision: ULong) { checkAvailable(); require(state.revision == revision) }
-    @Synchronized override fun close() { if (!closed) { closed = true; storage.close() } }
+    override fun close() { locked { if (!closed) { closed = true; storage.close() } } }
 
     companion object {
         /** Caller retains storage on failure. Creation never resets an existing archive. */
@@ -185,14 +188,15 @@ class EncryptedEnrollmentStore private constructor(
             val keyIDs = mutableMapOf<CborValue.Bytes, String>()
             val materials = mutableMapOf<CborValue.Bytes, Pair<Pair<CborValue.Bytes, CborValue.Bytes>, EnrollmentKeyRole>>()
             for (row in rows) for (key in row.enrollment.keys) {
-                val prior = aliases.putIfAbsent(key.alias, row.enrollment.scope to key)
+                val prior = aliases.firstWriter(key.alias, row.enrollment.scope to key)
                 require(prior == null || (prior.first == row.enrollment.scope && prior.second.role == key.role && prior.second.keyID == key.keyID && prior.second.publicKey == key.publicKey))
-                val priorID = keyIDs.putIfAbsent(key.keyID, key.alias)
+                val priorID = keyIDs.firstWriter(key.keyID, key.alias)
                 require(priorID == null || priorID == key.alias)
                 val owner = row.enrollment.scope to key.role
-                val priorMaterial = materials.putIfAbsent(CborValue.Bytes(key.pointBytes()), owner)
+                val priorMaterial = materials.firstWriter(CborValue.Bytes(key.pointBytes()), owner)
                 require(priorMaterial == null || priorMaterial == owner)
             }
         }
+        private fun <K, V : Any> MutableMap<K, V>.firstWriter(key: K, value: V): V? = this[key].also { if (it == null) this[key] = value }
     }
 }

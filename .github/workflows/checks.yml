@@ -388,7 +388,7 @@ jobs:
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
       - name: Kotlin tests on the iOS simulator
-        run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
+        run: ./gradlew :protocol-kotlin:iosSimulatorArm64Test :phone-pairing:iosSimulatorArm64Test :phone-enrollment:iosSimulatorArm64Test :phone-ui:iosSimulatorArm64Test
       - name: Build the iOS app for the simulator
         env:
           REMOZIO_IOS_DERIVED_DATA: ${{ runner.temp }}/remozio-ios
@@ -437,7 +437,7 @@ jobs:
             ~/.gradle/caches/modules-2
           key: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'gradle/libs.versions.toml', 'gradle.properties', '**/*.gradle.kts') }}
           restore-keys: gradle-downloads-v1-${{ github.job }}-${{ runner.os }}-
-      - run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
+      - run: ./gradlew :protocol-kotlin:jvmTest :phone-pairing:jvmTest :phone-enrollment:jvmTest :phone-core:test :phone-ui:jvmTest :dev-invitation:test
       - name: Save Gradle downloads
         # Pull requests only restore, so a pull request cannot change the entries that main and other pull requests read.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.gradle-cache.outputs.cache-hit != 'true'

@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-pairing:jvmTest", ":phone-core:test", ":phone-ui:jvmTest", ":dev-invitation:test"]
+COMMON_TASKS = [":protocol-kotlin:jvmTest", ":phone-pairing:jvmTest", ":phone-enrollment:jvmTest", ":phone-core:test", ":phone-ui:jvmTest", ":dev-invitation:test"]
 ANDROID_TASKS = [":android-app:testDebugUnitTest", ":android-app:assembleDebug", ":android-app:lintDebug"]
 
 
@@ -48,7 +48,7 @@ class LocalChecksTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(calls, [["./scripts/check.sh"],
                                  ["./gradlew", *COMMON_TASKS, ":phone-core:approvalFlowTest",
-                                  ":protocol-kotlin:iosSimulatorArm64Test", ":phone-pairing:iosSimulatorArm64Test",
+                                  ":protocol-kotlin:iosSimulatorArm64Test", ":phone-pairing:iosSimulatorArm64Test", ":phone-enrollment:iosSimulatorArm64Test",
                                   ":phone-ui:iosSimulatorArm64Test",
                                   *ANDROID_TASKS],
                                  ["./scripts/build-ios-app.sh"], ["./scripts/test-ios-app.sh"]])
