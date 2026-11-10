@@ -21,10 +21,15 @@ final class NativePairingKeys: NSObject, PlatformPairingKeys {
 
     init(endpoint: NWEndpoint? = nil, makeTransportKey: () throws -> SecKey = PairingTransportKey.make) {
         self.endpoint = endpoint
-        let made = Result(catching: makeTransportKey)
-        transport = made
-        // With no key, this point only fills the proposal object: the transport stops before it connects.
-        transportPoint = (try? PairingTransportKey.point(of: made.get())) ?? P256.Signing.PrivateKey().publicKey.x963Representation
+        do {
+            let key = try makeTransportKey()
+            transportPoint = try PairingTransportKey.point(of: key)
+            transport = .success(key)
+        } catch {
+            // This point only fills the proposal object. The transport stops before it opens, so it never leaves the phone.
+            transportPoint = P256.Signing.PrivateKey().publicKey.x963Representation
+            transport = .failure(error)
+        }
     }
 
     var transportPublicKey: KotlinByteArray { PairingBytesKt.pairingBytes(data: transportPoint) }
@@ -324,6 +329,7 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
         if let error { pairingLog.notice("transport closed: \(error, privacy: .public)") }
         browser?.cancel(); browser = nil
         connection?.cancel(); connection = nil
+        clientIdentity = nil
         events?.closed(error: error)
         events = nil
     }

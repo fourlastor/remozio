@@ -167,7 +167,17 @@ final class PairingNetworkTests: XCTestCase {
     }
 
     func testNoKeyStopsBeforeDiscovery() {
-        let keys = NativePairingKeys(makeTransportKey: { throw PairingTransportKey.Failure.refused })
+        assertStopsBeforeDiscovery(NativePairingKeys(makeTransportKey: { throw PairingTransportKey.Failure.refused }))
+    }
+
+    func testAKeyWithNoP256PointStopsBeforeDiscovery() throws {
+        let attributes: [CFString: Any] = [kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits: 384]
+        let wrong = try XCTUnwrap(SecKeyCreateWithData(P384.Signing.PrivateKey().x963Representation as CFData, attributes as CFDictionary, nil))
+        assertStopsBeforeDiscovery(NativePairingKeys(makeTransportKey: { wrong }))
+    }
+
+    private func assertStopsBeforeDiscovery(_ keys: NativePairingKeys) {
         let events = Recorder(self, expectOpen: false)
         keys.openTransport(macID: Self.bytes(16), accountID: Self.bytes(16),
             pin: PairingBytesKt.pairingBytes(data: Self.prefix + P256.Signing.PrivateKey().publicKey.x963Representation),
