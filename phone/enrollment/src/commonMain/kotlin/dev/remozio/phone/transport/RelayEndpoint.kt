@@ -3,7 +3,7 @@ package dev.remozio.phone.transport
 /** An endpoint from trusted enrollment storage, never a push payload or discovery assertion. */
 data class RelayEndpoint(val host: String, val port: Int = 443, val path: String = "/remozio/approval") {
     init {
-        require(host.length in 1..253 && host == host.lowercase(java.util.Locale.ROOT))
+        require(host.length in 1..253 && host == host.lowercase())
         require(host.split('.').all { it.length in 1..63 && Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?").matches(it) })
         require(port in 1..65_535)
         require(path.length in 1..512 && path.startsWith('/') && Regex("/[A-Za-z0-9/._~-]*").matches(path))

@@ -7,7 +7,7 @@ import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECParameterSpec
 import java.security.spec.X509EncodedKeySpec
 
-internal fun p256TransportPin(encoded: ByteArray): ByteArray {
+internal actual fun p256TransportPin(encoded: ByteArray): ByteArray {
     require(encoded.size in 1..256) { "Invalid transport pin" }
     val copy = encoded.copyOf()
     val key = KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(copy)) as? ECPublicKey
