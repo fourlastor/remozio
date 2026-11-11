@@ -96,6 +96,18 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(ordinary, path: path).mode, .ordinary)
         XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(completion, path: path))
         XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(startup, path: path + ".other"))
+
+        let retained = try RetainedSetupConsumerHostArchiveTests.Fixture()
+        for version in [UInt64(3), UInt64(4)] {
+            let bytes = try retained.bytes(stage: version, role: .gateway)
+            let host = try GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(bytes)
+            let path = try host.gatewayConfigurationPath
+            let ordinary = try retained.f.host(.gateway, runtime: retained.reference)
+            XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(ordinary.encoded, path: path).mode, .ordinary)
+            XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeGatewayStartup(bytes, path: path)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
     }
 
     func testTransportHealthReaderPreservesTheStartupHostAndRejectsOrdinaryAndCompletion() throws {
@@ -122,6 +134,23 @@ final class MachineUpdateConsumerHealthStartupTests: XCTestCase {
         XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(ordinary, path: path).mode, .ordinary)
         XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(completion, path: path))
         XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(startup, path: path + ".other"))
+
+        let retained = try RetainedSetupConsumerHostArchiveTests.Fixture(), source = retained.f.f.plan.transport
+        for version in [UInt64(3), UInt64(4)] {
+            let host = try GatewaySettingsConsumerHostConfiguration.decodeForReleaseArchive(retained.bytes(stage: version))
+            let encoded = try TransportPairingStartupConfiguration(transport: source.transport, control: source.control,
+                wake: source.wake, relayPort: source.relayPort, settingsHost: host).canonicalBytes
+            let bootstrap = try TransportSettingsConsumerBootstrap(base: .decodeForReleaseArchive(encoded))
+            let path = try bootstrap.configurationPath
+            XCTAssertNoThrow(try bootstrap.validatePath(path))
+            let ordinaryHost = try retained.f.host(.transport, runtime: retained.reference)
+            let ordinary = try TransportPairingStartupConfiguration(transport: source.transport, control: source.control,
+                wake: source.wake, relayPort: source.relayPort, settingsHost: ordinaryHost)
+            XCTAssertEqual(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(ordinary.canonicalBytes, path: path).mode, .ordinary)
+            XCTAssertThrowsError(try GatewaySettingsConsumerNativeScope.decodeTransportStartup(encoded, path: path)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
     }
 
     func testHealthPeerPolicyUsesTheSuccessorReleaseAndRetainedConsumerAccount() throws {
