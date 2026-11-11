@@ -106,6 +106,18 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
             host: selected, transport: transport, gateway: gateway, clients: clients)
     }
 
+    /// Checks completed archive values only. It grants no current source, publication, or startup authority.
+    static func requireRetainedCompletionValues(archive: RuntimeRetainedSetupCompletionArchive,
+        host: InstalledAuthorityCommandConfiguration, transport: TransportPairingStartupConfiguration,
+        gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients) throws {
+        guard gateway.retainedSetupCompletionBinding == archive.binding, gateway.policyStage == .completion,
+              transport.settingsHost?.retainedSetupCompletionBinding == archive.binding else { throw RuntimeActivationError.changedScope }
+        try archive.binding.requireHistoricalRuntime(gateway.runtime)
+        try archive.binding.requireCompletionPolicy(host.codePolicy)
+        try validateValues(host: host, transport: transport, gateway: gateway, clients: clients,
+            releaseDigest: archive.binding.startupBinding.installedReleaseDigest, policy: host.codePolicy)
+    }
+
     private static func code(_ role: AuthorityCodeRole, _ policy: AuthorityCodePolicy) throws -> AuthorityCodeEntry {
         guard let code = policy.entries.first(where: { $0.role == role && $0.active }) else { throw RuntimeActivationError.changedScope }
         return code
