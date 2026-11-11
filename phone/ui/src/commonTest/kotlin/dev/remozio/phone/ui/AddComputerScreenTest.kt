@@ -1,6 +1,8 @@
 package dev.remozio.phone.ui
 
 import androidx.compose.ui.test.*
+// The v2 runner queues coroutines on a StandardTestDispatcher, as production does, instead of running them at once.
+import androidx.compose.ui.test.v2.runComposeUiTest
 import dev.remozio.pairing.PairingTransport
 import dev.remozio.pairing.PlatformPairingKeys
 import kotlin.test.*
