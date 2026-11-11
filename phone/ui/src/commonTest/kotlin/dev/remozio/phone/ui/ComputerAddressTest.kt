@@ -19,8 +19,25 @@ class ComputerAddressTest {
 
     @Test fun rejectsMalformedIPv6() {
         for (host in listOf(":::", "::::", "1::2::3", "1:2", "12345::1", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7:8::",
-            ":1::", "1:2:3:4:5:6:7:192.0.2.1", "::192.0.2.256", "::1.2.3", "g::1", "::1%en0"))
+            ":1::", "1:2:3:4:5:6:7:192.0.2.1", "::192.0.2.256", "::1.2.3", "g::1", "::1%en0",
+            // A dotted group is only the last 32 bits, so nothing may follow it, not even `::`.
+            "192.0.2.1::", "1:2:192.0.2.1::", "::ffff:192.0.2.01"))
             assertNull(ComputerAddress.parse("[$host]:7443"), host)
+    }
+
+    @Test fun readsZeroOctetsWithoutLeadingZeros(): Unit =
+        assertEquals(ComputerAddress("10.0.0.1", 7443), ComputerAddress.parse("10.0.0.1:7443"))
+
+    @Test fun rejectsANumericHostNameThatIsNotADottedIPv4Address() {
+        // Some resolvers read these as IPv4 numbers (1234 as 0.0.4.210, 010 as octal), so they never pass as names.
+        for (host in listOf("1234", "1.2.3", "1.2.3.4.5", "999.1.1.1", "256.0.0.1", "010.0.0.1", "1.2.3.04", "host.123",
+            "0x7f000001", "0X7F.0.0.1", "127.0.0.0x1"))
+            assertNull(ComputerAddress.parse("$host:7443"), host)
+    }
+
+    @Test fun keepsHostNamesWithDigits() {
+        for (host in listOf("123.example", "host.0x", "host.0xg1", "0x7f.example"))
+            assertEquals(ComputerAddress(host, 7443), ComputerAddress.parse("$host:7443"), host)
     }
 
     @Test fun rejectsNonAsciiDigitsInThePortWithoutThrowing() {
@@ -30,7 +47,9 @@ class ComputerAddressTest {
 
     @Test fun theRouteFollowsTheField() {
         assertEquals(ConnectionRoute.Discover, ConnectionRoute.of(""))
-        assertEquals(ConnectionRoute.Discover, ConnectionRoute.of("   "))
+        // Only an empty field searches the network. Typed spaces are not an address, so the test cannot start.
+        assertEquals(ConnectionRoute.Invalid, ConnectionRoute.of("   "))
+        assertEquals(ConnectionRoute.Direct(ComputerAddress("192.0.2.10", 7443)), ConnectionRoute.of(" 192.0.2.10:7443 "))
         assertEquals(ConnectionRoute.Direct(ComputerAddress("192.0.2.10", 7443)), ConnectionRoute.of("192.0.2.10:7443"))
         assertEquals(ConnectionRoute.Invalid, ConnectionRoute.of("192.0.2.10"))
     }
