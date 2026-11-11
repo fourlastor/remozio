@@ -88,9 +88,12 @@ the checks directly. It was not collected in this run. A repeat should collect i
 Pass: the device reports a build that includes #663, the phone shows the comparison code, and the peer printed
 `Compare on the phone.` The log line above is the direct signal of the enclave checks. On a failure the screen shows
 only "Could not reach the computer." The unified log for subsystem `dev.remozio.pairing` names the failed stage and the error code, with no key
-data. A network failure also logs the system's error text as public. Every such error is an `NWError`, whose cases
-carry only a code (POSIX, DNS or TLS), so the text is the code and a fixed message. A Network framework probe on a
-Mac on 2026-11-11 printed POSIX, DNS and TLS errors built in code (for example `-9836: bad protocol version`) and the
-errors of real connections: `POSIXErrorCode(rawValue: 61): Connection refused` to a closed local port,
+data. A network failure also logs the system's error text as public. Every error text that reaches that line comes
+from a Network framework callback (connection, browser, send or receive) and is an `NWError`; the other reasons are
+fixed strings. `NWError` cases hold only a code (POSIX, DNS or TLS) and no endpoint, so the text is the code and the
+fixed message for it. A Network framework probe on a Mac on 2026-11-11 printed POSIX, DNS and TLS errors built in code
+(for example `-9836: bad protocol version`) and the errors of real connections:
+`POSIXErrorCode(rawValue: 61): Connection refused` to a closed local port,
 `POSIXErrorCode(rawValue: 50): Network is down` to a documentation IPv6 address, and `-65554: NoSuchRecord` for an
-unknown host name. No output held an address. The iPhone log itself was not collected.
+unknown host name. No output held an address. The probe did not cause a TLS name mismatch, which also arrives as a TLS
+code. The iPhone log itself was not collected.
