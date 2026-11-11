@@ -3318,6 +3318,44 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertEqual(try record.committedPolicy?.snapshot(), completionPolicy)
             XCTAssertEqual(record.committedCheckpoint, try completionCheckpoint.bytes)
 
+            let completionBinding = try RuntimeRetainedSetupCompletionBinding.decode(json([
+                "formatVersion": 1, "startupBinding": binding,
+                "recordedCompletionDigest": try digest(record.encoded), "activationPlanDigest": syntheticDigest,
+                "recordedInventoryDigest": syntheticDigest, "completionPolicyRevision": completionPolicy.revision.uuidString,
+                "completionPolicySnapshotDigest": try digest(completionPolicy.storedBytes),
+                "completionCheckpointDigest": try digest(completionCheckpoint.bytes),
+            ]))
+            let completionBoundary = AuthorityJournal.MachineUpdatePolicyBoundary(macID: account.macID,
+                accountID: account.accountID, policy: completionPolicy, checkpoint: completionCheckpoint)
+            XCTAssertNoThrow(try completionBinding.requireRecordedBoundary(completionBoundary))
+            XCTAssertNotEqual(try startupPolicy.policy.bytes, try completionPolicy.policy.bytes)
+            XCTAssertNoThrow(try completionBinding.requireCompletionPolicy(completionPolicy.policy))
+            XCTAssertThrowsError(try completionBinding.requireCompletionPolicy(startupPolicy.policy)) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+            }
+            let otherRevision = AuthorityCodePolicySnapshot(revision: UUID(), policy: completionPolicy.policy,
+                roleRevisions: completionPolicy.roleRevisions)
+            XCTAssertEqual(try otherRevision.storedBytes, try completionPolicy.storedBytes)
+            let otherRoleRevisions = Dictionary(uniqueKeysWithValues: completionPolicy.roleRevisions.keys.map { ($0, UUID()) })
+            let otherSnapshot = AuthorityCodePolicySnapshot(revision: completionPolicy.revision,
+                policy: completionPolicy.policy, roleRevisions: otherRoleRevisions)
+            XCTAssertNotEqual(try otherSnapshot.storedBytes, try completionPolicy.storedBytes)
+            for wrong in [
+                AuthorityJournal.MachineUpdatePolicyBoundary(macID: account.macID, accountID: account.accountID,
+                    policy: otherRevision, checkpoint: completionCheckpoint),
+                .init(macID: account.macID, accountID: account.accountID, policy: otherSnapshot, checkpoint: completionCheckpoint),
+                .init(macID: account.macID, accountID: account.accountID, policy: startupPolicy, checkpoint: completionCheckpoint),
+                .init(macID: account.macID, accountID: account.accountID, policy: completionPolicy, checkpoint: checkpoint),
+                .init(macID: Data(repeating: 0, count: 16), accountID: account.accountID,
+                    policy: completionPolicy, checkpoint: completionCheckpoint),
+                .init(macID: account.macID, accountID: Data(repeating: 0, count: 16),
+                    policy: completionPolicy, checkpoint: completionCheckpoint),
+            ] {
+                XCTAssertThrowsError(try completionBinding.requireRecordedBoundary(wrong)) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
+                }
+            }
+
             // Use the same real boundary at all three phases to exercise a no-op completion receipt.
             let unchangedPolicy = try completionPolicy.policy.bytes
             let unchangedCheckpoint = try completionCheckpoint.bytes
