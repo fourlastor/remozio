@@ -34,7 +34,7 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
          enableSecondReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
@@ -83,6 +83,7 @@ private final class MachineReplacementFixture {
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
+            if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
@@ -1637,7 +1638,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
         enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
@@ -1645,7 +1646,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats,
             enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
@@ -2265,7 +2266,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -2273,7 +2274,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats,
             enableSecondReadiness: enableSecondReadiness, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
@@ -3225,6 +3226,286 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try fixture.files.reopen()
             XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: candidate)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    /// Links owned machine rows to decoded archive operands. It proves no live publication or startup.
+    private func withPromotionReaderFixture(_ body: (CompletionFixture, AccountPreparationIntent,
+        MachineUpdateRetainedSetupCompletionIntentRecord, MachineUpdateRetainedSetupPromotionIntentRecord) throws -> Void) throws {
+        var retained: AccountPreparationIntent?
+        try withFinishingFixture(stableFormats: true, policyReaderFormats: true, completionReaderFormats: true, promotionReaderFormats: true,
+            beforeActivation: { retained = try self.prepareSecondForeground($0).account }) { fixture, finishing, _ in
+            let account = try XCTUnwrap(retained)
+            let candidate = fixture.candidate
+            let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
+            let loan = try stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try fixture.machine.withCurrentMachineUpdateReadiness(candidate: candidate, directory: fixture.directory, loan: loan) {
+                try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: candidate)
+            }
+            _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
+                directory: fixture.directory, loan: loan) { _, _ in }
+            XCTAssertNil(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID, ownerUID: owner.uid, candidate: candidate))
+            let reader = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
+            defer { try? reader.close() }
+            let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
+                journal: reader, candidate: candidate)
+            let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord(source: source)
+            try reader.close()
+
+            let storage = try fixture.policyStorage(readOnly: false, accountID: account.accountID)
+            defer { try? storage.close() }
+            let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+            let startupPolicy = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
+                try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
+            }
+            let checkpoint = try storage.continuity.read().committed
+            let completionPolicy = try commits.write(epoch: checkpoint.journalEpoch) {
+                try $0.installCodePolicy(source.policy.completionPolicy, expectedRevision: startupPolicy.revision)
+            }
+            let completionCheckpoint = try storage.continuity.read().committed
+            XCTAssertNotEqual(completionPolicy.revision, startupPolicy.revision)
+            XCTAssertEqual(completionCheckpoint.generation, checkpoint.generation + 1)
+            XCTAssertEqual(completionCheckpoint.authorityGeneration, checkpoint.currentAuthorityGeneration + 1)
+            for (before, after) in zip(startupPolicy.policy.entries, completionPolicy.policy.entries) {
+                XCTAssertEqual(before == after, startupPolicy.roleRevisions[before.role] == completionPolicy.roleRevisions[after.role])
+            }
+            try storage.close()
+            func json(_ fields: [String: Any]) throws -> Data {
+                try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes])
+            }
+            var startup = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.encoded) as? [String: Any])
+            startup["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.recorded.rawValue
+            startup["committedPolicy"] = [
+                "revision": startupPolicy.revision.uuidString, "bytes": try startupPolicy.storedBytes.base64EncodedString()
+            ]
+            startup["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
+            let startupRecord = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(json(startup))
+            func digest(_ bytes: Data) -> String { MachineUpdateActivationRecord.digest(bytes).base64EncodedString() }
+            let syntheticDigest = digest(Data("archive fixture".utf8))
+            // The row reader binds the two archives. It does not open an activation plan or prove native startup.
+            var binding: [String: Any] = [
+                "formatVersion": 1, "macID": account.macID.base64EncodedString(), "installationID": account.installationID.base64EncodedString(),
+                "accountID": account.accountID.base64EncodedString(), "ownerUID": owner.uid, "activationAttempt": finishing.activation.attemptID.uuidString,
+                "initializationDigest": startupRecord.initializationDigest.base64EncodedString(),
+                "provisioningReleaseDigest": account.releaseDigest.base64EncodedString(),
+                "installedReleaseDigest": startupRecord.installedReleaseDigest.base64EncodedString(),
+                "retainedSourceDigest": startupRecord.sourceDigest.base64EncodedString(), "policyIntentDigest": try digest(startupRecord.encoded),
+                "sourcePolicyDigest": try digest(source.policy.source.storedBytes), "sourceCheckpointDigest": digest(startupRecord.sourceCheckpoint),
+                "startupPolicyDigest": digest(startupRecord.startupPolicy), "startupPolicySnapshotDigest": try digest(startupPolicy.storedBytes),
+                "startupCheckpointDigest": try digest(checkpoint.bytes), "completionPolicyDigest": digest(startupRecord.completionPolicy),
+            ]
+            for name in ["candidateDigest", "admissionDigest", "updateID", "stableSealDigest", "installedEpochDigest", "sealedInventoryDigest",
+                         "sourceAccountDigest", "preparationDigest", "provisioningInventoryDigest", "previousInstalledReleaseDigest", "runtimeReferenceDigest"] {
+                binding[name] = syntheticDigest
+            }
+            let reference = try XCTUnwrap(source.runtime.state.reference)
+            binding["runtimeReferenceDigest"] = try digest(reference.encoded)
+            let historical = try source.runtime.setup.source.provisioningInventory(accountID: account.accountID,
+                ownerUID: owner.uid, releaseDigest: account.releaseDigest)
+            let initialization = try XCTUnwrap(source.runtime.setup.account?.initialization)
+            let bundle = try RuntimeConfigurationBundle.initial(account: account, initialization: initialization,
+                reference: reference, inventory: historical)
+            let installedInventory = source.runtime.setup.source.actual.inventory
+            let limits = try CBORLimits(maxBytes: 4_194_304, maxDepth: 4, maxItems: 4096)
+            func encode(_ fields: [UInt64: CBORValue]) throws -> Data {
+                try DeterministicCBOR.encode(.map(fields), limits: limits)
+            }
+            func host(_ policy: AuthorityCodePolicy) throws -> InstalledAuthorityCommandConfiguration {
+                let label = bundle.paths.namespace + ".authority"
+                return try .init(machineDirectory: MachineBootstrap.machineDirectory,
+                    installationID: account.installationID, releaseDigest: installedInventory.releaseDigest,
+                    codePolicy: policy, command: bundle.command, label: label, plistName: label + ".plist",
+                    jobPlacement: .systemAccount, gatewaySettingsControlEnabled: true)
+            }
+            func consumer(_ role: GatewaySettingsConsumerRole, policy: AuthorityCodePolicy,
+                          binding: Data, completed: Bool) throws -> GatewaySettingsConsumerHostConfiguration {
+                let base = try GatewaySettingsConsumerHostConfiguration(role: role, runtime: reference,
+                    bundlePath: installedInventory.bundlePath, codePolicy: policy)
+                guard case .map(var fields) = try DeterministicCBOR.decode(base.encoded, limits: limits) else {
+                    throw RuntimeActivationError.invalidPlan
+                }
+                fields[0] = .unsigned(completed ? 4 : 3); fields[6] = .bytes(binding)
+                fields[7] = .unsigned(completed ? RuntimeReleasePolicyStage.completion.rawValue : RuntimeReleasePolicyStage.startup.rawValue)
+                return try .decodeForReleaseArchive(encode(fields))
+            }
+            func transport(_ settings: GatewaySettingsConsumerHostConfiguration) throws -> TransportPairingStartupConfiguration {
+                try .init(transport: bundle.transport.transport, control: bundle.transport.control,
+                    wake: bundle.transport.wake, relayPort: bundle.transport.relayPort, settingsHost: settings)
+            }
+            let startupBinding = try json(binding)
+            let startupHost = try host(startupPolicy.policy)
+            let startupGateway = try consumer(.gateway, policy: startupPolicy.policy, binding: startupBinding, completed: false)
+            let startupTransport = try transport(consumer(.transport, policy: startupPolicy.policy, binding: startupBinding, completed: false))
+            let activation = try encode([0: .unsigned(6), 1: .bytes(reference.encoded), 2: .text(installedInventory.bundlePath),
+                3: .bytes(startupHost.canonicalBytes), 4: .bytes(startupTransport.canonicalBytes), 5: .bytes(startupGateway.encoded),
+                6: .null, 7: .unsigned(1), 8: .null, 9: .bytes(startupBinding), 10: .bytes(installedInventory.canonicalBytes)])
+            _ = try RuntimeRetainedSetupActivationArchive.decode(activation)
+            let enrolled = try InstallationAccount(accountID: account.accountID, ownerUID: account.ownerUID)
+            let service = try InstallationService(role: .authority, kind: .daemon, domainUID: nil, executionUID: 0,
+                label: startupHost.label, plistName: startupHost.plistName, accountID: account.accountID)
+            let recordedInventory = try InstallationInventory(macID: installedInventory.macID,
+                installationID: installedInventory.installationID, revision: installedInventory.revision,
+                bundlePath: installedInventory.bundlePath, releaseDigest: installedInventory.releaseDigest,
+                accounts: installedInventory.accounts + [enrolled], services: installedInventory.services + [service], formatVersion: 2)
+            let completionFields: [String: Any] = [
+                "formatVersion": 1, "id": UUID().uuidString, "revision": UUID().uuidString, "phase": 3,
+                "startupIntent": startup, "binding": binding, "activationPlanDigest": digest(activation),
+                "inventoryDigest": digest(recordedInventory.canonicalBytes),
+                "committedPolicy": ["revision": completionPolicy.revision.uuidString, "bytes": try completionPolicy.storedBytes.base64EncodedString()],
+                "committedCheckpoint": try completionCheckpoint.bytes.base64EncodedString(),
+            ]
+            let completion = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(json(completionFields))
+            let completedBinding = try json([
+                "formatVersion": 1, "startupBinding": binding, "recordedCompletionDigest": try digest(completion.encoded),
+                "activationPlanDigest": digest(activation), "recordedInventoryDigest": digest(recordedInventory.canonicalBytes),
+                "completionPolicyRevision": completionPolicy.revision.uuidString,
+                "completionPolicySnapshotDigest": try digest(completionPolicy.storedBytes),
+                "completionCheckpointDigest": try digest(completionCheckpoint.bytes),
+            ])
+            let archive = try encode([0: .unsigned(1), 1: .text("retained-setup-completion-archive"),
+                2: .bytes(completedBinding), 3: .bytes(activation), 4: .bytes(completion.encoded),
+                5: .bytes(recordedInventory.canonicalBytes)])
+            let completedHost = try host(completionPolicy.policy)
+            let completedGateway = try consumer(.gateway, policy: completionPolicy.policy, binding: completedBinding, completed: true)
+            let completedTransport = try transport(consumer(.transport, policy: completionPolicy.policy, binding: completedBinding, completed: true))
+            let clients = RuntimeActivationClients(presence: bundle.presenceClient, pairing: bundle.pairingClient, frontend: bundle.frontendClient)
+            let sourceDigest = try RuntimeReleaseConfigurationSource(host: startupHost, transport: startupTransport,
+                gateway: startupGateway, clients: clients).digest
+            let configuration = try encode([0: .unsigned(1), 1: .text("runtime.retained-setup-completion-configuration"),
+                2: .bytes(archive), 3: .bytes(sourceDigest), 4: .bytes(completedHost.canonicalBytes),
+                5: .bytes(completedTransport.canonicalBytes), 6: .bytes(completedGateway.encoded),
+                7: .bytes(clients.presence.canonicalBytes), 8: .bytes(clients.pairing.canonicalBytes), 9: .bytes(clients.frontend.canonicalBytes)])
+            let publication = try encode([0: .unsigned(1), 1: .text("runtime.retained-setup-completion-publication"),
+                2: .bytes(configuration), 3: .bytes(clients.presence.canonicalBytes),
+                4: .bytes(clients.pairing.canonicalBytes), 5: .bytes(clients.frontend.canonicalBytes)])
+            let id = UUID(), revision = UUID()
+            func bytes(_ id: UUID) -> Data { var value = id.uuid; return withUnsafeBytes(of: &value) { Data($0) } }
+            let promotion = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(encode([
+                0: .unsigned(1), 1: .text(MachineUpdateRetainedSetupPromotionIntentRecord.formatName),
+                2: .bytes(bytes(id)), 3: .bytes(bytes(revision)), 4: .unsigned(1), 5: .bytes(publication)]))
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            func row(_ id: UUID, _ revision: UUID, _ data: Data) -> String {
+                "(X'\(hex(account.accountID))',X'\(hex(bytes(id)))',X'\(hex(bytes(revision)))',X'\(hex(data))')"
+            }
+            try fixture.machine.close()
+            try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
+            try fixture.files.sql(MachineUpdateRetainedSetupCompletionStorage.createSQL)
+            try fixture.files.sql(MachineUpdateRetainedSetupPromotionStorage.createSQL)
+            try fixture.files.sql("PRAGMA user_version=27")
+            try fixture.files.sql("INSERT INTO retained_setup_policy_intents_v1 VALUES \(try row(startupRecord.id, startupRecord.revision, startupRecord.encoded))")
+            try fixture.files.sql("INSERT INTO retained_setup_completion_intents_v1 VALUES \(try row(completion.id, completion.revision, completion.encoded))")
+            try fixture.files.sql("INSERT INTO retained_setup_promotion_intents_v1 VALUES \(try row(promotion.id, promotion.revision, promotion.encoded))")
+            try fixture.files.reopen()
+            try body(fixture, account, completion, promotion)
+        }
+    }
+
+    func testRetainedSetupPromotionReadsSchema27AndRejectsOrdinaryWrites() throws {
+        try withPromotionReaderFixture { fixture, account, completion, promotion in
+            let recordBytes = try promotion.encoded
+            // This fixture fits the ordinary cell bound. It does not prove acceptance above that bound.
+            XCTAssertLessThanOrEqual(recordBytes.count, 278_528,
+                "The fixture exceeds the ordinary cell bound. Update its declared coverage before accepting this test.")
+            let snapshot = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            XCTAssertEqual(snapshot.schemaVersion, 27)
+            XCTAssertEqual(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate), promotion)
+            XCTAssertEqual(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate), completion)
+            XCTAssertNil(try fixture.machine.retainedSetupPromotionIntent(accountID: Data(repeating: 0, count: 16),
+                ownerUID: account.ownerUID, candidate: fixture.candidate))
+            XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID + 1, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try fixture.machine.writeInventory(snapshot.inventory, expectedRevision: snapshot.inventory.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            let table = MachineUpdateRetainedSetupPromotionStorage.tableName
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM \(table)")
+            try fixture.files.reopen()
+            XCTAssertNil(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate))
+            XCTAssertNotEqual(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).currentRowsDigest,
+                snapshot.currentRowsDigest)
+        }
+    }
+
+    func testRetainedSetupPromotionRequiresExactColumnsAndTheActualCompletionRow() throws {
+        try withPromotionReaderFixture { fixture, account, completion, promotion in
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            let accountHex = hex(account.accountID)
+            let id = promotion.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = promotion.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let record = try hex(promotion.encoded)
+            func reject(_ update: String) throws {
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE retained_setup_promotion_intents_v1 SET \(update)")
+                try fixture.files.reopen()
+                XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
+                    ownerUID: account.ownerUID, candidate: fixture.candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE retained_setup_promotion_intents_v1 SET account=X'\(accountHex)',id=X'\(id)',revision=X'\(revision)',record=X'\(record)'")
+            }
+            try reject("account=zeroblob(16)")
+            try reject("id=zeroblob(16)")
+            try reject("revision=zeroblob(16)")
+            try reject("record=X'01'")
+            try reject("record=zeroblob(\(MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes))")
+            var different = try XCTUnwrap(JSONSerialization.jsonObject(with: completion.encoded) as? [String: Any])
+            let differentRevision = UUID()
+            different["revision"] = differentRevision.uuidString
+            let differentBytes = try JSONSerialization.data(withJSONObject: different, options: [.sortedKeys, .withoutEscapingSlashes])
+            let decoded = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(differentBytes)
+            XCTAssertNotEqual(decoded, completion)
+            let differentID = differentRevision.uuidString.replacingOccurrences(of: "-", with: "")
+            try fixture.files.sql("UPDATE retained_setup_completion_intents_v1 SET revision=X'\(differentID)',record=X'\(hex(differentBytes))'")
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM retained_setup_completion_intents_v1")
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedSetupPromotionRejectsAValidForeignPublication() throws {
+        try withPromotionReaderFixture { fixture, account, _, _ in
+            let foreign = try RetainedSetupPromotionArchiveTests.Fixture()
+            let record = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(foreign.record())
+            let binding = try record.publication().configuration.archive.binding.startupBinding
+            XCTAssertNotEqual(binding.accountID, account.accountID)
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM retained_setup_promotion_intents_v1")
+            let id = record.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = record.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            try fixture.files.sql("INSERT INTO retained_setup_promotion_intents_v1 VALUES(X'\(hex(binding.accountID))',X'\(id)',X'\(revision)',X'\(try hex(record.encoded))')")
+            try fixture.files.reopen()
+            // The foreign account and missing completion row both reject this valid archive.
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedSetupPromotionRequiresItsExactTableDeclaration() throws {
+        try withPromotionReaderFixture { fixture, _, _, _ in
+            try fixture.machine.close()
+            try fixture.files.sql("ALTER TABLE retained_setup_promotion_intents_v1 RENAME TO replaced_promotion")
+            try fixture.files.sql("CREATE TABLE retained_setup_promotion_intents_v1(account BLOB PRIMARY KEY,id BLOB,revision BLOB,record BLOB) STRICT")
+            try fixture.files.sql("DROP TABLE replaced_promotion")
+            XCTAssertThrowsError(try fixture.files.reopen()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
             }
         }
     }

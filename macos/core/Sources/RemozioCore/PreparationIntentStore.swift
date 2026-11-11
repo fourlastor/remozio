@@ -12,7 +12,7 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -3313,7 +3313,7 @@ public final class PreparationIntentStore {
     private func installedCurrentSourceProjection(inventory: InstallationInventory,
         installed: MachineUpdateInstalledReleaseEpoch.Archive, schema: Int64)
         throws -> (historicalInventory: InstallationInventory, historicalSchemaVersion: Int64, digest: Data) {
-        guard (23...MachineUpdateRetainedSetupCompletionStorage.schemaVersion).contains(schema),
+        guard (23...MachineUpdateRetainedSetupPromotionStorage.schemaVersion).contains(schema),
               try scalar("PRAGMA user_version") == schema,
               try loadInventoryRecord() == inventory else { throw PreparationStoreError.staleRevision }
         let configuration = try installed.configuration(), intent = try installed.completionIntent()
@@ -3559,6 +3559,51 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Reads archived promotion metadata. It grants no file, startup, or writer authority.
+    func retainedSetupPromotionIntent(accountID: Data, ownerUID: UInt32, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPromotionIntentRecord? {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+            for record in frame.promotionIntents {
+                let binding = try record.publication().configuration.archive.binding.startupBinding
+                if binding.accountID == accountID {
+                    guard binding.ownerUID == ownerUID else { throw PreparationStoreError.staleRevision }
+                    return record
+                }
+            }
+            return nil
+        }
+    }
+
+    private func loadRetainedSetupPromotionIntents(installationID: Data,
+        completion: [MachineUpdateRetainedSetupCompletionIntentRecord]) throws -> [MachineUpdateRetainedSetupPromotionIntentRecord] {
+        let completions = Dictionary(uniqueKeysWithValues: completion.map { ($0.binding.accountID, $0) })
+        return try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+            try statement("SELECT account,id,revision,record FROM retained_setup_promotion_intents_v1 ORDER BY account LIMIT 65") { row in
+                var records: [MachineUpdateRetainedSetupPromotionIntentRecord] = []
+                var accounts = Set<Data>(), ids = Set<UUID>()
+                while try step(row) == SQLITE_ROW {
+                    guard records.count < 64 else { throw PreparationStoreError.corruptRecord }
+                    let record = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(blob(row, column: 3,
+                        maximum: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes))
+                    let archive = try record.publication().configuration.archive
+                    let binding = archive.binding.startupBinding
+                    guard try blob(row, column: 0, maximum: 16) == binding.accountID,
+                          try blob(row, column: 1, maximum: 16) == bytes(record.id),
+                          try blob(row, column: 2, maximum: 16) == bytes(record.revision),
+                          binding.macID == macID, binding.installationID == installationID,
+                          accounts.insert(binding.accountID).inserted, ids.insert(record.id).inserted,
+                          let actual = completions[binding.accountID],
+                          try actual.encoded == archive.completionIntentBytes else {
+                        throw PreparationStoreError.corruptRecord
+                    }
+                    records.append(record)
+                }
+                return records
+            }
+        }
+    }
+
     private func loadStableReleaseRecord() throws -> MachineUpdateStableReleaseRecord {
         try statement("SELECT id,epoch,revision,record FROM stable_release_state_v1 ORDER BY id") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_INTEGER,
@@ -3576,17 +3621,20 @@ public final class PreparationIntentStore {
     }
 
     private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence)
-        throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord]) {
+        throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
+            promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord]) {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
-        guard (24...MachineUpdateRetainedSetupCompletionStorage.schemaVersion).contains(schema) else {
+        guard (24...MachineUpdateRetainedSetupPromotionStorage.schemaVersion).contains(schema) else {
             throw PreparationStoreError.invalidTransition
         }
         let hasRetainedPolicy = schema >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion
-        let hasRetainedCompletion = schema == MachineUpdateRetainedSetupCompletionStorage.schemaVersion
+        let hasRetainedCompletion = schema >= MachineUpdateRetainedSetupCompletionStorage.schemaVersion
+        let hasRetainedPromotion = schema >= MachineUpdateRetainedSetupPromotionStorage.schemaVersion
         try MachineUpdateStableReleaseRecord.requireFormats(release)
         if hasRetainedPolicy { try MachineUpdateRetainedSetupPolicyStorage.requireReaderFormats(release) }
         if hasRetainedCompletion { try MachineUpdateRetainedSetupCompletionStorage.requireReaderFormats(release) }
+        if hasRetainedPromotion { try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(release) }
         guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
               let activation = try loadMachineUpdateActivationRecord(), let admission = try loadUpdateAdmissionRegistration(),
               try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
@@ -3605,10 +3653,12 @@ public final class PreparationIntentStore {
         let policies = hasRetainedPolicy ? try loadRetainedSetupPolicyIntents(installationID: inventory.installationID) : []
         let completion = hasRetainedCompletion
             ? try loadRetainedSetupCompletionIntents(installationID: inventory.installationID, policies: policies) : []
+        let promotions = hasRetainedPromotion
+            ? try loadRetainedSetupPromotionIntents(installationID: inventory.installationID, completion: completion) : []
         let current = try installedCurrentSourceProjection(inventory: inventory, installed: installed, schema: schema)
         let snapshot = MachineUpdateStableReleaseSnapshot(schemaVersion: schema, inventory: inventory, activation: activation,
             admission: admission, candidate: candidate, installed: installed, seal: seal, currentRowsDigest: current.digest)
-        return (snapshot, completion)
+        return (snapshot, completion, promotions)
     }
 
     private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {
@@ -4351,6 +4401,10 @@ public final class PreparationIntentStore {
                 hash.update(data: try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupCompletionIntentRecord.maximumBytes) {
                     try machineTableDigest(table)
                 })
+            } else if table == MachineUpdateRetainedSetupPromotionStorage.tableName {
+                hash.update(data: try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+                    try machineTableDigest(table)
+                })
             } else {
                 hash.update(data: try historicalTables[table] ?? machineTableDigest(table))
             }
@@ -4362,7 +4416,8 @@ public final class PreparationIntentStore {
         guard !table.isEmpty, table.utf8.allSatisfy({ ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 }) else {
             throw PreparationStoreError.corruptRecord
         }
-        let cellLimit = 278528
+        let cellLimit = table == MachineUpdateRetainedSetupPromotionStorage.tableName
+            ? MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes : 278528
         let rows: [Data] = try statement("SELECT * FROM \(table)") { row in
             var rows: [Data] = []
             while try step(row) == SQLITE_ROW {
@@ -4610,6 +4665,9 @@ public final class PreparationIntentStore {
         if version >= MachineUpdateRetainedSetupCompletionStorage.schemaVersion {
             expected.append(MachineUpdateRetainedSetupCompletionStorage.tableName)
         }
+        if version >= MachineUpdateRetainedSetupPromotionStorage.schemaVersion {
+            expected.append(MachineUpdateRetainedSetupPromotionStorage.tableName)
+        }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
@@ -4626,6 +4684,14 @@ public final class PreparationIntentStore {
             return names
         }
         guard names == expected else { throw PreparationStoreError.incompatibleStore }
+        if version >= MachineUpdateRetainedSetupPromotionStorage.schemaVersion {
+            try statement("SELECT sql FROM sqlite_schema WHERE name='retained_setup_promotion_intents_v1' AND type='table'") { row in
+                guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let sql = sqlite3_column_text(row, 0),
+                      String(cString: sql) == MachineUpdateRetainedSetupPromotionStorage.createSQL,
+                      try step(row) == SQLITE_DONE else { throw PreparationStoreError.incompatibleStore }
+            }
+        }
         try statement("SELECT id,mac FROM installation_identity_v1") { row in
             guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 1 else { throw PreparationStoreError.incompatibleStore }
             guard try blob(row, column: 1, maximum: 16) == macID else { throw PreparationStoreError.wrongMac }
