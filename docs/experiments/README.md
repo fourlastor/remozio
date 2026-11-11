@@ -27,6 +27,7 @@ The [design specification](https://remozio-plan.seebrock3r.chatgpt.site/) define
 | Streaming encrypted channel | [TLS](tls-channel.md) and [WebSocket carrier](websocket-carrier.md) harnesses | Android keys, Cloudflare integration, protected identities, and reconnect |
 | Restricted pairing setup | [Native/JVM TLS controls passed](evidence/2026-10-14-pairing-setup-tls.json); [wire contract](../../protocol/pairing-setup.md) | Signed app control bridge, setup UI, hardware keys, and installed Root commit |
 | Native TLS key custody | [Disposable enclave identity and TLS exchange measured](macos-enclave-tls.md) | macOS 26 runtime, pre-login access, protected service identity, Android hardware peer |
+| iOS transport key | [Temporary enclave key in a TLS 1.3 handshake on an iPhone](ios-enclave-tls.md) | Permanent keys, locked and before-first-unlock handshakes, Face ID, complete pairing |
 | Presence signals | [One-shot probe prepared](macos-presence.md) | GUI-session observations, remote desktop usability, lock and brightness support |
 | UI adapters | Needs interactive session | Authorized dialog fixtures |
 | Per-Mac push and tunnel | Pending configuration | FCM delivery and independent Mac endpoints |

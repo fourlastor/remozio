@@ -189,5 +189,9 @@ loopback with disposable software keys: it enrolls a phone and verifies the rece
 receipt or enrollment, and refuses a candidate whose transport claim differs from its TLS key while the right phone
 still pairs on the same run.
 
-**Not tested.** A physical phone, mDNS discovery through `avahi-daemon`, an IPv6 listener, an iPhone (the iOS app
-has no setup network client yet), host suspend during setup, and any key custody claim.
+**Physical iPhone.** The iOS Test connection reaches this tool's transcript over a typed address, with an enclave
+transport key on the phone ([result](../../docs/experiments/ios-enclave-tls.md)). The phone's test stops at the
+comparison code and sends no proof.
+
+**Not tested.** A complete pairing from a physical phone, mDNS discovery through `avahi-daemon`, an IPv6 listener,
+host suspend during setup, and any custody claim for this tool's own keys, which are software keys.
