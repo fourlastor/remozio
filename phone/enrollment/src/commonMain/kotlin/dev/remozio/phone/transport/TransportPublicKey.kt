@@ -10,7 +10,8 @@ internal fun p256TransportPin(encoded: ByteArray): ByteArray {
     val copy = encoded.copyOf()
     val prefix = p256SpkiPrefix()
     require(copy.size == prefix.size + 65 && copy.copyOfRange(0, prefix.size).contentEquals(prefix)) { "P-256 transport key required" }
-    // The constructor rejects a point off the curve and a coordinate at or above p.
+    // The constructor calls pairingPoint in :protocol-kotlin, which on every target requires the 0x04 marker and
+    // rejects a point off the curve and a coordinate at or above p. The key ID is a placeholder; nothing keeps it.
     PairingKey(ByteArray(16), copy.copyOfRange(prefix.size, copy.size))
     return copy
 }

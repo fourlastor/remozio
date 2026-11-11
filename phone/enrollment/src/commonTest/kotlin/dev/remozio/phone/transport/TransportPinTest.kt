@@ -20,6 +20,13 @@ class TransportPinTest {
         assertEquals(0x30, pin[0].toInt())
     }
 
+    @Test fun acceptsAnotherPointOnTheCurve() {
+        // 2G, so the check is the curve equation and not a comparison with the generator.
+        val twice = spki(x = "7cf27b188d034f7e8a52380304b51ac3c08969e277f21b35a60b48fc47669978",
+            y = "07775510db8ed040293d9ac69f7430dbba7dade63ce982299e04b79d227873d1")
+        assertContentEquals(twice, p256TransportPin(twice))
+    }
+
     @Test fun rejectsAWrongLength() {
         rejects(ByteArray(0))
         rejects(spki().copyOf(90))
