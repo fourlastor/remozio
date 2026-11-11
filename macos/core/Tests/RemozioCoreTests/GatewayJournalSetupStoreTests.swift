@@ -114,7 +114,7 @@ final class GatewayJournalSetupStoreTests: XCTestCase {
         XCTAssertEqual(try f.runtime.f.sql("SELECT COUNT(*) FROM gateway_journal_preparation_v1"), 1)
         XCTAssertEqual(try machine.inventory(), inventory)
         XCTAssertEqual(try machine.runtimeActivation(accountID: f.intent.accountID).plan?.encoded, try activation.plan?.encoded)
-        XCTAssertEqual(PreparationIntentStore.supportedSchemaVersions, Set(1...25))
+        XCTAssertEqual(PreparationIntentStore.supportedSchemaVersions, Set(1...26))
     }
     func testAnAlreadyDeclaredGatewayCannotAcquireANewInitializationIntent() throws {
         let f = try Fixture(), old = try XCTUnwrap(f.machine.inventory()), proposed = try f.bundle.enrolledInventory(old)
