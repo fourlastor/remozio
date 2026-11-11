@@ -35,6 +35,15 @@ struct RuntimeRetainedSetupReleaseBinding: Codable, Equatable, Sendable, CustomS
     var description: String { "RuntimeRetainedSetupReleaseBinding(redacted)" }
     var debugDescription: String { description }
 
+    /// Compares archived provenance with an exact historical runtime. It grants no current startup authority.
+    func requireHistoricalRuntime(_ reference: RuntimeMaterialReference) throws {
+        try validate()
+        let services = reference.services
+        guard macID == services.macID, installationID == services.installationID, accountID == services.accountID,
+              ownerUID == services.ownerUID, provisioningReleaseDigest == services.releaseDigest,
+              try runtimeReferenceDigest == Self.digest(reference.encoded) else { throw RuntimeActivationError.changedScope }
+    }
+
     func requireStartupPolicy(_ policy: AuthorityCodePolicy) throws {
         try validate()
         guard try Self.digest(policy.bytes) == startupPolicyDigest else { throw RuntimeActivationError.changedScope }

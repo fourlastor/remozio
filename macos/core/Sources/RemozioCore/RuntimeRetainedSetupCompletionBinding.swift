@@ -15,6 +15,11 @@ struct RuntimeRetainedSetupCompletionBinding: Codable, Equatable, Sendable, Cust
     var description: String { "RuntimeRetainedSetupCompletionBinding(redacted)" }
     var debugDescription: String { description }
 
+    /// Compares archived provenance only. Current preparation and native admission need a separate owner.
+    func requireHistoricalRuntime(_ reference: RuntimeMaterialReference) throws {
+        try validate(); try startupBinding.requireHistoricalRuntime(reference)
+    }
+
     func requireCompletionPolicy(_ policy: AuthorityCodePolicy) throws {
         try validate()
         guard try Self.digest(policy.bytes) == startupBinding.completionPolicyDigest else {
