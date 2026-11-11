@@ -87,6 +87,6 @@ the checks directly. It was not collected in this run. A repeat should collect i
 
 Pass: the device reports a build that includes #663, the phone shows the comparison code, and the peer printed
 `Compare on the phone.` The log line above is the direct signal of the enclave checks. On a failure the screen shows
-only Failed. The unified log for subsystem `dev.remozio.pairing` names the failed stage and the error code, with no key
+only "Could not reach the computer." The unified log for subsystem `dev.remozio.pairing` names the failed stage and the error code, with no key
 data. A network failure also logs the system's error text as public. This run did not check whether that text can
 contain an address; a repeat that collects the enclave line should check it.
