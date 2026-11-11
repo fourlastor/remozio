@@ -11,7 +11,10 @@ data class ComputerAddress(val host: String, val port: Int) {
         // Room for the brackets of an IPv6 literal, the colon and a five-digit port.
         private const val MAXIMUM_TEXT = MAXIMUM_HOST + 8
 
-        /** Reads `host:port`, `[IPv6]:port` or `IPv4:port`. Returns null for anything else, including blank text. */
+        /**
+         * Reads `host:port`, `[IPv6]:port` or `IPv4:port`. Returns null for anything else, including blank text. A host
+         * whose last label is a number (decimal, or hex with `0x`) must be a dotted IPv4 address without leading zeros.
+         */
         fun parse(text: String): ComputerAddress? {
             val value = text.trim()
             if (value.isEmpty() || value.length > MAXIMUM_TEXT || value.any { it.isWhitespace() }) return null
@@ -29,12 +32,28 @@ data class ComputerAddress(val host: String, val port: Int) {
                 host = value.substring(0, colon)
                 portText = value.substring(colon + 1)
                 // An IPv6 literal must be in brackets, or its last group would read as the port.
-                if (':' in host || !isHostName(host)) return null
+                if (':' in host) return null
+                // Resolvers can read a numeric host as an IPv4 number (1234 as 0.0.4.210, 010 as octal, 0x7f000001 as
+                // hex). As in the URL standard's host parser, a host whose last label is a number is IPv4 or nothing;
+                // no top-level domain is all digits, so this rejects no name under a real top-level domain.
+                val valid = when {
+                    isNumber(host.substringAfterLast('.')) -> isIPv4(host)
+                    else -> isHostName(host)
+                }
+                if (!valid) return null
             }
             // ASCII digits only: other Unicode digits pass isDigit but make toInt throw.
             val port = portText.takeIf { it.length in 1..5 && it.all { c -> c in '0'..'9' } }?.toInt() ?: return null
             if (port !in 1..65_535) return null
             return ComputerAddress(host, port)
+        }
+
+        /** A number as the URL standard reads one: decimal digits, or `0x` and hex digits (a bare `0x` is zero). */
+        private fun isNumber(label: String): Boolean {
+            if (label.startsWith("0x", ignoreCase = true)) {
+                return label.substring(2).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+            }
+            return label.isNotEmpty() && label.all { it in '0'..'9' }
         }
 
         private fun isHostName(host: String): Boolean {
@@ -52,9 +71,11 @@ data class ComputerAddress(val host: String, val port: Int) {
             if (halves.size > 2) return false
             val groups = halves.map { half -> if (half.isEmpty()) emptyList() else half.split(':') }
             val all = groups.flatten()
+            // The dotted group is the last 32 bits, so it must end the address: a trailing `::` leaves no place for it.
+            val dottedIndex = if (halves.size == 2 && halves[1].isEmpty()) -1 else all.lastIndex
             var count = 0
             for ((index, group) in all.withIndex()) {
-                if (index == all.lastIndex && '.' in group) {
+                if (index == dottedIndex && '.' in group) {
                     if (!isIPv4(group)) return false
                     count += 2
                 } else {
@@ -67,8 +88,9 @@ data class ComputerAddress(val host: String, val port: Int) {
 
         private fun isIPv4(text: String): Boolean {
             val parts = text.split('.')
+            // No leading zeros: some parsers read 010 as octal.
             return parts.size == 4 && parts.all { part ->
-                part.length in 1..3 && part.all { it in '0'..'9' } && part.toInt() <= 255
+                part.length in 1..3 && part.all { it in '0'..'9' } && (part.length == 1 || part[0] != '0') && part.toInt() <= 255
             }
         }
     }
@@ -79,11 +101,11 @@ sealed interface ConnectionRoute {
     /** The field is empty: search the local network. */
     data object Discover : ConnectionRoute
     data class Direct(val address: ComputerAddress) : ConnectionRoute
-    /** The field holds text that is not an address. The test cannot start. */
+    /** The field holds text that is not an address, spaces only included. The test cannot start. */
     data object Invalid : ConnectionRoute
 
     companion object {
         fun of(addressText: String): ConnectionRoute =
-            if (addressText.isBlank()) Discover else ComputerAddress.parse(addressText)?.let(::Direct) ?: Invalid
+            if (addressText.isEmpty()) Discover else ComputerAddress.parse(addressText)?.let(::Direct) ?: Invalid
     }
 }
