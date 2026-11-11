@@ -48,11 +48,12 @@ data class ComputerAddress(val host: String, val port: Int) {
             return ComputerAddress(host, port)
         }
 
-        /** Decimal digits, or `0x` and hex digits. */
+        /** A number as the URL standard reads one: decimal digits, or `0x` and hex digits (a bare `0x` is zero). */
         private fun isNumber(label: String): Boolean {
-            val hex = label.startsWith("0x", ignoreCase = true)
-            val digits = if (hex) label.substring(2) else label
-            return digits.isNotEmpty() && digits.all { it in '0'..'9' || (hex && (it in 'a'..'f' || it in 'A'..'F')) }
+            if (label.startsWith("0x", ignoreCase = true)) {
+                return label.substring(2).all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }
+            }
+            return label.isNotEmpty() && label.all { it in '0'..'9' }
         }
 
         private fun isHostName(host: String): Boolean {

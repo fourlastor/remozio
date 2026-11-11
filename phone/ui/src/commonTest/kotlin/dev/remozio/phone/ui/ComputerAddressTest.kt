@@ -32,12 +32,12 @@ class ComputerAddressTest {
         // A last label that is a number makes the host IPv4 or nothing: resolvers can read 1234 as 0.0.4.210 and 010 as
         // octal, and the URL standard also refuses host.123 and gateway.0.
         for (host in listOf("0", "1234", "1.2.3", "1.2.3.4.5", "999.1.1.1", "256.0.0.1", "010.0.0.1", "1.2.3.04",
-            "host.123", "gateway.0", "0x7f000001", "0X7F.0.0.1", "127.0.0.0x1"))
+            "host.123", "gateway.0", "0x7f000001", "0X7F.0.0.1", "127.0.0.0x1", "host.0x"))
             assertNull(ComputerAddress.parse("$host:7443"), host)
     }
 
     @Test fun keepsHostNamesWithDigits() {
-        for (host in listOf("123.example", "host.0x", "host.0xg1", "1.2.3.0xg1", "0x7f.example"))
+        for (host in listOf("123.example", "host.0xg1", "1.2.3.0xg1", "0x7f.example"))
             assertEquals(ComputerAddress(host, 7443), ComputerAddress.parse("$host:7443"), host)
     }
 
