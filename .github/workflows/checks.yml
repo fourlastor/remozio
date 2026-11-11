@@ -19,7 +19,9 @@ jobs:
   linux-protocol:
     name: Linux Swift protocol
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # Ubuntu mirror lookups failed for about an hour on 2026-11-11; with apt retries the
+    # packages still arrived, in about 16 minutes instead of under one.
+    timeout-minutes: 45
     outputs:
       gradle-key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
     steps:
@@ -28,8 +30,8 @@ jobs:
         env:
           SWIFT_ARCHIVE_SHA256: 15608c4fa0364ef906014343d81639cf58169e8a40de2b2d3503c3f35a8bb66d
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libxml2 libicu74 libsqlite3-dev libssl-dev
+          sudo apt-get -o Acquire::Retries=5 update
+          sudo apt-get -o Acquire::Retries=5 install --yes --no-install-recommends libxml2 libicu74 libsqlite3-dev libssl-dev
           curl --fail --location --retry 3 --max-time 300 \
             https://download.swift.org/swift-6.2.4-release/ubuntu2404/swift-6.2.4-RELEASE/swift-6.2.4-RELEASE-ubuntu24.04.tar.gz \
             --output "$RUNNER_TEMP/remozio-swift.tar.gz"
@@ -77,11 +79,11 @@ jobs:
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
       - name: Prepare private native TPM simulator dependencies
         run: |
-          sudo apt-get install --yes --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=5 install --yes --no-install-recommends \
             pkg-config libssl-dev tpm2-openssl swtpm tpm2-tools libtss2-tcti-tabrmd0 dbus-daemon
           mkdir -p "$RUNNER_TEMP/remozio-native-tpm-debs" "$RUNNER_TEMP/remozio-native-tpm-runtime"
           cd "$RUNNER_TEMP/remozio-native-tpm-debs"
-          apt-get download tpm2-abrmd=3.0.0-1ubuntu2
+          apt-get -o Acquire::Retries=5 download tpm2-abrmd=3.0.0-1ubuntu2
           printf '%s  %s\n' \
             bd65b246104f6feac832c1cfcb100378be9b885b98a980441f77a7ccb0bf3241 \
             tpm2-abrmd_3.0.0-1ubuntu2_amd64.deb | sha256sum --check -
