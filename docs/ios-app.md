@@ -62,7 +62,9 @@ Requirements: macOS with Xcode 26.3 or later, and JDK 21 in `JAVA_HOME` (the Xco
 ```
 
 CI and `./scripts/check-local.sh` on macOS run the same three steps. `test-ios-app.sh` runs `RemozioTests` on the
-first available iPhone simulator, so the Secure Enclave path runs only on a device.
+first available iPhone simulator. These tests run the pinned transport against a local TLS listener (right pin, wrong
+pin, wrong ALPN) and check which route an address selects. The Secure Enclave path and a connection test to a computer run only on
+a device, by hand.
 
 For a device or TestFlight build, pass the team at build time with `DEVELOPMENT_TEAM=<team>`. The project does not
 contain a team ID.
@@ -101,5 +103,6 @@ CI builds the app and runs the Kotlin and native iOS tests; it does not run Maes
 ## Not covered yet
 
 Pairing (the proof, the Face ID signature, saving the computer), permanent enclave keys and the iOS enrollment
-archive, Bonjour discovery on a device, a Mac as the peer, approvals, push, and Android use of `:phone-ui`. The key
-custody decisions on #436 come before permanent keys and the archive.
+archive, approvals, push, and Android use of `:phone-ui`. The key custody decisions on #436 come before permanent
+keys and the archive. Bonjour discovery is built, but no recorded device run has used it, and no recorded run has
+used a Mac as the peer.
