@@ -33,9 +33,14 @@ data class ComputerAddress(val host: String, val port: Int) {
                 portText = value.substring(colon + 1)
                 // An IPv6 literal must be in brackets, or its last group would read as the port.
                 if (':' in host) return null
-                // Resolvers read a host that ends in a number as an IPv4 number (1234 as 0.0.4.210, 010 as octal,
-                // 0x7f000001 as hex), so such a host is a dotted IPv4 address or nothing.
-                if (if (isNumber(host.substringAfterLast('.'))) !isIPv4(host) else !isHostName(host)) return null
+                // Resolvers can read a numeric host as an IPv4 number (1234 as 0.0.4.210, 010 as octal, 0x7f000001 as
+                // hex). As in the URL standard's host parser, a host whose last label is a number is IPv4 or nothing;
+                // no top-level domain is all digits, so this rejects no name under a real top-level domain.
+                val valid = when {
+                    isNumber(host.substringAfterLast('.')) -> isIPv4(host)
+                    else -> isHostName(host)
+                }
+                if (!valid) return null
             }
             // ASCII digits only: other Unicode digits pass isDigit but make toInt throw.
             val port = portText.takeIf { it.length in 1..5 && it.all { c -> c in '0'..'9' } }?.toInt() ?: return null
@@ -45,8 +50,8 @@ data class ComputerAddress(val host: String, val port: Int) {
 
         /** Decimal digits, or `0x` and hex digits. */
         private fun isNumber(label: String): Boolean {
-            val digits = if (label.startsWith("0x", ignoreCase = true)) label.substring(2) else label
-            val hex = digits.length != label.length
+            val hex = label.startsWith("0x", ignoreCase = true)
+            val digits = if (hex) label.substring(2) else label
             return digits.isNotEmpty() && digits.all { it in '0'..'9' || (hex && (it in 'a'..'f' || it in 'A'..'F')) }
         }
 
