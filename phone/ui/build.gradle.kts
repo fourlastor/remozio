@@ -6,7 +6,7 @@ plugins {
 
 kotlin {
     jvmToolchain(21)
-    // The JVM target runs the shared state tests on Linux; no app consumes it.
+    // The JVM target runs the shared state and screen tests on Linux; no app consumes it.
     jvm()
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
         target.binaries.framework {
@@ -28,6 +28,11 @@ kotlin {
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
+            implementation(libs.compose.multiplatform.ui.test)
+        }
+        // The screen tests render with Skia on the JVM, which needs the native library for the host.
+        jvmTest.dependencies {
+            implementation(compose.desktop.currentOs)
         }
     }
 }
