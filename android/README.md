@@ -148,7 +148,7 @@ Update settings control foreground checks and prerelease discovery.
 The [transport identity loader](transport-identity.md) validates an existing hardware-backed enrollment key. It supplies the key handle to the TLS client.
 Pairing, key creation, and native Pixel validation remain pending.
 
-The [phone enrollment store](../phone/core/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file.
+The [phone enrollment store](../phone/enrollment/ENROLLMENTS.md) has an Android adapter with a dedicated hardware encryption key and a no-backup atomic file.
 The future enrollment host can use this adapter. App startup does not initialize it.
 
 The [decision identity](decision-identity.md) creates and loads a separate hardware key for choices that need no biometrics.

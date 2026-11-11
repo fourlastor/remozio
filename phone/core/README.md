@@ -45,7 +45,7 @@ The [phone TLS engine](TRANSPORT.md) accepts ordered ciphertext without a local 
 
 The [relay connector](RELAY.md) authenticates outer HTTPS and validates the upgrade before bounded framing starts. Its host supplies trusted enrollment data and scoped Access credentials.
 
-The [enrollment store](ENROLLMENTS.md) persists prepared, active, and removed ownership records with encrypted replacement. It keeps Mac/account scopes separate. The production setup owner must still validate authorization and freshness before using active records.
+The [enrollment store](../enrollment/ENROLLMENTS.md) persists prepared, active, and removed ownership records with encrypted replacement. It keeps Mac/account scopes separate. The production setup owner must still validate authorization and freshness before using active records.
 
 The [negotiated TLS channel](../../protocol/session-envelope.md) owns the phone handshake, bounded framing, and session-bound message delivery.
 

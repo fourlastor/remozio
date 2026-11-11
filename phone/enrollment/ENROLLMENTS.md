@@ -5,6 +5,8 @@ Trusted setup code prepares the records.
 `PhonePairingAttempt` verifies a Mac receipt before activation.
 Network input cannot select this store as an enrollment endpoint.
 
+The code is in `:phone-enrollment`, a Kotlin Multiplatform module with JVM and iOS targets. `:phone-core` exposes it to the Android app, and the [Android adapter](#android-storage) is in `android/app`. The iOS app does not use the store yet: iOS has no `EnrollmentAead` and no storage adapter. `vectors/enrollment-archive-v1.json` pins the archive bytes that the store wrote before it moved to this module.
+
 ```mermaid
 stateDiagram-v2
     [*] --> Prepared: Persist setup material
@@ -83,7 +85,7 @@ The tests use software encryption keys and memory storage. They do not prove And
 
 ## Pairing commit receipts
 
-The raw activation transition is internal to the phone-core Kotlin module. Android production callers use the receipt-verifying owner. Consumer tests use a synthetic helper from the separate test-fixtures artifact, which is not an application dependency.
+The raw activation transition is internal to `:phone-enrollment`. `:phone-core` reaches it as a friend module. Android production callers use the receipt-verifying owner. Consumer tests use a synthetic helper from the separate test-fixtures artifact, which is not an application dependency.
 
 `PhonePairingAttempt` binds a retained transcript to one local PREPARED record. It checks the Mac/account/phone/epoch scope, both Mac pins, all phone key IDs and points, notification tag, and local protocol floor. An independently selected replacement must match the transcript's old phone and epoch and the same Mac/account.
 
