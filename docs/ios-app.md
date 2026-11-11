@@ -35,9 +35,10 @@ connection to the computer that made the invitation. It does not pair, save a co
   onto disk. The [device result](experiments/ios-enclave-tls.md) records the first run on an iPhone.
 - **Logs.** On a failure, the screen shows only "Could not reach the computer." The unified log (subsystem
   `dev.remozio.pairing`, category `transport`) names the failed stage and the error code, with no key data. Network
-  failures also log the system's error text, an `NWError`. Its cases hold only a POSIX, DNS or TLS code, so the text
-  is that code and the fixed message for it, for example `POSIXErrorCode(rawValue: 61): Connection refused`. The
-  value holds no address to print. A probe on a Mac agrees; the iPhone log has not been collected.
+  failures also log the system's error text, an `NWError`. Its cases hold only a code (POSIX, DNS, TLS or Wi-Fi
+  Aware), so the text is that code and the fixed message for it, for example
+  `POSIXErrorCode(rawValue: 61): Connection refused`. The value holds no address to print. A probe on a Mac agrees;
+  the iPhone log has not been collected.
 
 ## Modules
 
