@@ -63,10 +63,16 @@ class AddComputerScreenTest {
         // Without a port the text is not an address. It must never fall back to searching the network.
         onNodeWithTag("computer-address").performScrollTo().performTextInput("192.0.2.10")
         onNodeWithTag("address-invalid").assertExists()
+        // The click is a touch at the button's position, so it shows that a real tap does nothing.
         onNodeWithTag("test-connection").assertIsNotEnabled().performClick()
         waitForIdle()
         onNodeWithTag("connecting").assertDoesNotExist()
         assertEquals(emptyList(), services.addresses)
+        // Clearing the field makes it empty again, so the next tap searches the network.
+        onNodeWithTag("computer-address").performTextClearance()
+        onNodeWithTag("address-invalid").assertDoesNotExist()
+        testConnection()
+        assertEquals(listOf<ComputerAddress?>(null), services.addresses)
     }
 
     @Test fun aChangedAddressIsUsedOnTheNextTap() = runComposeUiTest {
