@@ -45,4 +45,27 @@ enum MachineUpdateRetainedSetupPromotionStorage {
             }
         }
     }
+    enum WriteOperation { case retainPrepared, changePhase }
+
+    /// Checks the full producer contract before the future writer starts a transaction.
+    static func requireWriteFormats(_ candidate: SignedReleaseEvidence, sourceSchema: Int64,
+        operation: WriteOperation) throws {
+        try requireProposalFormats(candidate)
+        switch (sourceSchema, operation) {
+        case (26, .retainPrepared): try requireMigrationFormats(candidate)
+        case (27, _), (28, _): break
+        default: throw PreparationStoreError.invalidTransition
+        }
+    }
+
+    /// Checks declarations only. This check does not perform or authorize a migration.
+    static func requireMigrationFormats(_ candidate: SignedReleaseEvidence) throws {
+        try requireProposalFormats(candidate)
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            guard candidate.manifest.components.first(where: { $0.role == role })?
+                .formats.first(where: { $0.name == "authority.installation-preparation" })?.migrations[26] == 27 else {
+                throw PreparationStoreError.incompatibleStore
+            }
+        }
+    }
 }
