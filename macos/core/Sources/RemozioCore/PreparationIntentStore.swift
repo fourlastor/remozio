@@ -3516,19 +3516,42 @@ public final class PreparationIntentStore {
     /// Reads retained activation and its exact startup receipt in one transaction. It grants no write authority.
     func retainedSetupActivationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupActivationSnapshot {
+        try transaction(write: false) { try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadRetainedSetupActivationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupActivationSnapshot {
+        let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+        let actual = runtime.setup.source.actual, account = runtime.preparation.accountID
+        guard (25...28).contains(actual.schemaVersion),
+              let intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                .first(where: { $0.accountID == account }) else { throw RuntimeActivationError.incomplete }
+        let state = try loadRetainedSetupActivation(accountID: account)
+        let result = try MachineUpdateRetainedSetupActivationSnapshot(runtime: runtime, state: state,
+            intent: intent, candidate: candidate)
+        try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+        try state.requireSame(as: loadRetainedSetupActivation(accountID: account))
+        guard try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+            .first(where: { $0.accountID == account }) == intent else { throw PreparationStoreError.staleRevision }
+        return result
+    }
+
+    /// Joins the actual retained activation and completion rows in one read transaction.
+    func retainedSetupCompletionSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupCompletionSnapshot {
         try transaction(write: false) {
-            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
-            let actual = runtime.setup.source.actual, account = runtime.preparation.accountID
-            guard (25...28).contains(actual.schemaVersion),
-                  let intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
-                    .first(where: { $0.accountID == account }) else { throw RuntimeActivationError.incomplete }
-            let state = try loadRetainedSetupActivation(accountID: account)
-            let result = try MachineUpdateRetainedSetupActivationSnapshot(runtime: runtime, state: state,
-                intent: intent, candidate: candidate)
-            try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
-            try state.requireSame(as: loadRetainedSetupActivation(accountID: account))
-            guard try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
-                .first(where: { $0.accountID == account }) == intent else { throw PreparationStoreError.staleRevision }
+            let activation = try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate)
+            let account = activation.runtime.preparation.accountID
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+            try frame.snapshot.requireSame(as: activation.runtime.setup.source.actual)
+            let intent = frame.completionIntents.first { $0.binding.accountID == account }
+            let result = try MachineUpdateRetainedSetupCompletionSnapshot(activation: activation, intent: intent, candidate: candidate)
+            try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate).requireSame(as: activation)
+            let current = try loadStableMachineUpdateFrame(candidate: candidate)
+            try current.snapshot.requireSame(as: frame.snapshot)
+            guard current.completionIntents.first(where: { $0.binding.accountID == account }) == intent else {
+                throw PreparationStoreError.staleRevision
+            }
             return result
         }
     }
