@@ -42,7 +42,7 @@ struct RuntimeRetainedSetupActivationArchive: Sendable, CustomStringConvertible,
     var description: String { "RuntimeRetainedSetupActivationArchive(redacted)" }
     var debugDescription: String { description }
 
-    private init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
+    init(reference: RuntimeMaterialReference, bundlePath: String, host: InstalledAuthorityCommandConfiguration,
         transport: TransportPairingStartupConfiguration, gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration,
         phoneRoutingVersion: UInt64?, phoneAuditVersion: UInt64?, phoneUpdateSchedulingVersion: UInt64?,
         binding: RuntimeRetainedSetupReleaseBinding, inventory: InstallationInventory) throws {

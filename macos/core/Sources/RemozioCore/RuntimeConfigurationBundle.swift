@@ -34,14 +34,14 @@ struct RuntimePreparationPaths: Sendable {
     var transportWakeKey: String { serviceDirectory + "/transport-wake-key.cbor" }
 }
 
-/// Bootstrap configuration only. Construction does not prove protected placement or activate any service.
+/// Scoped configuration values. Construction does not prove protected placement or activate any service.
 struct RuntimeConfigurationBundle: CustomStringConvertible {
     let paths: RuntimePreparationPaths
     let command: AuthorityCommandStartupConfiguration
     let transport: TransportPairingStartupConfiguration
     var gatewaySettingsHost: GatewaySettingsConsumerHostConfiguration? { get throws {
         guard let host = transport.settingsHost else { return nil }
-        return try .init(role: .gateway, runtime: host.runtime, bundlePath: host.bundlePath, codePolicy: host.codePolicy)
+        return try host.selecting(role: .gateway)
     } }
     let presenceClient: AuthorityPresenceClientConfiguration
     let pairingClient: TransportPairingControlConfiguration
@@ -54,6 +54,18 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
                         importIntent: SharedSetupImportIntent? = nil,
                         presencePolicyOverride: PresenceConfiguration? = nil,
                         relayPlan: SharedSetupImportRelayPlan? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
+        let selected = try initialSelection(account: account, inventory: inventory, importIntent: importIntent,
+            presencePolicyOverride: presencePolicyOverride, relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+        return try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
+            presencePolicy: selected.presence, relayPort: selected.relayPort,
+            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
+            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
+            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+    }
+
+    private static func initialSelection(account: AccountPreparationIntent, inventory: InstallationInventory,
+        importIntent: SharedSetupImportIntent?, presencePolicyOverride: PresenceConfiguration?,
+        relayPlan: SharedSetupImportRelayPlan?, relayPortOverride: UInt16?) throws -> (presence: PresenceConfiguration, relayPort: UInt16?) {
         let presence: PresenceConfiguration
         let relayPort: UInt16?
         if let importIntent, importIntent.recipe.cloudflare != nil {
@@ -76,8 +88,75 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
                       other.unavailableGraceMilliseconds == presence.unavailableGraceMilliseconds else { throw SharedSetupImportError.conflict }
             }
         } else { presence = try presencePolicyOverride ?? .init(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 30_000) }
-        return try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
-            presencePolicy: presence, relayPort: relayPort,
+        return (presence, relayPort)
+    }
+
+    /// Initial stable publication only. The caller must retain admission and recheck this source around every file operation.
+    static func stableInitial(snapshot: MachineUpdateStableRuntimePreparationSnapshot, reference: RuntimeMaterialReference,
+        candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
+        importIntent: SharedSetupImportIntent? = nil, presencePolicyOverride: PresenceConfiguration? = nil,
+        relayPlan: SharedSetupImportRelayPlan? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
+        try stableInitial(snapshot: snapshot, reference: reference, candidate: candidate, currentCodePolicy: currentCodePolicy,
+            retainedSetupBinding: nil, importIntent: importIntent, presencePolicyOverride: presencePolicyOverride,
+            relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+    }
+
+    /// Uses the exact recorded startup pair. Native custody and publication remain the caller's separate obligations.
+    static func retainedSetupInitial(snapshot: MachineUpdateRetainedSetupPolicySnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        currentCodePolicy: AuthorityCodePolicy, importIntent: SharedSetupImportIntent? = nil,
+        presencePolicyOverride: PresenceConfiguration? = nil, relayPlan: SharedSetupImportRelayPlan? = nil,
+        relayPortOverride: UInt16? = nil) throws -> Self {
+        let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: candidate)
+        try binding.requireStartupPolicy(currentCodePolicy)
+        let runtime = snapshot.activation.runtime
+        guard snapshot.activation.origin == .retained, snapshot.activation.installed == nil,
+              snapshot.activation.state.plan == nil, !snapshot.activation.state.jobsRegistered,
+              runtime.setup.account?.inInventory == false, !runtime.state.configurationPublished,
+              let reference = runtime.state.reference, reference.serviceActivity != nil else { throw RuntimePreparationError.changedScope }
+        return try stableInitial(snapshot: runtime, reference: reference, candidate: candidate, currentCodePolicy: currentCodePolicy,
+            retainedSetupBinding: binding, importIntent: importIntent, presencePolicyOverride: presencePolicyOverride,
+            relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+    }
+
+    private static func stableInitial(snapshot: MachineUpdateStableRuntimePreparationSnapshot, reference: RuntimeMaterialReference,
+        candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
+        retainedSetupBinding: RuntimeRetainedSetupReleaseBinding?, importIntent: SharedSetupImportIntent? = nil, presencePolicyOverride: PresenceConfiguration? = nil,
+        relayPlan: SharedSetupImportRelayPlan? = nil, relayPortOverride: UInt16? = nil) throws -> Self {
+        guard !snapshot.state.configurationPublished,
+              snapshot.state.reference == nil || snapshot.state.reference == reference,
+              let initialization = snapshot.setup.account?.initialization, initialization.complete else {
+            throw RuntimePreparationError.changedScope
+        }
+        let account = snapshot.preparation, source = snapshot.setup.source, actual = source.actual
+        try reference.validate(account: account, services: snapshot.plan)
+        let provisioning = try source.provisioningInventory(accountID: account.accountID,
+            ownerUID: account.ownerUID, releaseDigest: account.releaseDigest)
+        try validateScope(account: account, initialization: initialization, reference: reference, inventory: provisioning)
+        guard provisioning.bundlePath == actual.inventory.bundlePath else { throw RuntimePreparationError.changedScope }
+        try actual.seal.requireCurrentInventory(actual.inventory, epoch: actual.installed, candidate: candidate)
+        try actual.inventory.compareRelease(candidate); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
+        try ReleaseGenerationPreflight.validate(candidate, against: currentCodePolicy)
+        let required: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway,
+            .commandFrontend, .commandMonitor, .commandChild, .setupController]
+        guard required.allSatisfy({ role in currentCodePolicy.entries.contains { $0.role == role && $0.active } }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        for entry in currentCodePolicy.entries where entry.active {
+            guard let component = candidate.manifest.components.first(where: { $0.role == entry.role }),
+                  entry.teamID == component.teamID, entry.identifier == component.identifier,
+                  entry.installedGeneration == component.generation,
+                  entry.codeDirectoryHash == candidate.codeDirectoryHashes[entry.role] else { throw RuntimePreparationError.changedScope }
+        }
+        if reference.serviceActivity != nil {
+            try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: actual.inventory.bundlePath,
+                policy: currentCodePolicy, retainedSetupBinding: retainedSetupBinding).validateRelease(candidate)
+        }
+        let selected = try initialSelection(account: account, inventory: provisioning, importIntent: importIntent,
+            presencePolicyOverride: presencePolicyOverride, relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+        return try .init(checkedAccount: account, initialization: initialization, reference: reference,
+            codeInventory: actual.inventory, codePolicy: currentCodePolicy, retainedSetupBinding: retainedSetupBinding,
+            presencePolicy: selected.presence, relayPort: selected.relayPort,
             environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
             submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
             captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
@@ -87,14 +166,16 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
          reference: RuntimeMaterialReference, inventory: InstallationInventory,
          presencePolicy: PresenceConfiguration, relayPort: UInt16? = nil, environment: [CapturedEnvironmentEntry],
          submissionLimits: CBORLimits, captureLimits: CBORLimits) throws {
-        try reference.validate(account: account, services: reference.services)
-        guard account.storagePrepared, initialization.complete,
-              initialization.accountID == account.accountID, initialization.macID == account.macID,
-              initialization.installationID == account.installationID, initialization.releaseDigest == account.releaseDigest,
-              initialization.initializationBytes == account.initializationBytes,
-              inventory.macID == account.macID, inventory.installationID == account.installationID,
-              inventory.releaseDigest == account.releaseDigest else { throw RuntimePreparationError.changedScope }
-        let policy = try account.initialAuthority.codePolicy
+        try Self.validateScope(account: account, initialization: initialization, reference: reference, inventory: inventory)
+        try self.init(checkedAccount: account, initialization: initialization, reference: reference,
+            codeInventory: inventory, codePolicy: account.initialAuthority.codePolicy,
+            presencePolicy: presencePolicy, relayPort: relayPort, environment: environment,
+            submissionLimits: submissionLimits, captureLimits: captureLimits)
+    }
+    private init(checkedAccount account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
+        reference: RuntimeMaterialReference, codeInventory inventory: InstallationInventory, codePolicy policy: AuthorityCodePolicy,
+        retainedSetupBinding: RuntimeRetainedSetupReleaseBinding? = nil, presencePolicy: PresenceConfiguration, relayPort: UInt16?, environment: [CapturedEnvironmentEntry],
+        submissionLimits: CBORLimits, captureLimits: CBORLimits) throws {
         func entry(_ role: AuthorityCodeRole) throws -> AuthorityCodeEntry {
             guard let value = policy.entries.first(where: { $0.role == role && $0.active }) else {
                 throw RuntimePreparationError.invalidRecord
@@ -142,7 +223,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
         let baseTransport = try TransportPairingStartupConfiguration(transport: direct, control: pairingClient, relayPort: relayPort)
         if reference.serviceActivity != nil {
             transport = try GatewaySettingsNativeHostPlan(reference: reference, bundlePath: inventory.bundlePath,
-                policy: policy).selecting(baseTransport)
+                policy: policy, retainedSetupBinding: retainedSetupBinding).selecting(baseTransport)
         } else { transport = baseTransport }
         presenceClient = try .init(macID: account.macID, accountID: account.accountID, ownerUID: account.ownerUID,
             serviceName: paths.presenceService, teamID: authority.teamID, rootIdentifier: authority.identifier,
@@ -177,6 +258,57 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
         try self.init(retaining: plan.host.command, transport: plan.transport, reference: plan.reference,
             account: account, initialization: initialization, inventory: inventory,
             policy: account.initialAuthority.codePolicy, clients: clients)
+    }
+
+    /// Retains checked v6 values. This overload cannot create an ordinary executable activation plan.
+    init(retaining plan: RuntimeRetainedSetupActivationPlan, account: AccountPreparationIntent,
+        initialization: AuthorityInitializationIntent, inventory: InstallationInventory, clients: RuntimeActivationClients) throws {
+        try plan.requireConfigurationScope(account: account, initialization: initialization, inventory: inventory)
+        try self.init(retaining: plan.host.command, transport: plan.transport, reference: plan.reference,
+            account: account, initialization: initialization, inventory: inventory, policy: plan.host.codePolicy, clients: clients)
+    }
+
+    /// Validates completed bytes against current code and frozen provisioning. It does not rebuild tunable values.
+    static func stableCompleted(snapshot: MachineUpdateStableRuntimePreparationSnapshot, reference: RuntimeMaterialReference,
+        candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
+        command: AuthorityCommandStartupConfiguration, transport: TransportPairingStartupConfiguration,
+        clients: RuntimeActivationClients) throws -> Self {
+        guard snapshot.state.configurationPublished, snapshot.state.reference == reference,
+              let initialization = snapshot.setup.account?.initialization, initialization.complete else {
+            throw RuntimePreparationError.changedScope
+        }
+        let account = snapshot.preparation, source = snapshot.setup.source, actual = source.actual
+        try reference.validate(account: account, services: snapshot.plan)
+        let provisioning = try source.provisioningInventory(accountID: account.accountID,
+            ownerUID: account.ownerUID, releaseDigest: account.releaseDigest)
+        try validateScope(account: account, initialization: initialization, reference: reference, inventory: provisioning)
+        guard provisioning.bundlePath == actual.inventory.bundlePath else { throw RuntimePreparationError.changedScope }
+        try actual.seal.requireCurrentInventory(actual.inventory, epoch: actual.installed, candidate: candidate)
+        try actual.inventory.compareRelease(candidate); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
+        try ReleaseGenerationPreflight.validate(candidate, against: currentCodePolicy)
+        let required: [AuthorityCodeRole] = [.app, .authority, .transport, .notificationGateway,
+            .commandFrontend, .commandMonitor, .commandChild, .setupController]
+        guard required.allSatisfy({ role in currentCodePolicy.entries.contains { $0.role == role && $0.active } }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        for entry in currentCodePolicy.entries where entry.active {
+            guard let component = candidate.manifest.components.first(where: { $0.role == entry.role }),
+                  entry.teamID == component.teamID, entry.identifier == component.identifier,
+                  entry.installedGeneration == component.generation,
+                  entry.codeDirectoryHash == candidate.codeDirectoryHashes[entry.role] else { throw RuntimePreparationError.changedScope }
+        }
+        if reference.serviceActivity != nil {
+            guard let host = transport.settingsHost, host.runtime == reference,
+                  host.role == .transport, try host.codePolicy.bytes == currentCodePolicy.bytes else {
+                throw RuntimePreparationError.changedScope
+            }
+            try host.requireConfigurationScope(account: account, inventory: actual.inventory)
+            try host.validateRelease(candidate)
+            try host.validate(transport: transport.transport, pairing: clients.pairing)
+        } else { guard transport.settingsHost == nil else { throw RuntimePreparationError.changedScope } }
+        return try .init(retaining: command, transport: transport, reference: reference,
+            account: account, initialization: initialization, inventory: actual.inventory,
+            policy: currentCodePolicy, clients: clients)
     }
 
     private init(retaining command: AuthorityCommandStartupConfiguration, transport transportConfiguration: TransportPairingStartupConfiguration,

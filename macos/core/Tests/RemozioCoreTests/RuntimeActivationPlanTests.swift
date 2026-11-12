@@ -95,3 +95,32 @@ extension RuntimeActivationPlanTests {
         XCTAssertFalse(try RuntimeActivationPlan.decode(before).host.gatewaySettingsControlEnabled)
     }
 }
+
+extension RuntimeActivationPlanTests {
+    func testRetainedValueSupportKeepsEveryOrdinaryPlanWireVersionAndJobBytes() throws {
+        for version in UInt64(1)...5 {
+            let f = try RuntimeActivationFixture(nativeConsumerHosts: version >= 2,
+                phoneRouting: version == 3, phoneAudit: version == 4,
+                phoneUpdateScheduling: version == 5)
+            let plan = f.plan
+            XCTAssertEqual(plan.formatVersion, version)
+            var fields: [UInt64: CBORValue] = [0: .unsigned(version), 1: .bytes(try plan.reference.encoded),
+                2: .text(plan.bundlePath), 3: .bytes(plan.host.canonicalBytes), 4: .bytes(plan.transport.canonicalBytes)]
+            if version >= 2 { fields[5] = .bytes(try XCTUnwrap(plan.gatewaySettingsHost).encoded) }
+            if version >= 3 { fields[6] = version == 3 ? .unsigned(1) : .null }
+            if version >= 4 { fields[7] = version == 4 ? .unsigned(1) : .null }
+            if version == 5 { fields[8] = .unsigned(1) }
+            let expected = try DeterministicCBOR.encode(.map(fields), limits: RuntimeActivationPlan.limits)
+            XCTAssertEqual(try plan.encoded, expected)
+            let restored = try RuntimeActivationPlan.decode(expected)
+            XCTAssertEqual(try restored.encoded, expected)
+            XCTAssertEqual(restored.authorityJob.bytes, plan.authorityJob.bytes)
+            XCTAssertEqual(restored.transportJob.bytes, plan.transportJob.bytes)
+            XCTAssertFalse(plan.authorityJob.machServices.contains(
+                try MachineUpdateRetainedSetupHealthService.authority(accountID: plan.accountID)))
+            XCTAssertThrowsError(try RuntimeRetainedSetupActivationArchive.decode(expected))
+            XCTAssertThrowsError(try RuntimeRetainedSetupActivationPlan.decode(expected))
+        }
+        XCTAssertEqual(RuntimeActivationPlan.supportedVersions, [1, 2, 3, 4, 5])
+    }
+}

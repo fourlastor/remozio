@@ -4,10 +4,21 @@ import Foundation
 struct GatewaySettingsNativeHostPlan: Sendable {
     let gateway: GatewaySettingsConsumerHostConfiguration
     let transport: GatewaySettingsConsumerHostConfiguration
-    init(reference: RuntimeMaterialReference, bundlePath: String, policy: AuthorityCodePolicy) throws {
+    init(reference: RuntimeMaterialReference, bundlePath: String, policy: AuthorityCodePolicy,
+        retainedSetupBinding: RuntimeRetainedSetupReleaseBinding? = nil) throws {
         guard reference.serviceActivity != nil else { throw RuntimeActivationError.incomplete }
-        gateway = try .init(role: .gateway, runtime: reference, bundlePath: bundlePath, codePolicy: policy)
-        transport = try .init(role: .transport, runtime: reference, bundlePath: bundlePath, codePolicy: policy)
+        let host: GatewaySettingsConsumerHostConfiguration
+        if let retainedSetupBinding {
+            host = try .retainedSetup(role: .transport, runtime: reference, bundlePath: bundlePath,
+                codePolicy: policy, binding: retainedSetupBinding)
+        } else {
+            host = try .init(role: .transport, runtime: reference, bundlePath: bundlePath, codePolicy: policy)
+        }
+        try self.init(host: host)
+    }
+    init(host: GatewaySettingsConsumerHostConfiguration) throws {
+        gateway = try host.selecting(role: .gateway)
+        transport = try host.selecting(role: .transport)
     }
     /// Setup must inspect the actual signed release before it retains a new selection.
     func validateRelease(_ release: SignedReleaseEvidence) throws {
@@ -15,9 +26,7 @@ struct GatewaySettingsNativeHostPlan: Sendable {
             throw GatewayPreparationError.changedScope
         }
         for host in [gateway, transport] {
-            try host.validateRelease(release)
-            _ = try GatewaySettingsRecoveryNativePolicy(role: host.role, services: host.runtime.services,
-                codePolicy: host.codePolicy, release: release)
+            _ = try GatewaySettingsRecoveryNativePolicy(host: host, release: release)
             guard release.manifest.components.first(where: { $0.role == host.role.codeRole })?.relativePath
                 == host.consumerExecutableRelativePath else { throw GatewayPreparationError.changedScope }
         }

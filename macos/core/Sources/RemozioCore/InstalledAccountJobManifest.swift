@@ -16,12 +16,13 @@ struct InstalledAccountJobManifest {
 
     init(accountID: Data, role: AuthorityCodeRole, executionUID: UInt32, userName: String,
          bundlePath: String, gatewaySettingsControlEnabled: Bool = false, settingsConsumerHostEnabled: Bool = false,
-         installedReadinessEnabled: Bool = false) throws {
+         installedReadinessEnabled: Bool = false, retainedSetupHealthEnabled: Bool = false) throws {
         let paths = try RuntimePreparationPaths(accountID: accountID)
         let serviceRole: ServiceAccountRole = role == .notificationGateway ? .gateway : .transport
         guard role == .authority || role == .transport || role == .notificationGateway,
               !gatewaySettingsControlEnabled || role == .authority,
               !installedReadinessEnabled || (role == .authority && gatewaySettingsControlEnabled),
+              !retainedSetupHealthEnabled || (role == .authority && gatewaySettingsControlEnabled),
               !settingsConsumerHostEnabled || role == .transport || role == .notificationGateway,
               role == .authority ? (executionUID == 0 && userName == "root") :
                 (executionUID > 0 && executionUID < UInt32.max && userName == ServiceAccountClaim.recordName(accountID: accountID, role: serviceRole)),
@@ -44,7 +45,8 @@ struct InstalledAccountJobManifest {
             settingsConsumerHostEnabled ? "--settings-host" : role == .notificationGateway ? "--configuration" : "--pairing-configuration", configurationPath]
         machServices = role == .authority ? Set([paths.authorityService, paths.commandService, paths.presenceService]
             + (gatewaySettingsControlEnabled ? [paths.gatewaySettingsControlService] : [])
-            + (installedReadinessEnabled ? [try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: accountID)] : [])) :
+            + (installedReadinessEnabled ? [try MachineUpdateAuthorityReadinessDeclaration.serviceName(accountID: accountID)] : [])
+            + (retainedSetupHealthEnabled ? [try MachineUpdateRetainedSetupHealthService.authority(accountID: accountID)] : [])) :
             role == .notificationGateway ? Set([paths.gatewayService, paths.gatewayWakeService]
                 + (settingsConsumerHostEnabled ? [try GatewaySettingsConsumerRole.gateway.serviceName(accountID: accountID),
                     try GatewaySettingsConsumerRole.gateway.recoveryServiceName(accountID: accountID)] : [])) :
