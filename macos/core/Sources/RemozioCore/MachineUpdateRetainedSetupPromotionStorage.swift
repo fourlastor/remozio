@@ -34,11 +34,14 @@ enum MachineUpdateRetainedSetupPromotionStorage {
                   Set([UInt64(25), 26, 27]).isSubset(of: installation.writers) else {
                 throw PreparationStoreError.incompatibleStore
             }
-            for name in [MachineUpdateRetainedSetupPolicyIntentRecord.formatName,
-                MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.formatName] {
+            for (name, version) in [
+                (MachineUpdateRetainedSetupPolicyIntentRecord.formatName, MachineUpdateRetainedSetupPolicyIntentRecord.currentFormatVersion),
+                (MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupCompletionIntentRecord.currentFormatVersion),
+                (MachineUpdateRetainedSetupPromotionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.currentFormatVersion)
+            ] {
                 let needsWriter = name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController
-                guard let format = component.formats.first(where: { $0.name == name }), format.readers.contains(1),
-                      !needsWriter || format.writers.contains(1) else { throw PreparationStoreError.incompatibleStore }
+                guard let format = component.formats.first(where: { $0.name == name }), format.readers.contains(version),
+                      !needsWriter || format.writers.contains(version) else { throw PreparationStoreError.incompatibleStore }
             }
         }
     }
