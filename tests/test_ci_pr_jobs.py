@@ -62,9 +62,9 @@ def changed(*texts):
     return {next(index for index, line in enumerate(lines) if text in line) for text in texts}
 
 
-def select(*texts, used_elsewhere=lambda name: True):
+def select(*texts, used_elsewhere=lambda name: True, users=lambda name: set()):
     return JOBS.tests_for_changes(TEST_FILE, changed(*texts), 'M', {'HeavyTests', 'LightTests'}, {'HeavyTests'},
-                                  used_elsewhere)
+                                  used_elsewhere, users)
 
 
 class GitRepository:
@@ -186,8 +186,8 @@ class CoreTestSelectionTests(unittest.TestCase):
         self.assertEqual(select('import XCTest', '@testable import'), set())
         lines = TEST_FILE.splitlines()
         blank = {index for index, line in enumerate(lines) if not line.strip()}
-        self.assertEqual(JOBS.tests_for_changes(TEST_FILE, blank, 'M', {'HeavyTests'}, set(), lambda name: True),
-                         set())
+        self.assertEqual(JOBS.tests_for_changes(TEST_FILE, blank, 'M', {'HeavyTests'}, set(), lambda name: True,
+                                                lambda name: set()), set())
 
     def test_file_local_support_selects_the_classes_of_its_file(self):
         self.assertEqual(select('private struct LocalFixture'), {'M.HeavyTests', 'M.LightTests'})
@@ -195,6 +195,23 @@ class CoreTestSelectionTests(unittest.TestCase):
 
     def test_shared_support_needs_the_full_suite(self):
         self.assertIsNone(select('let value = 2'))
+
+    def test_a_change_outside_the_test_methods_of_a_class_also_selects_its_users(self):
+        users = {'HeavyTests': {'N.CallerTests'}, 'LightTests': {'N.OtherTests'}}
+        asked = []
+
+        def lookup(name):
+            asked.append(name)
+            return users[name]
+
+        self.assertEqual(select('private func helper', users=lookup), {'M.HeavyTests', 'N.CallerTests'})
+        self.assertEqual(select('final class LightTests', users=lookup), {'M.LightTests', 'N.OtherTests'})
+        asked.clear()
+        # A change inside a test method cannot reach another class, so it asks for no users.
+        self.assertEqual(select('XCTAssertEqual(2, 2)', 'func testThree', users=lookup),
+                         {'M.HeavyTests/testTwo', 'M.LightTests'})
+        self.assertEqual(asked, [])
+        self.assertIsNone(select('private func helper', users=lambda name: None))
 
     def test_the_smoke_classes_are_weighted_core_classes_that_need_no_app(self):
         weights = json.loads((ROOT / JOBS.WEIGHTS).read_text())['weights']
@@ -251,6 +268,56 @@ class CoreTestSelectionTests(unittest.TestCase):
             self.assertEqual(values['mac'], 'true')
             self.assertEqual(values['mac_core'], 'false')
             self.assertEqual(values['android'], 'false')
+
+    def test_a_helper_change_selects_the_classes_that_call_it_from_other_files(self):
+        heavy = ('import XCTest\nfinal class HeavyTests: XCTestCase {\n    static func withFixture() -> Int { 1 }\n\n'
+                 '    func testOne() { XCTAssertEqual(Self.withFixture(), 1) }\n}\n')
+        caller = ('import XCTest\nfinal class CallerTests: XCTestCase {\n'
+                  '    func testCalls() { XCTAssertEqual(HeavyTests.withFixture(), 1) }\n}\n')
+        middle = ('import XCTest\nfinal class MiddleTests: XCTestCase {\n'
+                  '    static func viaHeavy() -> Int { HeavyTests.withFixture() }\n\n'
+                  '    func testMiddle() { XCTAssertEqual(Self.viaHeavy(), 1) }\n}\n')
+        far = ('import XCTest\nfinal class FarTests: XCTestCase {\n'
+               '    func testFar() { XCTAssertEqual(MiddleTests.viaHeavy(), 1) }\n}\n')
+        unrelated = 'import XCTest\nfinal class UnrelatedTests: XCTestCase {\n    func testAlone() {}\n}\n'
+        commented = ('import XCTest\n// HeavyTests covers the fixture.\nfinal class NoteTests: XCTestCase {\n'
+                     '    func testNote() {}\n}\n')
+        core = 'macos/core/Tests/RemozioCoreTests/'
+        with tempfile.TemporaryDirectory() as directory, working_directory(directory):
+            repository = GitRepository(directory)
+            for name, text in (('HeavyTests', heavy), ('CallerTests', caller), ('MiddleTests', middle),
+                               ('FarTests', far), ('UnrelatedTests', unrelated), ('NoteTests', commented)):
+                repository.write(f'{core}{name}.swift', text)
+            repository.commit('base')
+            cases = {
+                'helper': (heavy.replace('{ 1 }', '{ 2 }'),
+                           ['RemozioCoreTests.CallerTests', 'RemozioCoreTests.FarTests',
+                            'RemozioCoreTests.HeavyTests', 'RemozioCoreTests.MiddleTests']),
+                # Each branch starts from main, which already holds the merged helper change.
+                'test-body': (heavy.replace('{ 1 }', '{ 2 }').replace('Self.withFixture(), 1', 'Self.withFixture(), 2'),
+                              ['RemozioCoreTests.HeavyTests']),
+            }
+            for branch, (text, expected) in cases.items():
+                with self.subTest(branch=branch):
+                    repository.git('switch', '--quiet', '-c', branch, 'main')
+                    repository.write(core + 'HeavyTests.swift', text)
+                    repository.commit(branch)
+                    base, merge = repository.merge(branch)
+                    paths = [name for name in JOBS.changed_paths(merge) if name != 'README.md']
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(JOBS.core_test_plan(paths, base, merge), ('selected', expected))
+
+            # Shared support outside a test class that names the class could reach any test, so the suite runs in full.
+            repository.git('switch', '--quiet', 'main')
+            repository.write(core + 'Support.swift', 'func shared() -> Int { HeavyTests.withFixture() }\n')
+            repository.write(core + 'UnrelatedTests.swift', unrelated.replace('{}', '{ _ = shared() }'))
+            repository.commit('support')
+            repository.git('switch', '--quiet', '-c', 'through-support', 'main')
+            repository.write(core + 'HeavyTests.swift', heavy.replace('{ 1 }', '{ 3 }'))
+            repository.commit('through-support')
+            base, merge = repository.merge('through-support')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(JOBS.core_test_plan([core + 'HeavyTests.swift'], base, merge), ('full', []))
 
     def test_a_commit_that_is_not_a_merge_runs_everything_in_full(self):
         with tempfile.TemporaryDirectory() as directory, working_directory(directory):

@@ -9,12 +9,16 @@ pull request.
 macos/core tests. The Mac core tests job runs in one of two modes.
 - full: every class except the app-dependent ones, in six shards on two runners. A pull request gets this mode when it
   changes a path that runs every job, a Package.swift or Package.resolved file, a file under macos/core/Tests that is
-  not Swift (fixtures), Swift code under macos/core/Tests outside an XCTestCase class (shared test support), or a
-  file that a core test reads from outside macos/core (CORE_TEST_INPUTS).
+  not Swift (fixtures), Swift code under macos/core/Tests outside an XCTestCase class that other files share (shared
+  test support), a test class that such shared support names, or a file that a core test reads from outside
+  macos/core (CORE_TEST_INPUTS).
 - selected: only the XCTestCase classes whose code the pull request adds or changes under macos/core/Tests. For a
   heavy class (METHOD_LEVEL_SECONDS or more in the weights file, or split there under "methods"), only the test
-  methods whose bodies change, unless a change falls outside every test method of the class. A change to a private
-  or fileprivate top-level declaration in a test file selects every class of that file. A change to the
+  methods whose bodies change, unless a change falls outside every test method of the class. A change outside the
+  test methods of a class, such as a helper, also selects its users: every test class in another file that names
+  it, and in turn the users of a class that names it outside its own test methods. A change to a private or
+  fileprivate top-level declaration in a test file, or to one that no other file names, selects every class of
+  that file. A change to the
   macos/core, protocol/swift or host sources adds the fixed SMOKE_CLASSES. Import, blank and comment lines select
   nothing. A change to the Gradle build alone runs only the smoke classes. A selection estimated above
   TWO_RUNNER_SECONDS runs on two runners.
@@ -166,17 +170,24 @@ def test_spans(lines, line_owners):
     return spans
 
 
-def tests_for_changes(text, changed, module, test_classes, method_level, used_elsewhere):
+def in_test_method(spans, test_class, index):
+    return any(owner == test_class and index in span for (owner, _), span in spans.items())
+
+
+def tests_for_changes(text, changed, module, test_classes, method_level, used_elsewhere, users):
     """The Module.Class and Module.Class/method names that the changed lines (0-based) of one test file select.
 
-    A change to a top-level declaration that only this file can use selects every test class of the file: a private
-    or fileprivate one, or one whose name no other test file mentions (`used_elsewhere(name)` is false). Returns None
-    when a change needs the full suite: other code outside the XCTestCase classes, which other test files share.
+    A change inside a test method selects its class, or only that method in a heavy class. A change elsewhere in a
+    test class, such as a helper or a fixture, selects the class and also `users(name)`: the test classes of other
+    files that name it. A change to a top-level declaration that only this file can use selects every test class of
+    the file: a private or fileprivate one, or one whose name no other test file mentions (`used_elsewhere(name)` is
+    false). Returns None when a change needs the full suite: other code outside the XCTestCase classes, which other
+    test files share, or a class whose users cannot be bounded (`users` returns None).
     """
     lines = text.splitlines()
     line_owners = owners(lines, test_classes)
     spans = test_spans(lines, line_owners)
-    whole, methods = set(), set()
+    whole, methods, others = set(), set(), set()
     for index in sorted(changed):
         if not 0 <= index < len(lines):
             continue
@@ -189,14 +200,18 @@ def tests_for_changes(text, changed, module, test_classes, method_level, used_el
             continue
         if kind != 'class':
             return None
-        if name in method_level:
-            method = next((test for (owner, test), span in spans.items() if owner == name and index in span), None)
-            if method:
-                methods.add((name, method))
-                continue
+        if not in_test_method(spans, name, index):
+            found = users(name)
+            if found is None:
+                return None
+            others |= found
+        elif name in method_level:
+            methods.add(next((name, test) for (owner, test), span in spans.items()
+                             if owner == name and index in span))
+            continue
         whole.add(name)
-    return ({f'{module}.{name}' for name in whole}
-            | {f'{module}.{name}/{method}' for name, method in methods if name not in whole})
+    selected = {f'{module}.{name}' for name in whole} | others
+    return selected | {f'{module}.{name}/{method}' for name, method in methods if f'{module}.{name}' not in selected}
 
 
 def git(*arguments):
@@ -212,6 +227,66 @@ def changed_lines(base, merge_commit, path):
     return lines
 
 
+class TestTree:
+    """The macos/core test sources at one commit, read through git."""
+
+    def __init__(self, commit):
+        self.commit = commit
+        self.classes = set(TEST_CLASS.findall(git('grep', '-h', '-F', 'XCTestCase', commit, '--', CORE_TESTS)))
+        self.texts = {}
+
+    def text(self, path):
+        if path not in self.texts:
+            self.texts[path] = git('show', f'{self.commit}:{path}')
+        return self.texts[path]
+
+    def mentions(self, name):
+        """The test files that contain `name` as a whole word."""
+        found = subprocess.run(['git', 'grep', '-l', '-w', '-F', name, self.commit, '--', CORE_TESTS], text=True,
+                               capture_output=True).stdout.split('\n')
+        return [mention.split(':', 1)[1] for mention in found if mention]
+
+    def used_elsewhere(self, name, path):
+        return any(mention != path for mention in self.mentions(name))
+
+    def users(self, name):
+        """Module.Class names of the test classes that can reach test class `name`'s non-test code.
+
+        A class that names `name` is a user. When it names it outside its own test methods, its helpers may pass
+        the change on, so the users of that class count too. A file-local declaration that names it makes every
+        class of its file a user. Returns None when shared support outside a test class names it.
+        """
+        found, queue, seen = set(), [name], set()
+        while queue:
+            current = queue.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            word = re.compile(rf'\b{re.escape(current)}\b')
+            for path in self.mentions(current):
+                module = PurePosixPath(path).relative_to(CORE_TESTS).parts[0]
+                lines = self.text(path).splitlines()
+                line_owners = owners(lines, self.classes)
+                spans = test_spans(lines, line_owners)
+                for index, line in enumerate(lines):
+                    if not word.search(line) or line.strip().startswith(('//', '/*', '*')):
+                        continue
+                    kind, owner = line_owners[index]
+                    if kind == 'import':
+                        continue
+                    if kind == 'class':
+                        found.add(f'{module}.{owner}')
+                        if not in_test_method(spans, owner, index):
+                            queue.append(owner)
+                    elif kind == 'file' or (kind == 'other' and owner and not self.used_elsewhere(owner, path)):
+                        local = [test_class for kind, test_class in line_owners if kind == 'class']
+                        found |= {f'{module}.{test_class}' for test_class in local}
+                        queue += local
+                    else:
+                        return None
+        return found
+
+
 def core_test_plan(paths, base, merge_commit):
     """('full', []) or ('selected', sorted names) for the macos/core tests of a pull request. See the module doc."""
     def full(path, reason):
@@ -221,7 +296,7 @@ def core_test_plan(paths, base, merge_commit):
     weights = json.loads((ROOT / WEIGHTS).read_text())
     method_level = set(weights.get('methods', {})) | {
         name for name, seconds in weights['weights'].items() if seconds >= METHOD_LEVEL_SECONDS}
-    test_classes = None
+    tree = None
     names, smoke = set(), False
     for path in paths:
         if path.startswith(GRADLE_BUILD):
@@ -238,20 +313,13 @@ def core_test_plan(paths, base, merge_commit):
                 return full(path, 'is a test fixture')
             if subprocess.run(['git', 'cat-file', '-e', f'{merge_commit}:{path}'], capture_output=True).returncode:
                 continue  # A deleted test file runs nothing; the build still compiles every remaining test.
-            if test_classes is None:
-                test_classes = set(TEST_CLASS.findall(git('grep', '-h', '-F', 'XCTestCase', merge_commit, '--',
-                                                          CORE_TESTS)))
+            tree = tree or TestTree(merge_commit)
             module = PurePosixPath(path).relative_to(CORE_TESTS).parts[0]
-
-            def used_elsewhere(name, path=path):
-                mentions = subprocess.run(['git', 'grep', '-l', '-w', '-F', name, merge_commit, '--', CORE_TESTS],
-                                          text=True, capture_output=True).stdout.split()
-                return any(mention != f'{merge_commit}:{path}' for mention in mentions)
-
-            found = tests_for_changes(git('show', f'{merge_commit}:{path}'), changed_lines(base, merge_commit, path),
-                                      module, test_classes, method_level, used_elsewhere)
+            found = tests_for_changes(tree.text(path), changed_lines(base, merge_commit, path), module, tree.classes,
+                                      method_level, lambda name, path=path: tree.used_elsewhere(name, path),
+                                      tree.users)
             if found is None:
-                return full(path, 'changes test code outside an XCTestCase class')
+                return full(path, 'changes shared test code outside an XCTestCase class or its users')
             names |= found
         elif path.startswith(CORE_SOURCES):
             smoke = True
