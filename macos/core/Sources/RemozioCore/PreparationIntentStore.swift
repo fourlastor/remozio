@@ -219,12 +219,73 @@ public final class PreparationIntentStore {
     func retainedRuntimeCompatibilityInputs() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try transaction(write: false) { try loadRetainedRuntimeCompatibilityInputs() }
     }
-    private func loadRetainedRuntimeCompatibilityInputs(finishing: MachineUpdateInstalledSourceSnapshot? = nil)
-        throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+    /// Enumerates protected v6 ownership claims. Directory resolution belongs outside this transaction.
+    func retainedSetupCompatibilityOwners(expected: MachineUpdateStableRuntimeSource, candidate: SignedReleaseEvidence)
+        throws -> [RuntimeStableCompatibilityOwner] {
+        try transaction(write: false) {
+            try loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
+            let ids: [Data] = try statement("SELECT account FROM runtime_activation_v1 ORDER BY account") { row in
+                var values: [Data] = []
+                while try step(row) == SQLITE_ROW {
+                    guard values.count < 64 else { throw PreparationStoreError.corruptRecord }
+                    values.append(try blob(row, column: 0, maximum: 16))
+                }
+                return values
+            }
+            var claims: [RuntimeStableCompatibilityOwner] = []
+            for id in ids {
+                guard let row = try loadCompatibilityActivation(accountID: id).plan else { throw PreparationStoreError.corruptRecord }
+                if case .retained(let plan) = row {
+                    guard let account = expected.accounts.first(where: { $0.accountID == id }), account.origin == .retained,
+                          let preparation = account.preparation, account.ownerUID == plan.reference.services.ownerUID else {
+                        throw PreparationStoreError.corruptRecord
+                    }
+                    try plan.validate(account: preparation, reference: plan.reference)
+                    claims.append(.init(accountID: id, ownerUID: preparation.ownerUID, directoryID: preparation.directoryID))
+                }
+            }
+            try loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
+            return claims
+        }
+    }
+
+    /// Reads checked stable compatibility without granting ordinary activation or write authority.
+    func stableRuntimeCompatibilitySnapshot(expected: MachineUpdateStableRuntimeSource,
+        retained: [MachineUpdateRetainedSetupActivationSnapshot], candidate: SignedReleaseEvidence)
+        throws -> RuntimeReleaseCompatibilitySnapshot {
+        let ids = retained.map { $0.runtime.preparation.accountID }
+        guard Set(ids).count == ids.count else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
+        return try transaction(write: false) {
+            let context = StableCompatibilityRead(source: expected, retained: retained)
+            func capture() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+                try self.loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
+                for supplied in retained {
+                    guard supplied.state.plan != nil else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
+                    try supplied.runtime.setup.source.requireSame(as: expected)
+                    try self.loadRetainedSetupActivationSnapshot(owner: supplied.runtime.setup.owner,
+                        candidate: candidate).requireSame(as: supplied)
+                }
+                return try self.loadRetainedRuntimeCompatibilityInputs(stable: context)
+            }
+            let inputs = try capture()
+            let result = try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs)
+            guard try capture() == inputs else { throw PreparationStoreError.staleRevision }
+            return result
+        }
+    }
+    private struct StableCompatibilityRead {
+        let source: MachineUpdateStableRuntimeSource
+        let retained: [MachineUpdateRetainedSetupActivationSnapshot]
+    }
+    private func loadRetainedRuntimeCompatibilityInputs(finishing: MachineUpdateInstalledSourceSnapshot? = nil,
+        stable: StableCompatibilityRead? = nil) throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
         let actualInventory = try schema >= 2 ? loadInventoryRecord() : nil
-        if let finishing {
+        if let stable {
+            guard case nil = finishing, schema == stable.source.actual.schemaVersion,
+                  schema >= 24, actualInventory == stable.source.actual.inventory else { throw PreparationStoreError.staleRevision }
+        } else if let finishing {
             guard schema == 23, finishing.actual.inventory == actualInventory else { throw PreparationStoreError.staleRevision }
         } else {
             // The ordinary reader cannot treat a finishing store as a stable runtime.
@@ -249,23 +310,58 @@ public final class PreparationIntentStore {
         let ids = try accounts("SELECT account FROM runtime_preparation_v1 ORDER BY account")
         let activated = try schema >= 7 ? accounts("SELECT account FROM runtime_activation_v1 ORDER BY account") : []
         guard activated.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
+        func historicalInventory(for reference: RuntimeMaterialReference) throws -> InstallationInventory? {
+            if let stable {
+                return try stable.source.provisioningInventory(accountID: reference.services.accountID,
+                    ownerUID: reference.services.ownerUID, releaseDigest: reference.services.releaseDigest)
+            }
+            return finishing?.historicalInventory
+        }
+        var retainedIDs = Set<Data>()
         var values: [RuntimeReleaseCompatibilitySnapshot.Runtime] = []
         for id in ids {
             let state = try loadRuntimePreparation(accountID: id)
             guard let reference = state.reference else { throw PreparationStoreError.corruptRecord }
-            try requireRuntimeMaterialScope(reference, historicalInventory: finishing?.historicalInventory)
+            let historical = try historicalInventory(for: reference)
+            try requireRuntimeMaterialScope(reference, historicalInventory: historical)
             var record: Data?, registered = false
             if activated.contains(id) {
-                let activation = try loadRuntimeActivation(accountID: id)
-                guard let plan = activation.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
-                try requireRuntimeActivationScope(plan, historicalInventory: finishing?.historicalInventory)
-                if activation.jobsRegistered {
-                    guard let inventory, try plan.enrolledInventory(inventory) == inventory else { throw PreparationStoreError.corruptRecord }
+                let projection: RuntimeActivationCompatibilityProjection
+                if let stable {
+                    let row = try loadCompatibilityActivation(accountID: id)
+                    guard let plan = row.plan, plan.reference == reference else { throw PreparationStoreError.corruptRecord }
+                    projection = plan; registered = row.registered
+                    if case .retained(let value) = plan {
+                        guard let supplied = stable.retained.first(where: { $0.runtime.preparation.accountID == id }) else {
+                            throw RuntimeActivationCompatibilityError.missingRetainedSnapshot
+                        }
+                        guard try supplied.state.plan?.encoded == value.encoded,
+                              supplied.state.jobsRegistered == registered else { throw PreparationStoreError.staleRevision }
+                        retainedIDs.insert(id)
+                    }
+                } else {
+                    let activation = try loadRuntimeActivation(accountID: id)
+                    guard let plan = activation.plan else { throw PreparationStoreError.corruptRecord }
+                    projection = .ordinary(plan); registered = activation.jobsRegistered
                 }
-                record = try plan.encoded; registered = activation.jobsRegistered
+                guard projection.reference == reference else { throw PreparationStoreError.corruptRecord }
+                if case .ordinary(let plan) = projection {
+                    try requireRuntimeActivationScope(plan, historicalInventory: historical)
+                    if registered {
+                        guard let scope = historical ?? inventory, try plan.enrolledInventory(scope) == scope else {
+                            throw PreparationStoreError.corruptRecord
+                        }
+                    }
+                }
+                record = try projection.encoded
             }
             values.append(.init(reference: reference, configurationPublished: state.configurationPublished,
                 activationRecord: record, jobsRegistered: registered))
+        }
+        if let stable {
+            guard retainedIDs == Set(stable.retained.map { $0.runtime.preparation.accountID }) else {
+                throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot
+            }
         }
         for record in sharedImport?.records ?? [] {
             if let retained = record.runCredential {
@@ -284,13 +380,17 @@ public final class PreparationIntentStore {
         for id in gatewayIDs {
             let state = try loadGatewayRuntimeActivation(accountID: id)
             guard let plan = state.plan else { throw PreparationStoreError.corruptRecord }
-            let scope = try requireGatewayRuntimeActivationScope(plan, historicalInventory: finishing?.historicalInventory)
+            guard let reference = values.first(where: { $0.reference.services.accountID == id })?.reference else {
+                throw PreparationStoreError.corruptRecord
+            }
+            let historical = try historicalInventory(for: reference)
+            let scope = try requireGatewayRuntimeActivationScope(plan, historicalInventory: historical)
             if state.jobRegistered {
                 let proposal = try plan.proposal(journal: scope.journal, foreground: scope.foreground, inventory: scope.inventory)
                 guard try proposal.enrolledInventory(scope.inventory) == scope.inventory else { throw PreparationStoreError.corruptRecord }
             }
             let settings = try schema >= 11 ? loadGatewaySettingsTransition(accountID: id) : .empty
-            if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision, historicalInventory: finishing?.historicalInventory) }
+            if let revision = settings.pending ?? settings.active { _ = try requireGatewaySettingsScope(revision, historicalInventory: historical) }
             gateways.append(.init(accountID: id, activationRecord: try plan.encoded,
                 configurationPublished: state.filesPublished, jobRegistered: state.jobRegistered,
                 activeSettings: try settings.active?.encoded, pendingSettings: try settings.pending?.encoded,
@@ -300,7 +400,7 @@ public final class PreparationIntentStore {
         guard upgradeIDs.allSatisfy({ ids.contains($0) }) else { throw PreparationStoreError.corruptRecord }
         let auditUpgrades = try upgradeIDs.map { id -> RuntimeAuditUpgradeRecord in
             guard let record = try loadRuntimeAuditUpgrade(accountID: id) else { throw PreparationStoreError.corruptRecord }
-            try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true, historicalInventory: finishing?.historicalInventory); return record
+            try requireRuntimeAuditUpgradeScope(record.intent, allowCommitted: true, historicalInventory: historicalInventory(for: record.intent.source)); return record
         }
         let auditGraphs: [RuntimeAuditUpgradeGraphRecord]
         if schema >= 13 {
@@ -326,12 +426,12 @@ public final class PreparationIntentStore {
         } : []
         try identity(macID)
         let admission = try schema >= 16 ? loadUpdateAdmissionRegistration()?.encoded : nil
-        if let finishing {
-            let installed = finishing.actual.installed
+        if let installed = finishing?.actual.installed ?? stable?.source.actual.installed,
+           let activation = finishing?.actual.activation ?? stable?.source.actual.activation {
             return try .init(schemaVersion: schema, macID: macID, inventory: actualInventory?.canonicalBytes, runtimes: values,
                 gateways: gateways, sharedImport: sharedImport, auditUpgrades: auditUpgrades, auditGraphs: auditGraphs,
                 auditCutovers: auditCutovers, updateAdmissionRegistration: admission,
-                machineUpdateActivation: finishing.actual.activation.encoded,
+                machineUpdateActivation: activation.encoded,
                 machineUpdateConfigurationEpoch: installed.configuration().record.encoded,
                 machineUpdateBackendEpoch: installed.backend().record.encoded,
                 completionIntent: MachineUpdateActivationRecord.digest(installed.completionIntent().record.encoded),
@@ -417,6 +517,27 @@ public final class PreparationIntentStore {
               let inventory = try historicalInventory ?? loadInventoryRecord() else { throw RuntimeActivationError.incomplete }
         try plan.validate(account: account, reference: plan.reference)
         _ = try plan.enrolledInventory(inventory)
+    }
+    private func loadCompatibilityActivation(accountID: Data)
+        throws -> (plan: RuntimeActivationCompatibilityProjection?, registered: Bool) {
+        try withRetainedSetupRecordLimit(maximumBytes: RuntimeRetainedSetupActivationPlan.maximumBytes) {
+            try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
+                try bind(accountID, column: 1, row: row)
+                if try step(row) == SQLITE_DONE { return (nil, false) }
+                let bytes = try blob(row, column: 3, maximum: RuntimeRetainedSetupActivationPlan.maximumBytes)
+                let plan: RuntimeActivationCompatibilityProjection
+                do { plan = try .decode(bytes) } catch { throw PreparationStoreError.corruptRecord }
+                guard plan.reference.services.accountID == accountID, plan.reference.services.macID == macID,
+                      try blob(row, column: 0, maximum: 16) == plan.reference.materialID,
+                      try blob(row, column: 1, maximum: 32) == MachineUpdateActivationRecord.digest(bytes),
+                      sqlite3_column_type(row, 2) == SQLITE_INTEGER, [0, 1].contains(sqlite3_column_int64(row, 2)) else {
+                    throw PreparationStoreError.corruptRecord
+                }
+                let registered = sqlite3_column_int64(row, 2) == 1
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                return (plan, registered)
+            }
+        }
     }
     private func loadRuntimeActivation(accountID: Data) throws -> RuntimeActivationState {
         try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in

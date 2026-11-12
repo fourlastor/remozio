@@ -1619,14 +1619,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture,
-        didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
+    private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture, offset: UInt32 = 1000,
+        firstServiceUID: UInt32 = 20002, didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
         throws -> (account: AccountPreparationIntent, reference: RuntimeMaterialReference) {
         let store = files.machine.store
-        let account = try reserveRestartAccount(files, complete: true)
+        let account = try reserveRestartAccount(files, offset: offset, complete: true)
         let services = try ServiceAccountPlan(account: account, planID: AccountPreparationIntent.randomID(), claims: [
-            .init(accountID: account.accountID, role: .transport, number: 20002, userID: UUID(), groupID: UUID()),
-            .init(accountID: account.accountID, role: .gateway, number: 20003, userID: UUID(), groupID: UUID())])
+            .init(accountID: account.accountID, role: .transport, number: firstServiceUID, userID: UUID(), groupID: UUID()),
+            .init(accountID: account.accountID, role: .gateway, number: firstServiceUID + 1, userID: UUID(), groupID: UUID())])
         try store.retainServiceAccountPlan(services)
         try store.completeServiceAccountPlan(services)
         let activity = try ServiceReleaseActivityReference(services: services,
@@ -3215,12 +3215,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupPolicyMaterial) throws -> Void) throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: policySourceFormats,
             completionReaderFormats: completionReaderFormats, promotionReaderFormats: completionReaderFormats,
             readinessReaderFormats: completionReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            beforeActivation: { retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account }) { fixture, finishing, _ in
+            beforeActivation: {
+                retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account
+                try additionalBeforeActivation($0)
+            }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
             let loan = try stableFixtureLoan(fixture, finishing: finishing)
@@ -3424,55 +3428,66 @@ final class MachineUpdateReplacementTests: XCTestCase {
     /// Uses owned policy commits and injected rows. It proves no native publication or current file custody.
     private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupActivationSource,
             MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
-        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial) { fixture, owner, material in
-            let account = material.runtime.preparation.accountID
-            let reader = try fixture.openPolicyPair(readOnly: true, accountID: account)
-            defer { try? reader.close() }
-            let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
-                journal: reader, candidate: fixture.candidate)
-            let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord(source: source)
-            let empty = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
-            XCTAssertNil(empty.intent)
-            XCTAssertNoThrow(try prepared.requireSnapshot(empty.activation, candidate: fixture.candidate))
-            try reader.close()
-            let intent: MachineUpdateRetainedSetupPolicyIntentRecord
-            let current: AuthorityJournal.MachineUpdatePolicyBoundary
-            if recorded {
-                let storage = try fixture.policyStorage(readOnly: false, accountID: account)
-                defer { try? storage.close() }
-                let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
-                XCTAssertNotEqual(source.policy.startupPolicy, source.policy.source.policy)
-                let policy = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
-                    try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
-                }
-                let checkpoint = try storage.continuity.read().committed
-                try storage.close()
-                var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.encoded) as? [String: Any])
-                fields["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.recorded.rawValue
-                fields["committedPolicy"] = ["revision": policy.revision.uuidString, "bytes": try policy.storedBytes.base64EncodedString()]
-                fields["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
-                intent = try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
-                let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account)
-                defer { try? fresh.close() }
-                current = try fresh.captureRetainedSetupPolicyBoundary(expected: material.initialization)
-                XCTAssertEqual(current.policy, policy); XCTAssertEqual(current.checkpoint, checkpoint)
-                try fresh.close()
-            } else { intent = prepared; current = source.accountPolicy }
-            func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
-            let id = intent.id.uuidString.replacingOccurrences(of: "-", with: "")
-            let revision = intent.revision.uuidString.replacingOccurrences(of: "-", with: "")
-            let bytes = try hex(intent.encoded)
-            try fixture.machine.close()
-            try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
-            try fixture.files.sql("PRAGMA user_version=25")
-            try fixture.files.sql("INSERT INTO retained_setup_policy_intents_v1 VALUES(X'\(hex(account))',X'\(id)',X'\(revision)',X'\(bytes)')")
-            try fixture.files.reopen()
-            let snapshot = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
-            XCTAssertEqual(snapshot.intent, intent)
-            try body(fixture, owner, source, snapshot, current)
+        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial, additionalBeforeActivation: additionalBeforeActivation) { fixture, owner, material in
+            try withRetainedPolicyAfterStable(fixture: fixture, owner: owner, material: material,
+                recorded: recorded, body)
         }
+    }
+
+    private func withRetainedPolicyAfterStable(fixture: CompletionFixture, owner: LocalAccountIdentity,
+        material: MachineUpdateRetainedSetupPolicyMaterial, recorded: Bool,
+        _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupActivationSource,
+            MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        let account = material.runtime.preparation.accountID
+        let reader = try fixture.openPolicyPair(readOnly: true, accountID: account)
+        defer { try? reader.close() }
+        let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
+            journal: reader, candidate: fixture.candidate)
+        let prepared = try MachineUpdateRetainedSetupPolicyIntentRecord(source: source)
+        let empty = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+        XCTAssertNil(empty.intent)
+        XCTAssertNoThrow(try prepared.requireSnapshot(empty.activation, candidate: fixture.candidate))
+        try reader.close()
+        let intent: MachineUpdateRetainedSetupPolicyIntentRecord
+        let current: AuthorityJournal.MachineUpdatePolicyBoundary
+        if recorded {
+            let storage = try fixture.policyStorage(readOnly: false, accountID: account)
+            defer { try? storage.close() }
+            let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+            XCTAssertNotEqual(source.policy.startupPolicy, source.policy.source.policy)
+            let policy = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
+                try $0.installCodePolicy(source.policy.startupPolicy, expectedRevision: source.policy.source.revision)
+            }
+            let checkpoint = try storage.continuity.read().committed
+            try storage.close()
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: prepared.encoded) as? [String: Any])
+            fields["phase"] = MachineUpdateRetainedSetupPolicyIntentRecord.Phase.recorded.rawValue
+            fields["committedPolicy"] = ["revision": policy.revision.uuidString, "bytes": try policy.storedBytes.base64EncodedString()]
+            fields["committedCheckpoint"] = try checkpoint.bytes.base64EncodedString()
+            intent = try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
+            let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account)
+            defer { try? fresh.close() }
+            current = try fresh.captureRetainedSetupPolicyBoundary(expected: material.initialization)
+            XCTAssertEqual(current.policy, policy); XCTAssertEqual(current.checkpoint, checkpoint)
+            try fresh.close()
+        } else { intent = prepared; current = source.accountPolicy }
+        func hex(_ bytes: Data) -> String { bytes.map { String(format: "%02x", $0) }.joined() }
+        let id = intent.id.uuidString.replacingOccurrences(of: "-", with: "")
+        let revision = intent.revision.uuidString.replacingOccurrences(of: "-", with: "")
+        let bytes = try hex(intent.encoded)
+        try fixture.machine.close()
+        if empty.activation.runtime.setup.source.actual.schemaVersion == 24 {
+            try fixture.files.sql(MachineUpdateRetainedSetupPolicyStorage.createSQL)
+        }
+        try fixture.files.sql("PRAGMA user_version=25")
+        try fixture.files.sql("INSERT INTO retained_setup_policy_intents_v1 VALUES(X'\(hex(account))',X'\(id)',X'\(revision)',X'\(bytes)')")
+        try fixture.files.reopen()
+        let snapshot = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+        XCTAssertEqual(snapshot.intent, intent)
+        try body(fixture, owner, source, snapshot, current)
     }
 
     func testRetainedPolicySnapshotReconstructsTheExactPublicV2DigestAndRevision() throws {
@@ -4093,31 +4108,39 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false, _ body: (RetainedSelectionFixture) throws -> Void) throws {
+    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+        additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
+        _ body: (RetainedSelectionFixture) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
-        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }) {
+        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }, additionalBeforeActivation: additionalBeforeActivation) {
             fixture, owner, _, unpublished, current in
-            let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: unpublished, current: current,
-                candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
-            let retainedMaterial = try XCTUnwrap(material)
-            let account = unpublished.activation.runtime.preparation.accountID
-            let hex = account.map { String(format: "%02x", $0) }.joined()
-            // This owned row injection is not a production publication API or a proof of installed files.
-            try fixture.machine.close()
-            try fixture.files.sql("UPDATE runtime_preparation_v1 SET complete=1 WHERE account=X'\(hex)' AND complete=0")
-            try fixture.files.reopen()
-            let snapshot = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
-            XCTAssertTrue(snapshot.activation.runtime.state.configurationPublished)
-            let initialization = try XCTUnwrap(snapshot.activation.runtime.setup.account?.initialization)
-            let journal = try fixture.openPolicyPair(readOnly: true, accountID: account)
-            defer { try? journal.close() }
-            let files = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: retainedMaterial)
-            let artifacts = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
-            XCTAssertEqual(artifacts.count, 8)
-            try body(.init(fixture: fixture, owner: owner, snapshot: snapshot, unpublished: unpublished,
-                current: current, material: retainedMaterial, bundle: bundle, journal: journal,
-                initialization: initialization, artifacts: artifacts))
+            try withRetainedSelectionAfterPolicy(fixture: fixture, owner: owner, unpublished: unpublished,
+                current: current, retainedMaterial: XCTUnwrap(material), body)
         }
+    }
+
+    private func withRetainedSelectionAfterPolicy(fixture: CompletionFixture, owner: LocalAccountIdentity,
+        unpublished: MachineUpdateRetainedSetupPolicySnapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary,
+        retainedMaterial: RuntimePreparationMaterial, _ body: (RetainedSelectionFixture) throws -> Void) throws {
+        let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: unpublished, current: current,
+            candidate: fixture.candidate, currentCodePolicy: current.policy.policy)
+        let account = unpublished.activation.runtime.preparation.accountID
+        let hex = account.map { String(format: "%02x", $0) }.joined()
+        // This owned row injection is not a production publication API or a proof of installed files.
+        try fixture.machine.close()
+        try fixture.files.sql("UPDATE runtime_preparation_v1 SET complete=1 WHERE account=X'\(hex)' AND complete=0")
+        try fixture.files.reopen()
+        let snapshot = try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate)
+        XCTAssertTrue(snapshot.activation.runtime.state.configurationPublished)
+        let initialization = try XCTUnwrap(snapshot.activation.runtime.setup.account?.initialization)
+        let journal = try fixture.openPolicyPair(readOnly: true, accountID: account)
+        defer { try? journal.close() }
+        let files = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: retainedMaterial)
+        let artifacts = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+        XCTAssertEqual(artifacts.count, 8)
+        try body(.init(fixture: fixture, owner: owner, snapshot: snapshot, unpublished: unpublished,
+            current: current, material: retainedMaterial, bundle: bundle, journal: journal,
+            initialization: initialization, artifacts: artifacts))
     }
 
     func testRetainedSelectionReadsOnlyScopedInjectedFilesAndPreservesTheirBytes() throws {
@@ -4336,6 +4359,70 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     })) {
                     if pairingCase { XCTAssertEqual($0 as? GatewayPreparationError, .changedScope) }
                     else { XCTAssertEqual($0 as? RuntimeActivationError, .changedScope) }
+                }
+            }
+        }
+    }
+
+    /// Reuses owned records for compatibility tests in their separate class.
+    static func withRetainedRuntimeCompatibilityFixture(_ body: (RetainedRuntimeCompatibilityFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedActivationSQLReadsV6AndTheOrdinaryStateReaderStillRejectsIt"))
+        try suite.withRetainedActivationValueFixture { f, _, plan in
+            try body(suite.compatibilityFixture(f, plan: plan))
+        }
+    }
+
+    private func compatibilityFixture(_ f: RetainedSelectionFixture,
+        plan: RuntimeRetainedSetupActivationPlan) -> RetainedRuntimeCompatibilityFixture {
+        return .init(readMachine: { f.fixture.machine }, candidate: f.fixture.candidate,
+                owner: f.owner, plan: plan, injectRow: { bytes, material, digest, registered in
+                    try self.injectRetainedActivationRow(f, bytes: bytes, materialID: material,
+                        digest: digest, registered: registered)
+                }, createImportJournal: {
+                    let inventory = try XCTUnwrap(f.fixture.machine.inventory()), anchor = f.fixture.files.f.f.root.path
+                    let directory = try ProtectedSetupDirectory(anchor: anchor, relativePath: "machine/SharedSetupImport",
+                        owner: getuid(), createIfMissing: true)
+                    defer { directory.close() }
+                    _ = try SetupDatabaseFileProvisioning.prepare(directory: directory, kind: .sharedSetupImport, owner: getuid())
+                    let lease = try ProtectedStorageLease(anchor: anchor, relativeDirectory: "machine/SharedSetupImport",
+                        owner: getuid(), ancestorOwner: getuid(), databaseName: "setup-import.sqlite")
+                    let journal = try SharedSetupImportJournal(lease: lease, owner: getuid(), macID: inventory.macID,
+                        installationID: inventory.installationID, initialize: true)
+                    try journal.close()
+                })
+    }
+
+    static func withTwoRetainedRuntimeCompatibilityFixtures(_ body: ([RetainedRuntimeCompatibilityFixture]) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedActivationSQLReadsV6AndTheOrdinaryStateReaderStillRejectsIt"))
+        var third: AccountPreparationIntent?, thirdMaterial: RuntimePreparationMaterial?
+        try suite.withRetainedSelectionFixture(additionalBeforeActivation: { files in
+            third = try suite.prepareSecondForeground(files, offset: 1001, firstServiceUID: 20004,
+                didPrepareMaterial: { thirdMaterial = $0 }).account
+        }) { first in
+            let account = try XCTUnwrap(third), material = try XCTUnwrap(thirdMaterial)
+            let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
+            let preparation = try first.fixture.machine.retainedSetupPolicyMaterial(owner: owner, candidate: first.fixture.candidate)
+            try suite.withRetainedPolicyAfterStable(fixture: first.fixture, owner: owner, material: preparation,
+                recorded: true) { fixture, owner, _, unpublished, current in
+                try suite.withRetainedSelectionAfterPolicy(fixture: fixture, owner: owner, unpublished: unpublished,
+                    current: current, retainedMaterial: material) { second in
+                    var values: [RetainedRuntimeCompatibilityFixture] = []
+                    for original in [first, second] {
+                        let snapshot = try original.fixture.machine.retainedSetupPolicySnapshot(owner: original.owner,
+                            candidate: original.fixture.candidate)
+                        let refreshed = RetainedSelectionFixture(fixture: original.fixture, owner: original.owner,
+                            snapshot: snapshot, unpublished: original.unpublished, current: original.current,
+                            material: original.material, bundle: original.bundle, journal: original.journal,
+                            initialization: original.initialization, artifacts: original.artifacts)
+                        let selected = try refreshed.capture()
+                        let plan = try RuntimeRetainedSetupActivationPlan.retainingRetainedSetup(snapshot: snapshot,
+                            selection: selected, current: refreshed.boundary(), candidate: original.fixture.candidate)
+                        try suite.injectRetainedActivationRow(refreshed, bytes: plan.encoded, materialID: plan.reference.materialID)
+                        values.append(suite.compatibilityFixture(refreshed, plan: plan))
+                    }
+                    try body(values)
                 }
             }
         }
