@@ -4997,6 +4997,18 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Exposes owned value operands only. The machine store still has no completed retained registration.
+    static func withRetainedPromotionNativeContextFixture(_ body: (RetainedPromotionNativeContextFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedPromotionCaptureRequiresRecordedCompletionAndActualRegistration"))
+        try suite.withRetainedPromotionValueFixture { f in
+            try body(.init(completion: f.completion, candidate: f.candidate, material: f.source.material,
+                machine: f.source.fixture.machine, changingFrame: { schema, digest, reservations in
+                    try suite.retainedPromotionCompletion(f, schema: schema, rowsDigest: digest, reservedNumbers: reservations)
+                }, policy: f.current.policy.policy))
+        }
+    }
+
     private func withRetainedPromotionValueFixture(_ body: (RetainedPromotionFixture) throws -> Void) throws {
         try withRetainedCompletionValueFixture(promotionProposalFormats: true) { f, activation, _, prepared in
             let writing = try prepared.preparingWrite(expected: f.boundary())
