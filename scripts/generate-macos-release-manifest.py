@@ -73,10 +73,11 @@ def declarations(role):
         values.append(format_declaration('authority.journal', [12, 13, 14, 15, 16, 17], {v: 12 for v in range(1, 12)}))
     if role in (2, 8):
         preparation = next(value for value in values if value[0] == 'authority.installation-preparation')
-        preparation[1].extend((25, 26, 27))
+        preparation[1].extend((25, 26, 27, 28))
         values.append({0: 'authority.retained-setup-policy-intent', 1: [2], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-completion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-intent', 1: [1], 2: [], 3: {}})
+        values.append({0: 'authority.retained-setup-promotion-ready', 1: [1], 2: [], 3: {}})
     if role in (2, 12):
         values.append({0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     # Recovery fences include the retained settings revision and selected commit.

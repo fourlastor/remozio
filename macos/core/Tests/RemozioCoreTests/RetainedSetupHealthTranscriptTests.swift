@@ -66,7 +66,7 @@ final class RetainedSetupHealthTranscriptTests: XCTestCase {
             XCTAssertEqual(try Packet.decode(pair.1.encoded).encoded, try pair.1.encoded)
             XCTAssertEqual(try Evidence.decodeRequestedRequirement(pair.0), pair.2)
         }
-        XCTAssertFalse(PreparationIntentStore.supportedSchemaVersions.contains(28))
+        XCTAssertTrue(PreparationIntentStore.supportedSchemaVersions.contains(28))
     }
     func testEachSignatureFailureKeepsTheOtherSignatureValid() throws {
         let f = try Fixture(), valid = try f.exchange()

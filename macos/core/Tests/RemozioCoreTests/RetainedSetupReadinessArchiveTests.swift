@@ -361,9 +361,9 @@ final class RetainedSetupReadinessArchiveTests: XCTestCase {
         }
     }
 
-    func testReadinessDeclarationIsInertAndReaderOnly() throws {
+    func testReadinessDeclarationIsReaderOnly() throws {
         XCTAssertEqual(MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion, 28)
-        XCTAssertFalse(PreparationIntentStore.supportedSchemaVersions.contains(28))
+        XCTAssertTrue(PreparationIntentStore.supportedSchemaVersions.contains(28))
         XCTAssertTrue(try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements.allSatisfy { $0.writeVersions.isEmpty })
         XCTAssertTrue(try MachineUpdateRetainedSetupPromotionReadyRecord.readerRequirements.allSatisfy { $0.writeVersions.isEmpty })
         var db: OpaquePointer?; XCTAssertEqual(sqlite3_open(":memory:", &db), SQLITE_OK)
