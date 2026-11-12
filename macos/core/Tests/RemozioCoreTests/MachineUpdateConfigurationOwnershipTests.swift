@@ -104,8 +104,11 @@ final class MachineUpdateConfigurationOwnershipTests: XCTestCase {
 
     func testPostCommitErrorRetiresTheStoreAndReleasesItsWriterLockWithoutReplayingTheWrite() throws {
         let f = try AccountPreparationFixture()
-        var failAfterCommit = false
-        let machine = try f.open(initialize: true, hook: { if failAfterCommit { throw Fault.afterCommit } })
+        var failAfterCommit = false, commitCalls = 0
+        let machine = try f.open(initialize: true, hook: {
+            commitCalls += 1
+            if failAfterCommit { throw Fault.afterCommit }
+        })
         defer { try? machine.close() }
         let first = try XCTUnwrap(machine.inventory())
         func revised(_ revision: Data) throws -> InstallationInventory {
@@ -114,22 +117,34 @@ final class MachineUpdateConfigurationOwnershipTests: XCTestCase {
                 accounts: first.accounts, services: first.services, formatVersion: first.formatVersion)
         }
         let control = try revised(AccountPreparationIntent.randomID())
-        XCTAssertNoThrow(try machine.writeInventory(control, expectedRevision: first.revision))
-        XCTAssertEqual(try machine.inventory(), control)
+        let stored = try machine.writeInventory(control, expectedRevision: first.revision)
+        XCTAssertEqual(try machine.inventory(), stored)
+        XCTAssertNotEqual(stored.revision, control.revision)
         let lockPath = f.root.path + "/machine/writer.lock"
         XCTAssertEqual(try childLockStatus(lockPath), 42)
         let committed = try revised(AccountPreparationIntent.randomID())
+        let callsBeforeFault = commitCalls
         failAfterCommit = true
-        XCTAssertThrowsError(try machine.writeInventory(committed, expectedRevision: control.revision)) {
+        XCTAssertThrowsError(try machine.writeInventory(committed, expectedRevision: stored.revision)) {
             XCTAssertTrue($0 is Fault)
         }
+        XCTAssertEqual(commitCalls, callsBeforeFault + 1)
         XCTAssertThrowsError(try machine.inventory()) {
             XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
         }
         XCTAssertEqual(try childLockStatus(lockPath), 0)
         let next = try f.open()
         defer { try? next.close() }
-        XCTAssertEqual(try next.inventory(), committed)
+        let actual = try XCTUnwrap(next.inventory())
+        XCTAssertNotEqual(actual.revision, stored.revision)
+        XCTAssertNotEqual(actual.revision, committed.revision)
+        XCTAssertEqual(actual.macID, committed.macID)
+        XCTAssertEqual(actual.installationID, committed.installationID)
+        XCTAssertEqual(actual.bundlePath, committed.bundlePath)
+        XCTAssertEqual(actual.releaseDigest, committed.releaseDigest)
+        XCTAssertEqual(actual.accounts, committed.accounts)
+        XCTAssertEqual(actual.services, committed.services)
+        XCTAssertEqual(actual.formatVersion, committed.formatVersion)
         XCTAssertEqual(try childLockStatus(lockPath), 42)
     }
 }
