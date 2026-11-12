@@ -10,6 +10,12 @@ struct RuntimeRetainedSetupCompletionPublication: CustomStringConvertible, Custo
         let verify: () throws -> Void
         let read: (Artifact) throws -> Data
     }
+    /// Owned file operations only. Retention confirms durability without another exchange.
+    struct Operations {
+        let observation: Observation
+        let replace: (Artifact) throws -> Void
+        let retainSelected: (Artifact) throws -> Void
+    }
     struct Artifact {
         let kind: File
         let location: Location
@@ -74,6 +80,24 @@ struct RuntimeRetainedSetupCompletionPublication: CustomStringConvertible, Custo
             }
         }
         return selected == changed ? .selected : selected == 0 ? .source : .mixed
+    }
+    /// Stops on every uncertain result. A later invocation observes actual files before any new exchange.
+    func resume(operations: Operations) throws {
+        let observation = operations.observation
+        _ = try progress(observation: observation)
+        for artifact in artifacts {
+            try observation.verify(); let actual = try observation.read(artifact); try observation.verify()
+            if actual != artifact.selected {
+                guard actual == artifact.previous else { throw RuntimeActivationError.changedScope }
+                try operations.replace(artifact); try observation.verify()
+                guard try observation.read(artifact) == artifact.selected else { throw RuntimeActivationError.changedScope }
+                try observation.verify()
+            }
+            try operations.retainSelected(artifact); try observation.verify()
+            guard try observation.read(artifact) == artifact.selected else { throw RuntimeActivationError.changedScope }
+            try observation.verify()
+        }
+        guard try progress(observation: observation) == .selected else { throw RuntimeActivationError.incomplete }
     }
     var encoded: Data { get throws {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
