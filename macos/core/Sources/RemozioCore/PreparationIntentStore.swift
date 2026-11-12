@@ -3513,6 +3513,46 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Reads retained activation and its exact startup receipt in one transaction. It grants no write authority.
+    func retainedSetupActivationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupActivationSnapshot {
+        try transaction(write: false) {
+            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+            let actual = runtime.setup.source.actual, account = runtime.preparation.accountID
+            guard (25...28).contains(actual.schemaVersion),
+                  let intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                    .first(where: { $0.accountID == account }) else { throw RuntimeActivationError.incomplete }
+            let state = try loadRetainedSetupActivation(accountID: account)
+            let result = try MachineUpdateRetainedSetupActivationSnapshot(runtime: runtime, state: state,
+                intent: intent, candidate: candidate)
+            try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+            try state.requireSame(as: loadRetainedSetupActivation(accountID: account))
+            guard try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                .first(where: { $0.accountID == account }) == intent else { throw PreparationStoreError.staleRevision }
+            return result
+        }
+    }
+
+    private func loadRetainedSetupActivation(accountID: Data) throws -> RuntimeRetainedSetupActivationState {
+        try withRetainedSetupRecordLimit(maximumBytes: RuntimeRetainedSetupActivationPlan.maximumBytes) {
+            try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
+                try bind(accountID, column: 1, row: row)
+                if try step(row) == SQLITE_DONE { return try .init(plan: nil, jobsRegistered: false) }
+                let data = try blob(row, column: 3, maximum: RuntimeRetainedSetupActivationPlan.maximumBytes)
+                let plan: RuntimeRetainedSetupActivationPlan
+                do { plan = try .decode(data) } catch { throw PreparationStoreError.corruptRecord }
+                guard plan.accountID == accountID, plan.reference.services.macID == macID,
+                      try blob(row, column: 0, maximum: 16) == plan.reference.materialID,
+                      try blob(row, column: 1, maximum: 32) == MachineUpdateActivationRecord.digest(data),
+                      sqlite3_column_type(row, 2) == SQLITE_INTEGER,
+                      [0, 1].contains(sqlite3_column_int64(row, 2)) else { throw PreparationStoreError.corruptRecord }
+                let registered = sqlite3_column_int64(row, 2) == 1
+                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                return try .init(plan: plan, jobsRegistered: registered)
+            }
+        }
+    }
+
     /// Reads a durable intent for the exact owner and machine state. The paired journal still needs its own observation.
     func retainedSetupPolicyIntent(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupPolicyIntentRecord? {
