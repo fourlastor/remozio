@@ -446,6 +446,33 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         try await coordinator.shutdown()
     }
 
+    /// Fork-only control: the test as it was before #684, with the provider's own clock samples.
+    func testControlProviderSampledPacing() async throws {
+        let fixture = try Fixture(), provider = Provider([]), coordinator = try fixture.coordinator(provider)
+        try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
+        for n: UInt8 in 1...3 { try await fixture.admit(coordinator, n: n) }
+        await provider.hold()
+        let first = Task { try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)) }
+        let second = Task { try await coordinator.deliverProbe(operationID: id(2), phoneID: id(6)) }
+        defer { first.cancel(); second.cancel() }
+        try await until { await provider.times.count == 2 }
+        do { _ = try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)); XCTFail("Duplicate flight") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .alreadyRunning) }
+        do { _ = try await coordinator.deliverProbe(operationID: id(3), phoneID: id(6)); XCTFail("Capacity exceeded") }
+        catch { XCTAssertEqual(error as? GatewayDeliveryError, .capacityExceeded) }
+        first.cancel(); _ = await first.result
+        try await until { await coordinator.activeProbeCount == 1 }
+        await provider.release()
+        _ = try await second.value
+        let third = try await coordinator.deliverProbe(operationID: id(3), phoneID: id(6))
+        XCTAssertEqual(third?.status, .accepted)
+        let times = await provider.times
+        XCTAssertEqual(times.count, 3)
+        // Signed differences, so a reversed pair fails the assertion instead of trapping on UInt64 underflow.
+        for pair in zip(times, times.dropFirst()) { XCTAssertGreaterThanOrEqual(Int64(pair.1) - Int64(pair.0), 10) }
+        try await coordinator.shutdown()
+    }
+
     private func deliver(_ coordinator: GatewayDeliveryCoordinator, operation: UInt8, recording slot: PacingSlot) async throws -> GatewayProbeProgress? {
         try await PacingSlot.$current.withValue(slot) {
             try await coordinator.deliverProbe(operationID: id(operation), phoneID: id(6))
