@@ -22,6 +22,15 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
         self.id = id; self.revision = revision; self.phase = phase; self.publicationBytes = publicationBytes
     }
     func publication() throws -> RuntimeRetainedSetupCompletionPublication { try .decode(publicationBytes) }
+    /// Validates adjacent historical phases. This comparison grants no writer or publication authority.
+    func requireTransition(from previous: Self) throws {
+        _ = try publication(); _ = try previous.publication()
+        guard id == previous.id, revision != previous.revision, publicationBytes == previous.publicationBytes,
+              previous.phase == .prepared && phase == .publishing || previous.phase == .publishing && phase == .filesPublished else {
+            throw PreparationStoreError.invalidTransition
+        }
+    }
+
     private static func uuidBytes(_ value: UUID) -> Data {
         var bytes = value.uuid; return withUnsafeBytes(of: &bytes) { Data($0) }
     }
