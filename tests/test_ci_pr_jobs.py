@@ -1,0 +1,281 @@
+"""Pull request selection must run every job and core test that a change can affect, and everything when unsure."""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location('ci_pr_jobs', ROOT / 'scripts/ci-pr-jobs.py')
+JOBS = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(JOBS)
+WORKFLOW = ROOT / '.github/workflows/checks.yml'
+KOTLIN = {'linux', 'mac_interop', 'ios', 'kotlin', 'android'}
+SHARED_SWIFT = {'linux', 'mac', 'mac_experiments', 'mac_core', 'mac_interop'}
+
+TEST_FILE = '''import XCTest
+@testable import RemozioCore
+
+private struct LocalFixture {
+    let value = 1
+}
+
+struct SharedFixture {
+    let value = 2
+}
+
+@MainActor
+final class HeavyTests: XCTestCase {
+    private var state = 0
+
+    func testOne() {
+        XCTAssertEqual(1, 1)
+    }
+
+    func testTwo() {
+        XCTAssertEqual(2, 2)
+    }
+
+    private func helper() {}
+}
+
+final class LightTests: XCTestCase, @unchecked Sendable {
+    func testThree() {}
+}
+
+extension HeavyTests {
+    func testFour() {
+        XCTAssertTrue(true)
+    }
+}
+'''
+
+
+def changed(*texts):
+    """0-based indexes of the TEST_FILE lines that contain each text."""
+    lines = TEST_FILE.splitlines()
+    return {next(index for index, line in enumerate(lines) if text in line) for text in texts}
+
+
+def select(*texts, used_elsewhere=lambda name: True):
+    return JOBS.tests_for_changes(TEST_FILE, changed(*texts), 'M', {'HeavyTests', 'LightTests'}, {'HeavyTests'},
+                                  used_elsewhere)
+
+
+class GitRepository:
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.env = {**os.environ, 'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@example.invalid',
+                    'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@example.invalid',
+                    'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+        self.git('init', '--quiet', '--initial-branch=main')
+
+    def git(self, *arguments):
+        return subprocess.run(['git', *arguments], cwd=self.directory, env=self.env, text=True, check=True,
+                              capture_output=True).stdout.strip()
+
+    def write(self, path, text):
+        (self.directory / path).parent.mkdir(parents=True, exist_ok=True)
+        (self.directory / path).write_text(text)
+
+    def commit(self, message):
+        self.git('add', '--all')
+        self.git('commit', '--quiet', '-m', message)
+
+    def merge(self, branch):
+        """Merge `branch` into main after main moved on, as GitHub builds a pull request merge commit."""
+        self.git('switch', '--quiet', 'main')
+        self.write('README.md', self.git('rev-parse', 'HEAD'))
+        self.commit('main moves on')
+        self.git('merge', '--quiet', '--no-ff', '-m', 'merge', branch)
+        return self.git('rev-parse', 'HEAD^1'), self.git('rev-parse', 'HEAD')
+
+
+@contextlib.contextmanager
+def working_directory(path):
+    current = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(current)
+
+
+class JobSelectionTests(unittest.TestCase):
+    def test_unclaimed_and_shared_build_paths_run_every_job(self):
+        for path in ('scripts/check.sh', '.github/workflows/checks.yml', '.github/macos-core-test-weights.json',
+                     'gradle/libs.versions.toml', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties',
+                     'gradlew', '.gitignore', 'third-party/cloudflared/pin.json', 'protocol/vectors/a.json',
+                     'protocol/session-envelope.md', 'unknown/file.txt'):
+            with self.subTest(path=path):
+                self.assertEqual(JOBS.jobs_for(path), JOBS.EVERY_JOB)
+
+    def test_documentation_runs_only_the_python_checks(self):
+        for path in ('docs/design-decisions.md', 'README.md', 'AGENTS.md', 'LICENSE'):
+            with self.subTest(path=path):
+                self.assertEqual(JOBS.jobs_for(path), frozenset())
+
+    def test_each_area_runs_the_jobs_that_build_it(self):
+        cases = {
+            'protocol/kotlin/src/commonMain/kotlin/A.kt': KOTLIN,
+            'phone/core/build.gradle.kts': KOTLIN,
+            'tools/dev-invitation/src/main/kotlin/A.kt': KOTLIN,
+            'android/app/src/main/A.kt': {'android'},
+            'ios/Remozio/A.swift': {'ios'},
+            '.maestro/flow.yaml': {'ios'},
+            'protocol/swift/Sources/A.swift': SHARED_SWIFT,
+            'host/shared-core/Sources/A.swift': SHARED_SWIFT,
+            'macos/core/Sources/A.swift': {'mac', 'mac_experiments', 'mac_core', 'mac_interop'},
+            'macos/core/Tests/RemozioCoreTests/ATests.swift': {'mac', 'mac_experiments', 'mac_core', 'mac_interop'},
+            'macos/app/App/A.swift': {'mac', 'mac_experiments', 'mac_interop'},
+            'macos/app/CommandMonitor/MonitorMain.c': {'mac', 'mac_experiments', 'mac_core', 'mac_interop'},
+            'experiments/macos/Sources/A.swift': {'linux', 'mac', 'mac_experiments', 'mac_interop'},
+            'experiments/command-frontend/live-child.c': {'linux', 'mac', 'mac_experiments', 'mac_core',
+                                                          'mac_interop'},
+            'tests/test_xctest_shards.py': {'mac_experiments'},
+            '.agents/skills/babysit-pr/scripts/gh_pr_watch.py': {'mac_experiments'},
+        }
+        for path, jobs in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(JOBS.jobs_for(path), jobs)
+
+    def test_a_swift_package_manifest_or_lockfile_runs_every_swift_job(self):
+        for path in ('experiments/sparkle-probe/Package.swift', 'macos/app/Package.resolved',
+                     'ios/Remozio.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved'):
+            with self.subTest(path=path):
+                self.assertTrue(SHARED_SWIFT | {'ios'} <= JOBS.jobs_for(path))
+
+    def test_selection_is_the_union_of_its_paths(self):
+        self.assertEqual(JOBS.select(['android/app/A.kt', 'ios/Remozio/A.swift', 'docs/a.md']), {'android', 'ios'})
+        self.assertEqual(JOBS.select([]), set())
+
+    def test_the_workflow_gates_each_selected_job_on_its_output(self):
+        text = WORKFLOW.read_text()
+        for name in (*JOBS.JOBS, 'mac_core_mode', 'mac_core_parts', 'mac_core_tests'):
+            with self.subTest(name=name):
+                self.assertIn(f'{name}: ${{{{ steps.select.outputs.{name} }}}}', text)
+        for job in JOBS.JOBS:
+            with self.subTest(job=job):
+                self.assertRegex(text, rf"needs\.changes\.outputs\.{job} == 'true'")
+        gated = re.findall(r"^  ([a-z-]+):\n(?:    .*\n)*?    if: \$\{\{ !cancelled\(\) && \(github\.event_name != "
+                           r"'pull_request' \|\| needs\.changes\.outputs\.", text, re.MULTILINE)
+        self.assertEqual(len(gated), len(JOBS.JOBS))
+
+
+class CoreTestSelectionTests(unittest.TestCase):
+    def test_a_test_method_change_in_a_heavy_class_selects_that_method(self):
+        self.assertEqual(select('XCTAssertEqual(2, 2)'), {'M.HeavyTests/testTwo'})
+        self.assertEqual(select('func testOne', 'XCTAssertTrue(true)'),
+                         {'M.HeavyTests/testOne', 'M.HeavyTests/testFour'})
+
+    def test_a_change_outside_the_test_methods_of_a_heavy_class_selects_the_class(self):
+        self.assertEqual(select('private func helper'), {'M.HeavyTests'})
+        self.assertEqual(select('private var state', 'XCTAssertEqual(2, 2)'), {'M.HeavyTests'})
+
+    def test_a_change_in_another_class_selects_the_whole_class(self):
+        self.assertEqual(select('func testThree'), {'M.LightTests'})
+        self.assertEqual(select('final class LightTests'), {'M.LightTests'})
+        self.assertEqual(select('@MainActor'), {'M.HeavyTests'})
+
+    def test_imports_blank_lines_and_comments_select_nothing(self):
+        self.assertEqual(select('import XCTest', '@testable import'), set())
+        lines = TEST_FILE.splitlines()
+        blank = {index for index, line in enumerate(lines) if not line.strip()}
+        self.assertEqual(JOBS.tests_for_changes(TEST_FILE, blank, 'M', {'HeavyTests'}, set(), lambda name: True),
+                         set())
+
+    def test_file_local_support_selects_the_classes_of_its_file(self):
+        self.assertEqual(select('private struct LocalFixture'), {'M.HeavyTests', 'M.LightTests'})
+        self.assertEqual(select('let value = 2', used_elsewhere=lambda name: False), {'M.HeavyTests', 'M.LightTests'})
+
+    def test_shared_support_needs_the_full_suite(self):
+        self.assertIsNone(select('let value = 2'))
+
+    def test_the_smoke_classes_are_weighted_core_classes_that_need_no_app(self):
+        weights = json.loads((ROOT / JOBS.WEIGHTS).read_text())['weights']
+        for name in JOBS.SMOKE_CLASSES:
+            with self.subTest(name=name):
+                module, test_class = name.split('.')
+                self.assertEqual(module, 'RemozioCoreTests')
+                self.assertLess(weights[test_class], 10)
+                self.assertTrue((ROOT / f'macos/core/Tests/RemozioCoreTests/{test_class}.swift').is_file())
+        self.assertLess(JOBS.estimate(JOBS.SMOKE_CLASSES, json.loads((ROOT / JOBS.WEIGHTS).read_text())), 60)
+
+    def test_pull_request_merges_choose_full_selected_or_no_core_tests(self):
+        with tempfile.TemporaryDirectory() as directory, working_directory(directory):
+            repository = GitRepository(directory)
+            core = 'macos/core/Tests/RemozioCoreTests/'
+            repository.write(core + 'HeavyTests.swift', TEST_FILE)
+            repository.write(core + 'Other.swift', 'func useShared() { _ = SharedFixture() }\n')
+            repository.write('macos/core/Sources/A.swift', 'let a = 1\n')
+            repository.write('macos/app/App/A.swift', 'let a = 1\n')
+            repository.write('android/A.kt', 'class A\n')
+            repository.commit('base')
+            cases = {
+                'test-method': ((core + 'HeavyTests.swift', TEST_FILE.replace('(2, 2)', '(2, 3)')),
+                                ('selected', ['RemozioCoreTests.HeavyTests'])),
+                'new-test-file': ((core + 'NewTests.swift', 'import XCTest\nfinal class NewTests: XCTestCase {\n'
+                                   '    func testNew() {}\n}\n'), ('selected', ['RemozioCoreTests.NewTests'])),
+                'core-source': (('macos/core/Sources/A.swift', 'let a = 2\n'),
+                                ('selected', sorted(JOBS.SMOKE_CLASSES))),
+                'shared-support': ((core + 'HeavyTests.swift', TEST_FILE.replace('value = 2', 'value = 3')),
+                                   ('full', [])),
+                'fixture': ((core + 'Fixtures/tls/cert.pem', 'pem\n'), ('full', [])),
+                'package': (('macos/core/Package.resolved', '{}\n'), ('full', [])),
+                'script': (('scripts/check.sh', 'true\n'), ('full', [])),
+                'gradle': (('gradle.properties', 'a=b\n'), ('selected', sorted(JOBS.SMOKE_CLASSES))),
+            }
+            for branch, ((path, text), expected) in cases.items():
+                with self.subTest(branch=branch):
+                    repository.git('switch', '--quiet', '-c', branch, 'main')
+                    repository.write(path, text)
+                    repository.commit(branch)
+                    base, merge = repository.merge(branch)
+                    paths = [name for name in JOBS.changed_paths(merge) if name != 'README.md']
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(JOBS.core_test_plan(paths, base, merge), expected)
+
+            repository.git('switch', '--quiet', '-c', 'app-only', 'main')
+            repository.write('macos/app/App/A.swift', 'let a = 2\n')
+            repository.commit('app')
+            repository.merge('app-only')
+            output = Path(directory) / 'output'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(JOBS.main(['--merge-commit', 'HEAD', '--github-output', str(output)]), 0)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual(values['mac'], 'true')
+            self.assertEqual(values['mac_core'], 'false')
+            self.assertEqual(values['android'], 'false')
+
+    def test_a_commit_that_is_not_a_merge_runs_everything_in_full(self):
+        with tempfile.TemporaryDirectory() as directory, working_directory(directory):
+            repository = GitRepository(directory)
+            repository.write('android/A.kt', 'class A\n')
+            repository.commit('base')
+            output = Path(directory) / 'output'
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(JOBS.main(['--merge-commit', 'HEAD', '--github-output', str(output)]), 0)
+            self.assertIn('::warning::', printed.getvalue())
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual({job: values[job] for job in JOBS.JOBS}, {job: 'true' for job in JOBS.JOBS})
+            self.assertEqual((values['mac_core_mode'], values['mac_core_parts'], values['mac_core_tests']),
+                             ('full', '[1, 2]', ''))
+
+    def test_all_selects_every_job_and_the_full_suite_on_two_runners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'output'
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(JOBS.main(['--all', '--github-output', str(output)]), 0)
+            values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertEqual(values['mac_core_mode'], 'full')
+            self.assertEqual(values['mac_core_parts'], '[1, 2]')
+            self.assertTrue(all(values[job] == 'true' for job in JOBS.JOBS))
+
+
+if __name__ == '__main__':
+    unittest.main()

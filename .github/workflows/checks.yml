@@ -1,14 +1,54 @@
 name: Checks
+# Pull requests are a fast sanity check. They run only the jobs whose inputs they change, and the Mac core tests job
+# runs only the macos/core tests that they add or change plus a smoke set (scripts/ci-pr-jobs.py explains the rules).
+# Pushes to main, the nightly run and manual runs run every job and the full suite, so the nightly run of the full
+# matrix catches an input or a test that the selection misses.
 on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 2 * * *'
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: checks-${{ github.event.pull_request.number || github.ref }}
+  # The event is part of the group, so a push to main never cancels the nightly run of main, nor the reverse.
+  group: checks-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
+  # Each other job except the Python checks needs this one and runs when its output is 'true' or the event is not a
+  # pull request. Its `!cancelled()` keeps it running on main when this job fails; on a pull request, a failure here
+  # skips the jobs and fails the run.
+  changes:
+    name: Select jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      linux: ${{ steps.select.outputs.linux }}
+      mac: ${{ steps.select.outputs.mac }}
+      mac_experiments: ${{ steps.select.outputs.mac_experiments }}
+      mac_core: ${{ steps.select.outputs.mac_core }}
+      mac_interop: ${{ steps.select.outputs.mac_interop }}
+      ios: ${{ steps.select.outputs.ios }}
+      kotlin: ${{ steps.select.outputs.kotlin }}
+      android: ${{ steps.select.outputs.android }}
+      mac_core_mode: ${{ steps.select.outputs.mac_core_mode }}
+      mac_core_parts: ${{ steps.select.outputs.mac_core_parts }}
+      mac_core_tests: ${{ steps.select.outputs.mac_core_tests }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # A pull request checks out its merge commit. Depth 2 also fetches the base it was merged onto.
+          fetch-depth: 2
+      - name: Select the jobs and macos/core tests that the changed paths need
+        id: select
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            python3 scripts/ci-pr-jobs.py --merge-commit HEAD --github-output "$GITHUB_OUTPUT"
+          else
+            python3 scripts/ci-pr-jobs.py --all --github-output "$GITHUB_OUTPUT"
+          fi
   python:
     name: Python checks
     runs-on: ubuntu-latest
@@ -18,6 +58,8 @@ jobs:
       - run: ./scripts/check.sh
   linux-protocol:
     name: Linux Swift protocol
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.linux == 'true') }}
     runs-on: ubuntu-24.04
     # Ubuntu mirror lookups failed for about an hour on 2026-11-11; with apt retries the
     # packages still arrived, in about 16 minutes instead of under one.
@@ -120,6 +162,8 @@ jobs:
           retention-days: 7
   mac:
     name: Mac build
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac == 'true') }}
     runs-on: macos-26
     timeout-minutes: 120
     outputs:
@@ -197,6 +241,8 @@ jobs:
           PYTHON
   mac-experiments:
     name: Mac experiments
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_experiments == 'true') }}
     runs-on: macos-26
     timeout-minutes: 60
     outputs:
@@ -237,9 +283,20 @@ jobs:
           path: ${{ steps.build-cache-key.outputs.paths }}
           key: ${{ steps.build-cache-key.outputs.key }}
   mac-core:
-    name: Mac core tests
+    name: Mac core tests (${{ matrix.part }})
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_core == 'true') }}
     runs-on: macos-26
     timeout-minutes: 60
+    # The full suite, and a large pull request selection, run six class shards on two runners: three concurrent
+    # xctest processes on each runner's three CPUs. Both runners build the same tests and compute the same partition,
+    # and part N runs shards 3(N-1) to 3(N-1)+2. A small pull request selection runs three shards on one runner.
+    # scripts/ci-pr-jobs.py chooses the mode, the parts and the selected tests; without its outputs, the job runs
+    # the full suite.
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(needs.changes.outputs.mac_core_parts || '[1, 2]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Identify compatible Mac build cache
@@ -259,22 +316,38 @@ jobs:
         run: python3 scripts/ci-build-cache.py restore --scope mac
       # Whole classes in three concurrent xctest processes. The Mac build job runs the classes that need the built app,
       # so a skip here other than the GUI-session control means a test silently lost its fixture.
-      - name: Run macos/core tests in three concurrent class shards
+      - name: Run macos/core class shards concurrently
+        env:
+          PART: ${{ matrix.part }}
+          PARTS: ${{ needs.changes.outputs.mac_core_parts || '[1, 2]' }}
+          MODE: ${{ needs.changes.outputs.mac_core_mode || 'full' }}
+          SELECTED_TESTS: ${{ needs.changes.outputs.mac_core_tests }}
         run: |
+          if [ "$PARTS" = '[1]' ]; then
+            set -- --shards 3 --concurrent
+          else
+            first=$(( (PART - 1) * 3 ))
+            set -- --shards 6 --index "$first" --index "$((first + 1))" --index "$((first + 2))"
+          fi
+          if [ "$MODE" = selected ]; then
+            set -- "$@" --only "$SELECTED_TESTS"
+          fi
           python3 scripts/run-xctest-shards.py --package-path macos/core \
-            --weights .github/macos-core-test-weights.json --shards 3 --concurrent --app-dependent exclude \
+            --weights .github/macos-core-test-weights.json "$@" --app-dependent exclude \
             --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
             -- --triple arm64-apple-macosx26.0 -Xswiftc -O
       - name: Retain shard logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: mac-core-shards-${{ github.run_attempt }}
+          name: mac-core-shards-${{ matrix.part }}-${{ github.run_attempt }}
           path: .build/xctest-shards/*.log
           if-no-files-found: ignore
           retention-days: 7
   mac-interop:
     name: Mac interoperability
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_interop == 'true') }}
     runs-on: macos-26
     timeout-minutes: 20
     outputs:
@@ -360,6 +433,8 @@ jobs:
           retention-days: 7
   ios:
     name: iOS build
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.ios == 'true') }}
     runs-on: macos-26
     timeout-minutes: 45
     outputs:
@@ -411,6 +486,8 @@ jobs:
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   kotlin:
     name: Kotlin protocol
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.kotlin == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -452,6 +529,8 @@ jobs:
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
   android:
     name: Android build
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.android == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     outputs:
