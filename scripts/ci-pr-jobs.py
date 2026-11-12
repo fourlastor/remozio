@@ -167,34 +167,94 @@ def owners(lines, test_classes):
 
 
 def code_only(lines):
-    """Each line with string literal contents and // comments removed, so that their braces do not count.
+    """Each line without string literal contents and comments, and the indexes of the lines it could not read.
 
-    This is a small scanner, not a Swift parser: an unusual literal can still leave a stray brace, which can only make
-    a method span wrong in a way that test_spans detects or that selects more tests (see there).
+    It removes // comments, nested /* */ comments over any number of lines, and the contents of string literals, so
+    that their braces do not count: "...", raw #"..."# with any number of #, and multi-line literals in triple
+    quotes, raw or not.
+    It follows interpolations, including ones that hold nested strings. A line that it cannot read, such as a
+    one-line string that does not end on its line, loses the rest of its code and is reported as unsure. This is a
+    small scanner, not a Swift parser: test_spans treats a method with an unsure line as ambiguous.
     """
-    result, in_block = [], False
-    for line in lines:
+    result, unsure, comment, block = [], set(), 0, None
+    for number, line in enumerate(lines):
         code, index = [], 0
         while index < len(line):
-            if in_block:
-                end = line.find('"""', index)
-                if end < 0:
+            raw = RAW_STRING_START.match(line, index)
+            if comment:
+                if line.startswith('/*', index):
+                    comment, index = comment + 1, index + 2
+                elif line.startswith('*/', index):
+                    comment, index = comment - 1, index + 2
+                else:
+                    index += 1
+            elif block:
+                found = line.find(block, index)
+                if found < 0:
                     break
-                in_block, index = False, end + 3
-            elif line.startswith('"""', index):
-                in_block, index = True, index + 3
+                block, index = None, found + len(block)
+            elif line.startswith('/*', index):
+                comment, index = 1, index + 2
             elif line.startswith('//', index):
                 break
-            elif line[index] == '"':
-                index += 1
-                while index < len(line) and line[index] != '"':
-                    index += 2 if line[index] == '\\' else 1
-                index += 1
+            elif raw or line[index] == '"':
+                hashes = raw[1] if raw else ''
+                opening = raw[0] if raw else '"'
+                if line.startswith(hashes + '"""', index):
+                    block, index = '"""' + hashes, index + len(hashes) + 3
+                    continue
+                index = string_end(line, index + len(opening), len(hashes))
+                if index is None:
+                    unsure.add(number)
+                    break
             else:
                 code.append(line[index])
                 index += 1
         result.append(''.join(code))
-    return result
+    return result, unsure
+
+
+RAW_STRING_START = re.compile(r'(#+)"')
+
+
+def string_end(line, index, hashes=0):
+    """The index after the end of a one-line string whose contents start at `index`, or None when it does not end.
+
+    `hashes` is the number of # around a raw string. An interpolation is skipped up to its closing parenthesis, and
+    the strings nested in it are skipped the same way.
+    """
+    close, escape = '"' + '#' * hashes, '\\' + '#' * hashes
+    while index < len(line):
+        if line.startswith(escape + '(', index):
+            index = interpolation_end(line, index + len(escape) + 1)
+            if index is None:
+                return None
+        elif line.startswith(escape, index):
+            index += len(escape) + 1
+        elif line.startswith(close, index):
+            return index + len(close)
+        else:
+            index += 1
+    return None
+
+
+def interpolation_end(line, index):
+    """The index after the parenthesis that closes an interpolation whose code starts at `index`, or None."""
+    depth = 1
+    while index < len(line):
+        raw = RAW_STRING_START.match(line, index)
+        if line.startswith('"""', index) or (raw and line.startswith(raw[1] + '"""', index)):
+            return None
+        if raw or line[index] == '"':
+            index = string_end(line, index + (len(raw[0]) if raw else 1), len(raw[1]) if raw else 0)
+            if index is None:
+                return None
+            continue
+        depth += {'(': 1, ')': -1}.get(line[index], 0)
+        index += 1
+        if not depth:
+            return index
+    return None
 
 
 def test_spans(lines, line_owners):
@@ -202,10 +262,11 @@ def test_spans(lines, line_owners):
 
     The body ends where the braces opened on the func line balance again, which also handles a test on one line.
     A class gets no spans at all when one of its spans is ambiguous: the braces never balance, code follows the
-    closing brace on its line, or two spans overlap. Every change in that class then counts as outside its test
-    methods, which selects the whole class and its users instead of a guessed method.
+    closing brace on its line, the closing brace of a longer method is not alone at the func line's indentation,
+    the method has a line that code_only could not read, or two spans overlap. Every change in that class then counts
+    as outside its test methods, which selects the whole class and its users instead of a guessed method.
     """
-    code = code_only(lines)
+    code, unsure = code_only(lines)
     spans, ambiguous = {}, set()
     for start, line in enumerate(lines):
         match = TEST_METHOD.match(line)
@@ -223,8 +284,11 @@ def test_spans(lines, line_owners):
                         break
             if end is not None or depth < 0 or (opened and depth == 0):
                 break
-        if end is None or any(test_class == owner and set(span) & set(range(start, end + 1))
-                              for (owner, _), span in spans.items()):
+        if (end is None
+                or (end != start and code[end].rstrip() != match[1] + '}')
+                or unsure & set(range(start, end + 1))
+                or any(test_class == owner and set(span) & set(range(start, end + 1))
+                       for (owner, _), span in spans.items())):
             ambiguous.add(test_class)
         spans[(test_class, match[2])] = range(start, (end if end is not None else start) + 1)
     return {key: span for key, span in spans.items() if key[0] not in ambiguous}

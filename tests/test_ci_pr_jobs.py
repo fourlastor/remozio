@@ -211,6 +211,73 @@ class CoreTestSelectionTests(unittest.TestCase):
         self.assertEqual(self.heavy_selection(text, 'XCTAssertFalse'), {'M.HeavyTests/testA'})
         self.assertEqual(self.heavy_selection(text, 'func testB'), {'M.HeavyTests/testB'})
 
+    def last_test_then_helper(self, body_line):
+        """A class whose last test, testB, holds `body_line`, followed by a helper (the reviewer's reproduction)."""
+        return ('final class HeavyTests: XCTestCase {\n'
+                '    func testA() {}\n'
+                '    func testB() {\n'
+                f'{body_line}\n'
+                '        XCTAssertTrue(true)\n'
+                '    }\n'
+                '    private func helper() {\n'
+                '        work()\n'
+                '    }\n'
+                '}\n')
+
+    def helper_selection(self, text, needle):
+        lines = text.splitlines()
+        users = []
+        changed_line = next(index for index, line in enumerate(lines) if needle in line)
+        found = JOBS.tests_for_changes(text, {changed_line}, 'M', {'HeavyTests'}, {'HeavyTests'},
+                                       lambda name: True, lambda name: users.append(name) or {'N.UserTests'})
+        return found, users
+
+    def test_braces_in_nested_interpolations_and_raw_strings_do_not_count(self):
+        for body in ('        XCTAssertEqual("\\(xs.map { "{" })", "")',
+                     '        XCTAssertEqual("a\\(f("\\(g("{"))"))b", "")',
+                     '        let json = #"{"a": "\\"}"#, raw = ##"}"#"##',
+                     '        let value = #"\\#(xs.map { "{" })"#'):
+            with self.subTest(body=body):
+                text = self.last_test_then_helper(body)
+                lines = text.splitlines()
+                spans = JOBS.test_spans(lines, JOBS.owners(lines, {'HeavyTests'}))
+                self.assertEqual(spans[('HeavyTests', 'testB')], range(2, 6))
+                self.assertEqual(self.helper_selection(text, 'work()'),
+                                 ({'M.HeavyTests', 'N.UserTests'}, ['HeavyTests']))
+                self.assertEqual(self.helper_selection(text, 'XCTAssertTrue')[0], {'M.HeavyTests/testB'})
+
+    def test_a_line_the_scanner_cannot_read_makes_the_class_ambiguous(self):
+        for body in ('        let text = "{ never closed', '        XCTAssertEqual("\\(f("""', ):
+            with self.subTest(body=body):
+                text = self.last_test_then_helper(body)
+                lines = text.splitlines()
+                self.assertEqual(JOBS.test_spans(lines, JOBS.owners(lines, {'HeavyTests'})), {})
+                self.assertEqual(self.helper_selection(text, 'XCTAssertTrue'),
+                                 ({'M.HeavyTests', 'N.UserTests'}, ['HeavyTests']))
+
+    def test_a_brace_in_a_block_comment_does_not_count(self):
+        for body in ('        /* { */', '        /* nested /* { */ } { */',
+                     '        /* opens {\n         over lines */'):
+            with self.subTest(body=body):
+                text = self.last_test_then_helper(body)
+                lines = text.splitlines()
+                spans = JOBS.test_spans(lines, JOBS.owners(lines, {'HeavyTests'}))
+                closing = next(index for index, line in enumerate(lines) if 'XCTAssertTrue' in line) + 1
+                self.assertEqual(spans[('HeavyTests', 'testB')], range(2, closing + 1))
+                self.assertEqual(self.helper_selection(text, 'work()')[0], {'M.HeavyTests', 'N.UserTests'})
+                self.assertEqual(self.helper_selection(text, 'XCTAssertTrue')[0], {'M.HeavyTests/testB'})
+
+    def test_a_closing_brace_away_from_the_func_indentation_makes_the_class_ambiguous(self):
+        # A brace that the scanner miscounts would end a span on a line at another indentation, such as the class's
+        # closing brace at column 0. Any such span makes the class ambiguous.
+        text = ('final class HeavyTests: XCTestCase {\n'
+                '    func testA() {\n'
+                '        work()\n'
+                '      }\n'
+                '}\n')
+        lines = text.splitlines()
+        self.assertEqual(JOBS.test_spans(lines, JOBS.owners(lines, {'HeavyTests'})), {})
+
     def test_an_ambiguous_span_selects_the_whole_class_and_its_users(self):
         cases = {
             'code after the closing brace': ('final class HeavyTests: XCTestCase {\n'
