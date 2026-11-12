@@ -56,6 +56,23 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
         }
     }
 
+    /// Checks recorded operands against current metadata. The caller separately observes the paired journal.
+    func requireSnapshot(_ snapshot: MachineUpdateStableRuntimeActivationSnapshot, candidate: SignedReleaseEvidence) throws {
+        try requireCandidate(candidate)
+        let preparation = snapshot.runtime.preparation
+        guard macID == preparation.macID, installationID == preparation.installationID,
+              accountID == preparation.accountID, ownerUID == preparation.ownerUID,
+              let initial = snapshot.runtime.setup.account?.initialization,
+              try MachineUpdateActivationRecord.digest(initial.bytes) == initializationDigest,
+              try MachineUpdateRetainedSetupActivationSource.retainedScopeDigest(snapshot: snapshot,
+                sourcePolicy: sourcePolicy.snapshot(), sourceCheckpoint: .decode(sourceCheckpoint), candidate: candidate) == sourceDigest else {
+            throw PreparationStoreError.staleRevision
+        }
+    }
+    func requireCandidate(_ candidate: SignedReleaseEvidence) throws {
+        try requirePlan(MachineUpdatePolicyPlan(source: sourcePolicy.snapshot(), candidate: candidate))
+    }
+
     /// Compares a decoded record with the actual machine and the original paired stores.
     func observe(owner: LocalAccountIdentity, machine: PreparationIntentStore, journal: AuthorityJournal,
         candidate: SignedReleaseEvidence) throws -> Observation {
@@ -111,7 +128,7 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
     }
 
     /// Checks a retained acknowledgement against the actual pair. The recorded marker alone proves no current health.
-    private func requireRecorded(_ current: AuthorityJournal.MachineUpdatePolicyBoundary) throws {
+    func requireRecorded(_ current: AuthorityJournal.MachineUpdatePolicyBoundary) throws {
         try validate(); guard phase == .recorded else { throw PreparationStoreError.invalidTransition }
         guard current.macID == macID, current.accountID == accountID,
               try committedPolicy?.snapshot() == current.policy,
