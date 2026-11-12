@@ -5033,6 +5033,28 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Opens the actual owned schema 26 catalog. It supplies no completed registration or native proof.
+    static func withRetainedPromotionSchema26SQLFixture(_ body: (String, PreparationIntentStore,
+        MachineUpdateRetainedSetupPromotionIntentRecord, MachineUpdateRetainedSetupPromotionIntentRecord,
+        MachineUpdateRetainedSetupPromotionIntentRecord) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedPromotionCaptureRequiresRecordedCompletionAndActualRegistration"))
+        try suite.withRetainedPromotionValueFixture { f in
+            try f.source.fixture.machine.close()
+            try f.source.fixture.files.sql(MachineUpdateRetainedSetupCompletionStorage.createSQL)
+            try f.source.fixture.files.sql("PRAGMA user_version=26")
+            try f.source.fixture.files.reopen()
+            let before = try f.source.fixture.machine.stableMachineUpdateSnapshot(candidate: f.candidate)
+            XCTAssertEqual(before.schemaVersion, 26)
+            let path = f.source.fixture.files.f.f.root.appendingPathComponent("machine/installation.sqlite").path
+            let publishing = try f.prepared.beginningPublication(snapshot: f.completion, current: f.current, candidate: f.candidate)
+            let published = try publishing.recordingPublishedFiles(snapshot: f.completion, current: f.current,
+                candidate: f.candidate, observation: f.observation(selected: Set(UInt64(1)...6)))
+            try body(path, f.source.fixture.machine, f.prepared, publishing, published)
+            try f.source.fixture.machine.stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: before)
+        }
+    }
+
     private func withRetainedPromotionValueFixture(_ body: (RetainedPromotionFixture) throws -> Void) throws {
         try withRetainedCompletionValueFixture(promotionProposalFormats: true) { f, activation, _, prepared in
             let writing = try prepared.preparingWrite(expected: f.boundary())

@@ -21,6 +21,7 @@ public final class PreparationIntentStore {
     private let inventoryRecordLimit: Int32
     private var active = false
     private var unavailable = false
+    private var retainedSetupPromotionAuthorization: RetainedSetupPromotionAuthorization?
     private static let applicationID: Int64 = 0x524D4953
 
     public static func open(directoryPath: String, macID: Data, maximumRecords: Int = 64,
@@ -3703,6 +3704,327 @@ public final class PreparationIntentStore {
         return result
     }
 
+    /// A synchronous loan of this writer's actual private frame. Other files cannot construct it.
+    final class RetainedSetupPromotionFrameLoan {
+        private let process = getpid(), thread = pthread_self(), lock = NSRecursiveLock()
+        private var read: ((MachineUpdateRetainedSetupCompletionSnapshot) throws -> Void)?
+        private var executing = false
+        fileprivate init(_ read: @escaping (MachineUpdateRetainedSetupCompletionSnapshot) throws -> Void) { self.read = read }
+        func verify(_ expected: MachineUpdateRetainedSetupCompletionSnapshot) throws {
+            guard getpid() == process, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            try lock.withLock {
+                guard !executing, let read else { throw JournalLeaseError.invalidated }
+                executing = true; defer { executing = false }
+                try read(expected)
+                guard self.read != nil else { throw JournalLeaseError.invalidated }
+            }
+        }
+        fileprivate func expire() { lock.withLock { read = nil } }
+    }
+
+    private final class RetainedSetupPromotionAuthorization {
+        private let process = getpid(), thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private let original: MachineUpdateRetainedSetupPromotionSnapshot
+        private var expected: MachineUpdateRetainedSetupPromotionSnapshot
+        private let candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease
+        private let admission: UpdateOrdinaryAdmissionLease.Scope
+        private let owners: [LocalAccountIdentity]
+        private let retaining: Bool
+        private var protectedDigest: Data?
+        private var catalog: MachineUpdateRetainedSetupPromotionCatalog.Frame?
+        init(writer: PreparationIntentStore, expected: MachineUpdateRetainedSetupPromotionSnapshot,
+            candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope,
+            owners: [LocalAccountIdentity], retaining: Bool) {
+            self.writer = writer; original = expected; self.expected = expected; self.candidate = candidate
+            self.directory = directory; self.admission = admission; self.owners = owners; self.retaining = retaining
+        }
+        private func requireScope(_ owner: PreparationIntentStore) throws {
+            guard getpid() == process, pthread_equal(pthread_self(), thread) != 0, let writer, writer === owner,
+                  writer.active, writer.retainedSetupPromotionAuthorization === self, let db = writer.db,
+                  sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+            try writer.requireUpdateAdmissionDirectory(directory)
+            try admission.validateMachineBoundary(directory: directory,
+                expected: original.completion.activation.runtime.setup.source.actual.admission.machine)
+        }
+        func capture(in owner: PreparationIntentStore) throws -> MachineUpdateRetainedSetupPromotionSnapshot {
+            try requireScope(owner)
+            let actual = try owner.loadRetainedSetupPromotionSnapshot(owner: original.completion.activation.runtime.setup.owner, candidate: candidate)
+            try actual.requireSame(as: expected)
+            let digest = try owner.retainedSetupPromotionProtectedDigest(excluding: original.completion.activation.runtime.preparation.accountID, candidate: candidate)
+            if let protectedDigest { guard digest == protectedDigest else { throw PreparationStoreError.staleRevision } }
+            else { protectedDigest = digest }
+            let current = try MachineUpdateRetainedSetupPromotionCatalog.capture(owner.db!)
+            if let catalog { try current.requireSame(as: catalog) } else { catalog = current }
+            try owner.captureRetainedSetupPromotionCompatibility(expected: actual.completion.activation.runtime.setup.source,
+                owners: owners, candidate: candidate)
+            try owner.loadRetainedSetupPromotionSnapshot(owner: original.completion.activation.runtime.setup.owner,
+                candidate: candidate).requireSame(as: actual)
+            try admission.validate(); return actual
+        }
+        func adopt(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord, in owner: PreparationIntentStore) throws {
+            try requireScope(owner)
+            let actual = try owner.loadRetainedSetupPromotionSnapshot(owner: original.completion.activation.runtime.setup.owner, candidate: candidate)
+            if retaining { try actual.requireRetention(intent, from: original) } else { try actual.requireTransition(intent, from: original) }
+            try intent.requireSnapshot(actual.completion, candidate: candidate)
+            guard let catalog else { throw JournalLeaseError.invalidated }
+            let current = try MachineUpdateRetainedSetupPromotionCatalog.capture(owner.db!)
+            if retaining { try current.requireRetention(from: catalog) } else { try current.requireSame(as: catalog) }
+            self.catalog = current; expected = actual; _ = try capture(in: owner)
+        }
+    }
+
+    private func captureRetainedSetupPromotionCompatibility(expected: MachineUpdateStableRuntimeSource,
+        owners: [LocalAccountIdentity], candidate: SignedReleaseEvidence) throws {
+        try loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
+        let retained = try owners.map { owner in
+            let value = try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate)
+            try value.runtime.setup.source.requireSame(as: expected); return value
+        }
+        guard Set(retained.map { $0.runtime.preparation.accountID }).count == retained.count else {
+            throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot
+        }
+        let context = StableCompatibilityRead(source: expected, retained: retained)
+        let inputs = try loadRetainedRuntimeCompatibilityInputs(stable: context)
+        _ = try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs)
+        guard try loadRetainedRuntimeCompatibilityInputs(stable: context) == inputs else { throw PreparationStoreError.staleRevision }
+    }
+
+    /// Retains one prepared intent. Only G4 can supply native custody proof.
+    func retainRetainedSetupPromotionIntent(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
+        boundary: AuthorityJournal.MachineUpdatePolicyBoundary, expected: MachineUpdateRetainedSetupPromotionSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        native: MachineUpdateRetainedSetupPromotionNativeContext.NativeContext,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPromotionSnapshot) throws -> Void) throws
+        -> MachineUpdateRetainedSetupPromotionSnapshot {
+        guard intent.phase == .prepared else { throw PreparationStoreError.invalidTransition }
+        return try writeRetainedSetupPromotionIntent(intent, boundary: boundary, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, native: native, retaining: true, observation: nil, verifyScoped: verifyScoped)
+    }
+    /// Changes one adjacent phase. The file marker requires a fresh read-only observation.
+    func changeRetainedSetupPromotionIntent(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
+        boundary: AuthorityJournal.MachineUpdatePolicyBoundary, expected: MachineUpdateRetainedSetupPromotionSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        native: MachineUpdateRetainedSetupPromotionNativeContext.NativeContext,
+        observation: RuntimeRetainedSetupCompletionPublication.Observation? = nil,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPromotionSnapshot) throws -> Void) throws
+        -> MachineUpdateRetainedSetupPromotionSnapshot {
+        guard let previous = expected.intent, intent.phase != .prepared else { throw PreparationStoreError.invalidTransition }
+        if previous != intent { try intent.requireTransition(from: previous) }
+        return try writeRetainedSetupPromotionIntent(intent, boundary: boundary, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, native: native, retaining: false, observation: observation, verifyScoped: verifyScoped)
+    }
+    private func writeRetainedSetupPromotionIntent(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
+        boundary: AuthorityJournal.MachineUpdatePolicyBoundary, expected: MachineUpdateRetainedSetupPromotionSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        native: MachineUpdateRetainedSetupPromotionNativeContext.NativeContext, retaining: Bool,
+        observation: RuntimeRetainedSetupCompletionPublication.Observation?,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPromotionSnapshot) throws -> Void) throws
+        -> MachineUpdateRetainedSetupPromotionSnapshot {
+        let schema = expected.completion.activation.runtime.setup.source.actual.schemaVersion
+        try MachineUpdateRetainedSetupPromotionStorage.requireWriteFormats(candidate, sourceSchema: schema,
+            operation: retaining ? .retainPrepared : .changePhase)
+        try intent.requireSource(expected.completion, current: boundary, candidate: candidate)
+        _ = try intent.encoded
+        try native.requireActive()
+        guard retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        let claims = try retainedSetupCompatibilityOwners(expected: expected.completion.activation.runtime.setup.source, candidate: candidate)
+        let owners = try claims.map { claim in
+            let owner: LocalAccountIdentity
+            do { owner = try LocalAccountDirectory.lookup(uid: claim.ownerUID) }
+            catch { throw RuntimeActivationCompatibilityError.ownerUnavailable(claim.ownerUID) }
+            do { try LocalAccountDirectory.validateOwnership(owner, uid: claim.ownerUID, directoryID: claim.directoryID) }
+            catch { throw RuntimeActivationCompatibilityError.ownerIdentityChanged(claim.ownerUID) }
+            return owner
+        }
+        var committed = false
+        do {
+            return try admission.withMachineAdmission { scope in
+                let authorization = RetainedSetupPromotionAuthorization(writer: self, expected: expected, candidate: candidate,
+                    directory: directory, admission: scope, owners: owners, retaining: retaining)
+                guard retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+                retainedSetupPromotionAuthorization = authorization
+                defer { retainedSetupPromotionAuthorization = nil }
+                func verify(_ stage: CompletionIntentStorageStage, _ actual: MachineUpdateRetainedSetupPromotionSnapshot) throws {
+                    let loan = RetainedSetupPromotionFrameLoan { approved in
+                        try authorization.capture(in: self).completion.requireSame(as: approved)
+                    }
+                    defer { loan.expire() }
+                    try native.withWriterFrame(loan) {
+                        let completion = actual.completion
+                        guard let initial = completion.activation.runtime.setup.account?.initialization else { throw RuntimeActivationError.incomplete }
+                        let paths = try MachineUpdateRetainedSetupPromotionNativeSupport.Paths(accountID: initial.accountID,
+                            journalPath: initial.journalPath, continuityPath: initial.continuityPath)
+                        try MachineUpdateRetainedSetupPromotionNativeSupport.withReadOnlyPair(initial: initial,
+                            verifyCurrent: { try native.verify(completion) }, openStorage: {
+                                try MachineUpdateRetainedSetupPromotionNativeSupport.openExistingStorage(initial: initial,
+                                    openJournalLease: { try ProtectedJournalLease.acquire(directoryPath: paths.journalDirectory) },
+                                    openContinuityLease: { try ProtectedContinuityLease.acquire(directoryPath: paths.continuityDirectory,
+                                        excludingDirectory: $0) })
+                            }) { journal, current in
+                                try MachineUpdateRetainedSetupPromotionSourceValidation.withPinnedPair(completion: completion,
+                                    readPolicyBoundary: { try journal.captureRetainedSetupPolicyBoundary(expected: initial) },
+                                    verifyCurrent: current) { pair, kind, pinned in
+                                        guard pair == boundary, kind == .recorded else { throw PreparationStoreError.staleRevision }
+                                        try verifyScoped(stage, actual); try pinned()
+                                        try intent.requireSource(completion, current: pair, candidate: candidate)
+                                        if intent.phase == .filesPublished {
+                                            guard let observation else { throw RuntimeActivationError.incomplete }
+                                            let checked = RuntimeRetainedSetupCompletionPublication.Observation(verify: {
+                                                try pinned(); try observation.verify(); try pinned()
+                                            }, read: { artifact in
+                                                try pinned(); let bytes = try observation.read(artifact); try pinned(); return bytes
+                                            })
+                                            guard try intent.publication().progress(observation: checked) == .selected else {
+                                                throw RuntimeActivationError.incomplete
+                                            }
+                                        }
+                                        try pinned()
+                                    }
+                            }
+                    }
+                }
+                let before = try transaction(write: false) {
+                    let actual = try authorization.capture(in: self)
+                    try verify(.beforeTransaction, actual); _ = try authorization.capture(in: self); return actual
+                }
+                if before.intent == intent { return before }
+                try transaction(write: true, activationWrite: true, retainedSetupPromotion: authorization) {
+                    let actual = try authorization.capture(in: self)
+                    try verify(.inTransaction, actual); _ = try authorization.capture(in: self)
+                    guard retaining ? actual.intent == nil : actual.intent != nil else { throw PreparationStoreError.staleRevision }
+                    try writeRetainedSetupPromotionRow(intent, replacing: actual.intent)
+                    try authorization.adopt(intent, in: self)
+                    try verify(.afterMutation, authorization.capture(in: self)); _ = try authorization.capture(in: self)
+                }
+                committed = true
+                return try transaction(write: false) {
+                    let actual = try authorization.capture(in: self)
+                    try verify(.afterCommit, actual); _ = try authorization.capture(in: self)
+                    guard actual.intent == intent else { throw PreparationStoreError.staleRevision }; return actual
+                }
+            }
+        } catch { if committed { unavailable = true; shutdown() }; throw error }
+    }
+    // Only the native driver and the owned DEBUG fixture call this primitive. It grants no custody proof.
+    private func writeRetainedSetupPromotionRow(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
+        replacing previous: MachineUpdateRetainedSetupPromotionIntentRecord?) throws {
+        let accountID = try intent.publication().configuration.archive.binding.startupBinding.accountID
+        let encoded = try intent.encoded, schema = try scalar("PRAGMA user_version")
+        guard previous == nil && [Int64(26), 27, 28].contains(schema) || previous != nil && [Int64(27), 28].contains(schema) else {
+            throw PreparationStoreError.invalidTransition
+        }
+        try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+            if previous == nil {
+                guard intent.phase == .prepared else { throw PreparationStoreError.invalidTransition }
+                if schema == 26 { try exec(MachineUpdateRetainedSetupPromotionStorage.createSQL) }
+                guard try scalar("SELECT COUNT(*) FROM retained_setup_promotion_intents_v1") < 64 else { throw PreparationStoreError.capacity }
+                try statement("SELECT COUNT(*) FROM retained_setup_promotion_intents_v1 WHERE id=?") { row in
+                    try bind(bytes(intent.id), column: 1, row: row)
+                    guard try step(row) == SQLITE_ROW, sqlite3_column_int64(row, 0) == 0 else { throw PreparationStoreError.staleRevision }
+                }
+                try statement("INSERT INTO retained_setup_promotion_intents_v1 VALUES(?,?,?,?)") { row in
+                    try bind(accountID, column: 1, row: row)
+                    try bind(bytes(intent.id), column: 2, row: row); try bind(bytes(intent.revision), column: 3, row: row)
+                    try bind(encoded, column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                if schema == 26 { try exec("PRAGMA user_version=27") }
+            } else {
+                guard let previous else { throw PreparationStoreError.staleRevision }
+                try intent.requireTransition(from: previous)
+                try statement("UPDATE retained_setup_promotion_intents_v1 SET revision=?,record=? WHERE account=? AND id=? AND revision=?") { row in
+                    try bind(bytes(intent.revision), column: 1, row: row); try bind(encoded, column: 2, row: row)
+                    try bind(accountID, column: 3, row: row)
+                    try bind(bytes(previous.id), column: 4, row: row); try bind(bytes(previous.revision), column: 5, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+            }
+        }
+    }
+
+    #if DEBUG
+    /// Runs only the private SQL primitive on an ordinary owned lease. It never supplies native custody proof.
+    final class OwnedRetainedSetupPromotionSQLFixture {
+        private weak var owner: PreparationIntentStore?
+        private let process = getpid(), thread = pthread_self()
+        fileprivate init(_ owner: PreparationIntentStore) { self.owner = owner }
+        fileprivate func expire() { owner = nil }
+        private func current() throws -> PreparationIntentStore {
+            guard getpid() == process, pthread_equal(pthread_self(), thread) != 0, getuid() != 0,
+                  let owner, owner.active else { throw JournalLeaseError.invalidated }
+            try owner.lease.validate(); return owner
+        }
+        func write(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
+            replacing previous: MachineUpdateRetainedSetupPromotionIntentRecord? = nil) throws {
+            try current().writeRetainedSetupPromotionRow(intent, replacing: previous)
+        }
+        func replaceSyntheticBytesForBoundsTest(_ bytes: Data, accountID: Data) throws {
+            let owner = try current()
+            try owner.withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+                try owner.statement("UPDATE retained_setup_promotion_intents_v1 SET record=? WHERE account=?") { row in
+                    try owner.bind(bytes, column: 1, row: row); try owner.bind(accountID, column: 2, row: row)
+                    guard try owner.step(row) == SQLITE_DONE, sqlite3_changes(owner.db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+            }
+        }
+        func limit() throws -> Int32 { sqlite3_limit(try current().db, SQLITE_LIMIT_LENGTH, -1) }
+        func read(accountID: Data) throws -> MachineUpdateRetainedSetupPromotionIntentRecord? {
+            let owner = try current()
+            return try owner.withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+                try owner.statement("SELECT record FROM retained_setup_promotion_intents_v1 WHERE account=?") { row in
+                    try owner.bind(accountID, column: 1, row: row)
+                    if try owner.step(row) == SQLITE_DONE { return nil }
+                    return try .decode(owner.blob(row, column: 0, maximum: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes))
+                }
+            }
+        }
+    }
+    private enum RetainedSetupPromotionFixtureRollback: Error { case done }
+    /// Always rolls back. Root cannot use this fixture entry, including with an existing native connection.
+    func withOwnedRetainedSetupPromotionSQLFixture<Value>(_ body: (OwnedRetainedSetupPromotionSQLFixture) throws -> Value) throws -> Value {
+        guard getuid() != 0 else { throw JournalLeaseError.unsafeMetadata }
+        try lease.validate()
+        var output: Value?
+        do {
+            try transaction(write: false) {
+                let fixture = OwnedRetainedSetupPromotionSQLFixture(self)
+                defer { fixture.expire() }
+                output = try body(fixture)
+                throw RetainedSetupPromotionFixtureRollback.done
+            }
+        } catch RetainedSetupPromotionFixtureRollback.done {}
+        guard let output else { throw PreparationStoreError.invalidTransition }; return output
+    }
+    #endif
+
+    private func retainedSetupPromotionProtectedDigest(excluding accountID: Data, candidate: SignedReleaseEvidence) throws -> Data {
+        guard accountID.count == 16 else { throw PreparationStoreError.corruptRecord }
+        let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name") { row in
+            var values: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard values.count < 128, let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
+                values.append(String(cString: name))
+            }
+            return values
+        }
+        var hash = SHA256(); hash.update(data: Data("Remozio/RetainedSetupPromotionProtectedRows/v1\0".utf8)); hash.update(data: accountID)
+        for table in tables where table != MachineUpdateRetainedSetupPromotionStorage.tableName {
+            hash.update(data: try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes) {
+                try machineTableDigest(table, maximumCellBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes)
+            })
+        }
+        hash.update(data: Data("Remozio/RetainedSetupPromotionOtherIntents/v1\0".utf8))
+        if try scalar("PRAGMA user_version") >= 27 {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+            for value in frame.promotionIntents where try value.publication().configuration.archive.binding.startupBinding.accountID != accountID {
+                let bytes = try value.encoded
+                hash.update(data: candidateGeneration(UInt64(bytes.count))); hash.update(data: bytes)
+            }
+        }
+        return Data(hash.finalize())
+    }
+
     private func loadRetainedSetupActivation(accountID: Data) throws -> RuntimeRetainedSetupActivationState {
         try withRetainedSetupRecordLimit(maximumBytes: RuntimeRetainedSetupActivationPlan.maximumBytes) {
             try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
@@ -4708,14 +5030,14 @@ public final class PreparationIntentStore {
         return Data(hash.finalize())
     }
 
-    private func machineTableDigest(_ table: String) throws -> Data {
+    private func machineTableDigest(_ table: String, maximumCellBytes: Int? = nil) throws -> Data {
         guard !table.isEmpty, table.utf8.allSatisfy({ ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 }) else {
             throw PreparationStoreError.corruptRecord
         }
-        let cellLimit = table == MachineUpdateRetainedSetupPromotionReadyStorage.tableName
+        let cellLimit = maximumCellBytes ?? (table == MachineUpdateRetainedSetupPromotionReadyStorage.tableName
             ? MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes
             : table == MachineUpdateRetainedSetupPromotionStorage.tableName
-                ? MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes : 278528
+                ? MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes : 278528)
         let rows: [Data] = try statement("SELECT * FROM \(table)") { row in
             var rows: [Data] = []
             while try step(row) == SQLITE_ROW {
@@ -5022,7 +5344,8 @@ public final class PreparationIntentStore {
             return result
         }
     }
-    private func transaction<T>(write: Bool, activationWrite: Bool = false, willCommit: () -> Void = {},
+    private func transaction<T>(write: Bool, activationWrite: Bool = false,
+        retainedSetupPromotion: RetainedSetupPromotionAuthorization? = nil, willCommit: () -> Void = {},
         _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
@@ -5036,15 +5359,23 @@ public final class PreparationIntentStore {
         active = true; defer { active = false }
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if write, try scalar("PRAGMA user_version") >= 24 { throw PreparationStoreError.invalidTransition }
+            if let retainedSetupPromotion {
+                guard write, activationWrite, retainedSetupPromotionAuthorization === retainedSetupPromotion,
+                      [Int64(26), 27, 28].contains(try scalar("PRAGMA user_version")) else {
+                    throw PreparationStoreError.invalidTransition
+                }
+                _ = try retainedSetupPromotion.capture(in: self)
+            } else if write, try scalar("PRAGMA user_version") >= 24 { throw PreparationStoreError.invalidTransition }
             if write && !activationWrite, try scalar("PRAGMA user_version") >= 17,
                try loadMachineUpdateActivation()?.phase.blocksMachineWrites == true {
                 throw PreparationStoreError.invalidTransition
             }
             let value = try body()
+            if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
             try lease.validate()
             do {
                 if write { willCommit() }
+                if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
                 try exec("COMMIT")
                 if write { try didCommit?() }
             } catch { unavailable = true; throw error }

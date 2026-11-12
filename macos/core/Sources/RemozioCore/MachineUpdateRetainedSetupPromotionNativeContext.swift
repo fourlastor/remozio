@@ -2,8 +2,7 @@ import Darwin
 import Foundation
 import RemozioProtocol
 
-/// Authenticates fresh native reads only. The owner chooses each approved frame.
-/// G6 must authorize 26 to 27 and supply a private transaction loan before writer views can be supported.
+/// Authenticates fresh native reads and sealed writer loans. The private writer authorizes each changed frame.
 enum MachineUpdateRetainedSetupPromotionNativeContext {
     typealias Snapshot = MachineUpdateRetainedSetupCompletionSnapshot
     typealias Verify = () throws -> Void
@@ -25,10 +24,11 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         private let processID = getpid()
         private let thread = pthread_self()
         private let lock = NSRecursiveLock()
-        private var body: ((Snapshot) throws -> Void)?
+        private var body: ((Snapshot, PreparationIntentStore.RetainedSetupPromotionFrameLoan?) throws -> Void)?
+        private var writerFrame: PreparationIntentStore.RetainedSetupPromotionFrameLoan?
         private var approved: Snapshot?
         private var executing = false
-        fileprivate init(_ body: @escaping (Snapshot) throws -> Void) { self.body = body }
+        fileprivate init(_ body: @escaping (Snapshot, PreparationIntentStore.RetainedSetupPromotionFrameLoan?) throws -> Void) { self.body = body }
 
         func verify(_ frame: Snapshot) throws {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
@@ -36,10 +36,23 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
                 guard !executing, let body else { expire(); throw JournalLeaseError.invalidated }
                 executing = true; defer { executing = false }
                 do {
-                    try body(frame)
+                    try body(frame, writerFrame)
                     guard self.body != nil else { throw JournalLeaseError.invalidated }
                     approved = frame
                 } catch { expire(); throw error }
+            }
+        }
+        fileprivate func requireActive() throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            try lock.withLock { guard body != nil else { throw JournalLeaseError.invalidated } }
+        }
+        fileprivate func withWriterFrame<Value>(_ loan: PreparationIntentStore.RetainedSetupPromotionFrameLoan,
+            perform: () throws -> Value) throws -> Value {
+            try requireActive()
+            return try lock.withLock {
+                guard !executing, writerFrame == nil else { throw JournalLeaseError.invalidated }
+                writerFrame = loan; defer { writerFrame = nil }
+                let value = try perform(); try verifyLast(); return value
             }
         }
         fileprivate func verifyLast() throws {
@@ -49,7 +62,7 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
                 try verify(approved)
             }
         }
-        fileprivate func expire() { lock.withLock { body = nil; approved = nil } }
+        fileprivate func expire() { lock.withLock { body = nil; approved = nil; writerFrame = nil } }
     }
 
     /// Proves native custody only during its enclosing scope. Owned contexts cannot construct this type.
@@ -57,6 +70,9 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         private let context: Context
         fileprivate init(_ context: Context) { self.context = context }
         func verify(_ frame: Snapshot) throws { try context.verify(frame) }
+        func requireActive() throws { try context.requireActive() }
+        func withWriterFrame<Value>(_ loan: PreparationIntentStore.RetainedSetupPromotionFrameLoan,
+            perform: () throws -> Value) throws -> Value { try context.withWriterFrame(loan, perform: perform) }
     }
 
     /// Opens no authority pair and exposes no registration, policy writer or startup operation.
@@ -130,13 +146,16 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
     static func withOwnedContext<Value>(expected: Snapshot, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy, controls: Controls, perform: (Context) throws -> Value) throws -> Value {
         _ = try requireExpected(expected, candidate: candidate, currentCodePolicy: currentCodePolicy)
-        let context = Context { approved in
+        let context = Context { approved, writer in
             try requireApproved(approved, from: expected, candidate: candidate)
             func frame() throws {
                 try controls.validateCustody()
-                let actual = try readFresh(approved: approved, candidate: candidate,
-                    openMachine: controls.openMachine, lookupOwner: controls.lookupOwner)
-                try actual.requireSame(as: approved)
+                if let writer { try writer.verify(approved) }
+                else {
+                    let actual = try readFresh(approved: approved, candidate: candidate,
+                        openMachine: controls.openMachine, lookupOwner: controls.lookupOwner)
+                    try actual.requireSame(as: approved)
+                }
                 try controls.validateCustody()
             }
             func external<Result>(_ read: () throws -> Result) throws -> Result {
@@ -210,6 +229,9 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         _ = try requireExpected(initial, candidate: candidate, currentCodePolicy: policy)
         _ = try requireExpected(approved, candidate: candidate, currentCodePolicy: policy)
         let before = initial.activation.runtime.setup.source.actual, after = approved.activation.runtime.setup.source.actual
+        guard before.schemaVersion == after.schemaVersion || before.schemaVersion == 26 && after.schemaVersion == 27 else {
+            throw PreparationStoreError.staleRevision
+        }
         if before.schemaVersion == after.schemaVersion, before.currentRowsDigest == after.currentRowsDigest {
             try approved.requireSame(as: initial)
         } else { try approved.requirePromotionMetadataChange(from: initial) }
@@ -233,7 +255,7 @@ enum MachineUpdateRetainedSetupPromotionNativeContext {
         currentCodePolicy: AuthorityCodePolicy) throws -> AuthorityInitializationIntent {
         try expected.requireSame(as: .init(activation: expected.activation, intent: expected.intent, candidate: candidate))
         let runtime = expected.activation.runtime
-        guard expected.intent?.phase == .recorded, [Int64(26), 27].contains(runtime.setup.source.actual.schemaVersion),
+        guard expected.intent?.phase == .recorded, [Int64(26), 27, 28].contains(runtime.setup.source.actual.schemaVersion),
               let initial = runtime.setup.account?.initialization, initial.complete,
               initial.macID == runtime.preparation.macID, initial.installationID == runtime.preparation.installationID,
               initial.accountID == runtime.preparation.accountID, initial.initializationBytes == runtime.preparation.initializationBytes,
