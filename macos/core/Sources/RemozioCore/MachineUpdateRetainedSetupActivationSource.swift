@@ -75,6 +75,52 @@ struct MachineUpdateRetainedSetupActivationSource: CustomStringConvertible, Cust
         self.digest = digest
     }
 
+    /// Reconstructs the public v2 scope. It does not observe the current paired journal.
+    static func retainedScopeDigest(snapshot: MachineUpdateStableRuntimeActivationSnapshot,
+        sourcePolicy: AuthorityCodePolicySnapshot, sourceCheckpoint: ContinuityCheckpoint,
+        candidate: SignedReleaseEvidence) throws -> Data {
+        guard snapshot.origin == .retained, snapshot.installed == nil,
+              snapshot.state.plan == nil, !snapshot.state.jobsRegistered,
+              snapshot.runtime.setup.account?.inInventory == false else { throw RuntimeActivationError.changedScope }
+        return try recordedScopeDigest(runtime: snapshot.runtime,
+            observedInventory: snapshot.runtime.setup.source.actual.inventory,
+            sourcePolicy: sourcePolicy, sourceCheckpoint: sourceCheckpoint, candidate: candidate)
+    }
+
+    /// Rechecks recorded inventory operands against current metadata. The digest grants no native or writer authority.
+    static func recordedScopeDigest(runtime: MachineUpdateStableRuntimePreparationSnapshot,
+        observedInventory: InstallationInventory, sourcePolicy: AuthorityCodePolicySnapshot,
+        sourceCheckpoint: ContinuityCheckpoint, candidate: SignedReleaseEvidence) throws -> Data {
+        let setup = runtime.setup, source = setup.source, actual = source.actual, preparation = runtime.preparation
+        guard setup.account?.origin == .retained, preparation.storagePrepared,
+              let reference = runtime.state.reference, let initialization = setup.account?.initialization,
+              initialization.complete, initialization.initializationBytes == preparation.initializationBytes,
+              sourcePolicy.policy == (try preparation.initialAuthority.codePolicy),
+              sourceCheckpoint == initialization.checkpoint else { throw RuntimeActivationError.changedScope }
+        let original = try source.unconfiguredRetainedAccount(accountID: preparation.accountID, ownerUID: preparation.ownerUID)
+        try reference.validate(account: preparation, services: runtime.plan)
+        try actual.seal.requireCurrentInventory(actual.inventory, epoch: actual.installed, candidate: candidate)
+        try actual.seal.requireCurrentInventory(observedInventory, epoch: actual.installed, candidate: candidate)
+        guard observedInventory.macID == actual.inventory.macID, observedInventory.installationID == actual.inventory.installationID,
+              observedInventory.bundlePath == actual.inventory.bundlePath, observedInventory.releaseDigest == actual.inventory.releaseDigest,
+              observedInventory.accounts.allSatisfy({ actual.inventory.accounts.contains($0) }),
+              observedInventory.services.allSatisfy({ actual.inventory.services.contains($0) }) else { throw RuntimeActivationError.changedScope }
+        let policy = try MachineUpdatePolicyPlan(source: sourcePolicy, candidate: candidate)
+        guard policy.releaseDigest == actual.inventory.releaseDigest,
+              preparation.releaseDigest != policy.releaseDigest else { throw RuntimeActivationError.changedScope }
+        let limits = try CBORLimits(maxBytes: 1_048_576, maxDepth: 3, maxItems: 40)
+        let bytes = try DeterministicCBOR.encode(.map([
+            0: .text("remozio/retained-setup-activation-source/v2"),
+            1: .bytes(observedInventory.canonicalBytes), 2: .bytes(actual.seal.encoded),
+            3: .bytes(original.sourceDigest), 4: .bytes(preparation.bytes),
+            5: .bytes(initialization.bytes), 6: .bytes(runtime.plan.encoded), 7: .bytes(reference.encoded),
+            8: .bytes(sourcePolicy.storedBytes), 9: .bytes(sourceCheckpoint.bytes),
+            10: .bytes(policy.startupPolicy.bytes), 11: .bytes(policy.completionPolicy.bytes),
+            12: .text(sourcePolicy.revision.uuidString.lowercased())
+        ]), limits: limits)
+        return MachineUpdateActivationRecord.digest(bytes)
+    }
+
     static func capture(owner: LocalAccountIdentity, machine: PreparationIntentStore,
         journal: AuthorityJournal, candidate: SignedReleaseEvidence) throws -> Self {
         let material = try machine.retainedSetupPolicyMaterial(owner: owner, candidate: candidate)

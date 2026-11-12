@@ -3464,6 +3464,22 @@ public final class PreparationIntentStore {
         return result
     }
 
+    /// Reads activation facts in one transaction. It grants no enrollment or native registration authority.
+    func stableRuntimeActivationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableRuntimeActivationSnapshot {
+        try transaction(write: false) { try loadStableRuntimeActivationSnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadStableRuntimeActivationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableRuntimeActivationSnapshot {
+        let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+        let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
+        let result = try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime, state: state, candidate: candidate)
+        try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+        try result.requireState(loadRuntimeActivation(accountID: runtime.preparation.accountID))
+        return result
+    }
+
     /// Reads policy operands and the activation row in one transaction.
     func retainedSetupPolicyMaterial(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupPolicyMaterial {
@@ -3474,6 +3490,27 @@ public final class PreparationIntentStore {
         throws -> MachineUpdateRetainedSetupPolicyMaterial {
         let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
         return try .init(runtime: runtime, activation: loadRuntimeActivation(accountID: runtime.preparation.accountID))
+    }
+
+    /// Reads policy metadata and activation facts in one transaction. It grants no journal write or publication authority.
+    func retainedSetupPolicySnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPolicySnapshot {
+        try transaction(write: false) {
+            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+            let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
+            let activation = try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(
+                runtime: runtime, state: state, candidate: candidate)
+            let actual = runtime.setup.source.actual
+            let intent: MachineUpdateRetainedSetupPolicyIntentRecord?
+            if actual.schemaVersion >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
+                intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                    .first { $0.accountID == runtime.preparation.accountID }
+            } else { intent = nil }
+            let result = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation, intent: intent, candidate: candidate)
+            try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+            try activation.requireState(loadRuntimeActivation(accountID: runtime.preparation.accountID))
+            return result
+        }
     }
 
     /// Reads a durable intent for the exact owner and machine state. The paired journal still needs its own observation.
