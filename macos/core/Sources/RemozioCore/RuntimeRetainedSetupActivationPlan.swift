@@ -119,3 +119,47 @@ struct RuntimeRetainedSetupActivationPlan: CustomStringConvertible, CustomDebugS
         try .init(archive: RuntimeRetainedSetupActivationArchive.decode(bytes))
     }
 }
+
+extension RuntimeRetainedSetupActivationPlan {
+    /// Proposes activation bytes from the recorded pair and published files. The owner must retain and enroll the plan separately.
+    static func retainingRetainedSetup(snapshot: MachineUpdateRetainedSetupPolicySnapshot,
+        selection: RuntimeRetainedSetupPublishedSelection, current: AuthorityJournal.MachineUpdatePolicyBoundary,
+        candidate: SignedReleaseEvidence) throws -> Self {
+        try requireFormats(candidate)
+        let actual = snapshot.activation, runtime = actual.runtime, setup = runtime.setup
+        guard actual.origin == .retained, actual.installed == nil, actual.state.plan == nil, !actual.state.jobsRegistered,
+              setup.account?.inInventory == false, runtime.state.configurationPublished,
+              let reference = runtime.state.reference, let initial = setup.account?.initialization else {
+            throw RuntimeActivationError.changedScope
+        }
+        let binding = selection.binding
+        try binding.requireSourceForPublication(snapshot, current: current, candidate: candidate)
+        try binding.requireHistoricalRuntime(reference); try binding.requireStartupPolicy(selection.host.codePolicy)
+        let bundle = selection.bundle
+        let clients = RuntimeActivationClients(presence: bundle.presenceClient, pairing: bundle.pairingClient,
+            frontend: bundle.frontendClient)
+        _ = try RuntimeConfigurationBundle.stableCompleted(snapshot: runtime, reference: reference, candidate: candidate,
+            currentCodePolicy: current.policy.policy, command: bundle.command, transport: bundle.transport, clients: clients)
+        guard selection.host.command.canonicalBytes == bundle.command.canonicalBytes,
+              bundle.transport.settingsHost?.retainedSetupBinding == binding,
+              try bundle.gatewaySettingsHost?.retainedSetupBinding == binding else { throw RuntimeActivationError.changedScope }
+        let maximum = bundle.command.presence.wake.request.service.maximumPayloadBytes
+        let routing = try PhoneRoutingReleaseContract.selectedVersion(in: candidate, policy: current.policy.policy,
+            nativeHosts: true, maximumPayloadBytes: maximum)
+        let audit = try PhoneAuditReleaseContract.selectedVersion(in: candidate, policy: current.policy.policy,
+            nativeHosts: true, maximumPayloadBytes: maximum)
+        let update = try PhoneUpdateSchedulingReleaseContract.selectedVersion(in: candidate, policy: current.policy.policy,
+            nativeHosts: true, maximumPayloadBytes: maximum)
+        if reference.auditDeliveryVersion != nil { try PhoneAuditReleaseContract.validateDelivery(candidate, policy: current.policy.policy) }
+        guard let gateway = try bundle.gatewaySettingsHost else { throw RuntimeActivationError.incomplete }
+        let archive = try RuntimeRetainedSetupActivationArchive(reference: reference,
+            bundlePath: setup.source.actual.inventory.bundlePath, host: selection.host, transport: bundle.transport,
+            gatewaySettingsHost: gateway, phoneRoutingVersion: routing,
+            phoneAuditVersion: audit, phoneUpdateSchedulingVersion: update, binding: binding, inventory: setup.source.actual.inventory)
+        let result = try Self(archive: archive)
+        try result.validate(account: runtime.preparation, reference: reference)
+        _ = try result.configurationBundle(account: runtime.preparation, initialization: initial,
+            inventory: setup.source.actual.inventory, clients: clients)
+        return result
+    }
+}
