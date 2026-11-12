@@ -106,6 +106,41 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
             retainedSetupCompletionBinding: retainedSetupCompletionBinding, policyStage: policyStage)
         _ = try encoded
     }
+    /// Retains startup metadata only. Ordinary decoders and native admission remain separate.
+    static func retainedSetup(role: GatewaySettingsConsumerRole, runtime: RuntimeMaterialReference,
+        bundlePath: String, codePolicy: AuthorityCodePolicy, binding: RuntimeRetainedSetupReleaseBinding) throws -> Self {
+        try .init(role: role, runtime: runtime, bundlePath: bundlePath, codePolicy: codePolicy,
+            releaseBinding: nil, policyStage: .startup, retainedSetupBinding: binding, retainedSetupCompletionBinding: nil)
+    }
+    /// Preserves the exact release binding when selecting the other consumer role.
+    func selecting(role: GatewaySettingsConsumerRole) throws -> Self {
+        try .init(role: role, runtime: runtime, bundlePath: bundlePath, codePolicy: codePolicy,
+            releaseBinding: releaseBinding, policyStage: policyStage, retainedSetupBinding: retainedSetupBinding,
+            retainedSetupCompletionBinding: retainedSetupCompletionBinding)
+    }
+    /// Checks configuration values only. It does not admit native startup or authenticate current files.
+    func requireConfigurationScope(account: AccountPreparationIntent, inventory: InstallationInventory) throws {
+        let services = runtime.services
+        try runtime.validate(account: account, services: services)
+        guard inventory.macID == services.macID, inventory.installationID == services.installationID,
+              inventory.releaseDigest == installedReleaseDigest, inventory.bundlePath == bundlePath else {
+            throw GatewayPreparationError.changedScope
+        }
+        if let releaseBinding, let policyStage {
+            try releaseBinding.requireHistoricalRuntime(runtime)
+            try releaseBinding.requirePolicy(codePolicy, stage: policyStage)
+        } else if let retainedSetupBinding {
+            try retainedSetupBinding.requirePreparation(account)
+            try retainedSetupBinding.requireHistoricalRuntime(runtime)
+            try retainedSetupBinding.requireStartupPolicy(codePolicy)
+        } else if let retainedSetupCompletionBinding {
+            try retainedSetupCompletionBinding.startupBinding.requirePreparation(account)
+            try retainedSetupCompletionBinding.requireHistoricalRuntime(runtime)
+            try retainedSetupCompletionBinding.requireCompletionPolicy(codePolicy)
+        } else {
+            guard try codePolicy.bytes == account.initialAuthority.codePolicy.bytes else { throw GatewayPreparationError.changedScope }
+        }
+    }
     /// Setup must compare these inputs with the current retained account and installation before publication.
     func validate(account: AccountPreparationIntent, inventory: InstallationInventory) throws {
         guard retainedSetupBinding == nil, retainedSetupCompletionBinding == nil else {

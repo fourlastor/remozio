@@ -153,3 +153,31 @@ extension InstalledAccountJobManifestTests {
         XCTAssertThrowsError(try readiness.validate(settings.bytes, inventory: inventory(), release: release()))
     }
 }
+
+extension InstalledAccountJobManifestTests {
+    func testRetainedHealthJobValueIsOptInAndRequiresTheAuthoritySettingsJob() throws {
+        let ordinary = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true)
+        let retained = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true, retainedSetupHealthEnabled: true)
+        let service = try MachineUpdateRetainedSetupHealthService.authority(accountID: account)
+        XCTAssertEqual(retained.machServices, ordinary.machServices.union([service]))
+        XCTAssertEqual(retained.arguments, ordinary.arguments); XCTAssertEqual(retained.declaration, ordinary.declaration)
+        XCTAssertEqual(retained.path, ordinary.path); XCTAssertEqual(retained.configurationPath, ordinary.configurationPath)
+        let explicitFalse = try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, gatewaySettingsControlEnabled: true, retainedSetupHealthEnabled: false)
+        XCTAssertEqual(explicitFalse.bytes, ordinary.bytes)
+        XCTAssertThrowsError(try InstalledAccountJobManifest(accountID: account, role: .authority, executionUID: 0,
+            userName: "root", bundlePath: bundle, retainedSetupHealthEnabled: true)) {
+            XCTAssertEqual($0 as? InstallationServiceManifestError, .invalidExpectation)
+        }
+        for role: AuthorityCodeRole in [.transport, .notificationGateway] {
+            let original = try job(role)
+            XCTAssertThrowsError(try InstalledAccountJobManifest(accountID: account, role: role,
+                executionUID: original.declaration.executionUID, userName: original.userName, bundlePath: bundle,
+                retainedSetupHealthEnabled: true)) {
+                XCTAssertEqual($0 as? InstallationServiceManifestError, .invalidExpectation)
+            }
+        }
+    }
+}
