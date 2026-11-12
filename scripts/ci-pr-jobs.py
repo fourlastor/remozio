@@ -30,6 +30,9 @@ Release app. The Mac build job builds and inspects the Debug app on every run. A
 Release app (mac_release) only when it changes a Release input that the Debug build does not check: the app under
 macos/app (its project, Info.plists and `#if DEBUG` code), the release-signing experiment that signs the Release app
 (RELEASE_INPUTS), a Swift package manifest or lockfile, or a path that runs every job other than the Gradle build.
+It also builds the Release app when the diff of a Swift source under CORE_SOURCES, outside a Tests directory, adds or
+removes a compiler directive line (#if, #elseif, #else, #endif) or a line that names DEBUG: SwiftPM debug builds
+define DEBUG, so only the Release app compiles the other branch.
 The release manifest declarations do not depend on the configuration, so the Debug app checks them against the
 compiled contracts of a macos/core change. A Release-only failure that the rules here miss fails the next push to
 main or the nightly run, which always build both configurations.
@@ -141,8 +144,36 @@ def select(paths):
     return selected
 
 
-def release_reason(paths):
-    """Why a pull request also builds the Release app, or None when the Debug app checks everything it changes."""
+# A line that starts or ends a conditional compilation block, or that names the DEBUG condition.
+CONDITIONAL_LINE = re.compile(r'^\s*#\s*(?:if|elseif|else|endif)\b|DEBUG')
+
+
+def conditional_change(diff):
+    """The first added or removed line of a unified diff that is a compiler directive or names DEBUG, or None."""
+    for line in diff.splitlines():
+        if line.startswith(('+++ ', '--- ')) or not line.startswith(('+', '-')):
+            continue
+        if CONDITIONAL_LINE.search(line[1:]):
+            return line
+    return None
+
+
+def core_swift_source(path):
+    return (path.startswith(CORE_SOURCES) and path.endswith('.swift')
+            and 'Tests' not in PurePosixPath(path).parts[:-1])
+
+
+def release_reason(paths, base=None, merge_commit=None):
+    """Why a pull request also builds the Release app, or None when the Debug app checks everything it changes.
+
+    With `base` and `merge_commit`, a conditional compilation change in a core Swift source counts too.
+    """
+    if base is not None:
+        sources = [path for path in paths if core_swift_source(path)]
+        for path in sources:
+            line = conditional_change(git('diff', '-U0', '--no-renames', base, merge_commit, '--', path))
+            if line:
+                return f'{path} changes conditional compilation that only the Release build compiles ({line.strip()})'
     for path in paths:
         if path.startswith(RELEASE_INPUTS):
             return f'{path} is an input of the app or of the Release signing check'
@@ -555,7 +586,7 @@ def main(argv):
             for path in paths:
                 print(f'{path}: {", ".join(sorted(jobs_for(path))) or "Python checks only"}')
             selected = select(paths)
-            reason = release_reason(paths)
+            reason = release_reason(paths, base, args.merge_commit)
             release = reason is not None
             if 'mac' in selected:
                 print(f'Mac build: Debug and Release apps, because {reason}' if release

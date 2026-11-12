@@ -196,6 +196,46 @@ class ReleaseSelectionTests(unittest.TestCase):
                 self.assertIsNone(JOBS.release_reason([path]))
 
 
+    def test_conditional_compilation_lines_are_found_in_added_and_removed_diff_lines(self):
+        diff = '--- a/A.swift\n+++ b/A.swift\n@@ -1 +1 @@\n-let a = 1\n+let a = 2\n'
+        self.assertIsNone(JOBS.conditional_change(diff))
+        for line in ('+#if DEBUG', '-#endif', '+    #else', '- #elseif os(macOS)', '+let isDebug = DEBUG_BUILD'):
+            with self.subTest(line=line):
+                self.assertEqual(JOBS.conditional_change(diff + line + '\n'), line)
+        self.assertIsNone(JOBS.conditional_change(diff + ' #if DEBUG\n'))  # Unchanged context is not a change.
+        self.assertIsNone(JOBS.conditional_change(diff + '+if #available(macOS 26, *) {}\n'))
+
+    def test_pull_request_merges_build_the_release_app_for_core_conditional_compilation(self):
+        source = 'macos/core/Sources/RemozioCore/Seam.swift'
+        base_text = 'let a = 1\n#if canImport(Darwin)\nlet b = 2\n#endif\nlet mode = "release"\n'
+        cases = {
+            'directive-added': (source, base_text.replace('let a = 1\n', '#if DEBUG\nlet a = 1\n#endif\n'), True),
+            'directive-removed': (source, base_text.replace('#if canImport(Darwin)\n', '').replace('#endif\n', ''),
+                                  True),
+            'debug-line-changed': (source, base_text.replace('let b = 2', 'let b = DEBUG_LEVEL'), True),
+            'protocol-directive': ('protocol/swift/Sources/P.swift', '#if DEBUG\nlet p = 1\n#endif\n', True),
+            'ordinary-change': (source, base_text.replace('let a = 1', 'let a = 3'), False),
+            'test-directive': ('macos/core/Tests/RemozioCoreTests/SeamTests.swift', '#if DEBUG\nlet t = 1\n#endif\n',
+                               False),
+        }
+        # Each case starts from the same base in its own repository, because each merge moves main on.
+        for branch, (path, text, release) in cases.items():
+            with self.subTest(branch=branch), tempfile.TemporaryDirectory() as directory, \
+                    working_directory(directory):
+                repository = GitRepository(directory)
+                repository.write(source, base_text)
+                repository.write('protocol/swift/Sources/P.swift', 'let p = 1\n')
+                repository.write('macos/core/Tests/RemozioCoreTests/SeamTests.swift', 'let t = 1\n')
+                repository.commit('base')
+                repository.git('switch', '--quiet', '-c', branch, 'main')
+                repository.write(path, text)
+                repository.commit(branch)
+                base, merge = repository.merge(branch)
+                paths = [name for name in JOBS.changed_paths(merge) if name != 'README.md']
+                self.assertEqual(JOBS.release_reason(paths, base, merge) is not None, release)
+                self.assertIsNone(JOBS.release_reason(paths))  # Without the diff, only the paths count.
+
+
 class CoreTestSelectionTests(unittest.TestCase):
     def test_a_test_method_change_in_a_heavy_class_selects_that_method(self):
         self.assertEqual(select('XCTAssertEqual(2, 2)'), {'M.HeavyTests/testTwo'})
