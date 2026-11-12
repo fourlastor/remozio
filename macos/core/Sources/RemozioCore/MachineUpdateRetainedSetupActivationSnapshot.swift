@@ -39,6 +39,10 @@ struct MachineUpdateRetainedSetupActivationSnapshot: CustomStringConvertible, Cu
         if schema >= 27 { try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(candidate) }
         if schema == 28 { try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(candidate) }
     }
+    /// Reuses reader declarations for this validated snapshot. It accepts no unchecked schema operand.
+    func requireCompletionReaderFormats(candidate: SignedReleaseEvidence) throws {
+        try Self.requireDeclaredSchema(runtime.setup.source.actual.schemaVersion, candidate: candidate)
+    }
     func requireSame(as other: Self) throws {
         try runtime.requireSame(as: other.runtime); try state.requireSame(as: other.state)
         guard intent == other.intent else { throw PreparationStoreError.staleRevision }
@@ -207,5 +211,26 @@ struct RuntimeRetainedSetupActivationState {
         guard jobsRegistered == other.jobsRegistered, try plan?.encoded == other.plan?.encoded else {
             throw PreparationStoreError.staleRevision
         }
+    }
+}
+
+extension MachineUpdateRetainedSetupActivationSnapshot {
+    /// Checks the same retained files against an actual completion boundary. It grants no startup or write authority.
+    func validateCompletionRuntime(plan: RuntimeRetainedSetupActivationPlan, material: RuntimePreparationMaterial,
+        completion: MachineUpdateRetainedSetupCompletionSnapshot,
+        readPolicyBoundary: () throws -> AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        verifyCurrent: () throws -> Void,
+        read: (RuntimePublishedArtifactValidation.Artifact) throws -> Data) throws {
+        try completion.activation.requireSame(as: self)
+        try validateRuntimeFiles(plan: plan, material: material, candidate: candidate, verifyCurrent: {
+            try verifyCurrent(); _ = try completion.classifyPair(readPolicyBoundary()); try verifyCurrent()
+        }, read: read)
+    }
+    /// Checks files from the supplied writer frame. The owner must validate the paired stores at its separate boundary.
+    func validateCompletionFiles(plan: RuntimeRetainedSetupActivationPlan, material: RuntimePreparationMaterial,
+        completion: MachineUpdateRetainedSetupCompletionSnapshot, candidate: SignedReleaseEvidence,
+        verifyCurrent: () throws -> Void, read: (RuntimePublishedArtifactValidation.Artifact) throws -> Data) throws {
+        try completion.activation.requireSame(as: self)
+        try validateRuntimeFiles(plan: plan, material: material, candidate: candidate, verifyCurrent: verifyCurrent, read: read)
     }
 }
