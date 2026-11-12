@@ -17,7 +17,8 @@ SPEC.loader.exec_module(CHECKS)
 
 
 class CheckStageTimingTests(unittest.TestCase):
-    def run_checks(self, system="Linux", github=False, fail_argument="", fail_command="", mac_part=None):
+    def run_checks(self, system="Linux", github=False, fail_argument="", fail_command="", mac_part=None,
+                   app_configurations=None):
         with tempfile.TemporaryDirectory(prefix="timed checks ") as temporary:
             directory = Path(temporary)
             (directory / "repo/scripts").mkdir(parents=True)
@@ -26,6 +27,7 @@ class CheckStageTimingTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts/check.sh", directory / "repo/scripts/check.sh")
             stub = '''#!/bin/sh
 printf '%s %s\\n' "${0##*/}" "$*" >> "$CHECK_TIMING_LOG"
+printf '%s\\n' "${REMOZIO_MAC_APP_CONFIGURATIONS:-unset}" >> "$CHECK_TIMING_LOG.configurations"
 printf '%s\\n' 'child stdout'
 printf '%s\\n' 'child stderr' >&2
 if [ -n "${FAIL_ARGUMENT:-}" ] && [ "${1:-}" = "$FAIL_ARGUMENT" ]; then exit 23; fi
@@ -45,8 +47,13 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
             env.pop("REMOZIO_CHECK_MAC_PART", None)
             if mac_part is not None:
                 env["REMOZIO_CHECK_MAC_PART"] = mac_part
+            env.pop("REMOZIO_MAC_APP_CONFIGURATIONS", None)
+            if app_configurations is not None:
+                env["REMOZIO_MAC_APP_CONFIGURATIONS"] = app_configurations
             result = subprocess.run(["/bin/sh", str(directory / "repo/scripts/check.sh")], cwd=directory,
                                     env=env, capture_output=True, text=True, timeout=10)
+            seen = log.with_name(log.name + ".configurations")
+            self.configurations_seen = set(seen.read_text().splitlines()) if seen.exists() else set()
             return result, log.read_text().splitlines() if log.exists() else []
 
     def test_local_timing_keeps_child_streams_and_command_arguments(self):
@@ -103,6 +110,26 @@ if [ -n "${FAIL_COMMAND:-}" ] && [ "${0##*/} $*" = "$FAIL_COMMAND" ]; then exit 
         ])
         self.assertEqual(experiments[:2], ["python3 -m unittest discover -s tests -p test_*.py",
                                            "python3 -m unittest discover -s .agents/skills/babysit-pr/scripts -p test_*.py"])
+
+    def test_a_debug_only_app_run_skips_only_the_release_signing_experiment(self):
+        _, both = self.run_checks("Darwin", github=True, mac_part="app")
+        self.assertEqual(self.configurations_seen, {"Debug,Release"})
+        result, debug = self.run_checks("Darwin", github=True, mac_part="app", app_configurations="Debug")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.configurations_seen, {"Debug"})
+        self.assertEqual(debug, [call for call in both if "run-macos-release-signing-experiment.py" not in call])
+        self.assertEqual(len(debug), len(both) - 1)
+        _, experiments = self.run_checks("Darwin", github=True, mac_part="experiments")
+        _, debug_experiments = self.run_checks("Darwin", github=True, mac_part="experiments", app_configurations="Debug")
+        self.assertEqual(debug_experiments, experiments)
+
+    def test_unknown_app_configurations_fail_before_any_stage(self):
+        for value in ("Release", "Debug,Release,Profile", "debug"):
+            with self.subTest(value=value):
+                result, calls = self.run_checks("Darwin", github=True, mac_part="app", app_configurations=value)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(calls, [])
+                self.assertIn(f"Unknown REMOZIO_MAC_APP_CONFIGURATIONS: {value}", result.stderr)
 
     def test_local_mac_run_keeps_the_serial_core_suite_in_the_app_part(self):
         _, every = self.run_checks("Darwin")

@@ -15,7 +15,10 @@ final class SignedReleaseInspectionTests: XCTestCase {
         return root
     }
     func testBuiltDebugAndReleaseDeclarationsMatchSignedComponentsAndCompiledContracts() throws {
-        for configuration in ["Debug", "Release"] {
+        // scripts/check.sh sets "Debug" when CI builds only the Debug app for a pull request; the declarations do not
+        // depend on the configuration. Every other run checks both apps.
+        let onlyDebug = ProcessInfo.processInfo.environment["REMOZIO_MAC_APP_CONFIGURATIONS"] == "Debug"
+        for configuration in onlyDebug ? ["Debug"] : ["Debug", "Release"] {
             let app = repository.appendingPathComponent(".build/macos-app/DerivedData/Build/Products/\(configuration)/Remozio.app")
             guard FileManager.default.fileExists(atPath: app.path) else {
                 throw XCTSkip("Build the app first; scripts/check.sh checks both real bundles before these tests.")

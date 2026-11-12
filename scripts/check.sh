@@ -29,6 +29,14 @@ case "$mac_part" in
     all|app|experiments) ;;
     *) printf 'Unknown REMOZIO_CHECK_MAC_PART: %s\n' "$mac_part" >&2; exit 2 ;;
 esac
+# CI builds only the Debug app for a pull request that changes no Release input (scripts/ci-pr-jobs.py decides).
+# scripts/check-macos-app.py and SignedReleaseInspectionTests read the same setting. Every other run checks both.
+mac_app_configurations=${REMOZIO_MAC_APP_CONFIGURATIONS:-Debug,Release}
+case "$mac_app_configurations" in
+    Debug,Release|Debug) ;;
+    *) printf 'Unknown REMOZIO_MAC_APP_CONFIGURATIONS: %s\n' "$mac_app_configurations" >&2; exit 2 ;;
+esac
+export REMOZIO_MAC_APP_CONFIGURATIONS="$mac_app_configurations"
 mac_stage() {
     mac_stage_part=$1
     shift
@@ -52,7 +60,10 @@ if [ "$(uname -s)" = Darwin ]; then
     mac_stage experiments check-service-lifecycle python3 scripts/check-service-lifecycle.py
     mac_stage app check-macos-app python3 scripts/check-macos-app.py
     mac_stage experiments run-native-bootstrap-file-experiment python3 scripts/run-native-bootstrap-file-experiment.py
-    mac_stage app run-macos-release-signing-experiment python3 scripts/run-macos-release-signing-experiment.py
+    # The release-signing experiment inspects the Release app, so it runs only when this run built it.
+    if [ "$mac_app_configurations" = Debug,Release ]; then
+        mac_stage app run-macos-release-signing-experiment python3 scripts/run-macos-release-signing-experiment.py
+    fi
     mac_stage experiments 'Swift build: experiments/release-dependencies' swift build --package-path experiments/release-dependencies --disable-keychain --disable-netrc
     mac_stage experiments 'Swift build: experiments/release-copy' swift build --package-path experiments/release-copy --disable-keychain --disable-netrc
     mac_stage experiments 'Swift test: experiments/release-attributes' swift test --package-path experiments/release-attributes --triple arm64-apple-macosx26.0
