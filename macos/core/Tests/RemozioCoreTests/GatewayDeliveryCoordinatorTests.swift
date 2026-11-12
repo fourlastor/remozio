@@ -92,6 +92,13 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         func cancel() { continuation?.resume(throwing: CancellationError()); continuation = nil }
     }
     private final class Counter: Sendable { let value = Mutex(0) }
+    /// Records the clock sample each provider call was decided on. A test binds a slot around `deliverProbe`, and the
+    /// flight task it starts inherits the binding.
+    private final class PacingSlot: Sendable {
+        @TaskLocal static var current: PacingSlot?
+        let lastSample = Mutex<UInt64?>(nil)
+        let decisions = Mutex<[UInt64]>([])
+    }
     private final class Fixture {
         let root: URL
         let key = P256.Signing.PrivateKey()
@@ -135,9 +142,18 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
                 }
             } else { wakeSend = nil }
             return try GatewayDeliveryCoordinator(database: db, identity: coordinatorIdentity ?? identity(), tokens: source,
-                policy: GatewayDeliveryPolicy(maximumFlights: maximumFlights, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: { clock.sample() },
+                policy: GatewayDeliveryPolicy(maximumFlights: maximumFlights, minimumSendIntervalMillis: 10, retryBaseDelayMillis: retryBase, maximumRetryBackoffMillis: retryCap), sample: {
+                    let sample = clock.sample()
+                    PacingSlot.current?.lastSample.withLock { $0 = sample.moment.milliseconds }
+                    return sample
+                },
                 sleep: { clock.advance($0) }, send: { probe, token in
                     try beforeSend()
+                    // The coordinator decides on its last sample before `send` and then releases its actor, so another
+                    // flight's fake sleep can advance the shared clock before the provider samples it below.
+                    if let slot = PacingSlot.current, let decided = slot.lastSample.withLock({ $0 }) {
+                        slot.decisions.withLock { $0.append(decided) }
+                    }
                     if let sender { return try await sender.send(probe, accessToken: token) }
                     return try await provider.send(at: clock.sample().moment.milliseconds)
                 }, wakePolicy: wakePolicy, sendWake: wakeSend, validateAuthority: validateAuthority, schedulerSleep: { milliseconds in
@@ -406,8 +422,9 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         try await coordinator.replaceTrustedEnrollments([fixture.enrollment()], active: true)
         for n: UInt8 in 1...3 { try await fixture.admit(coordinator, n: n) }
         await provider.hold()
-        let first = Task { try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)) }
-        let second = Task { try await coordinator.deliverProbe(operationID: id(2), phoneID: id(6)) }
+        let slots = [PacingSlot(), PacingSlot(), PacingSlot()]
+        let first = Task { try await deliver(coordinator, operation: 1, recording: slots[0]) }
+        let second = Task { try await deliver(coordinator, operation: 2, recording: slots[1]) }
         defer { first.cancel(); second.cancel() }
         try await until { await provider.times.count == 2 }
         do { _ = try await coordinator.deliverProbe(operationID: id(1), phoneID: id(6)); XCTFail("Duplicate flight") }
@@ -418,12 +435,21 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         try await until { await coordinator.activeProbeCount == 1 }
         await provider.release()
         _ = try await second.value
-        let third = try await coordinator.deliverProbe(operationID: id(3), phoneID: id(6))
+        let third = try await deliver(coordinator, operation: 3, recording: slots[2])
         XCTAssertEqual(third?.status, .accepted)
         let times = await provider.times
         XCTAssertEqual(times.count, 3)
-        for pair in zip(times, times.dropFirst()) { XCTAssertGreaterThanOrEqual(pair.1 - pair.0, 10) }
+        // Pace on the coordinator's decisions, in time order: concurrent flights reach the provider in either order.
+        let decisions = slots.flatMap { $0.decisions.withLock { $0 } }.sorted()
+        XCTAssertEqual(decisions.count, 3)
+        for pair in zip(decisions, decisions.dropFirst()) { XCTAssertGreaterThanOrEqual(pair.1 - pair.0, 10) }
         try await coordinator.shutdown()
+    }
+
+    private func deliver(_ coordinator: GatewayDeliveryCoordinator, operation: UInt8, recording slot: PacingSlot) async throws -> GatewayProbeProgress? {
+        try await PacingSlot.$current.withValue(slot) {
+            try await coordinator.deliverProbe(operationID: id(operation), phoneID: id(6))
+        }
     }
 
     func testChangedTrustCancelsOAuthBeforeProviderAndIdenticalTrustPreservesFlight() async throws {
