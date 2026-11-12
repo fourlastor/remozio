@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import RemozioProtocol
 import XCTest
@@ -245,6 +246,30 @@ final class MachineUpdateRetainedSetupPromotionSourceValidationTests: XCTestCase
             XCTAssertEqual(actual[0].bytes, f.plan.host.canonicalBytes)
             XCTAssertEqual(actual[1].bytes, f.plan.authorityJob.bytes)
             XCTAssertEqual(actual[2].bytes, f.plan.transportJob.bytes)
+            let root = URL(fileURLWithPath: "/private/tmp").appendingPathComponent("remozio-G5-job-retention-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            defer { XCTAssertNoThrow(try FileManager.default.removeItem(at: root)) }
+            XCTAssertEqual(chmod(root.path, 0o755), 0)
+            let directory = try ProtectedSetupDirectory(anchor: root.path, relativePath: "Jobs", owner: getuid(), visibility: .sharedMetadata)
+            defer { directory.close() }
+            for job in [f.plan.authorityJob, f.plan.transportJob] {
+                let file = AdministrativeSetupPublication.File.accountJob(accountID: f.plan.accountID, role: job.declaration.role)
+                _ = try AdministrativeSetupPublication.publish(job.bytes, file: file, directory: directory, owner: getuid())
+                XCTAssertEqual(try Source.retainedJobBytes(job, directory: directory, owner: getuid()), job.bytes)
+                let path = URL(fileURLWithPath: directory.path).appendingPathComponent(file.name)
+                try (job.bytes + Data([0])).write(to: path)
+                XCTAssertThrowsError(try Source.retainedJobBytes(job, directory: directory, owner: getuid()))
+                try job.bytes.write(to: path)
+                XCTAssertEqual(chmod(path.path, 0o600), 0)
+                XCTAssertThrowsError(try Source.retainedJobBytes(job, directory: directory, owner: getuid())) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .unsafeMetadata)
+                }
+                XCTAssertEqual(chmod(path.path, 0o644), 0)
+                XCTAssertEqual(try Source.retainedJobBytes(job, directory: directory, owner: getuid()), job.bytes)
+                try FileManager.default.removeItem(at: path)
+                XCTAssertThrowsError(try Source.retainedJobBytes(job, directory: directory, owner: getuid()))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
+            }
         }
     }
 }

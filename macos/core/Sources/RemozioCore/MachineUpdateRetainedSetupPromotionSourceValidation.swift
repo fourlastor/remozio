@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Checks the actual pair and source bytes. This value grants no publication, writer or native health authority.
@@ -54,7 +55,18 @@ enum MachineUpdateRetainedSetupPromotionSourceValidation {
             }) { journal, current in
                 try capture(expected: expected, material: material, candidate: candidate,
                     readPolicyBoundary: { try journal.captureRetainedSetupPolicyBoundary(expected: initial) },
-                    verifyCurrent: current, read: RuntimePublishedArtifactValidation.nativeRead)
+                    verifyCurrent: current, read: { artifact in
+                        if let plan = expected.activation.state.plan,
+                           let job = [plan.authorityJob, plan.transportJob].first(where: { $0.path == artifact.path }) {
+                            guard artifact.access == .publicRoot, artifact.bytes == job.bytes else { throw RuntimeActivationError.changedScope }
+                            let directory = try ProtectedSetupDirectory(anchor: "/",
+                                relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
+                                visibility: .sharedMetadata, createIfMissing: false)
+                            defer { directory.close() }
+                            return try retainedJobBytes(job, directory: directory, owner: 0)
+                        }
+                        return try RuntimePublishedArtifactValidation.nativeRead(artifact)
+                    })
             }
     }
 
@@ -109,6 +121,14 @@ enum MachineUpdateRetainedSetupPromotionSourceValidation {
                 let publication = try RuntimeRetainedSetupCompletionPublication(configuration: configuration, sourceClients: clients)
                 try current(); return publication
             }
+    }
+
+    /// Uses the existing per-file metadata and byte rules. It creates or repairs no retained job.
+    static func retainedJobBytes(_ job: InstalledAccountJobManifest, directory: ProtectedSetupDirectory, owner: uid_t) throws -> Data {
+        guard let account = job.declaration.accountID else { throw AdministrativeSetupPublicationError.invalidArtifact }
+        try AdministrativeSetupPublication.validateRetained(job.bytes,
+            file: .accountJob(accountID: account, role: job.declaration.role), directory: directory, owner: owner)
+        return job.bytes
     }
 
     /// Retains the donor's complete three-file activation set without a startup or health dependency.
