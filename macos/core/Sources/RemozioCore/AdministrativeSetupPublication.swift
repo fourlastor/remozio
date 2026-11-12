@@ -334,6 +334,25 @@ public enum AdministrativeSetupPublication {
             owner: owner, verify: verify, didStage: didStage)
     }
 
+    /// Confirms retained configuration durability. This path never stages or exchanges a file.
+    static func retainMachineUpdateConfiguration(_ bytes: Data, file: File, directory: ProtectedSetupDirectory,
+        owner: uid_t, verify: () throws -> Void) throws {
+        switch file {
+        case .commandHost, .transportConfiguration, .gatewaySettingsHost, .presenceClient, .pairingClient, .frontendClient: break
+        default: throw AdministrativeSetupPublicationError.invalidArtifact
+        }
+        guard getuid() == owner, geteuid() == owner, !bytes.isEmpty,
+              bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
+        try file.validate(); try verify(); try directory.validate()
+        let body: (Int32) throws -> Void = { parent in
+            try synchronizeRetained(parent: parent, name: file.name, bytes: bytes, owner: owner, mode: file.mode, group: nil)
+            guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+            try verify(); try directory.validate()
+        }
+        if file.requiresSharedDirectory { try directory.withSharedDirectory(body) }
+        else { try directory.withDirectory(body) }
+    }
+
     /// The bound publication ID and entry select a private staging namespace for this exact replacement.
     static func replaceMachineUpdateCompletion(_ entry: MachineUpdateCompletionPublicationPlan.Entry, publicationID: UUID,
         directory: ProtectedSetupDirectory, owner: uid_t, verify: () throws -> Void,

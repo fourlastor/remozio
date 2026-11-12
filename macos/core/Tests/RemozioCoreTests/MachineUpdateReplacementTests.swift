@@ -5055,6 +5055,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Supplies canonical publication values only. It grants no native file access or completed-store proof.
+    static func withRetainedPromotionFilePublicationFixture(_ body: (RuntimeRetainedSetupCompletionPublication) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedPromotionCaptureRequiresRecordedCompletionAndActualRegistration"))
+        try suite.withRetainedPromotionValueFixture { try body($0.publication) }
+    }
+
     private func withRetainedPromotionValueFixture(_ body: (RetainedPromotionFixture) throws -> Void) throws {
         try withRetainedCompletionValueFixture(promotionProposalFormats: true) { f, activation, _, prepared in
             let writing = try prepared.preparingWrite(expected: f.boundary())
