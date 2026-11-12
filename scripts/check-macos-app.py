@@ -3,6 +3,7 @@
 from pathlib import Path
 import plistlib
 import os
+import shutil
 import subprocess
 
 from macos_build_checks import require, run, verify_executable
@@ -10,6 +11,15 @@ from cloudflared_artifact import PRODUCT, RELATIVE_PATH, PIN_DIRECTORY, pin, sig
 
 ROOT = Path(__file__).resolve().parents[1]
 BUILD = ROOT / '.build' / 'macos-app'
+# scripts/check.sh validates REMOZIO_MAC_APP_CONFIGURATIONS; CI sets "Debug" for a pull request that changes no
+# Release input (scripts/ci-pr-jobs.py). Every other run builds and inspects both configurations.
+CONFIGURATIONS = {'Debug,Release': ('Debug', 'Release'), 'Debug': ('Debug',)}
+
+
+def configurations(environment):
+    value = environment.get('REMOZIO_MAC_APP_CONFIGURATIONS', 'Debug,Release')
+    require(value in CONFIGURATIONS, f'Unknown REMOZIO_MAC_APP_CONFIGURATIONS: {value}')
+    return CONFIGURATIONS[value]
 
 
 def check(configuration):
@@ -210,5 +220,12 @@ def inspect_built_app(configuration):
 
 if __name__ == '__main__':
     BUILD.mkdir(parents=True, exist_ok=True)
+    chosen = configurations(os.environ)
     for configuration in ('Debug', 'Release'):
-        check(configuration)
+        if configuration in chosen:
+            check(configuration)
+        else:
+            # A restored build cache can hold main's app for this configuration. Remove it, so that no later stage
+            # inspects an app that this checkout did not build.
+            shutil.rmtree(BUILD / f'DerivedData/Build/Products/{configuration}', ignore_errors=True)
+            print(f'Mac app {configuration}: not built in this run.')

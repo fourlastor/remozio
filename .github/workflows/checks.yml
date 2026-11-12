@@ -1,6 +1,7 @@
 name: Checks
 # Pull requests are a fast sanity check. They run only the jobs whose inputs they change, and the Mac core tests job
 # runs only the macos/core tests that they add or change plus a smoke set (scripts/ci-pr-jobs.py explains the rules).
+# The Mac build job builds the Release app on a pull request only when the pull request changes a Release input.
 # Pushes to main, the nightly run and manual runs run every job and the full suite, so the nightly run of the full
 # matrix catches an input or a test that the selection misses.
 on:
@@ -36,6 +37,7 @@ jobs:
       mac_core_mode: ${{ steps.select.outputs.mac_core_mode }}
       mac_core_parts: ${{ steps.select.outputs.mac_core_parts }}
       mac_core_tests: ${{ steps.select.outputs.mac_core_tests }}
+      mac_release: ${{ steps.select.outputs.mac_release }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -192,6 +194,9 @@ jobs:
       - name: Build the app and run the stages that inspect it or macos/core
         env:
           REMOZIO_CHECK_MAC_PART: app
+          # A pull request that changes no Release input builds and inspects only the Debug app, and skips the
+          # release-signing experiment that needs the Release app. Every other run, and a missing output, builds both.
+          REMOZIO_MAC_APP_CONFIGURATIONS: ${{ github.event_name == 'pull_request' && needs.changes.outputs.mac_release == 'false' && 'Debug' || 'Debug,Release' }}
         run: ./scripts/check.sh
       - name: Record validated Mac cache inputs
         id: build-cache-manifest

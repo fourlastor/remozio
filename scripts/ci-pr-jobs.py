@@ -26,6 +26,14 @@ macos/core tests. The Mac core tests job runs in one of two modes.
 Pushes to main, the nightly run and manual runs select every job and the full mode (--all), so the nightly run of the
 full matrix catches an input or a test that the rules here miss. Every mode still builds every macos/core test.
 
+Release app. The Mac build job builds and inspects the Debug app on every run. A pull request also builds the
+Release app (mac_release) only when it changes a Release input that the Debug build does not check: the app under
+macos/app (its project, Info.plists and `#if DEBUG` code), the release-signing experiment that signs the Release app
+(RELEASE_INPUTS), a Swift package manifest or lockfile, or a path that runs every job other than the Gradle build.
+The release manifest declarations do not depend on the configuration, so the Debug app checks them against the
+compiled contracts of a macos/core change. A Release-only failure that the rules here miss fails the next push to
+main or the nightly run, which always build both configurations.
+
 Verification. The last job of the workflow, Selected checks, runs --verify-needs on the results of every other job.
 It passes only when the selection succeeded, the Python checks passed, each selected job passed, and each job that
 was not selected was skipped. The PR watcher requires that one check, because the names and the number of the
@@ -53,9 +61,12 @@ SHARED_SWIFT = frozenset({'linux', 'mac', 'mac_experiments', 'mac_core', 'mac_in
 MACOS_CORE = frozenset({'mac', 'mac_experiments', 'mac_core', 'mac_interop'})
 # The rest of macos/ is the app and macos/ui-adapters, which the experiments part of scripts/check.sh tests.
 MACOS = frozenset({'mac', 'mac_experiments', 'mac_interop'})
-# The Mac build signs a release experiment, the experiments part builds most of them, the interoperability job builds
-# experiments/approval-flow, and the Linux job builds the Linux pairing peer and TPM provider probe.
-EXPERIMENTS = frozenset({'linux', 'mac', 'mac_experiments', 'mac_interop'})
+# The experiments part builds most of them, the interoperability job builds experiments/approval-flow, and the Linux
+# job builds the Linux pairing peer and TPM provider probe. The Mac build reads only experiments/release-signing.
+EXPERIMENTS = frozenset({'linux', 'mac_experiments', 'mac_interop'})
+RELEASE_SIGNING = 'experiments/release-signing/'
+# A pull request that changes one of these, beyond the paths that run every job, builds the Release app too.
+RELEASE_INPUTS = ('macos/app/', RELEASE_SIGNING)
 # The Mac experiments part of scripts/check.sh also runs the repository and PR watcher Python tests on macOS.
 PYTHON_TESTS = frozenset({'mac_experiments'})
 # macos/core tests compile these files from outside the package (CommandMonitor*Tests, MachCommandCallerReceiverTests
@@ -75,6 +86,7 @@ PREFIXES = (
     ('macos/core/', MACOS_CORE),
     *((prefix, (MACOS if prefix.startswith('macos/') else EXPERIMENTS) | {'mac_core'}) for prefix in CORE_TEST_INPUTS),
     ('macos/', MACOS),
+    (RELEASE_SIGNING, EXPERIMENTS | {'mac'}),
     ('experiments/', EXPERIMENTS),
     ('tests/', PYTHON_TESTS),
     ('.agents/', PYTHON_TESTS),
@@ -127,6 +139,18 @@ def select(paths):
     for path in paths:
         selected |= jobs_for(path)
     return selected
+
+
+def release_reason(paths):
+    """Why a pull request also builds the Release app, or None when the Debug app checks everything it changes."""
+    for path in paths:
+        if path.startswith(RELEASE_INPUTS):
+            return f'{path} is an input of the app or of the Release signing check'
+        if PurePosixPath(path).name in SWIFT_PACKAGE_FILES:
+            return f'{path} is a Swift package manifest or lockfile'
+        if jobs_for(path) == EVERY_JOB and not path.startswith(GRADLE_BUILD):
+            return f'{path} is an input of every job'
+    return None
 
 
 def owners(lines, test_classes):
@@ -523,7 +547,7 @@ def main(argv):
             print(f'::error::{problem}')
         return 1 if problems else 0
 
-    selected, mode, tests = set(JOBS), 'full', []
+    selected, mode, tests, release = set(JOBS), 'full', [], True
     if not args.all:
         try:
             base = merge_parents(args.merge_commit)[0]
@@ -531,6 +555,11 @@ def main(argv):
             for path in paths:
                 print(f'{path}: {", ".join(sorted(jobs_for(path))) or "Python checks only"}')
             selected = select(paths)
+            reason = release_reason(paths)
+            release = reason is not None
+            if 'mac' in selected:
+                print(f'Mac build: Debug and Release apps, because {reason}' if release
+                      else 'Mac build: Debug app only; the changes touch no Release input')
             if 'mac_core' in selected:
                 mode, tests = core_test_plan(paths, base, args.merge_commit)
                 if mode == 'selected' and not tests:
@@ -540,13 +569,14 @@ def main(argv):
             detail = error.stderr.strip() if isinstance(error, subprocess.CalledProcessError) else str(error)
             print(f'::warning::Could not read the pull request changes, so every job runs in full: {detail}',
                   flush=True)
-            selected, mode, tests = set(JOBS), 'full', []
+            selected, mode, tests, release = set(JOBS), 'full', [], True
     outputs = {job: 'true' if job in selected else 'false' for job in JOBS}
     two_runners = mode == 'full' or estimate(tests, json.loads((ROOT / WEIGHTS).read_text())) > TWO_RUNNER_SECONDS
     outputs['mac_core_mode'] = mode
     # Two parts run shards 0-2 and 3-5 of six, one per runner; one part runs three shards on one runner.
     outputs['mac_core_parts'] = '[1, 2]' if two_runners else '[1]'
     outputs['mac_core_tests'] = ','.join(tests)
+    outputs['mac_release'] = 'true' if release else 'false'
     lines = [f'{name}={value}' for name, value in outputs.items()]
     print('\n'.join(lines))
     if args.github_output:

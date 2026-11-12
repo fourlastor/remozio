@@ -134,9 +134,10 @@ class JobSelectionTests(unittest.TestCase):
             'macos/core/Tests/RemozioCoreTests/ATests.swift': {'mac', 'mac_experiments', 'mac_core', 'mac_interop'},
             'macos/app/App/A.swift': {'mac', 'mac_experiments', 'mac_interop'},
             'macos/app/CommandMonitor/MonitorMain.c': {'mac', 'mac_experiments', 'mac_core', 'mac_interop'},
-            'experiments/macos/Sources/A.swift': {'linux', 'mac', 'mac_experiments', 'mac_interop'},
-            'experiments/command-frontend/live-child.c': {'linux', 'mac', 'mac_experiments', 'mac_core',
-                                                          'mac_interop'},
+            'experiments/macos/Sources/A.swift': {'linux', 'mac_experiments', 'mac_interop'},
+            'experiments/command-frontend/live-child.c': {'linux', 'mac_experiments', 'mac_core', 'mac_interop'},
+            'experiments/release-signing/Sources/ReleaseSigningProbe/main.swift': {'linux', 'mac', 'mac_experiments',
+                                                                                  'mac_interop'},
             'tests/test_xctest_shards.py': {'mac_experiments'},
             '.agents/skills/babysit-pr/scripts/gh_pr_watch.py': {'mac_experiments'},
         }
@@ -156,7 +157,7 @@ class JobSelectionTests(unittest.TestCase):
 
     def test_the_workflow_gates_each_selected_job_on_its_output(self):
         text = WORKFLOW.read_text()
-        for name in (*JOBS.JOBS, 'mac_core_mode', 'mac_core_parts', 'mac_core_tests'):
+        for name in (*JOBS.JOBS, 'mac_core_mode', 'mac_core_parts', 'mac_core_tests', 'mac_release'):
             with self.subTest(name=name):
                 self.assertIn(f'{name}: ${{{{ steps.select.outputs.{name} }}}}', text)
         for job in JOBS.JOBS:
@@ -165,6 +166,34 @@ class JobSelectionTests(unittest.TestCase):
         gated = re.findall(r"^  ([a-z-]+):\n(?:    .*\n)*?    if: \$\{\{ !cancelled\(\) && \(github\.event_name != "
                            r"'pull_request' \|\| needs\.changes\.outputs\.", text, re.MULTILINE)
         self.assertEqual(len(gated), len(JOBS.JOBS))
+
+
+    def test_the_mac_build_builds_only_the_debug_app_on_a_pull_request_that_changes_no_release_input(self):
+        text = WORKFLOW.read_text()
+        self.assertEqual(text.count('REMOZIO_MAC_APP_CONFIGURATIONS'), 1)
+        self.assertIn("REMOZIO_MAC_APP_CONFIGURATIONS: ${{ github.event_name == 'pull_request' && "
+                      "needs.changes.outputs.mac_release == 'false' && 'Debug' || 'Debug,Release' }}", text)
+
+
+class ReleaseSelectionTests(unittest.TestCase):
+    def test_app_release_signing_package_and_shared_inputs_build_the_release_app(self):
+        for path in ('macos/app/App/RemozioApp.swift', 'macos/app/Remozio.xcodeproj/project.pbxproj',
+                     'macos/app/Authority/Info.plist', 'macos/app/CommandMonitor/MonitorMain.c',
+                     'experiments/release-signing/Sources/ReleaseSigningProbe/main.swift',
+                     'macos/core/Package.resolved', 'protocol/swift/Package.swift',
+                     'scripts/generate-macos-release-manifest.py', 'scripts/check-macos-app.py',
+                     '.github/workflows/checks.yml', 'third-party/cloudflared/pin.json', '.gitignore'):
+            with self.subTest(path=path):
+                self.assertIsNotNone(JOBS.release_reason(['docs/a.md', path]))
+
+    def test_other_changes_build_only_the_debug_app(self):
+        self.assertIsNone(JOBS.release_reason([]))
+        for path in ('macos/core/Sources/RemozioCore/A.swift', 'macos/core/Tests/RemozioCoreTests/ATests.swift',
+                     'protocol/swift/Sources/A.swift', 'host/shared-core/Sources/A.swift', 'macos/ui-adapters/A.swift',
+                     'experiments/macos/Sources/A.swift', 'tests/test_macos_release_manifest.py', 'docs/a.md',
+                     'gradle/libs.versions.toml', 'gradle.properties', 'gradlew', 'android/app/A.kt'):
+            with self.subTest(path=path):
+                self.assertIsNone(JOBS.release_reason([path]))
 
 
 class CoreTestSelectionTests(unittest.TestCase):
@@ -402,6 +431,19 @@ class CoreTestSelectionTests(unittest.TestCase):
             self.assertEqual(values['mac'], 'true')
             self.assertEqual(values['mac_core'], 'false')
             self.assertEqual(values['android'], 'false')
+            self.assertEqual(values['mac_release'], 'true')
+
+            output.unlink()  # Otherwise the next commit would add it, and as a top-level file it runs every job.
+            repository.git('switch', '--quiet', '-c', 'core-only', 'main')
+            repository.write('macos/core/Sources/A.swift', 'let a = 3\n')
+            repository.commit('core')
+            repository.merge('core-only')
+            with tempfile.TemporaryDirectory() as elsewhere, contextlib.redirect_stdout(io.StringIO()) as printed:
+                output = Path(elsewhere) / 'output'
+                self.assertEqual(JOBS.main(['--merge-commit', 'HEAD', '--github-output', str(output)]), 0)
+                values = dict(line.split('=', 1) for line in output.read_text().splitlines())
+            self.assertIn('Mac build: Debug app only', printed.getvalue())
+            self.assertEqual((values['mac'], values['mac_core'], values['mac_release']), ('true', 'true', 'false'))
 
     def test_a_helper_change_selects_the_classes_that_call_it_from_other_files(self):
         heavy = ('import XCTest\nfinal class HeavyTests: XCTestCase {\n    static func withFixture() -> Int { 1 }\n\n'
@@ -466,6 +508,7 @@ class CoreTestSelectionTests(unittest.TestCase):
             self.assertEqual({job: values[job] for job in JOBS.JOBS}, {job: 'true' for job in JOBS.JOBS})
             self.assertEqual((values['mac_core_mode'], values['mac_core_parts'], values['mac_core_tests']),
                              ('full', '[1, 2]', ''))
+            self.assertEqual(values['mac_release'], 'true')
 
     def test_all_selects_every_job_and_the_full_suite_on_two_runners(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -475,6 +518,7 @@ class CoreTestSelectionTests(unittest.TestCase):
             values = dict(line.split('=', 1) for line in output.read_text().splitlines())
             self.assertEqual(values['mac_core_mode'], 'full')
             self.assertEqual(values['mac_core_parts'], '[1, 2]')
+            self.assertEqual(values['mac_release'], 'true')
             self.assertTrue(all(values[job] == 'true' for job in JOBS.JOBS))
 
 
