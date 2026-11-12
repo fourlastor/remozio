@@ -3982,6 +3982,8 @@ public final class PreparationIntentStore {
     }
     private enum RetainedSetupPromotionFixtureRollback: Error { case done }
     /// Always rolls back. Root cannot use this fixture entry, including with an existing native connection.
+    /// Catch expected corruptRecord and JournalLeaseError refusals inside the body with XCTAssertThrowsError.
+    /// If either error escapes, the transaction quarantines this store.
     func withOwnedRetainedSetupPromotionSQLFixture<Value>(_ body: (OwnedRetainedSetupPromotionSQLFixture) throws -> Value) throws -> Value {
         guard getuid() != 0 else { throw JournalLeaseError.unsafeMetadata }
         try lease.validate()

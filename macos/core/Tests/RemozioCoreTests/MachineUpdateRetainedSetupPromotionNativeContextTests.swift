@@ -42,6 +42,9 @@ final class MachineUpdateRetainedSetupPromotionNativeContextTests: XCTestCase {
             let readiness = try f.changingFrame(28, Data(repeating: 90, count: 32), nil)
             XCTAssertNoThrow(try Context.requireApproved(readiness, from: readiness, candidate: f.candidate))
             XCTAssertThrowsError(try Context.requireApproved(readiness, from: f.completion, candidate: f.candidate))
+            XCTAssertThrowsError(try Context.requireApproved(readiness, from: promoted, candidate: f.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
             XCTAssertThrowsError(try Context.requireApproved(f.completion, from: promoted, candidate: f.candidate))
         }
     }
