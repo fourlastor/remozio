@@ -3127,6 +3127,15 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Supplies immutable stable values only. It grants no reservation writer or native authority.
+    static func withStableAccountReservationValues(_ body: (MachineUpdateStableRuntimeSource, SignedReleaseEvidence) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotReadsTheExactInstalledSelectionWithoutWriting"))
+        try suite.withStableActivationReadFixture { fixture, _, snapshot in
+            try body(snapshot.runtime.setup.source, fixture.candidate)
+        }
+    }
+
     /// Uses owned metadata fixtures. These reads prove no current files, native health, or writer authority.
     private func withStableActivationReadFixture(registerSecondForeground: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateStableRuntimeActivationSnapshot) throws -> Void) throws {
