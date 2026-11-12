@@ -11,7 +11,7 @@ jobs:
   mac-core:
     name: Mac core tests
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Identify compatible Mac build cache
@@ -29,19 +29,33 @@ jobs:
         env:
           REMOZIO_CACHE_HIT: ${{ steps.build-cache.outputs.cache-hit }}
         run: python3 scripts/ci-build-cache.py restore --scope mac
-      # Whole classes in three concurrent xctest processes. The Mac build job runs the classes that need the built app,
-      # so a skip here other than the GUI-session control means a test silently lost its fixture.
-      - name: Run macos/core tests in three concurrent class shards
+      # Fork-only paired measurement: one build, then both shard layouts on this runner, methods first.
+      - name: Run macos/core tests in both shard layouts (methods first)
         run: |
-          python3 scripts/run-xctest-shards.py --package-path macos/core \
-            --weights .github/macos-core-test-weights.json --shards 3 --concurrent --app-dependent exclude \
-            --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
-            -- --triple arm64-apple-macosx26.0 -Xswiftc -O
+          python3 -c 'import json, os; d = json.load(open(".github/macos-core-test-weights.json")); d.pop("methods"); json.dump(d, open(os.environ["RUNNER_TEMP"] + "/weights-classes.json", "w"))'
+          layout() {
+            case "$1" in
+              classes) weights="$RUNNER_TEMP/weights-classes.json" ;;
+              methods) weights=.github/macos-core-test-weights.json ;;
+            esac
+            echo "=== layout $1 started $(date -u +%H:%M:%S)"
+            python3 scripts/run-xctest-shards.py --package-path macos/core \
+              --weights "$weights" --shards 3 --concurrent --app-dependent exclude \
+              --allowed-skips RemozioCoreTests.LiveOwnedJobInspectionTests/testOwnedGUIJobReconciliation \
+              --log-dir ".build/xctest-shards/$1" \
+              -- --triple arm64-apple-macosx26.0 -Xswiftc -O
+            status=$?
+            echo "=== layout $1 finished $(date -u +%H:%M:%S) exit $status"
+            return $status
+          }
+          failed=0
+          for name in methods classes; do layout "$name" || failed=1; done
+          exit $failed
       - name: Retain shard logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mac-core-shards-${{ github.run_attempt }}
-          path: .build/xctest-shards/*.log
+          path: .build/xctest-shards/
           if-no-files-found: ignore
           retention-days: 7
