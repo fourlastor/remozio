@@ -3,20 +3,11 @@ import Foundation
 
 /// Fixed configuration paths only. It never opens a key, token, journal writer or service manager.
 enum MachineUpdateConfigurationFiles {
-    static func publishNative(_ archive: MachineUpdateConfigurationEpoch.Archive, accountID: Data,
-        file: MachineUpdatePublicationProgress.File, verify: () throws -> Void,
-        didStage: (AdministrativeSetupPublication.Stage) throws -> Void) throws {
-        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        try verify()
-        let directory = try openNativeDirectory(accountID: accountID, file: file)
-        defer { directory.close() }
-        try publishInLease(archive, accountID: accountID, file: file, directory: directory, owner: 0,
-            verify: verify, didStage: didStage)
-    }
-    /// Owned files exercise the same typed compare-and-swap. The native entry separately authenticates Root and fixed placement.
+    /// Owned fixtures exercise typed replacement only. This helper grants no native file authority.
     static func publishInLease(_ archive: MachineUpdateConfigurationEpoch.Archive, accountID: Data,
         file: MachineUpdatePublicationProgress.File, directory: ProtectedSetupDirectory, owner: uid_t,
         verify: () throws -> Void, didStage: (AdministrativeSetupPublication.Stage) throws -> Void = { _ in }) throws {
+        guard owner != 0, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
         try archive.validate()
         guard let progress = archive.record.publication,
               try progress.state(accountID: accountID, file: file) == .writing,
