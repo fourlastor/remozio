@@ -41,8 +41,11 @@ from 3.13, and the supported Xcode toolchain. This command is a manual local gat
 no Git hook is installed.
 
 Pull requests use the repository's [babysit skill](.agents/skills/babysit-pr/SKILL.md).
-Required checks cover Python, Linux Swift protocol, Mac builds, Mac interoperability,
-Kotlin protocol tests, Android builds and lint, and Codex review. The
+CI covers Python, Linux Swift protocol, Mac builds, Mac interoperability,
+Kotlin protocol tests, and Android builds and lint. On a pull request it runs only
+the jobs that the change needs, and the watcher requires the Selected checks job,
+which passes only when every selected job passed. The watcher does not wait for a
+Codex review (`codex.enabled` is `false` in the skill's `config.json`). The
 [CI coverage table](docs/linux-validation.md#local-gate-and-ci-coverage) maps each
 local check to its CI job. Device-dependent and Mac GUI checks still require the
 interactive sessions named in their experiment procedures.

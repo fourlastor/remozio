@@ -572,6 +572,24 @@ jobs:
             ~/.gradle/wrapper/dists
             ~/.gradle/caches/modules-2
           key: ${{ steps.gradle-cache.outputs.cache-primary-key }}
+  selected-checks:
+    name: Selected checks
+    # The PR watcher requires this check rather than each job: a pull request skips the jobs it does not need, and the
+    # Mac core tests job runs on one or two runners. scripts/ci-pr-jobs.py --verify-needs fails this check when the
+    # selection failed, when a selected job did not pass, or when a job that the selection needs was skipped.
+    needs: [changes, python, linux-protocol, mac, mac-experiments, mac-core, mac-interop, ios, kotlin, android]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: scripts/ci-pr-jobs.py
+          sparse-checkout-cone-mode: false
+      - name: Require each selected job to pass and each other job to be skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci-pr-jobs.py --verify-needs
   cache-cleanup:
     name: Prune superseded main caches
     # Each main push saves new Mac outputs, and Gradle downloads when build files change. Two generations exceed the

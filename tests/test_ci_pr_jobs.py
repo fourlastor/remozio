@@ -177,6 +177,73 @@ class CoreTestSelectionTests(unittest.TestCase):
         self.assertEqual(select('private func helper'), {'M.HeavyTests'})
         self.assertEqual(select('private var state', 'XCTAssertEqual(2, 2)'), {'M.HeavyTests'})
 
+    def heavy_selection(self, text, *needles):
+        lines = text.splitlines()
+        changed_lines = {next(index for index, line in enumerate(lines) if needle in line) for needle in needles}
+        return JOBS.tests_for_changes(text, changed_lines, 'M', {'HeavyTests'}, {'HeavyTests'}, lambda name: True,
+                                      lambda name: set())
+
+    def test_one_line_tests_each_own_only_their_line(self):
+        text = ('final class HeavyTests: XCTestCase {\n'
+                '    func testA() throws { try run("a") }\n'
+                '    func testB() throws { try run("b", flag: true) }\n'
+                '    func testC() throws {\n'
+                '        try run("c")\n'
+                '    }\n'
+                '    private func run(_ mode: String, flag: Bool = false) throws {}\n'
+                '}\n')
+        self.assertEqual(self.heavy_selection(text, 'run("b"'), {'M.HeavyTests/testB'})
+        self.assertEqual(self.heavy_selection(text, 'run("a")'), {'M.HeavyTests/testA'})
+        self.assertEqual(self.heavy_selection(text, 'try run("c")'), {'M.HeavyTests/testC'})
+        self.assertEqual(self.heavy_selection(text, 'private func run'), {'M.HeavyTests'})
+
+    def test_braces_in_strings_and_comments_do_not_move_a_span(self):
+        text = ('final class HeavyTests: XCTestCase {\n'
+                '    func testA() {\n'
+                '        XCTAssertEqual("}", "{") // }\n'
+                '        let json = """\n'
+                '        {"a": 1}}\n'
+                '        """\n'
+                '        XCTAssertFalse(json.isEmpty)\n'
+                '    }\n'
+                '    func testB() {}\n'
+                '}\n')
+        self.assertEqual(self.heavy_selection(text, 'XCTAssertFalse'), {'M.HeavyTests/testA'})
+        self.assertEqual(self.heavy_selection(text, 'func testB'), {'M.HeavyTests/testB'})
+
+    def test_an_ambiguous_span_selects_the_whole_class_and_its_users(self):
+        cases = {
+            'code after the closing brace': ('final class HeavyTests: XCTestCase {\n'
+                                             '    func testA() { work() }; func helper() {}\n'
+                                             '    func testB() {\n'
+                                             '        work()\n'
+                                             '    }\n'
+                                             '}\n'),
+            'braces that never balance': ('final class HeavyTests: XCTestCase {\n'
+                                          '    func testA() {\n'
+                                          '        work()\n'
+                                          '    func testB() {\n'
+                                          '        work()\n'),
+            'a test nested in a test': ('final class HeavyTests: XCTestCase {\n'
+                                        '    func testA() {\n'
+                                        '        func testInner() { work() }\n'
+                                        '        testInner()\n'
+                                        '    }\n'
+                                        '    func testB() {\n'
+                                        '        work()\n'
+                                        '    }\n'
+                                        '}\n'),
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                lines = text.splitlines()
+                changed_line = max(index for index, line in enumerate(lines) if 'work()' in line)
+                users = []
+                found = JOBS.tests_for_changes(text, {changed_line}, 'M', {'HeavyTests'}, {'HeavyTests'},
+                                               lambda name: True, lambda name: users.append(name) or {'N.UserTests'})
+                self.assertEqual(found, {'M.HeavyTests', 'N.UserTests'})
+                self.assertEqual(users, ['HeavyTests'])
+
     def test_a_change_in_another_class_selects_the_whole_class(self):
         self.assertEqual(select('func testThree'), {'M.LightTests'})
         self.assertEqual(select('final class LightTests'), {'M.LightTests'})

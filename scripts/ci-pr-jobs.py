@@ -25,9 +25,15 @@ macos/core tests. The Mac core tests job runs in one of two modes.
 
 Pushes to main, the nightly run and manual runs select every job and the full mode (--all), so the nightly run of the
 full matrix catches an input or a test that the rules here miss. Every mode still builds every macos/core test.
+
+Verification. The last job of the workflow, Selected checks, runs --verify-needs on the results of every other job.
+It passes only when the selection succeeded, the Python checks passed, each selected job passed, and each job that
+was not selected was skipped. The PR watcher requires that one check, because the names and the number of the
+other checks change with the selection.
 """
 import argparse
 import json
+import os
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -35,6 +41,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 JOBS = ('linux', 'mac', 'mac_experiments', 'mac_core', 'mac_interop', 'ios', 'kotlin', 'android')
+# The workflow job that each selection output gates.
+WORKFLOW_JOBS = {'linux-protocol': 'linux', 'mac': 'mac', 'mac-experiments': 'mac_experiments', 'mac-core': 'mac_core',
+                 'mac-interop': 'mac_interop', 'ios': 'ios', 'kotlin': 'kotlin', 'android': 'android'}
 EVERY_JOB = frozenset(JOBS)
 # Gradle builds :phone-core for the Linux pairing tool and interoperability tests, and :phone-ui for the iOS app.
 KOTLIN = frozenset({'linux', 'mac_interop', 'ios', 'kotlin', 'android'})
@@ -157,17 +166,68 @@ def owners(lines, test_classes):
     return result
 
 
+def code_only(lines):
+    """Each line with string literal contents and // comments removed, so that their braces do not count.
+
+    This is a small scanner, not a Swift parser: an unusual literal can still leave a stray brace, which can only make
+    a method span wrong in a way that test_spans detects or that selects more tests (see there).
+    """
+    result, in_block = [], False
+    for line in lines:
+        code, index = [], 0
+        while index < len(line):
+            if in_block:
+                end = line.find('"""', index)
+                if end < 0:
+                    break
+                in_block, index = False, end + 3
+            elif line.startswith('"""', index):
+                in_block, index = True, index + 3
+            elif line.startswith('//', index):
+                break
+            elif line[index] == '"':
+                index += 1
+                while index < len(line) and line[index] != '"':
+                    index += 2 if line[index] == '\\' else 1
+                index += 1
+            else:
+                code.append(line[index])
+                index += 1
+        result.append(''.join(code))
+    return result
+
+
 def test_spans(lines, line_owners):
-    """Map (class, test method) to its line range, from `func testX(` to the closing brace at the same indentation."""
-    spans = {}
+    """Map (class, test method) to its lines, from `func testX(` to the brace that closes its body.
+
+    The body ends where the braces opened on the func line balance again, which also handles a test on one line.
+    A class gets no spans at all when one of its spans is ambiguous: the braces never balance, code follows the
+    closing brace on its line, or two spans overlap. Every change in that class then counts as outside its test
+    methods, which selects the whole class and its users instead of a guessed method.
+    """
+    code = code_only(lines)
+    spans, ambiguous = {}, set()
     for start, line in enumerate(lines):
         match = TEST_METHOD.match(line)
         if not match or line_owners[start][0] != 'class':
             continue
-        end = next((index for index in range(start + 1, len(lines)) if lines[index].rstrip() == match[1] + '}'),
-                   start)
-        spans[(line_owners[start][1], match[2])] = range(start, end + 1)
-    return spans
+        test_class, end, depth, opened = line_owners[start][1], None, 0, False
+        for index in range(start, len(lines)):
+            for position, char in enumerate(code[index]):
+                if char == '{':
+                    depth, opened = depth + 1, True
+                elif char == '}':
+                    depth -= 1
+                    if depth < 0 or (opened and depth == 0):
+                        end = index if depth == 0 and not code[index][position + 1:].strip() else None
+                        break
+            if end is not None or depth < 0 or (opened and depth == 0):
+                break
+        if end is None or any(test_class == owner and set(span) & set(range(start, end + 1))
+                              for (owner, _), span in spans.items()):
+            ambiguous.add(test_class)
+        spans[(test_class, match[2])] = range(start, (end if end is not None else start) + 1)
+    return {key: span for key, span in spans.items() if key[0] not in ambiguous}
 
 
 def in_test_method(spans, test_class, index):
@@ -360,13 +420,44 @@ def changed_paths(merge_commit):
     return [name for name in git('diff', '--name-only', '--no-renames', '-z', base, merge_commit).split('\0') if name]
 
 
+def verify_needs(needs):
+    """Problems with one run's job results, from the workflow's `needs` context. An empty list means it passed."""
+    changes = needs.get('changes') or {}
+    if changes.get('result') != 'success':
+        return [f'changes: {changes.get("result") or "missing"}, so the selection is unknown']
+    outputs = changes.get('outputs') or {}
+    problems = []
+    python = (needs.get('python') or {}).get('result') or 'missing'
+    if python != 'success':
+        problems.append(f'python: {python}, expected success')
+    for job, output in WORKFLOW_JOBS.items():
+        result = (needs.get(job) or {}).get('result') or 'missing'
+        if outputs.get(output) not in ('true', 'false'):
+            problems.append(f'{job}: the selection has no {output} output')
+            continue
+        expected = 'success' if outputs[output] == 'true' else 'skipped'
+        if result != expected:
+            problems.append(f'{job}: {result}, expected {expected}')
+    return problems
+
+
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument('--merge-commit', help='the pull request merge commit that actions/checkout checked out')
     source.add_argument('--all', action='store_true', help='select every job and the full macos/core suite')
+    source.add_argument('--verify-needs', action='store_true',
+                        help='check the job results in the NEEDS environment variable (the `needs` context as JSON)')
     parser.add_argument('--github-output', help='append the outputs as name=value lines to this file')
     args = parser.parse_args(argv)
+    if args.verify_needs:
+        needs = json.loads(os.environ['NEEDS'])
+        for job, value in sorted(needs.items()):
+            print(f'{job}: {(value or {}).get("result")}')
+        problems = verify_needs(needs)
+        for problem in problems:
+            print(f'::error::{problem}')
+        return 1 if problems else 0
 
     selected, mode, tests = set(JOBS), 'full', []
     if not args.all:
