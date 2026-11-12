@@ -144,12 +144,20 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                 try include(item.role, item.name, item.readVersions, item.writeVersions)
             }
         }
-        if inputs.schemaVersion == 23 {
+        if inputs.schemaVersion >= 23 {
             guard let encoded = inputs.installedRelease else { throw PreparationStoreError.corruptRecord }
             let record = try MachineUpdateInstalledReleaseRecord.decode(encoded)
             var installed = try MachineUpdateInstalledReleaseRecord.requirements + MachineUpdateActivationRecord.finalizationRequirements
             if record.formatVersion == 2 { installed += try MachineUpdateInstalledReleaseRecord.provenanceRequirements }
             for item in installed { try include(item.role, item.name, item.readVersions, item.writeVersions) }
+        }
+        if inputs.schemaVersion >= 24 {
+            var stable = try MachineUpdateStableReleaseRecord.requirements
+            if inputs.schemaVersion >= 25 { stable += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
+            if inputs.schemaVersion >= 26 { stable += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
+            if inputs.schemaVersion >= 27 { stable += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
+            if inputs.schemaVersion >= 28 { stable += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
+            for item in stable { try include(item.role, item.name, item.readVersions, item.writeVersions) }
         }
         if native {
             for item in try CommandMonitorActivityContract.requirements {
@@ -234,7 +242,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             }
         }
         for runtime in inputs.runtimes {
-            let plan = try runtime.activationRecord.map(RuntimeActivationPlan.decode)
+            let plan = try runtime.activationRecord.map(RuntimeActivationCompatibilityProjection.decode)
             let materialVersion = runtime.reference.formatVersion
             let transportVersion: UInt64 = runtime.reference.serviceActivity == nil ? 1 : 2
             for role in [AuthorityCodeRole.authority, .setupController] {
@@ -267,8 +275,19 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
                     try include(record.role, record.name, record.readVersions, record.writeVersions)
                 }
             }
+            if case .retained(let retained)? = plan {
+                for item in try RuntimeRetainedSetupReleaseBinding.requirements {
+                    try include(item.role, item.name, item.readVersions, item.writeVersions)
+                }
+                if retained.host.installedReadinessEnabled {
+                    let version = MachineUpdateAuthorityReadinessDeclaration.version
+                    try include(.authority, MachineUpdateAuthorityReadinessDeclaration.formatName, [version], [version])
+                }
+            }
             let control = plan?.host.gatewaySettingsControlEnabled ?? (runtime.reference.serviceActivity != nil)
-            let version: UInt64 = control ? 3 : 2
+            let version: UInt64
+            if case .retained(let retained)? = plan { version = retained.host.formatVersion }
+            else { version = control ? 3 : 2 }
             for role in [AuthorityCodeRole.authority, .setupController] {
                 try include(role, "authority.command-host-config", [version], [version])
                 if control { try include(role, GatewaySettingsControlReleaseValidation.formatName, [1], [1]) }
