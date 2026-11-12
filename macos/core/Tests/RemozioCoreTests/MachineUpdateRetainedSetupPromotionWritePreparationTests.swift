@@ -211,7 +211,7 @@ final class MachineUpdateRetainedSetupPromotionWritePreparationTests: XCTestCase
     func testRollbackRestoresSchemaTableAbsenceAndTheOriginalCatalog() throws {
         try database { db in
             XCTAssertThrowsError(try Catalog.capture(db)) {
-                XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
             }
             try exec(db, "BEGIN IMMEDIATE")
             let before = try Catalog.capture(db)

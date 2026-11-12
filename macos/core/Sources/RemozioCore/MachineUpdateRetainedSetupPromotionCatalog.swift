@@ -21,7 +21,7 @@ enum MachineUpdateRetainedSetupPromotionCatalog {
     }
 
     static func capture(_ db: OpaquePointer) throws -> Frame {
-        guard sqlite3_get_autocommit(db) == 0 else { throw PreparationStoreError.transactionActive }
+        guard sqlite3_get_autocommit(db) == 0 else { throw PreparationStoreError.invalidTransition }
         func statement<Value>(_ sql: String, _ body: (OpaquePointer) throws -> Value) throws -> Value {
             var row: OpaquePointer?
             let result = sqlite3_prepare_v2(db, sql, -1, &row, nil)
@@ -39,9 +39,11 @@ enum MachineUpdateRetainedSetupPromotionCatalog {
             return withUnsafeBytes(of: &value) { Data($0) }
         }
         func text(_ row: OpaquePointer, _ column: Int32) throws -> Data {
+            guard sqlite3_column_type(row, column) == SQLITE_TEXT, let bytes = sqlite3_column_blob(row, column) else {
+                throw PreparationStoreError.corruptRecord
+            }
             let count = Int(sqlite3_column_bytes(row, column))
-            guard sqlite3_column_type(row, column) == SQLITE_TEXT, (1...8192).contains(count),
-                  let bytes = sqlite3_column_blob(row, column) else { throw PreparationStoreError.corruptRecord }
+            guard (1...8192).contains(count) else { throw PreparationStoreError.corruptRecord }
             let value = Data(bytes: bytes, count: count)
             guard String(data: value, encoding: .utf8) != nil else { throw PreparationStoreError.corruptRecord }
             return value
@@ -101,7 +103,7 @@ enum MachineUpdateRetainedSetupPromotionCatalog {
         hash.update(data: number(UInt64(schema == 26 ? 27 : schema)))
         hash.update(data: number(UInt64(rows.count)))
         for row in rows { hash.update(data: row) }
-        guard sqlite3_get_autocommit(db) == 0 else { throw PreparationStoreError.transactionActive }
+        guard sqlite3_get_autocommit(db) == 0 else { throw PreparationStoreError.invalidTransition }
         return Frame(schemaVersion: schema, protectedDigest: Data(hash.finalize()),
             promotionDigest: schema == 26 ? nil : Data(promotion.finalize()))
     }
