@@ -120,21 +120,21 @@ def declarations(role):
     if role in (2, 4, 6, 8):
         values.append({0: 'runtime.audit-upgrade-startup-fence', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     host_formats = {
-        2: [('runtime.activation-plan', [1, 2, 3, 4, 5], []),
-            ('runtime.gateway-settings-consumer-host', [1], []),
+        2: [('runtime.activation-plan', [1, 2, 3, 4, 5, 6], []),
+            ('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], []),
             ('runtime.gateway-settings-fence', [1, 2], [2]),
             ('gateway.gateway-settings-control', [2], [2]), ('transport.gateway-settings-control', [2], [2]),
             ('transport.pairing-config', [1, 2], []), ('gateway.service-config', [1, 2], [])],
-        4: [('runtime.gateway-settings-consumer-host', [1], []),
+        4: [('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], []),
             ('runtime.gateway-settings-fence', [1, 2], []),
             ('transport.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [])],
-        6: [('runtime.gateway-settings-consumer-host', [1], []),
+        6: [('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], []),
             ('runtime.gateway-settings-fence', [1, 2], []),
             ('gateway.gateway-settings-control', [1, 2], [1, 2]),
             ('transport.pairing-config', [1, 2], [])],
-        8: [('runtime.activation-plan', [1, 2, 3, 4, 5], [1, 2, 3, 4, 5]),
-            ('runtime.gateway-settings-consumer-host', [1], [1]),
+        8: [('runtime.activation-plan', [1, 2, 3, 4, 5, 6], [1, 2, 3, 4, 5]),
+            ('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], [1]),
             ('runtime.gateway-settings-fence', [1, 2], [1]),
             ('transport.pairing-config', [1, 2], [1, 2]), ('gateway.service-config', [1, 2], [1, 2])],
     }
@@ -143,6 +143,17 @@ def declarations(role):
         raise ValueError('duplicate format declaration before host overrides')
     for name, readers, writers in host_formats.get(role, []):
         by_name[name] = {0: name, 1: readers, 2: writers, 3: {}}
+    retained_readers = ()
+    if role in (2, 4, 6, 8):
+        retained_readers += ('runtime.retained-setup-release', 'runtime.retained-setup-completion')
+    if role in (2, 8):
+        retained_readers += ('runtime.retained-setup-completion-archive',
+                             'runtime.retained-setup-completion-configuration',
+                             'runtime.retained-setup-completion-publication')
+    for name in retained_readers:
+        if name in by_name:
+            raise ValueError('duplicate retained runtime format declaration')
+        by_name[name] = {0: name, 1: [1], 2: [], 3: {}}
     if role in (2, 4):
         for name in ('authority.routing-ipc', 'phone.routing-frame', 'routing.away-challenge',
                      'routing.away-control', 'routing.status-response'):

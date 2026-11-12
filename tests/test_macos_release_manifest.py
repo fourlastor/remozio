@@ -37,6 +37,9 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
                  'authority.retained-setup-promotion-ready',
+                 'runtime.retained-setup-release', 'runtime.retained-setup-completion',
+                 'runtime.retained-setup-completion-archive', 'runtime.retained-setup-completion-configuration',
+                 'runtime.retained-setup-completion-publication',
                  'authority.update-scheduling-ipc', 'phone.update-scheduling-frame', 'update.scheduling-control',
                  'update.scheduling-challenge', 'update.scheduling-status-response'}
         def legacy(role):
@@ -45,6 +48,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'authority.installation-preparation':
                     value[1] = list(range(1, 12))
                     value[2] = list(range(1, 12))
+                if value[0] == 'runtime.gateway-settings-consumer-host':
+                    value[1] = [1]
                 if value[0] == 'runtime.activation-plan':
                     value[1] = [1, 2]
                     value[2] = [1, 2] if role == 8 else []
@@ -499,7 +504,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         pairing = 'transport.pairing-config'
         gateway = 'gateway.service-config'
         for role in (2, 4, 6, 8):
-            self.assertEqual(by_role[role][host], {0: host, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+            self.assertEqual(by_role[role][host], {0: host, 1: [1, 2, 3, 4], 2: [1] if role == 8 else [], 3: {}})
             self.assertEqual(by_role[role][pairing], {0: pairing, 1: [1, 2], 2: [1, 2] if role in (4, 8) else [], 3: {}})
             self.assertEqual(by_role[role][gateway], {0: gateway, 1: [1, 2], 2: [1, 2] if role in (6, 8) else [], 3: {}})
         for role in (1, 5, 11, 12):
@@ -512,7 +517,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
                 versions = [1, 2, 3, 4, 5]
-                self.assertEqual(declarations[name], {0: name, 1: versions, 2: versions if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[name], {0: name, 1: versions + [6], 2: versions if role == 8 else [], 3: {}})
             else:
                 self.assertNotIn(name, declarations)
 
@@ -626,3 +631,104 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for request in component[8]:
                 self.assertEqual(request[5], [])
         self.assertLessEqual(len(info['RemozioReleaseManifest']), 65536)
+
+
+class RetainedRuntimeManifestReaderTests(unittest.TestCase):
+    def by_role(self):
+        return {role: {item[0]: item for item in MANIFEST.declarations(role)}
+                for role, *_ in MANIFEST.COMPONENTS}
+
+    def test_startup_and_completion_bindings_have_only_the_four_readers(self):
+        for role, declarations in self.by_role().items():
+            for name in ('runtime.retained-setup-release', 'runtime.retained-setup-completion'):
+                if role in (2, 4, 6, 8):
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)
+
+    def test_completion_payloads_have_only_the_authority_and_setup_readers(self):
+        names = ('runtime.retained-setup-completion-archive',
+                 'runtime.retained-setup-completion-configuration',
+                 'runtime.retained-setup-completion-publication')
+        for role, declarations in self.by_role().items():
+            for name in names:
+                if role in (2, 8):
+                    self.assertEqual(declarations[name], {0: name, 1: [1], 2: [], 3: {}})
+                else:
+                    self.assertNotIn(name, declarations)
+
+    def test_consumer_host_readers_match_all_current_archive_versions(self):
+        source = (ROOT / 'macos/core/Sources/RemozioCore/GatewaySettingsConsumerHostConfiguration.swift').read_text()
+        names = ('version', 'releaseBoundVersion', 'retainedSetupVersion', 'retainedSetupCompletionVersion')
+        versions = []
+        for name in names:
+            match = re.search(r'static let ' + name + r': UInt64 = ([0-9]+)', source)
+            self.assertIsNotNone(match, name)
+            versions.append(int(match.group(1)))
+        self.assertEqual(versions, [1, 2, 3, 4])
+        for role, declarations in self.by_role().items():
+            name = 'runtime.gateway-settings-consumer-host'
+            if role in (2, 4, 6, 8):
+                self.assertEqual(declarations[name], {0: name, 1: versions, 2: [1] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(name, declarations)
+
+    def test_typed_activation_reader_does_not_enable_the_future_writer(self):
+        source = (ROOT / 'macos/core/Sources/RemozioCore/RuntimeRetainedSetupActivationArchive.swift').read_text()
+        match = re.search(r'static let formatVersion: UInt64 = ([0-9]+)', source)
+        self.assertIsNotNone(match)
+        self.assertEqual(int(match.group(1)), 6)
+        for role, declarations in self.by_role().items():
+            name = 'runtime.activation-plan'
+            if role in (2, 8):
+                self.assertEqual(declarations[name],
+                                 {0: name, 1: [1, 2, 3, 4, 5, 6], 2: [1, 2, 3, 4, 5] if role == 8 else [], 3: {}})
+            else:
+                self.assertNotIn(name, declarations)
+
+    def test_reader_extensions_leave_retained_and_later_schema_writers_disabled(self):
+        by_role = self.by_role()
+        for role in (2, 8):
+            self.assertEqual(by_role[role]['authority.installation-preparation'][2], list(range(1, 25)))
+            for name, version in (('authority.retained-setup-policy-intent', 2),
+                                  ('authority.retained-setup-completion-intent', 1),
+                                  ('authority.retained-setup-promotion-intent', 1),
+                                  ('authority.retained-setup-promotion-ready', 1)):
+                self.assertEqual(by_role[role][name], {0: name, 1: [version], 2: [], 3: {}})
+        for declarations in by_role.values():
+            self.assertNotIn('authority.installed-readiness', declarations)
+            for name, declaration in declarations.items():
+                if name.startswith('runtime.retained-setup-'):
+                    self.assertEqual(declaration[2], [], name)
+
+    def test_reader_declarations_stay_sorted_unique_and_reject_an_existing_name(self):
+        for role, *_ in MANIFEST.COMPONENTS:
+            first = MANIFEST.declarations(role)
+            self.assertEqual(first, MANIFEST.declarations(role))
+            names = [item[0] for item in first]
+            self.assertEqual(names, sorted(set(names)))
+            for item in first:
+                self.assertEqual(item[1], sorted(set(item[1])))
+                self.assertEqual(item[2], sorted(set(item[2])))
+        original = MANIFEST.format_declaration
+
+        def conflicting(name, versions, migrations=None):
+            value = original(name, versions, migrations)
+            if name == 'authority.service-config':
+                value[0] = 'runtime.retained-setup-release'
+            return value
+
+        with patch.object(MANIFEST, 'format_declaration', side_effect=conflicting):
+            with self.assertRaisesRegex(ValueError, 'duplicate retained runtime format declaration'):
+                MANIFEST.declarations(2)
+
+    def test_generated_debug_and_release_bytes_are_deterministic_and_bounded(self):
+        with patch.object(MANIFEST, 'signed_identity', return_value=(bytes([7]) * 20, None)), \
+                patch.object(MANIFEST, 'signed_connector_identity', return_value=(bytes([9]) * 20, None)):
+            for configuration in ('Debug', 'Release'):
+                environment = ReleaseManifestBuildTests.environment(self, configuration)
+                first = MANIFEST.generate(environment)
+                self.assertEqual(first, MANIFEST.generate(environment))
+                self.assertLessEqual(len(first['RemozioReleaseManifest']), 65536)
+                for role, *_ in MANIFEST.COMPONENTS:
+                    self.assertLessEqual(len(MANIFEST.declarations(role)), 128)
