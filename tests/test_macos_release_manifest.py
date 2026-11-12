@@ -92,6 +92,22 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(preparation[2], list(range(1, 25)))
                 self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
 
+    def test_retained_intent_readers_match_the_current_record_codec_versions(self):
+        records = (
+            ('MachineUpdateRetainedSetupPolicyIntentRecord', 'authority.retained-setup-policy-intent'),
+            ('MachineUpdateRetainedSetupCompletionIntentRecord', 'authority.retained-setup-completion-intent'),
+            ('MachineUpdateRetainedSetupPromotionIntentRecord', 'authority.retained-setup-promotion-intent'),
+        )
+        for record, name in records:
+            source = (ROOT / 'macos/core/Sources/RemozioCore' / (record + '.swift')).read_text()
+            match = re.search(r'static let currentFormatVersion: UInt64 = ([0-9]+)', source)
+            self.assertIsNotNone(match, record)
+            version = int(match.group(1))
+            for role in (2, 8):
+                declaration = next(value for value in MANIFEST.declarations(role) if value[0] == name)
+                self.assertIn(version, declaration[1], (record, role))
+                self.assertEqual(declaration[2], [], (record, role))
+
     def test_retained_setup_policy_is_declared_read_only(self):
         name = 'authority.retained-setup-policy-intent'
         for role, *_ in MANIFEST.COMPONENTS:

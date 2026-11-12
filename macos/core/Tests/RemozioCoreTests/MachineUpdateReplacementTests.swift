@@ -94,10 +94,13 @@ private final class MachineReplacementFixture {
                 for role in [AuthorityCodeRole.authority, .setupController] {
                     requiredFormats.append(try .init(role: role, name: "authority.installation-preparation",
                         readVersions: [24, 25, 26, 27], writeVersions: [25, 26, 27]))
-                    for name in [MachineUpdateRetainedSetupPolicyIntentRecord.formatName,
-                        MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.formatName] {
-                        requiredFormats.append(try .init(role: role, name: name, readVersions: [1],
-                            writeVersions: name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController ? [1] : []))
+                    for (name, version) in [
+                        (MachineUpdateRetainedSetupPolicyIntentRecord.formatName, MachineUpdateRetainedSetupPolicyIntentRecord.currentFormatVersion),
+                        (MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupCompletionIntentRecord.currentFormatVersion),
+                        (MachineUpdateRetainedSetupPromotionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.currentFormatVersion)
+                    ] {
+                        requiredFormats.append(try .init(role: role, name: name, readVersions: [version],
+                            writeVersions: name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController ? [version] : []))
                     }
                 }
             }
@@ -4934,12 +4937,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func retainedPromotionCandidate(_ candidate: SignedReleaseEvidence, removing role: AuthorityCodeRole,
-        name: String, version: UInt64, writer: Bool) throws -> SignedReleaseEvidence {
+        name: String, version: UInt64, writer: Bool, replacementWriterVersion: UInt64? = nil) throws -> SignedReleaseEvidence {
         let components = try candidate.manifest.components.map { component in
             let formats = try component.formats.compactMap { format -> ReleaseFormat? in
                 guard component.role == role, format.name == name else { return format }
-                let readers = writer ? format.readers : format.readers.subtracting([version])
-                let writers = format.writers.subtracting([version])
+                var readers = writer ? format.readers : format.readers.subtracting([version])
+                var writers = format.writers.subtracting([version])
+                if let replacementWriterVersion {
+                    guard writer else { throw ReplacementFixtureError.injected }
+                    readers.insert(replacementWriterVersion); writers.insert(replacementWriterVersion)
+                }
                 if readers.isEmpty { return nil }
                 return try .init(name: format.name, readers: readers, writers: writers,
                     migrations: format.migrations.filter { $0.value != version })
@@ -5074,12 +5081,21 @@ final class MachineUpdateReplacementTests: XCTestCase {
             var requirements: [(AuthorityCodeRole, String, UInt64, Bool)] = []
             for role in [AuthorityCodeRole.authority, .setupController] {
                 requirements.append((role, "authority.installation-preparation", 24, false))
-                for version in [UInt64(25), 26, 27] { requirements.append((role, "authority.installation-preparation", version, true)) }
-                for name in [MachineUpdateRetainedSetupPolicyIntentRecord.formatName, MachineUpdateRetainedSetupCompletionIntentRecord.formatName] {
-                    requirements.append((role, name, 1, true))
+                for version in [UInt64(25), 26, 27] {
+                    requirements.append((role, "authority.installation-preparation", version, false))
+                    requirements.append((role, "authority.installation-preparation", version, true))
+                }
+                for (name, version) in [
+                    (MachineUpdateRetainedSetupPolicyIntentRecord.formatName, MachineUpdateRetainedSetupPolicyIntentRecord.currentFormatVersion),
+                    (MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupCompletionIntentRecord.currentFormatVersion),
+                    (MachineUpdateRetainedSetupPromotionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.currentFormatVersion)
+                ] {
+                    requirements.append((role, name, version, false))
+                    if name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController {
+                        requirements.append((role, name, version, true))
+                    }
                 }
             }
-            requirements.append((.setupController, MachineUpdateRetainedSetupPromotionIntentRecord.formatName, 1, true))
             for requirement in try RuntimeRetainedSetupCompletionBinding.completedHostRequirements {
                 for version in requirement.readVersions { requirements.append((requirement.role, requirement.name, version, false)) }
                 for version in requirement.writeVersions { requirements.append((requirement.role, requirement.name, version, true)) }
@@ -5089,6 +5105,58 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 if writer { XCTAssertNoThrow(try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(missing)) }
                 XCTAssertThrowsError(try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(missing)) {
                     XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                }
+            }
+        }
+    }
+
+    func testRetainedPromotionProducerDeclarationsMatchCanonicalRecordVersions() throws {
+        try withRetainedPromotionValueFixture { f in
+            let policyBytes = try f.completion.activation.intent.encoded
+            let policy = try MachineUpdateRetainedSetupPolicyIntentRecord.decode(policyBytes)
+            let completionBytes = try XCTUnwrap(f.completion.intent).encoded
+            let completion = try MachineUpdateRetainedSetupCompletionIntentRecord.decode(completionBytes)
+            let promotionBytes = try f.prepared.encoded
+            let limits = try CBORLimits(maxBytes: MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes,
+                maxDepth: 1, maxItems: 13)
+            guard case .map(let fields) = try DeterministicCBOR.decode(promotionBytes, limits: limits),
+                  case .unsigned(let promotionVersion) = fields[0] else {
+                return XCTFail("The canonical promotion record must contain its codec version.")
+            }
+            let versions = [(MachineUpdateRetainedSetupPolicyIntentRecord.formatName, policy.formatVersion),
+                (MachineUpdateRetainedSetupCompletionIntentRecord.formatName, completion.formatVersion),
+                (MachineUpdateRetainedSetupPromotionIntentRecord.formatName, promotionVersion)]
+            for role in [AuthorityCodeRole.authority, .setupController] {
+                let component = try XCTUnwrap(f.candidate.manifest.components.first { $0.role == role })
+                for (name, version) in versions {
+                    let declaration = try XCTUnwrap(component.formats.first { $0.name == name })
+                    XCTAssertTrue(declaration.readers.contains(version))
+                    if name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController {
+                        XCTAssertTrue(declaration.writers.contains(version))
+                    }
+                    if name == MachineUpdateRetainedSetupPolicyIntentRecord.formatName {
+                        XCTAssertFalse(declaration.writers.contains(1))
+                    }
+                }
+            }
+            try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(f.candidate)
+        }
+    }
+
+    func testRetainedPromotionProducerRejectsLegacyPolicyWritersAndWrongRoleDeclarations() throws {
+        try withRetainedPromotionValueFixture { f in
+            try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(f.candidate)
+            let replacementVersions: [UInt64?] = [nil, 1]
+            for role in [AuthorityCodeRole.authority, .setupController] {
+                for replacement in replacementVersions {
+                    let changed = try retainedPromotionCandidate(f.candidate, removing: role,
+                        name: MachineUpdateRetainedSetupPolicyIntentRecord.formatName,
+                        version: MachineUpdateRetainedSetupPolicyIntentRecord.currentFormatVersion,
+                        writer: true, replacementWriterVersion: replacement)
+                    XCTAssertNoThrow(try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(changed))
+                    XCTAssertThrowsError(try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(changed)) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                    }
                 }
             }
         }
