@@ -33,7 +33,7 @@ final class StableAccountStorageValueTests: XCTestCase {
         }
 
         func initial(_ preparation: AccountPreparationIntent) throws -> AuthorityInitializationIntent {
-            let root = "/private/tmp/remozio-A02a-value-" + UUID().uuidString
+            let root = try AccountPreparationController.authorityDirectory(accountID: preparation.accountID)
             return try .init(setupID: AccountPreparationIntent.randomID(), revision: AccountPreparationIntent.randomID(),
                 installationID: preparation.installationID, macID: preparation.macID, accountID: preparation.accountID,
                 releaseDigest: preparation.releaseDigest, initializationDigest: preparation.initialAuthority.initializationDigest,
@@ -58,12 +58,13 @@ final class StableAccountStorageValueTests: XCTestCase {
         }
 
         func copy(_ initial: AuthorityInitializationIntent, revision: Data? = nil, setupID: Data? = nil,
-            journalPath: String? = nil, checkpoint: ContinuityCheckpoint?, complete: Bool) throws -> AuthorityInitializationIntent {
+            journalPath: String? = nil, continuityPath: String? = nil,
+            checkpoint: ContinuityCheckpoint?, complete: Bool) throws -> AuthorityInitializationIntent {
             try .init(setupID: setupID ?? initial.setupID, revision: revision ?? AccountPreparationIntent.randomID(),
                 installationID: initial.installationID, macID: initial.macID, accountID: initial.accountID,
                 releaseDigest: initial.releaseDigest, initializationDigest: initial.initializationDigest,
                 initializationBytes: initial.initializationBytes, journalPath: journalPath ?? initial.journalPath,
-                continuityPath: initial.continuityPath, checkpoint: checkpoint, complete: complete)
+                continuityPath: continuityPath ?? initial.continuityPath, checkpoint: checkpoint, complete: complete)
         }
 
         func frame(schema: Int64? = nil, digest: Data? = nil) -> MachineUpdateStableReleaseSnapshot {
@@ -186,6 +187,27 @@ final class StableAccountStorageValueTests: XCTestCase {
             let premature = try c.copy(pinned, key: pinned.authorityPublicKey, prepared: true)
             try reject(c.state(premature), from: before, control: control)
             try reject(c.state(premature, initial: initial), from: before, control: control)
+        }
+    }
+
+    func testNewInitializationRequiresTheCanonicalJournalAndContinuityPaths() throws {
+        try fixture { c in
+            let pinned = try c.original.pinning(key()), before = try c.state(pinned)
+            let initial = try c.initial(pinned), control = try c.state(pinned, initial: initial)
+            let authority = try AccountPreparationController.authorityDirectory(accountID: pinned.accountID)
+            XCTAssertEqual(initial.journalPath, authority + "/Journal/journal.sqlite")
+            XCTAssertEqual(initial.continuityPath, authority + "/Continuity/continuity.sqlite")
+            let foreignJournal = try c.copy(initial, journalPath: "/private/tmp/remozio-A02a-foreign/Journal/journal.sqlite",
+                checkpoint: nil, complete: false)
+            let foreignContinuity = try c.copy(initial, continuityPath: "/private/tmp/remozio-A02a-foreign/Continuity/continuity.sqlite",
+                checkpoint: nil, complete: false)
+            for foreign in [foreignJournal, foreignContinuity] {
+                XCTAssertNoThrow(try control.check(from: before))
+                let state = try c.state(pinned, initial: foreign)
+                XCTAssertThrowsError(try state.check(from: before)) {
+                    XCTAssertEqual($0 as? MachineUpdateActivationError, .wrongBoundary)
+                }
+            }
         }
     }
 

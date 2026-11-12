@@ -71,6 +71,10 @@ struct MachineUpdateStableAccountSetupSnapshot: Sendable {
                   initialization.installationID == preparation.installationID, initialization.accountID == preparation.accountID,
                   initialization.releaseDigest == preparation.releaseDigest,
                   initialization.initializationBytes == preparation.initializationBytes else { throw PreparationStoreError.staleRevision }
+            if previous.initialization == nil {
+                _ = try MachineUpdateRetainedSetupPromotionNativeSupport.Paths(accountID: preparation.accountID,
+                    journalPath: initialization.journalPath, continuityPath: initialization.continuityPath)
+            }
         }
         guard !preparation.storagePrepared || initialization?.complete == true else { throw PreparationStoreError.staleRevision }
         if let old = previous.initialization {
