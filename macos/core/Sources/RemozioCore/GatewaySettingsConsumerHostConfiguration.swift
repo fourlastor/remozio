@@ -43,6 +43,8 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     static let retainedSetupVersion: UInt64 = 3
     static let retainedSetupCompletionVersion: UInt64 = 4
     static let supportedVersions: Set<UInt64> = [version]
+    /// Versions the archive reader accepts; the release manifest declares these readers.
+    static let archiveReadVersions: Set<UInt64> = [version, releaseBoundVersion, retainedSetupVersion, retainedSetupCompletionVersion]
     static let formatName = "runtime.gateway-settings-consumer-host"
     var role: GatewaySettingsConsumerRole { storage.role }
     var releaseBinding: RuntimeReleaseBinding? { storage.releaseBinding }
@@ -236,7 +238,7 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
     }
     private static func decode(_ bytes: Data, allowReleaseBound: Bool) throws -> Self {
         let allowed: Set<UInt64> = allowReleaseBound
-            ? [version, releaseBoundVersion, retainedSetupVersion, retainedSetupCompletionVersion] : [version]
+            ? archiveReadVersions : [version]
         guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: allowReleaseBound ? archiveLimits : limits),
               case .unsigned(let selected) = fields[0], allowed.contains(selected),
               Set(fields.keys) == Set(UInt64(0)...(selected == version ? 5 : 7)),

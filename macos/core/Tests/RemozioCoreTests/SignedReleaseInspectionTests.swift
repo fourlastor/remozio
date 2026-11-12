@@ -126,7 +126,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
                 let contracts: [(String, Set<UInt64>, Set<UInt64>)] = [
-                    (GatewaySettingsConsumerHostConfiguration.formatName, GatewaySettingsConsumerHostConfiguration.supportedVersions,
+                    (GatewaySettingsConsumerHostConfiguration.formatName, GatewaySettingsConsumerHostConfiguration.archiveReadVersions,
                      role == .setupController ? GatewaySettingsConsumerHostConfiguration.supportedVersions : []),
                     (TransportPairingStartupConfiguration.formatName, TransportPairingStartupConfiguration.supportedVersions,
                      role == .transport || role == .setupController ? TransportPairingStartupConfiguration.supportedVersions : []),
