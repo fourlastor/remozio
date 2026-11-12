@@ -106,6 +106,37 @@ struct RuntimeReleaseConfigurationPlan: Sendable, CustomStringConvertible, Custo
             host: selected, transport: transport, gateway: gateway, clients: clients)
     }
 
+    static func retainingCompletedSetup(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        clients sourceClients: RuntimeActivationClients) throws -> (archive: RuntimeRetainedSetupCompletionArchive, sourceDigest: Data,
+            host: InstalledAuthorityCommandConfiguration, transport: TransportPairingStartupConfiguration,
+            gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients) {
+        try RuntimeRetainedSetupCompletionBinding.requireCompletedHostFormats(candidate)
+        let archive = try RuntimeRetainedSetupCompletionArchive(snapshot: snapshot, current: current, candidate: candidate)
+        let original = try archive.originalActivation(), binding = archive.binding
+        let sourceGateway = original.gatewaySettingsHost
+        try binding.startupBinding.requireStartupPolicy(original.host.codePolicy)
+        try validateValues(host: original.host, transport: original.transport, gateway: sourceGateway, clients: sourceClients,
+            releaseDigest: binding.startupBinding.installedReleaseDigest, policy: original.host.codePolicy)
+        let policy = current.policy.policy
+        try binding.requireCompletionPolicy(policy)
+        let command = try Self.command(original.host.command, policy: policy)
+        let host = try InstalledAuthorityCommandConfiguration(machineDirectory: original.host.machineDirectory,
+            installationID: original.host.installationID, releaseDigest: binding.startupBinding.installedReleaseDigest,
+            codePolicy: policy, command: command, label: original.host.label, plistName: original.host.plistName,
+            jobPlacement: original.host.jobPlacement, gatewaySettingsControlEnabled: original.host.gatewaySettingsControlEnabled,
+            installedReadinessEnabled: original.host.installedReadinessEnabled)
+        let gateway = try GatewaySettingsConsumerHostConfiguration.retainedSetupCompletion(role: .gateway, runtime: original.reference,
+            bundlePath: original.bundlePath, codePolicy: policy, binding: binding)
+        let transportHost = try gateway.selecting(role: .transport)
+        let transport = try Self.transport(original.transport, host: transportHost, policy: policy)
+        let clients = try Self.clients(sourceClients, policy: policy)
+        try host.validateRelease(candidate, bundlePath: gateway.bundlePath)
+        try gateway.validateRelease(candidate); try transportHost.validateRelease(candidate)
+        return (archive: archive,
+            sourceDigest: try digest(host: original.host, transport: original.transport, gateway: sourceGateway, clients: sourceClients),
+            host: host, transport: transport, gateway: gateway, clients: clients)
+    }
     /// Checks completed archive values only. It grants no current source, publication, or startup authority.
     static func requireRetainedCompletionValues(archive: RuntimeRetainedSetupCompletionArchive,
         host: InstalledAuthorityCommandConfiguration, transport: TransportPairingStartupConfiguration,

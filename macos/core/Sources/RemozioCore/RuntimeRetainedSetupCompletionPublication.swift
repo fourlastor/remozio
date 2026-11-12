@@ -5,6 +5,11 @@ import RemozioProtocol
 struct RuntimeRetainedSetupCompletionPublication: CustomStringConvertible, CustomDebugStringConvertible {
     enum File: UInt64, CaseIterable, Sendable { case host = 1, transport, gateway, presence, pairing, frontend }
     enum Location: Sendable { case runtime, services, clients }
+    enum Progress: Equatable { case source, mixed, selected }
+    struct Observation {
+        let verify: () throws -> Void
+        let read: (Artifact) throws -> Data
+    }
     struct Artifact {
         let kind: File
         let location: Location
@@ -20,7 +25,7 @@ struct RuntimeRetainedSetupCompletionPublication: CustomStringConvertible, Custo
     var description: String { "RuntimeRetainedSetupCompletionPublication(redacted)" }
     var debugDescription: String { description }
 
-    private init(configuration: RuntimeRetainedSetupCompletionConfiguration, sourceClients: RuntimeActivationClients) throws {
+    init(configuration: RuntimeRetainedSetupCompletionConfiguration, sourceClients: RuntimeActivationClients) throws {
         let original = try configuration.archive.originalActivation()
         let gateway = original.gatewaySettingsHost
         guard try RuntimeReleaseConfigurationSource(host: original.host, transport: original.transport,
@@ -54,6 +59,22 @@ struct RuntimeRetainedSetupCompletionPublication: CustomStringConvertible, Custo
         }
     }
 
+    func requireSourceForPublication(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws {
+        try configuration.requireSourceForPublication(snapshot, current: current, candidate: candidate, clients: sourceClients)
+    }
+    func progress(observation: Observation) throws -> Progress {
+        var changed = 0, selected = 0
+        for artifact in artifacts {
+            try observation.verify(); let actual = try observation.read(artifact); try observation.verify()
+            guard actual == artifact.previous || actual == artifact.selected else { throw RuntimeActivationError.changedScope }
+            if artifact.previous != artifact.selected {
+                changed += 1
+                if actual == artifact.selected { selected += 1 }
+            }
+        }
+        return selected == changed ? .selected : selected == 0 ? .source : .mixed
+    }
     var encoded: Data { get throws {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
             2: .bytes(configuration.encoded), 3: .bytes(sourceClients.presence.canonicalBytes),

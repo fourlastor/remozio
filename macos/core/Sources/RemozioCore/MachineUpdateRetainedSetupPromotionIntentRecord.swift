@@ -14,6 +14,15 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
     var description: String { "MachineUpdateRetainedSetupPromotionIntentRecord(redacted)" }
     var debugDescription: String { description }
 
+    init(publication: RuntimeRetainedSetupCompletionPublication,
+        snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        id: UUID = UUID(), revision: UUID = UUID()) throws {
+        try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(candidate)
+        try publication.requireSourceForPublication(snapshot, current: current, candidate: candidate)
+        try self.init(id: id, revision: revision, phase: .prepared, publicationBytes: publication.encoded)
+        try requireSnapshot(snapshot, candidate: candidate)
+    }
     private init(id: UUID, revision: UUID, phase: Phase, publicationBytes: Data) throws {
         guard !publicationBytes.isEmpty, publicationBytes.count <= RuntimeRetainedSetupCompletionPublication.maximumBytes else {
             throw PreparationStoreError.corruptRecord
@@ -22,6 +31,38 @@ struct MachineUpdateRetainedSetupPromotionIntentRecord: Equatable, Sendable, Cus
         self.id = id; self.revision = revision; self.phase = phase; self.publicationBytes = publicationBytes
     }
     func publication() throws -> RuntimeRetainedSetupCompletionPublication { try .decode(publicationBytes) }
+    func requireSnapshot(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot, candidate: SignedReleaseEvidence) throws {
+        try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(candidate)
+        try snapshot.requireSame(as: .init(activation: snapshot.activation, intent: snapshot.intent, candidate: candidate))
+        let publication = try publication(), archive = publication.configuration.archive
+        guard snapshot.intent?.phase == .recorded,
+              try snapshot.intent?.encoded == archive.completionIntentBytes,
+              try snapshot.activation.state.plan?.encoded == archive.originalActivationBytes,
+              snapshot.activation.runtime.setup.source.actual.inventory.canonicalBytes == archive.recordedInventoryBytes else {
+            throw PreparationStoreError.staleRevision
+        }
+    }
+    func requireSource(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws {
+        try MachineUpdateRetainedSetupPromotionStorage.requireProposalFormats(candidate)
+        try requireSnapshot(snapshot, candidate: candidate)
+        try publication().requireSourceForPublication(snapshot, current: current, candidate: candidate)
+    }
+    func beginningPublication(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws -> Self {
+        guard phase == .prepared else { throw PreparationStoreError.invalidTransition }
+        try requireSource(snapshot, current: current, candidate: candidate)
+        return try .init(id: id, revision: UUID(), phase: .publishing, publicationBytes: publicationBytes)
+    }
+    func recordingPublishedFiles(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        observation: RuntimeRetainedSetupCompletionPublication.Observation) throws -> Self {
+        guard phase == .publishing else { throw PreparationStoreError.invalidTransition }
+        try requireSource(snapshot, current: current, candidate: candidate)
+        guard try publication().progress(observation: observation) == .selected else { throw RuntimeActivationError.incomplete }
+        try requireSource(snapshot, current: current, candidate: candidate)
+        return try .init(id: id, revision: UUID(), phase: .filesPublished, publicationBytes: publicationBytes)
+    }
     /// Validates adjacent historical phases. This comparison grants no writer or publication authority.
     func requireTransition(from previous: Self) throws {
         _ = try publication(); _ = try previous.publication()
