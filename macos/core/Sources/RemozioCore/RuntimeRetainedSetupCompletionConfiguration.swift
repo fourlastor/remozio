@@ -14,6 +14,14 @@ struct RuntimeRetainedSetupCompletionConfiguration: CustomStringConvertible, Cus
     var description: String { "RuntimeRetainedSetupCompletionConfiguration(redacted)" }
     var debugDescription: String { description }
 
+    init(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        clients: RuntimeActivationClients) throws {
+        let values = try RuntimeReleaseConfigurationPlan.retainingCompletedSetup(snapshot: snapshot,
+            current: current, candidate: candidate, clients: clients)
+        try self.init(archive: values.archive, sourceDigest: values.sourceDigest, host: values.host,
+            transport: values.transport, gateway: values.gateway, clients: values.clients)
+    }
     private init(archive: RuntimeRetainedSetupCompletionArchive, sourceDigest: Data,
         host: InstalledAuthorityCommandConfiguration, transport: TransportPairingStartupConfiguration,
         gateway: GatewaySettingsConsumerHostConfiguration, clients: RuntimeActivationClients) throws {
@@ -25,6 +33,12 @@ struct RuntimeRetainedSetupCompletionConfiguration: CustomStringConvertible, Cus
         self.host = host; self.transport = transport; self.gateway = gateway; self.clients = clients
     }
 
+    func requireSourceForPublication(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        clients: RuntimeActivationClients) throws {
+        let proposed = try Self(snapshot: snapshot, current: current, candidate: candidate, clients: clients)
+        guard try proposed.encoded == encoded else { throw RuntimeActivationError.changedScope }
+    }
     var encoded: Data { get throws {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
             2: .bytes(archive.encoded), 3: .bytes(sourceDigest), 4: .bytes(host.canonicalBytes),

@@ -13,6 +13,16 @@ struct RuntimeRetainedSetupCompletionArchive: Equatable, Sendable, CustomStringC
     var description: String { "RuntimeRetainedSetupCompletionArchive(redacted)" }
     var debugDescription: String { description }
 
+    init(snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws {
+        let binding = try RuntimeRetainedSetupCompletionBinding(snapshot: snapshot, current: current, candidate: candidate)
+        guard let plan = snapshot.activation.state.plan, let record = snapshot.intent else {
+            throw RuntimeActivationError.incomplete
+        }
+        try self.init(binding: binding, originalActivationBytes: plan.encoded, completionIntentBytes: record.encoded,
+            recordedInventoryBytes: snapshot.activation.runtime.setup.source.actual.inventory.canonicalBytes)
+        try binding.requireRecordedBoundary(current)
+    }
     private init(binding: RuntimeRetainedSetupCompletionBinding, originalActivationBytes: Data,
         completionIntentBytes: Data, recordedInventoryBytes: Data) throws {
         self.binding = binding; self.originalActivationBytes = originalActivationBytes
@@ -30,6 +40,12 @@ struct RuntimeRetainedSetupCompletionArchive: Equatable, Sendable, CustomStringC
         try .decode(recordedInventoryBytes, expectedMacID: binding.startupBinding.macID)
     }
 
+    func requireSourceForPublication(_ snapshot: MachineUpdateRetainedSetupCompletionSnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence) throws {
+        guard try Self(snapshot: snapshot, current: current, candidate: candidate) == self else {
+            throw RuntimeActivationError.changedScope
+        }
+    }
     private func validate() throws {
         _ = try binding.encoded
         guard !originalActivationBytes.isEmpty, originalActivationBytes.count <= RuntimeRetainedSetupActivationArchive.maximumBytes,

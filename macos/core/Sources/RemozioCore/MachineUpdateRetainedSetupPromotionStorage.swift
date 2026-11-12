@@ -23,4 +23,23 @@ enum MachineUpdateRetainedSetupPromotionStorage {
             }
         }
     }
+    /// Checks prospective producer declarations only. It grants no writer or migration authority.
+    static func requireProposalFormats(_ candidate: SignedReleaseEvidence) throws {
+        try requireReaderFormats(candidate)
+        try RuntimeRetainedSetupCompletionBinding.requireCompletedHostFormats(candidate)
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            guard let component = candidate.manifest.components.first(where: { $0.role == role }),
+                  let installation = component.formats.first(where: { $0.name == "authority.installation-preparation" }),
+                  Set([UInt64(24), 25, 26, 27]).isSubset(of: installation.readers),
+                  Set([UInt64(25), 26, 27]).isSubset(of: installation.writers) else {
+                throw PreparationStoreError.incompatibleStore
+            }
+            for name in [MachineUpdateRetainedSetupPolicyIntentRecord.formatName,
+                MachineUpdateRetainedSetupCompletionIntentRecord.formatName, MachineUpdateRetainedSetupPromotionIntentRecord.formatName] {
+                let needsWriter = name != MachineUpdateRetainedSetupPromotionIntentRecord.formatName || role == .setupController
+                guard let format = component.formats.first(where: { $0.name == name }), format.readers.contains(1),
+                      !needsWriter || format.writers.contains(1) else { throw PreparationStoreError.incompatibleStore }
+            }
+        }
+    }
 }

@@ -3539,21 +3539,47 @@ public final class PreparationIntentStore {
     /// Joins the actual retained activation and completion rows in one read transaction.
     func retainedSetupCompletionSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupCompletionSnapshot {
-        try transaction(write: false) {
-            let activation = try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate)
-            let account = activation.runtime.preparation.accountID
-            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
-            try frame.snapshot.requireSame(as: activation.runtime.setup.source.actual)
-            let intent = frame.completionIntents.first { $0.binding.accountID == account }
-            let result = try MachineUpdateRetainedSetupCompletionSnapshot(activation: activation, intent: intent, candidate: candidate)
-            try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate).requireSame(as: activation)
-            let current = try loadStableMachineUpdateFrame(candidate: candidate)
-            try current.snapshot.requireSame(as: frame.snapshot)
-            guard current.completionIntents.first(where: { $0.binding.accountID == account }) == intent else {
-                throw PreparationStoreError.staleRevision
-            }
-            return result
+        try transaction(write: false) { try loadRetainedSetupCompletionSnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadRetainedSetupCompletionSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupCompletionSnapshot {
+        let activation = try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate)
+        let account = activation.runtime.preparation.accountID
+        let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+        try frame.snapshot.requireSame(as: activation.runtime.setup.source.actual)
+        let intent = frame.completionIntents.first { $0.binding.accountID == account }
+        let result = try MachineUpdateRetainedSetupCompletionSnapshot(activation: activation, intent: intent, candidate: candidate)
+        try loadRetainedSetupActivationSnapshot(owner: owner, candidate: candidate).requireSame(as: activation)
+        let current = try loadStableMachineUpdateFrame(candidate: candidate)
+        try current.snapshot.requireSame(as: frame.snapshot)
+        guard current.completionIntents.first(where: { $0.binding.accountID == account }) == intent else {
+            throw PreparationStoreError.staleRevision
         }
+        return result
+    }
+
+    /// Captures promotion and its exact completion chain in one read transaction. It grants no writer authority.
+    func retainedSetupPromotionSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPromotionSnapshot {
+        try transaction(write: false) { try loadRetainedSetupPromotionSnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadRetainedSetupPromotionSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPromotionSnapshot {
+        let completion = try loadRetainedSetupCompletionSnapshot(owner: owner, candidate: candidate)
+        let actual = completion.activation.runtime.setup.source.actual, account = completion.activation.runtime.preparation.accountID
+        let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+        try frame.snapshot.requireSame(as: actual)
+        let intent = try frame.promotionIntents.first { try $0.publication().configuration.archive.binding.startupBinding.accountID == account }
+        let result = try MachineUpdateRetainedSetupPromotionSnapshot(completion: completion, intent: intent, candidate: candidate)
+        try loadRetainedSetupCompletionSnapshot(owner: owner, candidate: candidate).requireSame(as: completion)
+        let current = try loadStableMachineUpdateFrame(candidate: candidate)
+        try current.snapshot.requireSame(as: frame.snapshot)
+        guard try current.promotionIntents.first(where: { try $0.publication().configuration.archive.binding.startupBinding.accountID == account }) == intent else {
+            throw PreparationStoreError.staleRevision
+        }
+        return result
     }
 
     private func loadRetainedSetupActivation(accountID: Data) throws -> RuntimeRetainedSetupActivationState {

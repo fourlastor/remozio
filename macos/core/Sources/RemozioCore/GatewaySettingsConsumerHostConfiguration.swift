@@ -112,6 +112,12 @@ struct GatewaySettingsConsumerHostConfiguration: Equatable, Sendable, CustomStri
         try .init(role: role, runtime: runtime, bundlePath: bundlePath, codePolicy: codePolicy,
             releaseBinding: nil, policyStage: .startup, retainedSetupBinding: binding, retainedSetupCompletionBinding: nil)
     }
+    /// Creates retained completion values through the checked private initializer.
+    static func retainedSetupCompletion(role: GatewaySettingsConsumerRole, runtime: RuntimeMaterialReference,
+        bundlePath: String, codePolicy: AuthorityCodePolicy, binding: RuntimeRetainedSetupCompletionBinding) throws -> Self {
+        try .init(role: role, runtime: runtime, bundlePath: bundlePath, codePolicy: codePolicy,
+            releaseBinding: nil, policyStage: .completion, retainedSetupBinding: nil, retainedSetupCompletionBinding: binding)
+    }
     /// Preserves the exact release binding when selecting the other consumer role.
     func selecting(role: GatewaySettingsConsumerRole) throws -> Self {
         try .init(role: role, runtime: runtime, bundlePath: bundlePath, codePolicy: codePolicy,
