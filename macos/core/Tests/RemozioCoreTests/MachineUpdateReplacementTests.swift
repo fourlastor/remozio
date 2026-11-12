@@ -34,7 +34,7 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
+         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
          enableSecondReadiness: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
@@ -84,6 +84,7 @@ private final class MachineReplacementFixture {
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
+            if readinessReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
@@ -1638,7 +1639,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
         enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
@@ -1646,7 +1647,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats,
             enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
@@ -2266,7 +2267,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -2274,7 +2275,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats,
             enableSecondReadiness: enableSecondReadiness, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
@@ -3231,11 +3232,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Links owned machine rows to decoded archive operands. It proves no live publication or startup.
-    private func withPromotionReaderFixture(_ body: (CompletionFixture, AccountPreparationIntent,
+    private func withPromotionReaderFixture(readinessReaderFormats: Bool = false, published: Bool = false,
+        didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        _ body: (CompletionFixture, AccountPreparationIntent,
         MachineUpdateRetainedSetupCompletionIntentRecord, MachineUpdateRetainedSetupPromotionIntentRecord) throws -> Void) throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: true, completionReaderFormats: true, promotionReaderFormats: true,
-            beforeActivation: { retained = try self.prepareSecondForeground($0).account }) { fixture, finishing, _ in
+            readinessReaderFormats: readinessReaderFormats,
+            beforeActivation: { retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let candidate = fixture.candidate
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
@@ -3384,7 +3388,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             func bytes(_ id: UUID) -> Data { var value = id.uuid; return withUnsafeBytes(of: &value) { Data($0) } }
             let promotion = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(encode([
                 0: .unsigned(1), 1: .text(MachineUpdateRetainedSetupPromotionIntentRecord.formatName),
-                2: .bytes(bytes(id)), 3: .bytes(bytes(revision)), 4: .unsigned(1), 5: .bytes(publication)]))
+                2: .bytes(bytes(id)), 3: .bytes(bytes(revision)), 4: .unsigned(published ? 3 : 1), 5: .bytes(publication)]))
             func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
             func row(_ id: UUID, _ revision: UUID, _ data: Data) -> String {
                 "(X'\(hex(account.accountID))',X'\(hex(bytes(id)))',X'\(hex(bytes(revision)))',X'\(hex(data))')"
@@ -3399,6 +3403,242 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try fixture.files.sql("INSERT INTO retained_setup_promotion_intents_v1 VALUES \(try row(promotion.id, promotion.revision, promotion.encoded))")
             try fixture.files.reopen()
             try body(fixture, account, completion, promotion)
+        }
+    }
+
+    private func readinessReaderRecord(_ promotion: MachineUpdateRetainedSetupPromotionIntentRecord,
+        rootKey: P256.Signing.PrivateKey, transportKey: P256.Signing.PrivateKey,
+        ownerUID: UInt32? = nil) throws -> MachineUpdateRetainedSetupPromotionReadyRecord {
+        let publication = try promotion.publication(), archive = publication.configuration.archive
+        let original = try archive.originalActivation(), completion = try archive.completionIntent()
+        let binding: RuntimeRetainedSetupReleaseBinding
+        if let ownerUID {
+            var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: original.binding.encoded) as? [String: Any])
+            fields["ownerUID"] = ownerUID
+            binding = try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
+        } else { binding = original.binding }
+        let policy = try XCTUnwrap(completion.committedPolicy?.snapshot())
+        let checkpoint = try XCTUnwrap(completion.committedCheckpoint)
+        func uuid(_ id: UUID) -> Data { var raw = id.uuid; return withUnsafeBytes(of: &raw) { Data($0) } }
+        let limits = try CBORLimits(maxBytes: 4_194_304, maxDepth: 4, maxItems: 4096)
+        func encode(_ fields: [UInt64: CBORValue]) throws -> Data { try DeterministicCBOR.encode(.map(fields), limits: limits) }
+        let boundary = try encode([0: .bytes(completion.startupIntent.macID), 1: .bytes(completion.startupIntent.accountID),
+            2: .bytes(policy.storedBytes), 3: .bytes(checkpoint), 4: .bytes(uuid(policy.revision))])
+        let boundaryDigest = MachineUpdateActivationRecord.digest(Data("Remozio/RetainedSetupCompletionHealthBoundary/v2\0".utf8) + boundary)
+        let promotionDigest = try MachineUpdateActivationRecord.digest(Data("Remozio/RetainedSetupPromotionHealthScope/v3\0".utf8) + promotion.encoded)
+        let transport = try XCTUnwrap(publication.configuration.transport.settingsHost)
+        let rootCode = try XCTUnwrap(publication.configuration.host.codePolicy.entries.first { $0.role == .authority && $0.active })
+        XCTAssertEqual(rootKey.publicKey.x963Representation, original.reference.services.authorityPublicKey)
+        XCTAssertEqual(transportKey.publicKey.x963Representation, try original.reference.transportPublicKeyX963)
+        func requirement(_ role: AuthorityCodeRole) throws -> Data {
+            try MachineUpdateRetainedSetupHealthEvidence.Requirement(binding: binding,
+                activationPlanDigest: MachineUpdateActivationRecord.digest(archive.originalActivationBytes),
+                inventoryDigest: MachineUpdateActivationRecord.digest(archive.recordedInventoryBytes), role: role,
+                executionUID: role == .authority ? 0 : transport.serviceUID,
+                code: role == .authority ? rootCode : transport.consumerCode,
+                publicKey: role == .authority ? rootKey.publicKey.x963Representation : transportKey.publicKey.x963Representation,
+                completionBoundaryDigest: boundaryDigest, promotionDigest: promotionDigest).encoded
+        }
+        let request = try encode([0: .unsigned(1), 1: .text("retained-setup-health-challenge"),
+            2: .bytes(Data(repeating: 9, count: 32)), 3: .bytes(requirement(.authority))])
+        let nonce = MachineUpdateActivationRecord.digest(Data("Remozio/RetainedSetupTransportNonce/v1\0".utf8) + request)
+        let child = try encode([0: .unsigned(1), 1: .text("retained-setup-health-challenge"),
+            2: .bytes(nonce), 3: .bytes(requirement(.transport))])
+        let childSignature = try transportKey.signature(for: Data("Remozio/RetainedSetupHealthReply/v1\0".utf8) + child).rawRepresentation
+        let childReply = try encode([0: .unsigned(1), 1: .text("retained-setup-health-reply"),
+            2: .bytes(child), 3: .bytes(childSignature)])
+        let digest = try MachineUpdateRetainedSetupJointHealthPacket.transportDigest(request: child, reply: childReply)
+        let signature = try rootKey.signature(for: Data("Remozio/RetainedSetupJointRootReply/v1\0".utf8) + digest + request).rawRepresentation
+        let rootReply = try encode([0: .unsigned(1), 1: .text("retained-setup-joint-root-reply"),
+            2: .bytes(request), 3: .bytes(digest), 4: .bytes(signature)])
+        let packet = try MachineUpdateRetainedSetupJointHealthPacket(rootReply: rootReply, transportRequest: child, transportReply: childReply).encoded
+        return try .decode(encode([0: .unsigned(1), 1: .text(MachineUpdateRetainedSetupPromotionReadyRecord.formatName),
+            2: .bytes(uuid(UUID())), 3: .bytes(uuid(UUID())), 4: .bytes(uuid(promotion.id)),
+            5: .bytes(uuid(promotion.revision)), 6: .bytes(promotionDigest), 7: .bytes(request), 8: .bytes(packet)]))
+    }
+
+    /// Uses owned fixture keys and a historical exchange. It proves no native peer or fresh readiness.
+    private func withReadinessReaderFixture(readerFormats: Bool = true, differentOwnerUID: Bool = false,
+        _ body: (CompletionFixture, AccountPreparationIntent, MachineUpdateRetainedSetupCompletionIntentRecord,
+            MachineUpdateRetainedSetupPromotionIntentRecord, MachineUpdateRetainedSetupPromotionReadyRecord) throws -> Void) throws {
+        var material: RuntimePreparationMaterial?
+        try withPromotionReaderFixture(readinessReaderFormats: readerFormats, published: true,
+            didPrepareMaterial: { material = $0 }) { fixture, account, completion, promotion in
+            let material = try XCTUnwrap(material)
+            guard case .map(let identity) = try DeterministicCBOR.decode(material.transportIdentity,
+                limits: CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 9)),
+                  case .bytes(let key) = identity[2] else { throw ReplacementFixtureError.injected }
+            let ready = try readinessReaderRecord(promotion, rootKey: fixture.files.f.f.signingKey,
+                transportKey: P256.Signing.PrivateKey(x963Representation: key),
+                ownerUID: differentOwnerUID ? account.ownerUID + 1 : nil)
+            XCTAssertNoThrow(try ready.requirePublishedIntent(promotion))
+            if differentOwnerUID {
+                XCTAssertThrowsError(try ready.requirePublication(promotion)) {
+                    XCTAssertEqual($0 as? MachineUpdateRoleChallengeError, .changedScope)
+                }
+            } else { XCTAssertNoThrow(try ready.requirePublication(promotion)) }
+            XCTAssertNil(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate))
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            let id = ready.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = ready.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let record = try hex(ready.encoded)
+            try fixture.machine.close()
+            try fixture.files.sql(MachineUpdateRetainedSetupPromotionReadyStorage.createSQL)
+            try fixture.files.sql("PRAGMA user_version=28")
+            try fixture.files.sql("INSERT INTO retained_setup_promotion_ready_v1 VALUES(X'\(hex(account.accountID))',X'\(id)',X'\(revision)',X'\(record)')")
+            try fixture.files.reopen()
+            try body(fixture, account, completion, promotion, ready)
+        }
+    }
+
+    func testRetainedSetupReadinessReadsSchema28AndRejectsOrdinaryWrites() throws {
+        try withReadinessReaderFixture { fixture, account, completion, promotion, ready in
+            let snapshot = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            XCTAssertEqual(snapshot.schemaVersion, 28)
+            XCTAssertEqual(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate), ready)
+            XCTAssertEqual(try fixture.machine.retainedSetupPromotionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate), promotion)
+            XCTAssertEqual(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate), completion)
+            XCTAssertNil(try fixture.machine.retainedSetupPromotionReady(accountID: Data(repeating: 0, count: 16),
+                ownerUID: account.ownerUID, candidate: fixture.candidate))
+            XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID + 1, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+            }
+            XCTAssertThrowsError(try fixture.machine.writeInventory(snapshot.inventory, expectedRevision: snapshot.inventory.revision)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .invalidTransition)
+            }
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM retained_setup_promotion_ready_v1")
+            try fixture.files.reopen()
+            XCTAssertNil(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate))
+            XCTAssertNotEqual(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).currentRowsDigest,
+                snapshot.currentRowsDigest)
+        }
+    }
+
+    func testRetainedSetupReadinessRequiresExactColumnsAndTheActualPublishedPromotion() throws {
+        try withReadinessReaderFixture { fixture, account, _, promotion, ready in
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            let accountHex = hex(account.accountID)
+            let id = ready.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = ready.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let record = try hex(ready.encoded)
+            func readRejected(_ expected: PreparationStoreError = .corruptRecord) {
+                XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                    ownerUID: account.ownerUID, candidate: fixture.candidate)) {
+                    XCTAssertEqual($0 as? PreparationStoreError, expected)
+                }
+            }
+            for mutation in ["account=zeroblob(16)", "id=zeroblob(16)", "revision=zeroblob(16)", "record=X'01'"] {
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE retained_setup_promotion_ready_v1 SET \(mutation)")
+                try fixture.files.reopen(); readRejected()
+                try fixture.machine.close()
+                try fixture.files.sql("UPDATE retained_setup_promotion_ready_v1 SET account=X'\(accountHex)',id=X'\(id)',revision=X'\(revision)',record=X'\(record)'")
+                try fixture.files.reopen()
+                XCTAssertEqual(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                    ownerUID: account.ownerUID, candidate: fixture.candidate), ready)
+            }
+            let limits = try CBORLimits(maxBytes: 4_194_304, maxDepth: 1, maxItems: 64)
+            guard case .map(let original) = try DeterministicCBOR.decode(promotion.encoded, limits: limits) else {
+                throw ReplacementFixtureError.injected
+            }
+            func replacePromotion(_ fields: [UInt64: CBORValue]?) throws {
+                try fixture.machine.close()
+                try fixture.files.sql("DELETE FROM retained_setup_promotion_intents_v1")
+                if let fields {
+                    let bytes = try DeterministicCBOR.encode(.map(fields), limits: limits)
+                    let value = try MachineUpdateRetainedSetupPromotionIntentRecord.decode(bytes)
+                    let id = value.id.uuidString.replacingOccurrences(of: "-", with: "")
+                    let revision = value.revision.uuidString.replacingOccurrences(of: "-", with: "")
+                    try fixture.files.sql("INSERT INTO retained_setup_promotion_intents_v1 VALUES(X'\(accountHex)',X'\(id)',X'\(revision)',X'\(hex(bytes))')")
+                }
+                try fixture.files.reopen()
+            }
+            for key in [UInt64(2), 3, 4] {
+                var fields = original
+                if key == 4 { fields[key] = .unsigned(1) }
+                else { fields[key] = .bytes(Data(repeating: 42, count: 16)) }
+                try replacePromotion(fields); readRejected(key == 2 ? .corruptRecord : .staleRevision)
+                try replacePromotion(original)
+                XCTAssertEqual(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                    ownerUID: account.ownerUID, candidate: fixture.candidate), ready)
+            }
+            try replacePromotion(nil); readRejected()
+            try replacePromotion(original)
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM retained_setup_completion_intents_v1")
+            try fixture.files.reopen(); readRejected()
+        }
+    }
+
+    func testRetainedSetupReadinessRejectsOnlyTheDifferentSignedBindingOwner() throws {
+        try withReadinessReaderFixture(differentOwnerUID: true) { fixture, account, _, promotion, ready in
+            let binding = try MachineUpdateRetainedSetupHealthEvidence.decodeRequestedRequirement(ready.request).binding
+            let selected = try promotion.publication().configuration.archive.binding.startupBinding
+            XCTAssertEqual(binding.macID, selected.macID)
+            XCTAssertEqual(binding.installationID, selected.installationID)
+            XCTAssertEqual(binding.accountID, selected.accountID)
+            XCTAssertEqual(binding.accountID, account.accountID)
+            XCTAssertEqual(binding.ownerUID, account.ownerUID + 1)
+            XCTAssertNotEqual(binding.ownerUID, selected.ownerUID)
+            XCTAssertNoThrow(try ready.requirePublishedIntent(promotion))
+            XCTAssertEqual(try MachineUpdateRetainedSetupPromotionReadyRecord.decode(ready.encoded), ready)
+            XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedSetupReadinessRejectsAValidForeignSignedRecord() throws {
+        try withReadinessReaderFixture { fixture, account, _, _, _ in
+            let foreign = try RetainedSetupReadinessArchiveTests.Fixture()
+            let ready = try MachineUpdateRetainedSetupPromotionReadyRecord.decode(foreign.encode(foreign.readyFields()))
+            XCTAssertNoThrow(try ready.requirePublication(foreign.promotion))
+            let binding = try MachineUpdateRetainedSetupHealthEvidence.decodeRequestedRequirement(ready.request).binding
+            XCTAssertNotEqual(binding.accountID, account.accountID)
+            func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+            let id = ready.id.uuidString.replacingOccurrences(of: "-", with: "")
+            let revision = ready.revision.uuidString.replacingOccurrences(of: "-", with: "")
+            let record = try hex(ready.encoded)
+            try fixture.machine.close()
+            try fixture.files.sql("DELETE FROM retained_setup_promotion_ready_v1")
+            try fixture.files.sql("INSERT INTO retained_setup_promotion_ready_v1 VALUES(X'\(hex(binding.accountID))',X'\(id)',X'\(revision)',X'\(record)')")
+            try fixture.files.reopen()
+            XCTAssertThrowsError(try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+            }
+        }
+    }
+
+    func testRetainedSetupReadinessRequiresTheNewReaderFormats() throws {
+        try withReadinessReaderFixture(readerFormats: false) { fixture, account, _, _, _ in
+            XCTAssertNoThrow(try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(fixture.candidate))
+            XCTAssertThrowsError(try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+            }
+            XCTAssertThrowsError(try fixture.machine.retainedSetupPromotionReady(accountID: account.accountID,
+                ownerUID: account.ownerUID, candidate: fixture.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+            }
+        }
+    }
+
+    func testRetainedSetupReadinessRequiresItsExactTableDeclaration() throws {
+        try withReadinessReaderFixture { fixture, _, _, _, _ in
+            try fixture.machine.close()
+            try fixture.files.sql("ALTER TABLE retained_setup_promotion_ready_v1 RENAME TO replaced_ready")
+            try fixture.files.sql("CREATE TABLE retained_setup_promotion_ready_v1(account BLOB PRIMARY KEY,id BLOB,revision BLOB,record BLOB) STRICT")
+            try fixture.files.sql("DROP TABLE replaced_ready")
+            XCTAssertThrowsError(try fixture.files.reopen()) {
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+            }
         }
     }
 
