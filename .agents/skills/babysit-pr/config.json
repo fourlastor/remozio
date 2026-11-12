@@ -3,21 +3,25 @@
   "local_gate": "./scripts/check-local.sh",
   "required_checks": [
     "Python checks",
+    "Select jobs",
+    "Selected checks"
+  ],
+  "expected_skipped_checks": [
+    "Prune superseded main caches",
     "Linux Swift protocol",
     "Mac build",
     "Mac core tests",
+    "Mac core tests ()",
+    "Mac core tests (${{ matrix.part }})",
     "Mac experiments",
     "Mac interoperability",
     "Kotlin protocol",
     "Android build",
     "iOS build"
   ],
-  "expected_skipped_checks": [
-    "Prune superseded main caches"
-  ],
   "retry_eligible_workflow_keywords": [],
   "codex": {
-    "enabled": true,
+    "enabled": false,
     "required": true,
     "idle_wait_minutes": 10
   },

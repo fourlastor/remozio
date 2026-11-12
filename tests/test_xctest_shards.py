@@ -120,6 +120,48 @@ class XCTestShardTests(unittest.TestCase):
         self.assertEqual(SHARDS.verify(expected, found, set())[0],
                          ['RemozioCoreTests.ATests/testOne: skipped, which this job does not allow'])
 
+    def test_a_job_runs_every_shard_or_each_named_shard_once(self):
+        self.assertEqual(SHARDS.chosen_shards(6, True, None), [0, 1, 2, 3, 4, 5])
+        self.assertEqual(SHARDS.chosen_shards(6, False, [5, 1, 3]), [1, 3, 5])
+        self.assertEqual(SHARDS.chosen_shards(1, False, [0]), [0])
+        with self.assertRaises(ValueError):
+            SHARDS.chosen_shards(6, False, [1, 1])
+        with self.assertRaises(ValueError):
+            SHARDS.chosen_shards(6, False, [6])
+        with self.assertRaises(ValueError):
+            SHARDS.chosen_shards(6, False, [-1])
+
+    def test_the_two_mac_core_parts_run_every_shard_of_six_exactly_once(self):
+        workflow = (ROOT / '.github/workflows/checks.yml').read_text()
+        self.assertIn('first=$(( (PART - 1) * 3 ))', workflow)
+        self.assertIn('set -- --shards 6 --index "$first" --index "$((first + 1))" --index "$((first + 2))"', workflow)
+        self.assertIn("fromJSON(needs.changes.outputs.mac_core_parts || '[1, 2]')", workflow)
+        indices = [first + offset for part in (1, 2) for first in [(part - 1) * 3] for offset in range(3)]
+        self.assertEqual(sorted(indices), list(range(6)))
+
+    def test_only_narrows_the_selection_and_rejects_unlisted_names(self):
+        tests = SHARDS.listed_tests(LISTING)
+        selected = {test for test in tests if 'SignedRelease' not in test and 'RelayConnector' not in test}
+        kept, partial = SHARDS.restrict(tests, selected, {'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.BTests'})
+        self.assertEqual(kept, {'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.BTests/testThree'})
+        self.assertEqual(partial, {'RemozioCoreTests.ATests'})
+        # An app-dependent class outside this job's selection is listed, so it is not an error; it keeps nothing.
+        kept, partial = SHARDS.restrict(tests, selected, {'RemozioCoreTests.SignedReleaseInspectionTests'})
+        self.assertEqual((kept, partial), (set(), set()))
+        with self.assertRaises(ValueError):
+            SHARDS.restrict(tests, selected, {'RemozioCoreTests.GoneTests', 'RemozioCoreTests.ATests'})
+        with self.assertRaises(ValueError):
+            SHARDS.restrict(tests, selected, {'RemozioCoreTests.ATests/testGone'})
+
+    def test_a_partly_selected_class_runs_only_its_selected_tests(self):
+        tests = {'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.BTests/testThree'}
+        names = SHARDS.units(['RemozioCoreTests.ATests', 'RemozioCoreTests.BTests'], tests, {},
+                             {'RemozioCoreTests.ATests'})
+        self.assertEqual(names, ['RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.BTests'])
+        self.assertEqual(SHARDS.shard_tests(names, tests), tests)
+        found = {test: ['passed'] for test in tests}
+        self.assertEqual(SHARDS.verify(SHARDS.shard_tests(names, tests), found), ([], []))
+
     def test_weights_file_covers_the_app_dependent_classes_and_holds_seconds(self):
         document = json.loads((ROOT / '.github/macos-core-test-weights.json').read_text())
         weights = document['weights']

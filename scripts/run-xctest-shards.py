@@ -3,7 +3,9 @@
 
 Each shard is one xctest process that runs whole classes serially, as `swift test` does. A class that the weights
 file lists under "methods" is split instead: each of its selected tests is a unit, so one heavy class can spread over
-several shards. The shards run concurrently in this job (--concurrent) or one per job (--index). The weights only
+several shards. The shards run concurrently in this job: every shard (--concurrent), or only the shards named with
+--index, so that several jobs can share one partition. --only narrows the selection to named classes and tests, as
+a pull request does for the tests it changes. The weights only
 balance the shards: every selected test is assigned to a shard and must then report exactly one outcome, so a stale
 or missing weight can make a shard slower but can never drop a test.
 """
@@ -49,11 +51,31 @@ def select(classes, app_dependent):
     return sorted(classes)
 
 
-def units(classes, tests, methods):
-    """Whole classes, except that each selected test of a class named in `methods` is a unit of its own."""
+def restrict(tests, selected_tests, only):
+    """Narrow the selected tests to the names in `only`, and return them with the classes that keep only some tests.
+
+    A Module.Class name keeps every selected test of that class and a Module.Class/method name keeps that one test.
+    A name that the package does not list is an error, so a stale or mistyped name cannot select nothing silently.
+    A listed name outside the selection, such as an app-dependent class in a job that excludes them, keeps nothing.
+    """
+    listed_classes = {test.split('/', 1)[0] for test in tests}
+    unknown = sorted(name for name in only if name not in tests and name not in listed_classes)
+    if unknown:
+        raise ValueError(f'--only names tests that the package does not list: {", ".join(unknown)}')
+    kept = {test for test in selected_tests if test in only or test.split('/', 1)[0] in only}
+    kept_classes = {test.split('/', 1)[0] for test in kept}
+    partial = {test.split('/', 1)[0] for test in selected_tests - kept} & kept_classes
+    return kept, partial
+
+
+def units(classes, tests, methods, split=frozenset()):
+    """Whole classes, except that each selected test of a class named in `methods` is a unit of its own.
+
+    So is each selected test of a Module.Class in `split`: xctest given the class name would run its other tests too.
+    """
     result = []
     for name in classes:
-        if short_name(name) in methods:
+        if short_name(name) in methods or name in split:
             result += sorted(test for test in tests if test.split('/', 1)[0] == name)
         else:
             result.append(name)
@@ -95,6 +117,18 @@ def shard_tests(names, tests):
     """The selected tests a shard covers: every test of each whole class, and each test listed on its own."""
     members = set(names)
     return {test for test in tests if test in members or test.split('/', 1)[0] in members}
+
+
+def chosen_shards(shards, concurrent, indices):
+    """The shard indices this job runs: all of them, or each --index once. Every index must be within --shards."""
+    if concurrent:
+        return list(range(shards))
+    if len(set(indices)) != len(indices):
+        raise ValueError('--index names a shard more than once')
+    outside = [index for index in indices if not 0 <= index < shards]
+    if outside:
+        raise ValueError(f'--index must be within --shards: {", ".join(map(str, outside))}')
+    return sorted(indices)
 
 
 def describe(names):
@@ -161,17 +195,22 @@ def main(argv):
                         'optional "methods" map of class name to {test method: seconds} for the classes to split')
     parser.add_argument('--shards', type=int, required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--index', type=int, help='run only this shard')
+    mode.add_argument('--index', type=int, action='append',
+                      help='run only this shard; repeat it to run several shards at once in this job')
     mode.add_argument('--concurrent', action='store_true', help='run every shard at once in this job')
     parser.add_argument('--app-dependent', choices=('include', 'exclude', 'only'), default='include',
                         help=f'select the classes that need the built Mac app: {", ".join(APP_DEPENDENT)}')
     skips = parser.add_mutually_exclusive_group()
     skips.add_argument('--allowed-skips', help='comma-separated Module.Class/method tests that may skip; others fail')
     skips.add_argument('--forbid-skips', action='store_true', help='any skipped test fails the run')
+    parser.add_argument('--only', help='comma-separated Module.Class and Module.Class/method names; run only those '
+                        'selected tests. Every name must be in the package\'s test list')
     parser.add_argument('--log-dir', type=Path, default=ROOT / '.build/xctest-shards')
     args = parser.parse_args(own)
-    if args.index is not None and not 0 <= args.index < args.shards:
-        parser.error('--index must be within --shards')
+    try:
+        selected = chosen_shards(args.shards, args.concurrent, args.index)
+    except ValueError as error:
+        parser.error(str(error))
     allowed_skips = set() if args.forbid_skips else (
         {test.strip() for test in args.allowed_skips.split(',') if test.strip()} if args.allowed_skips is not None else None)
 
@@ -187,8 +226,15 @@ def main(argv):
     weights, methods = document['weights'], document.get('methods', {})
     classes = select({test.split('/', 1)[0] for test in tests}, args.app_dependent)
     selected_tests = {test for test in tests if test.split('/', 1)[0] in set(classes)}
-    assignment, loads = partition(units(classes, selected_tests, methods), weights, args.shards, methods)
-    selected = range(args.shards) if args.concurrent else [args.index]
+    partial = set()
+    if args.only is not None:
+        try:
+            selected_tests, partial = restrict(tests, selected_tests,
+                                               {name.strip() for name in args.only.split(',') if name.strip()})
+        except ValueError as error:
+            raise SystemExit(str(error))
+        classes = sorted({test.split('/', 1)[0] for test in selected_tests})
+    assignment, loads = partition(units(classes, selected_tests, methods, partial), weights, args.shards, methods)
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
     running = []
