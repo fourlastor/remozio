@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Run a Swift package's XCTest classes in balanced shards and require every selected test to run exactly once.
 
-Each shard is one xctest process that runs whole classes serially, as `swift test` does. The shards run concurrently
-in this job (--concurrent) or one per job (--index). The weights only balance the shards: every selected test is
-assigned to a shard and must then report exactly one outcome, so a stale or missing weight can make a shard slower
-but can never drop a test.
+Each shard is one xctest process that runs whole classes serially, as `swift test` does. A class that the weights
+file lists under "methods" is split instead: each of its selected tests is a unit, so one heavy class can spread over
+several shards. The shards run concurrently in this job (--concurrent) or one per job (--index). The weights only
+balance the shards: every selected test is assigned to a shard and must then report exactly one outcome, so a stale
+or missing weight can make a shard slower but can never drop a test.
 """
 import argparse
 import heapq
@@ -48,25 +49,57 @@ def select(classes, app_dependent):
     return sorted(classes)
 
 
-def partition(classes, weights, shards):
-    """Longest-processing-time assignment. Deterministic for one class list, weight table and shard count."""
+def units(classes, tests, methods):
+    """Whole classes, except that each selected test of a class named in `methods` is a unit of its own."""
+    result = []
+    for name in classes:
+        if short_name(name) in methods:
+            result += sorted(test for test in tests if test.split('/', 1)[0] == name)
+        else:
+            result.append(name)
+    return result
+
+
+def partition(units, weights, shards, methods=None):
+    """Longest-processing-time assignment. Deterministic for one unit list, weight table and shard count.
+
+    A unit is a class, or a Module.Class/method test of a split class. A test without its own weight counts as
+    the median test of its class; a class without a weight counts as the median class.
+    """
     if shards < 1:
         raise ValueError('At least one shard is required')
+    methods = methods or {}
     known = sorted(weights.values())
     default = known[len(known) // 2] if known else 1.0
 
     def weight(name):
-        return weights.get(short_name(name), default)
+        if '/' not in name:
+            return weights.get(short_name(name), default)
+        test_class, method = name.split('/', 1)
+        table = methods.get(short_name(test_class), {})
+        values = sorted(table.values())
+        return table.get(method, values[len(values) // 2] if values else default)
 
     loads = [0.0] * shards
     assigned = [[] for _ in range(shards)]
     heap = [(0.0, index) for index in range(shards)]
-    for name in sorted(classes, key=lambda name: (-weight(name), name)):
+    for name in sorted(units, key=lambda name: (-weight(name), name)):
         _, index = heapq.heappop(heap)
         assigned[index].append(name)
         loads[index] += weight(name)
         heapq.heappush(heap, (loads[index], index))
     return [sorted(names) for names in assigned], loads
+
+
+def shard_tests(names, tests):
+    """The selected tests a shard covers: every test of each whole class, and each test listed on its own."""
+    members = set(names)
+    return {test for test in tests if test in members or test.split('/', 1)[0] in members}
+
+
+def describe(names):
+    split = sum(1 for name in names if '/' in name)
+    return f'{len(names) - split} classes' + (f' and {split} tests of split classes' if split else '')
 
 
 def outcomes(text):
@@ -124,7 +157,8 @@ def main(argv):
     own, flags = (argv[:argv.index('--')], argv[argv.index('--') + 1:]) if '--' in argv else (argv, [])
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--package-path', type=Path, required=True)
-    parser.add_argument('--weights', type=Path, help='JSON object with a "weights" map of class name to seconds')
+    parser.add_argument('--weights', type=Path, help='JSON object with a "weights" map of class name to seconds and an '
+                        'optional "methods" map of class name to {test method: seconds} for the classes to split')
     parser.add_argument('--shards', type=int, required=True)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--index', type=int, help='run only this shard')
@@ -149,10 +183,11 @@ def main(argv):
     bundles = sorted(bin_path.glob('*.xctest'))
     if len(bundles) != 1:
         raise SystemExit(f'Expected one test bundle in {bin_path}, found {[b.name for b in bundles]}')
-    weights = json.loads(args.weights.read_text())['weights'] if args.weights else {}
+    document = json.loads(args.weights.read_text()) if args.weights else {'weights': {}}
+    weights, methods = document['weights'], document.get('methods', {})
     classes = select({test.split('/', 1)[0] for test in tests}, args.app_dependent)
     selected_tests = {test for test in tests if test.split('/', 1)[0] in set(classes)}
-    assignment, loads = partition(classes, weights, args.shards)
+    assignment, loads = partition(units(classes, selected_tests, methods), weights, args.shards, methods)
     selected = range(args.shards) if args.concurrent else [args.index]
     args.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -187,18 +222,18 @@ def main(argv):
     for index, names, log, process, started in running:
         status, ended = finished[index]
         text = log.read_text(errors='replace') if process else ''
-        expected = {test for test in selected_tests if test.split('/', 1)[0] in names}
+        expected = shard_tests(names, selected_tests)
         problems, skipped = verify(expected, outcomes(text), allowed_skips)
         if status != 0 and not problems:
             problems.append(f'xctest exited {status}')
         failed |= bool(problems)
         print(f'Command timing: xctest shard {index + 1}/{args.shards}: {ended - started:.3f}s (exit {status})',
               file=sys.stderr, flush=True)
-        group(f'xctest shard {index + 1}/{args.shards}: {len(names)} classes, {len(expected)} tests', text)
+        group(f'xctest shard {index + 1}/{args.shards}: {describe(names)}, {len(expected)} tests', text)
         summary.append((index, names, expected, ended - started, skipped, problems))
 
     for index, names, expected, elapsed, skipped, problems in summary:
-        print(f'Shard {index + 1}/{args.shards}: {len(names)} classes, {len(expected)} tests, '
+        print(f'Shard {index + 1}/{args.shards}: {describe(names)}, {len(expected)} tests, '
               f'estimated {loads[index]:.0f}s, took {elapsed:.0f}s, {len(skipped)} skipped, {len(problems)} problems')
         for test in skipped:
             print(f'  skipped: {test}')

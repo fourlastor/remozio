@@ -59,6 +59,45 @@ class XCTestShardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SHARDS.partition(['RemozioCoreTests.ATests'], {}, 0)
 
+    def test_a_split_class_runs_each_selected_test_as_its_own_unit(self):
+        classes = ['RemozioCoreTests.ATests', 'RemozioCoreTests.BTests']
+        tests = {'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.ATests/testOne', 'RemozioCoreTests.BTests/testThree'}
+        self.assertEqual(SHARDS.units(classes, tests, {'ATests': {'testOne': 1.0}}),
+                         ['RemozioCoreTests.ATests/testOne', 'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.BTests'])
+        self.assertEqual(SHARDS.units(classes, tests, {}), classes)
+
+    def test_a_heavy_split_class_spreads_over_the_shards_and_every_test_runs_once(self):
+        heavy = {f'test{index}': 10.0 for index in range(9)}
+        tests = {f'RemozioCoreTests.HeavyTests/{name}' for name in heavy}
+        tests |= {f'RemozioCoreTests.L{index}Tests/testOnly' for index in range(6)}
+        classes = sorted({test.split('/')[0] for test in tests})
+        weights = {'HeavyTests': 90.0, **{f'L{index}Tests': 5.0 for index in range(6)}}
+        _, whole = SHARDS.partition(classes, weights, 3)
+        split, loads = SHARDS.partition(SHARDS.units(classes, tests, {'HeavyTests': heavy}), weights, 3,
+                                        {'HeavyTests': heavy})
+        self.assertEqual(max(whole), 90.0)
+        self.assertEqual(loads, [40.0, 40.0, 40.0])
+        covered = [SHARDS.shard_tests(names, tests) for names in split]
+        self.assertEqual(sorted(test for shard in covered for test in shard), sorted(tests))
+        self.assertEqual(sum(1 for shard in covered if any(test.startswith('RemozioCoreTests.HeavyTests/')
+                                                           for test in shard)), 3)
+
+    def test_a_test_without_its_own_weight_counts_as_the_median_test_of_its_class(self):
+        methods = {'HeavyTests': {'testA': 1.0, 'testB': 3.0, 'testC': 100.0}}
+        self.assertEqual(SHARDS.partition(['RemozioCoreTests.HeavyTests/testNew'], {'OtherTests': 7.0}, 1, methods)[1],
+                         [3.0])
+        self.assertEqual(SHARDS.partition(['RemozioCoreTests.OtherTests/testNew'], {'OtherTests': 7.0}, 1, methods)[1],
+                         [7.0])
+
+    def test_shard_tests_cover_whole_classes_and_single_tests_only(self):
+        tests = {'RemozioCoreTests.ATests/testOne', 'RemozioCoreTests.ATests/testTwo',
+                 'RemozioCoreTests.HeavyTests/testOne', 'RemozioCoreTests.HeavyTests/testTwo'}
+        names = ['RemozioCoreTests.ATests', 'RemozioCoreTests.HeavyTests/testTwo']
+        self.assertEqual(SHARDS.shard_tests(names, tests), {
+            'RemozioCoreTests.ATests/testOne', 'RemozioCoreTests.ATests/testTwo', 'RemozioCoreTests.HeavyTests/testTwo'})
+        self.assertEqual(SHARDS.describe(names), '1 classes and 1 tests of split classes')
+        self.assertEqual(SHARDS.describe(['RemozioCoreTests.ATests']), '1 classes')
+
     def test_missing_duplicate_failed_and_foreign_outcomes_are_problems(self):
         expected = {'RemozioCoreTests.ATests/testOne', 'RemozioCoreTests.ATests/testTwo',
                     'RemozioCoreTests.BTests/testThree'}
@@ -82,10 +121,16 @@ class XCTestShardTests(unittest.TestCase):
                          ['RemozioCoreTests.ATests/testOne: skipped, which this job does not allow'])
 
     def test_weights_file_covers_the_app_dependent_classes_and_holds_seconds(self):
-        weights = json.loads((ROOT / '.github/macos-core-test-weights.json').read_text())['weights']
+        document = json.loads((ROOT / '.github/macos-core-test-weights.json').read_text())
+        weights = document['weights']
         self.assertGreater(len(weights), 400)
         self.assertTrue(all(isinstance(value, (int, float)) and value >= 0 for value in weights.values()))
         self.assertTrue(set(SHARDS.APP_DEPENDENT) <= set(weights))
+        for name, table in document.get('methods', {}).items():
+            self.assertIn(name, weights)
+            self.assertNotIn(name, SHARDS.APP_DEPENDENT)
+            self.assertTrue(table)
+            self.assertTrue(all(isinstance(value, (int, float)) and value >= 0 for value in table.values()))
 
 
 if __name__ == '__main__':
