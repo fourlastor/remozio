@@ -222,9 +222,10 @@ extension MachineUpdateRetainedSetupActivationSnapshot {
         verifyCurrent: () throws -> Void,
         read: (RuntimePublishedArtifactValidation.Artifact) throws -> Data) throws {
         try completion.activation.requireSame(as: self)
-        try validateRuntimeFiles(plan: plan, material: material, candidate: candidate, verifyCurrent: {
-            try verifyCurrent(); _ = try completion.classifyPair(readPolicyBoundary()); try verifyCurrent()
-        }, read: read)
+        try MachineUpdateRetainedSetupPromotionSourceValidation.withPinnedPair(completion: completion,
+            readPolicyBoundary: readPolicyBoundary, verifyCurrent: verifyCurrent) { _, _, current in
+                try validateRuntimeFiles(plan: plan, material: material, candidate: candidate, verifyCurrent: current, read: read)
+            }
     }
     /// Checks files from the supplied writer frame. The owner must validate the paired stores at its separate boundary.
     func validateCompletionFiles(plan: RuntimeRetainedSetupActivationPlan, material: RuntimePreparationMaterial,

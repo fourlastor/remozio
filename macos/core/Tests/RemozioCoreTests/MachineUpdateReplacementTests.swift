@@ -5009,6 +5009,30 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Exposes an actual owned pair and source byte controls. The machine still has no retained completion producer.
+    static func withRetainedPromotionSourceValidationFixture(_ body: (RetainedPromotionSourceValidationFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedPromotionCaptureRequiresRecordedCompletionAndActualRegistration"))
+        try suite.withRetainedPromotionValueFixture { f in
+            let initial = try XCTUnwrap(f.completion.activation.runtime.setup.account?.initialization)
+            let journal = try f.source.fixture.openPolicyPair(readOnly: true, accountID: initial.accountID)
+            defer { try? journal.close() }
+            let plan = try XCTUnwrap(f.completion.activation.state.plan)
+            let paths = try RuntimePreparationPaths(accountID: plan.accountID)
+            var files = f.source.artifacts
+            let host = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.commandHost.name
+            files[host] = .init(path: host, bytes: plan.host.canonicalBytes, access: .privateRoot)
+            for job in [plan.authorityJob, plan.transportJob] {
+                files[job.path] = .init(path: job.path, bytes: job.bytes, access: .publicRoot)
+            }
+            let material = paths.privateDirectory + "/" + AdministrativeSetupPublication.File.runtimeRecord.name
+            files[material] = try .init(path: material, bytes: f.source.material.encoded, access: .privateRoot)
+            try body(.init(completion: f.completion, candidate: f.candidate, material: f.source.material, plan: plan,
+                publication: f.publication, files: files,
+                boundary: { try journal.captureRetainedSetupPolicyBoundary(expected: initial) }, verifyCurrent: f.source.verifyMarker))
+        }
+    }
+
     private func withRetainedPromotionValueFixture(_ body: (RetainedPromotionFixture) throws -> Void) throws {
         try withRetainedCompletionValueFixture(promotionProposalFormats: true) { f, activation, _, prepared in
             let writing = try prepared.preparingWrite(expected: f.boundary())
