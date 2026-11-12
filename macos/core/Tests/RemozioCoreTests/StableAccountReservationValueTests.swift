@@ -77,6 +77,18 @@ final class StableAccountReservationValueTests: XCTestCase {
         }
     }
 
+    /// Shares immutable value controls only. It supplies no actual reservation or writer authorization.
+    static func withAccountStorageComparisonValues(_ body: (MachineUpdateStableRuntimeSource,
+        SignedReleaseEvidence, LocalAccountIdentity, AccountPreparationIntent) throws -> Void) throws {
+        let suite = StableAccountReservationValueTests(selector: NSSelectorFromString(
+            "testPureComparisonAcceptsTheSingleUnpreparedReservation"))
+        try suite.fixture { try body($0.after.source, $0.candidate, $0.owner, $0.value) }
+    }
+    static func accountStorageReservationValue(source: MachineUpdateStableRuntimeSource,
+        candidate: SignedReleaseEvidence, owner: LocalAccountIdentity) throws -> AccountPreparationIntent {
+        try Control(source: source, candidate: candidate, owner: owner).value
+    }
+
     private func fixture(_ body: (Control) throws -> Void) throws {
         try MachineUpdateReplacementTests.withStableAccountReservationValues { source, candidate in
             try body(Control(source: source, candidate: candidate))
