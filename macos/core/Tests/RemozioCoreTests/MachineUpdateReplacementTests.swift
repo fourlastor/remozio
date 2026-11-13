@@ -3729,13 +3729,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true,
+    static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true, noPolicyChange: Bool = false,
         _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
         try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
-            policyWriterFormats: writerFormats, policyMigration: migration,
+            unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration,
             beforeActivation: { retained = try suite.prepareSecondForeground($0).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
@@ -3765,7 +3765,16 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     let initial = try XCTUnwrap(source.runtime.setup.account?.initialization)
                     XCTAssertEqual(try fresh.captureUnactivatedSetupPolicySource(expected: initial), source.accountPolicy)
                 }, reopen: { hook in try fixture.files.reopen(hook: hook) },
-                scalar: { try fixture.files.f.f.sql($0) }))
+                scalar: { try fixture.files.f.f.sql($0) }, openPolicyJournal: { mode in
+                    switch mode {
+                    case .startup, .foreignStartup:
+                        let storage = try fixture.policyStorage(readOnly: false,
+                            accountID: mode == .foreignStartup ? fixture.boundary.accountID : account.accountID)
+                        return try AuthorityJournal(retainedSetupPolicyStorage: storage, validateSelf: { _ in })
+                    case .completion: return try fixture.openPolicyPair(readOnly: false, accountID: account.accountID)
+                    case .readOnly: return try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
+                    }
+                }))
         }
     }
 
