@@ -120,4 +120,31 @@ final class MachineUpdateStableRuntimeViewTests: XCTestCase {
             XCTAssertNoThrow(try f.machine.inventory())
         }
     }
+    func testInstalledRetainedMemberUsesCompletionHostScopeAndCurrentReleaseValidation() throws {
+        try MachineUpdateReplacementTests.withInstalledRetainedRuntimeViewFixture { machine, candidate, runtime in
+            let source = runtime.setup.source, inventory = source.actual.inventory
+            let scope = try source.account(runtime.preparation.accountID, ownerUID: runtime.preparation.ownerUID)
+            XCTAssertEqual(scope.origin, .retained)
+            XCTAssertTrue(scope.inInventory)
+            let archive = try source.actual.installed.configuration()
+            let configuration = try XCTUnwrap(archive.configuration(accountID: scope.accountID)).completion
+            XCTAssertEqual(configuration.policyStage, .completion)
+            XCTAssertNotEqual(runtime.preparation.releaseDigest, inventory.releaseDigest)
+            XCTAssertNotEqual(try configuration.gateway.codePolicy.bytes, try runtime.preparation.initialAuthority.codePolicy.bytes)
+            XCTAssertThrowsError(try configuration.gateway.validate(account: runtime.preparation, inventory: inventory)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            try configuration.gateway.requireConfigurationScope(account: runtime.preparation, inventory: inventory)
+            try configuration.gateway.validateRelease(candidate)
+            let inputs = try machine.stableRuntimeViewInputs(expected: source, retained: [], candidate: candidate)
+            let view = try View(compatibility: inputs, candidate: candidate)
+            let selected = try view.account(scope.accountID, ownerUID: scope.ownerUID)
+            XCTAssertEqual(selected.scope, scope)
+            XCTAssertEqual(try selected.configuration?.encoded, try configuration.encoded)
+            XCTAssertEqual(selected.host?.canonicalBytes, configuration.host.canonicalBytes)
+            try view.requireCurrent(machine: machine, candidate: candidate)
+            try runtime.requireCurrent(machine: machine, candidate: candidate)
+        }
+    }
+
 }

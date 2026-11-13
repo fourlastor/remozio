@@ -75,7 +75,8 @@ struct MachineUpdateStableRuntimeView: CustomStringConvertible, CustomDebugStrin
                     try configuration.binding.requireHistoricalRuntime(runtime.reference)
                     if account.inInventory {
                         _ = try configuration.host.validate(inventory: actual.inventory, release: candidate, bundlePath: actual.inventory.bundlePath)
-                        try configuration.gateway.validate(account: preparation, inventory: actual.inventory)
+                        try configuration.gateway.requireConfigurationScope(account: preparation, inventory: actual.inventory)
+                        try configuration.gateway.validateRelease(candidate)
                     }
                     if let gateway {
                         guard let base = try archivedBackend.capture(accountID: account.accountID)?.completion,

@@ -3346,6 +3346,18 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned metadata fixtures. These reads prove no current files, native health, or writer authority.
+    /// Supplies owned installed metadata only. The callback grants no native identity, file custody, or startup authority.
+    static func withInstalledRetainedRuntimeViewFixture(_ body: (PreparationIntentStore, SignedReleaseEvidence,
+        MachineUpdateStableRuntimePreparationSnapshot) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotReadsTheExactInstalledSelectionWithoutWriting"))
+        try suite.withStableActivationReadFixture { fixture, _, snapshot in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            try body(fixture.machine, fixture.candidate, snapshot.runtime)
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+        }
+    }
+
     private func withStableActivationReadFixture(registerSecondForeground: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateStableRuntimeActivationSnapshot) throws -> Void) throws {
         try withFinishingFixture(registerSecondForeground: registerSecondForeground, stableFormats: true,
