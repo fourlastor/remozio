@@ -150,7 +150,8 @@ final class StableRuntimeImportTests: XCTestCase {
                 try actual.requirePublished(from: before); XCTAssertEqual(actual.state, before.state)
                 captured = after; return before.preparation
             }
-            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            // The scope closes the directory; validate checks closed before retired.
+            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .closed) }
             try store.close()
             let machine = URL(fileURLWithPath: f.directory.path)
             let outside = try SharedSetupImportCompatibilitySnapshot.capture(anchor: machine.deletingLastPathComponent().path,
@@ -230,7 +231,7 @@ final class StableRuntimeImportTests: XCTestCase {
             XCTAssertThrowsError(try f.machine().withSharedImportSnapshot(journal: store) { directory, _ -> Bool in
                 escaped = directory; throw Fault.body
             }) { XCTAssertTrue($0 is Fault) }
-            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .closed) }
             try f.machine().withSharedImportSnapshot(journal: store) { directory, _ in
                 escaped = directory
                 let account = try snapshot(f).preparation
@@ -257,7 +258,7 @@ final class StableRuntimeImportTests: XCTestCase {
                 XCTAssertEqual(try store.current(scope: intent.scope), intent)
                 try snapshot(f).requireCurrent(machine: f.machine(), candidate: f.candidate)
             }
-            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(escaped).validate()) { XCTAssertEqual($0 as? JournalLeaseError, .closed) }
             XCTAssertThrowsError(try store.compatibilitySnapshot(directory: XCTUnwrap(escaped)))
         }
     }
