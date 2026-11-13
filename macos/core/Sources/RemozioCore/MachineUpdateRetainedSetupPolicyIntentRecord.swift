@@ -3,6 +3,10 @@ import Foundation
 /// Proposed startup-policy progress. This record grants no writer, native health, completion floor, or request authority.
 struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     enum Phase: UInt64, Codable, Sendable { case prepared = 1, writing = 2, recorded = 3 }
+    enum Reconciliation: Equatable, Sendable {
+        case sourceUnchanged
+        case recorded(MachineUpdateRetainedSetupPolicyIntentRecord)
+    }
     enum Observation: Equatable, Sendable { case sourceUnchanged, startupBoundary }
     typealias StoredPolicy = MachineUpdatePolicyIntentRecord.StoredPolicy
     static let formatName = "authority.retained-setup-policy-intent"
@@ -10,7 +14,7 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
     static let maximumBytes = 131072
     let formatVersion: UInt64
     let id: UUID
-    let revision: UUID
+    private(set) var revision: UUID
     let macID: Data
     let installationID: Data
     let accountID: Data
@@ -22,9 +26,9 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
     let sourceCheckpoint: Data
     let startupPolicy: Data
     let completionPolicy: Data
-    let phase: Phase
-    let committedPolicy: StoredPolicy?
-    let committedCheckpoint: Data?
+    private(set) var phase: Phase
+    private(set) var committedPolicy: StoredPolicy?
+    private(set) var committedCheckpoint: Data?
     var description: String { "MachineUpdateRetainedSetupPolicyIntentRecord(redacted)" }
     var debugDescription: String { description }
 
@@ -43,6 +47,66 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
         phase = .prepared; committedPolicy = nil; committedCheckpoint = nil
         try validate()
     }
+    /// Checks the current v2 source without selecting a historical codec or granting a journal write.
+    func requireSource(_ source: MachineUpdateRetainedSetupActivationSource) throws {
+        try validate(); try requirePlan(source.policy)
+        let preparation = source.runtime.preparation
+        guard source.digest == sourceDigest, preparation.macID == macID,
+              preparation.installationID == installationID, preparation.accountID == accountID,
+              preparation.ownerUID == ownerUID,
+              let initial = source.runtime.setup.account?.initialization,
+              try MachineUpdateActivationRecord.digest(initial.bytes) == initializationDigest else {
+            throw PreparationStoreError.staleRevision
+        }
+        try requireSource(source.accountPolicy)
+    }
+    private func requireSource(_ boundary: AuthorityJournal.MachineUpdatePolicyBoundary) throws {
+        guard boundary.macID == macID, boundary.accountID == accountID,
+              try boundary.policy == sourcePolicy.snapshot(), try boundary.checkpoint.bytes == sourceCheckpoint else {
+            throw PreparationStoreError.staleRevision
+        }
+    }
+
+    /// The machine owner must acknowledge this proposal before it can authorize a paired journal write.
+    func preparingWrite(expected: MachineUpdateRetainedSetupActivationSource) throws -> Self {
+        guard phase == .prepared else { throw PreparationStoreError.invalidTransition }
+        try requireSource(expected)
+        var next = self; next.revision = UUID(); next.phase = .writing
+        try next.validate(); return next
+    }
+
+    /// Proposes receipt facts only. The permit owner must separately prove and persist the actual write.
+    func recording(_ receipt: AuthorityJournal.MachineUpdatePolicyCommitReceipt) throws -> Self {
+        try validate(); guard phase == .writing else { throw PreparationStoreError.invalidTransition }
+        try requireSource(receipt.source)
+        var next = self; next.revision = UUID(); next.phase = .recorded
+        next.committedPolicy = try .init(receipt.policy); next.committedCheckpoint = try receipt.checkpoint.bytes
+        try next.validate(); return next
+    }
+
+    /// An unchanged writing source grants no retry. Only the exact fresh paired boundary can propose a receipt.
+    func reconciling(_ current: AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Reconciliation {
+        try validate(); guard phase == .writing else { throw PreparationStoreError.invalidTransition }
+        if try observeWriting(current) == .sourceUnchanged { return .sourceUnchanged }
+        var next = self; next.revision = UUID(); next.phase = .recorded
+        next.committedPolicy = try .init(current.policy); next.committedCheckpoint = try current.checkpoint.bytes
+        try next.validate(); return .recorded(next)
+    }
+
+    /// Changes one phase and revision while keeping all v2 scope and source operands exact.
+    func requireTransition(from previous: Self) throws {
+        try validate(); try previous.validate()
+        guard id == previous.id, revision != previous.revision, formatVersion == previous.formatVersion,
+              macID == previous.macID, installationID == previous.installationID,
+              accountID == previous.accountID, ownerUID == previous.ownerUID, sourceDigest == previous.sourceDigest,
+              initializationDigest == previous.initializationDigest, installedReleaseDigest == previous.installedReleaseDigest,
+              sourcePolicy == previous.sourcePolicy, sourceCheckpoint == previous.sourceCheckpoint,
+              startupPolicy == previous.startupPolicy, completionPolicy == previous.completionPolicy,
+              (previous.phase == .prepared && phase == .writing) || (previous.phase == .writing && phase == .recorded) else {
+            throw PreparationStoreError.invalidTransition
+        }
+    }
+
     /// Checks the machine facts and archived operands without using the live account policy as the source.
     func requireMaterial(_ material: MachineUpdateRetainedSetupPolicyMaterial, candidate: SignedReleaseEvidence) throws {
         let plan = try MachineUpdatePolicyPlan(source: sourcePolicy.snapshot(), candidate: candidate)

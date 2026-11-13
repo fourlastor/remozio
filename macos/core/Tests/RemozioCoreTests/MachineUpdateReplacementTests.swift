@@ -35,7 +35,7 @@ private final class MachineReplacementFixture {
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
          stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
-         enableSecondReadiness: Bool = false,
+         enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
@@ -113,7 +113,7 @@ private final class MachineReplacementFixture {
                         formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
                     }
             }
-            return try .init(role: c.role, identifier: c.identifier, generation: c.generation + 1, relativePath: c.relativePath,
+            return try .init(role: c.role, identifier: c.identifier, generation: c.generation + (unchangedCodeGenerations ? 0 : 1), relativePath: c.relativePath,
                 codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats, requests: c.requests)
         }
         candidate = try files.machine.select(files.machine.copy(release: newRelease))
@@ -1818,7 +1818,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
-        enableSecondReadiness: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
@@ -1826,7 +1826,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            enableSecondReadiness: enableSecondReadiness, beforeActivation: { files in
+            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
             }
@@ -2446,7 +2446,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
-        enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false,
+        enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false, unchangedCodeGenerations: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
@@ -2454,7 +2454,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            enableSecondReadiness: enableSecondReadiness, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
+            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
             func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
@@ -3489,6 +3489,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+        unchangedCodeGenerations: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupPolicyMaterial) throws -> Void) throws {
@@ -3496,7 +3497,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try withFinishingFixture(stableFormats: true, policyReaderFormats: policySourceFormats,
             completionReaderFormats: completionReaderFormats, promotionReaderFormats: completionReaderFormats,
             readinessReaderFormats: completionReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            beforeActivation: {
+            unchangedCodeGenerations: unchangedCodeGenerations, beforeActivation: {
                 retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account
                 try additionalBeforeActivation($0)
             }) { fixture, finishing, _ in
@@ -3715,6 +3716,38 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
             try body(snapshot, current, fixture.candidate, source.policy.source.policy, verifyUnchanged)
             try verifyUnchanged()
+        }
+    }
+
+    static func withRetainedPolicyProposalFixture(noPolicyChange: Bool = false,
+        _ body: (RetainedPolicyProposalFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
+        try suite.withUnpublishedActivationReadFixture(policySourceFormats: true,
+            unchangedCodeGenerations: noPolicyChange) { fixture, owner, material in
+            func read() throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
+                let pair = try fixture.openPolicyPair(readOnly: true, accountID: material.runtime.preparation.accountID)
+                defer { try? pair.close() }
+                return try pair.captureRetainedSetupPolicyBoundary(expected: material.initialization)
+            }
+            func capture() throws -> MachineUpdateRetainedSetupActivationSource {
+                let pair = try fixture.openPolicyPair(readOnly: true, accountID: material.runtime.preparation.accountID)
+                defer { try? pair.close() }
+                return try .capture(owner: owner, machine: fixture.machine, journal: pair, candidate: fixture.candidate)
+            }
+            let source = try capture(), before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            try body(.init(source: source, candidate: fixture.candidate, capture: capture, read: read, commit: { policy, revision in
+                let storage = try fixture.policyStorage(readOnly: false, accountID: material.runtime.preparation.accountID)
+                defer { try? storage.close() }
+                let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+                _ = try commits.write(epoch: source.accountPolicy.checkpoint.journalEpoch) {
+                    try $0.installCodePolicy(policy, expectedRevision: revision)
+                }
+                try storage.close(); return try read()
+            }, verifyMachine: {
+                try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+            }))
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
         }
     }
 
