@@ -286,7 +286,8 @@ final class StableRuntimePreparationWriterTests: XCTestCase {
             let retained = try snapshot(f); XCTAssertEqual(retained.state, .init(reference: selected, configurationPublished: false))
             try f.reopen { commits += 1; _ = try f.scalar("CREATE INDEX runtime_gate_fixture_extra ON runtime_preparation_v1(complete)") }
             XCTAssertThrowsError(try perform(.publish, f, reference: selected)) {
-                XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                // identity rejects extra sqlite_master objects before the digest.
+                XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
             }
             XCTAssertEqual(commits, 2)
             _ = try f.scalar("DROP INDEX runtime_gate_fixture_extra"); try f.reopen(nil)
