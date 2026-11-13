@@ -3443,6 +3443,19 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    static func withRetainedMaterialValueFixture(_ body: (PreparationIntentStore, SignedReleaseEvidence,
+        MachineUpdateRetainedSetupMaterialSnapshot) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotSeparatesUnpublishedMaterialFromPublishedFacts"))
+        try suite.withUnpublishedActivationReadFixture { fixture, owner, _ in
+            let runtime = try fixture.machine.stableRuntimePreparationSnapshot(owner: owner, candidate: fixture.candidate)
+            let actual = try MachineUpdateRetainedSetupMaterialSnapshot(runtime: runtime,
+                activation: fixture.machine.runtimeActivation(accountID: runtime.preparation.accountID))
+            try body(fixture.machine, fixture.candidate, actual)
+            try actual.requireCurrent(machine: fixture.machine, candidate: fixture.candidate)
+        }
+    }
+
     private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
