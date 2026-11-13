@@ -210,4 +210,24 @@ final class RetainedSetupInitialSelectionTests: XCTestCase {
             }
         }
     }
+
+    func testEachBorrowedFrameReadsTheActualSnapshotAndPairAtMostTwice() throws {
+        try fixture { f, snapshot, pair in
+            var snapshots = 0, pairs = 0
+            try Selection.withCurrent(machine: f.machine(), expected: snapshot, candidate: f.candidate,
+                recordedStartupPolicy: pair.policy.policy, readPolicyBoundary: {
+                    pairs += 1
+                    let journal = try f.openPolicyJournal(.readOnly); defer { try? journal.close() }
+                    return try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(snapshot.activation.runtime.setup.account?.initialization))
+                }, verifyCurrent: { _ in snapshots += 1 }) { selected, scope in
+                    let oldSnapshots = snapshots, oldPairs = pairs
+                    let frame = try scope.readFrame()
+                    XCTAssertEqual(snapshots - oldSnapshots, 2); XCTAssertLessThanOrEqual(snapshots - oldSnapshots, 2)
+                    XCTAssertEqual(pairs - oldPairs, 2); XCTAssertLessThanOrEqual(pairs - oldPairs, 2)
+                    try frame.snapshot.requireSame(as: snapshot); XCTAssertEqual(frame.current, pair)
+                    try frame.selection.requireSame(as: selected)
+                    XCTAssertEqual(String(describing: frame), "RetainedSetupInitialSelectionFrame(redacted)")
+                }
+        }
+    }
 }

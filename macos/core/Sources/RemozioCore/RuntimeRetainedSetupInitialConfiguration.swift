@@ -11,13 +11,11 @@ struct RuntimeRetainedSetupInitialConfiguration: CustomStringConvertible, Custom
 
     init(snapshot: MachineUpdateRetainedSetupPolicySnapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary,
         candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
-        importIntent: SharedSetupImportIntent? = nil, presencePolicyOverride: PresenceConfiguration? = nil,
-        relayPlan: SharedSetupImportRelayPlan? = nil, relayPortOverride: UInt16? = nil) throws {
+        importIntent: SharedSetupImportIntent?, relayPlan: SharedSetupImportRelayPlan? = nil) throws {
         binding = try .init(snapshot: snapshot, current: current, candidate: candidate)
         try binding.requireStartupPolicy(currentCodePolicy)
         bundle = try .retainedSetupInitial(snapshot: snapshot, current: current, candidate: candidate,
-            currentCodePolicy: currentCodePolicy, importIntent: importIntent, presencePolicyOverride: presencePolicyOverride,
-            relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+            currentCodePolicy: currentCodePolicy, importIntent: importIntent, relayPlan: relayPlan)
         let runtime = snapshot.activation.runtime, inventory = runtime.setup.source.actual.inventory
         let label = bundle.paths.namespace + ".authority"
         let initial = try InstalledAuthorityCommandConfiguration(machineDirectory: MachineBootstrap.machineDirectory,
@@ -37,13 +35,11 @@ struct RuntimeRetainedSetupInitialConfiguration: CustomStringConvertible, Custom
     /// The publication owner supplies fresh machine and journal reads and retains its admission and native file checks.
     func requireSourceForPublication(snapshot: MachineUpdateRetainedSetupPolicySnapshot,
         current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
-        currentCodePolicy: AuthorityCodePolicy, importIntent: SharedSetupImportIntent? = nil,
-        presencePolicyOverride: PresenceConfiguration? = nil, relayPlan: SharedSetupImportRelayPlan? = nil,
-        relayPortOverride: UInt16? = nil) throws {
+        currentCodePolicy: AuthorityCodePolicy, importIntent: SharedSetupImportIntent?,
+        relayPlan: SharedSetupImportRelayPlan? = nil) throws {
         try binding.requireSourceForPublication(snapshot, current: current, candidate: candidate)
         let actual = try Self(snapshot: snapshot, current: current, candidate: candidate, currentCodePolicy: currentCodePolicy,
-            importIntent: importIntent, presencePolicyOverride: presencePolicyOverride,
-            relayPlan: relayPlan, relayPortOverride: relayPortOverride)
+            importIntent: importIntent, relayPlan: relayPlan)
         guard try actual.digest == digest else { throw RuntimeActivationError.changedScope }
     }
     var digest: Data { get throws {
