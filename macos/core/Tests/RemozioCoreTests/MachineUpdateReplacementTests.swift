@@ -1019,6 +1019,145 @@ final class MachineUpdateReplacementTests: XCTestCase {
             startup: plan(configured.startup), completion: plan(configured.completion))
     }
 
+    private func withInstalledBackendSettingsFixture(_ body: (RuntimeReleaseBackendPlan, RuntimeReleaseBackendPlan,
+        SignedReleaseEvidence, GatewayRuntimeSettingsRevision, GatewayRuntimeSettingsRevision) throws -> Void) throws {
+        let (f, setup) = try populatedBackendFixture()
+        _ = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store, journal = try setup.state()
+        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: f.machine.account).plan)
+        let capture = try fixtureBackendCapture(f, foreground: setup.runtime.plan, activation: activation, journal: journal)
+        let startup = try XCTUnwrap(capture.startup), completion = try XCTUnwrap(capture.completion)
+        let selection = try GatewayRuntimeSettingsSelection(activation: activation, journal: journal,
+            foreground: setup.runtime.plan, inventory: completion.source.inventory)
+        let first = try GatewayRuntimeSettingsRevision(id: Data(repeating: 181, count: 16), selection: selection,
+            activation: activation, journal: journal, foreground: setup.runtime.plan, inventory: completion.source.inventory)
+        let second = try GatewayRuntimeSettingsRevision(id: Data(repeating: 182, count: 16), selection: selection,
+            activation: activation, previous: first, journal: journal, foreground: setup.runtime.plan,
+            inventory: completion.source.inventory)
+        let before = try store.retainedRuntimeCompatibilityInputs()
+        try body(startup, completion, f.newRelease, first, second)
+        XCTAssertEqual(try store.retainedRuntimeCompatibilityInputs(), before)
+    }
+
+    func testInstalledSettingsPublicationKeepsTheReleaseBindingAndExactOldAndNewMarkers() throws {
+        try withInstalledBackendSettingsFixture { startup, backend, candidate, first, second in
+            let plan = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: nil, candidate: candidate)
+            let oldPair = try GatewayRuntimeExtensions(release: backend)
+            let oldCommit = try GatewayRuntimeCommit(release: backend, pair: oldPair)
+            XCTAssertEqual(plan.artifacts.count, 5)
+            XCTAssertEqual(plan.artifacts.last?.file.name, AdministrativeSetupPublication.File.gatewayRuntimeCommit.name)
+            XCTAssertEqual(plan.artifacts.last?.previous, try oldCommit.encoded)
+            XCTAssertEqual(plan.artifacts.last?.selected, try plan.commit.encoded)
+            XCTAssertEqual(try plan.activation.encoded, try backend.source.activation.encoded)
+            try plan.commit.requireRelease(binding: backend.binding, stage: .completion)
+            let next = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: second,
+                previous: first, candidate: candidate)
+            XCTAssertEqual(next.artifacts.last?.previous, try plan.commit.encoded)
+            XCTAssertNotEqual(next.artifacts.last?.selected, plan.artifacts.last?.selected)
+            XCTAssertThrowsError(try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: first, candidate: candidate)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertThrowsError(try GatewayRuntimeSettingsPublicationPlan(installed: startup, revision: first,
+                previous: nil, candidate: candidate)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testInstalledSettingsStartupRequiresTheCompletionHostAndPreservesTheRecoveryFloor() throws {
+        try withInstalledBackendSettingsFixture { startup, backend, candidate, first, _ in
+            let plan = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: backend.configuration.host)
+            let pair = try GatewayRuntimeExtensions(release: backend)
+            let commit = try GatewayRuntimeCommit(release: backend, pair: pair)
+            XCTAssertEqual(plan.accountID, backend.binding.accountID)
+            XCTAssertEqual(plan.activeCommitDigest, try commit.observationDigest)
+            XCTAssertNil(plan.pendingChange)
+            XCTAssertFalse(plan.requiresConsumerRecovery)
+            XCTAssertTrue(plan.allowsInitialInstallation(commitDigest: try commit.observationDigest))
+            XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: startup,
+                authority: startup.configuration.host)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: backend,
+                authority: startup.configuration.host)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            let settled = try backend.projectingSettledInstalledSettings(.init(active: first, pending: nil, phase: nil),
+                candidate: candidate)
+            let recovery = try AuthorityGatewaySettingsStartupPlan(installed: settled, authority: settled.configuration.host)
+            XCTAssertTrue(recovery.requiresConsumerRecovery)
+            XCTAssertFalse(recovery.allowsInitialInstallation(commitDigest: recovery.activeCommitDigest))
+        }
+    }
+
+    func testInstalledSettingsChangeReadsReleaseMarkersAndKeepsTheOrdinaryDecoderClosed() throws {
+        try withInstalledBackendSettingsFixture { _, backend, candidate, first, _ in
+            let publication = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: nil, candidate: candidate)
+            let marker = try XCTUnwrap(publication.artifacts.last)
+            let previous = try XCTUnwrap(marker.previous)
+            let change = try AuthorityPhonePushSettingsChange(installed: publication)
+            let old = try GatewayRuntimeCommit.decodeForReleaseArchive(previous)
+            let selected = try GatewayRuntimeCommit.decodeForReleaseArchive(marker.selected)
+            try old.requireRelease(binding: backend.binding, stage: .completion)
+            try selected.requireRelease(binding: backend.binding, stage: .completion)
+            XCTAssertEqual(change.previousCommitDigest, try old.observationDigest)
+            XCTAssertEqual(change.selectedCommitDigest, try selected.observationDigest)
+            XCTAssertEqual(change.revisionDigest, try first.digest)
+            XCTAssertGreaterThan(marker.selected.count, 1024)
+            XCTAssertThrowsError(try GatewayRuntimeCommit.decode(marker.selected))
+            XCTAssertThrowsError(try AuthorityPhonePushSettingsChange(publication))
+        }
+    }
+
+    func testInstalledSettingsChangeRefusesAnOrdinaryPublicationAndPreservesItsExistingEntry() throws {
+        try withInstalledBackendSettingsFixture { _, backend, _, first, _ in
+            let source = backend.source
+            let ordinary = try GatewayRuntimeSettingsPublicationPlan(revision: first, previous: nil,
+                activation: source.activation, journal: source.journal, foreground: source.foreground, inventory: source.inventory)
+            XCTAssertNil(ordinary.commit.release)
+            XCTAssertNoThrow(try AuthorityPhonePushSettingsChange(ordinary))
+            XCTAssertThrowsError(try AuthorityPhonePushSettingsChange(installed: ordinary)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testInstalledSettingsStartupKeepsPendingChangesFencedForEveryHistoricalPhase() throws {
+        try withInstalledBackendSettingsFixture { _, backend, candidate, first, second in
+            let authority = backend.configuration.host
+            let empty = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                state: .empty, candidate: candidate)
+            XCTAssertNil(empty.pendingChange)
+            XCTAssertFalse(empty.requiresConsumerRecovery)
+            let settled = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                state: .init(active: first, pending: nil, phase: nil), candidate: candidate)
+            XCTAssertTrue(settled.requiresConsumerRecovery)
+            XCTAssertFalse(settled.allowsInitialInstallation(commitDigest: settled.activeCommitDigest))
+            for phase in GatewayRuntimeSettingsPhase.allCases {
+                let pending = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                    state: .init(active: first, pending: second, phase: phase), candidate: candidate)
+                let publication = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: second,
+                    previous: first, candidate: candidate)
+                XCTAssertEqual(pending.pendingChange, try AuthorityPhonePushSettingsChange(installed: publication))
+                XCTAssertEqual(pending.activeCommitDigest, settled.activeCommitDigest)
+                XCTAssertTrue(pending.requiresFreshQuiescence)
+                XCTAssertFalse(pending.requiresConsumerRecovery)
+                XCTAssertFalse(pending.allowsInitialInstallation(commitDigest: pending.activeCommitDigest))
+            }
+            for state in [GatewayRuntimeSettingsState(active: nil, pending: first, phase: nil),
+                .init(active: first, pending: nil, phase: .retained),
+                .init(active: first, pending: first, phase: .retained)] {
+                XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                    state: state, candidate: candidate)) {
+                    XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+                }
+            }
+        }
+    }
+
     func testGatewayHealthReadsOnlyTheMatchingReleaseBoundPublication() throws {
         let (f, setup) = try populatedBackendFixture()
         _ = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
@@ -3207,6 +3346,18 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned metadata fixtures. These reads prove no current files, native health, or writer authority.
+    /// Supplies owned installed metadata only. The callback grants no native identity, file custody, or startup authority.
+    static func withInstalledRetainedRuntimeViewFixture(_ body: (PreparationIntentStore, SignedReleaseEvidence,
+        MachineUpdateStableRuntimePreparationSnapshot) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotReadsTheExactInstalledSelectionWithoutWriting"))
+        try suite.withStableActivationReadFixture { fixture, _, snapshot in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            try body(fixture.machine, fixture.candidate, snapshot.runtime)
+            try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+        }
+    }
+
     private func withStableActivationReadFixture(registerSecondForeground: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateStableRuntimeActivationSnapshot) throws -> Void) throws {
         try withFinishingFixture(registerSecondForeground: registerSecondForeground, stableFormats: true,
@@ -3505,6 +3656,23 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned policy commits and injected rows. It proves no native publication or current file custody.
+    /// Exposes owned read values only. The callback grants no native custody, publication, or dispatch authority.
+    static func withRetainedInitialConfigurationValueFixture(recorded: Bool = true,
+        _ body: (MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary,
+            SignedReleaseEvidence, AuthorityCodePolicy, () throws -> Void) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedConfigurationInitialPreservesBindingAndLeavesMetadataUnchanged"))
+        try suite.withRetainedPolicySourceFixture(recorded: recorded) { fixture, owner, source, snapshot, current in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            func verifyUnchanged() throws {
+                try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+                try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate).requireSame(as: snapshot)
+            }
+            try body(snapshot, current, fixture.candidate, source.policy.source.policy, verifyUnchanged)
+            try verifyUnchanged()
+        }
+    }
+
     private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -4220,6 +4388,116 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try body(.init(fixture: fixture, owner: owner, snapshot: snapshot, unpublished: unpublished,
             current: current, material: retainedMaterial, bundle: bundle, journal: journal,
             initialization: initialization, artifacts: artifacts))
+    }
+
+    private func withStablePublishedSelectionFixture(_ body: (RetainedSelectionFixture,
+        MachineUpdateStableRuntimePreparationSnapshot, MachineUpdateStableRuntimeView) throws -> Void) throws {
+        try withRetainedSelectionFixture { f in
+            let snapshot = try f.fixture.machine.stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.fixture.candidate)
+            let inputs = try f.fixture.machine.stableRuntimeViewInputs(expected: snapshot.setup.source,
+                retained: [], candidate: f.fixture.candidate)
+            let view = try MachineUpdateStableRuntimeView(compatibility: inputs, candidate: f.fixture.candidate)
+            try body(f, snapshot, view)
+        }
+    }
+
+    func testStablePublishedSelectionReusesRetainedValidationAndRereadsEveryExactArtifact() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            let before = try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate)
+            var events: [String] = []
+            func verify() throws {
+                events.append("verify")
+                try f.verifyMarker()
+                try snapshot.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+                try view.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+            }
+            func read(_ artifact: RuntimePublishedArtifactValidation.Artifact) throws -> Data {
+                events.append("read"); return try f.read(artifact)
+            }
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: { events.append("pair"); return try f.boundary() },
+                verifyCurrent: verify, read: read)
+            XCTAssertEqual(Set(selected.artifacts.map(\.path)), Set(f.artifacts.keys))
+            for artifact in selected.artifacts {
+                let expected = try XCTUnwrap(f.artifacts[artifact.path])
+                XCTAssertEqual(artifact.bytes, expected.bytes)
+                XCTAssertEqual(artifact.access, expected.access)
+            }
+            XCTAssertEqual(selected.bundle.command.canonicalBytes, f.bundle.command.canonicalBytes)
+            XCTAssertEqual(selected.bundle.transport.canonicalBytes, f.bundle.transport.canonicalBytes)
+            XCTAssertEqual(selected.description, "MachineUpdateStableRuntimePublishedSelection(redacted)")
+            XCTAssertEqual(selected.debugDescription, selected.description)
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: verify, read: read)
+            for index in events.indices where events[index] == "read" {
+                guard index > 0, index + 1 < events.count else { return XCTFail("Missing read boundary") }
+                XCTAssertEqual(events[index - 1], "verify")
+                XCTAssertEqual(events[index + 1], "verify")
+            }
+            try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate).requireSame(as: before)
+        }
+    }
+
+    func testStablePublishedSelectionRequiresRecordedPolicyAtCaptureAndEveryLaterRead() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            var reads = 0
+            XCTAssertThrowsError(try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                verifyCurrent: f.verifyMarker, read: { reads += 1; return try f.read($0) })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            XCTAssertEqual(reads, 0)
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+            XCTAssertThrowsError(try selected.validate(verifyCurrent: f.verifyMarker,
+                read: { reads += 1; return try f.read($0) })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            XCTAssertEqual(reads, 0)
+            let revised = AuthorityJournal.MachineUpdatePolicyBoundary(macID: f.current.macID, accountID: f.current.accountID,
+                policy: .init(revision: UUID(), policy: f.current.policy.policy, roleRevisions: f.current.policy.roleRevisions),
+                checkpoint: f.current.checkpoint)
+            for changedAfter in 0...selected.artifacts.count {
+                reads = 0
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: {
+                    if reads >= changedAfter { return revised }
+                    return try f.boundary()
+                }, verifyCurrent: f.verifyMarker, read: { reads += 1; return try f.read($0) })) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+                XCTAssertEqual(reads, changedAfter)
+            }
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+        }
+    }
+
+    func testStablePublishedSelectionRejectsChangedBytesAndPropagatesTheOwnerFailure() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+            for target in selected.artifacts {
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker,
+                    read: { artifact in
+                        let bytes = try f.read(artifact)
+                        return artifact.path == target.path ? bytes + Data([0]) : bytes
+                    })) {
+                    XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .conflictingConfiguration)
+                }
+            }
+            for beforeRead in [true, false] {
+                var reads = 0
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: {
+                    try f.verifyMarker()
+                    if beforeRead || reads > 0 { throw RuntimeActivationError.unavailable }
+                }, read: { reads += 1; return try f.read($0) })) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .unavailable)
+                }
+                XCTAssertEqual(reads, beforeRead ? 0 : 1)
+            }
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+        }
     }
 
     func testRetainedSelectionReadsOnlyScopedInjectedFilesAndPreservesTheirBytes() throws {
