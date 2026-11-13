@@ -817,6 +817,26 @@ final class MachineUpdateReplacementTests: XCTestCase {
         XCTAssertEqual(try f.machine.store.machineUpdateConfigurationEpoch()?.record, writing)
     }
 
+    /// Borrows actual owned files and a held machine store. This fixture grants no native writer authority.
+    static func withOwnedConfigurationPublicationLockFixture(_ body: (ConfigurationPublicationLockFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testConfigurationWriterRequiresWritingAndRetainsEveryPublishedFileOnReplay"))
+        let f = try Fixture(configurationEpoch: true)
+        var record = try suite.advanceFixtureConfigurationEpoch(f, suite.retainFixtureConfigurationEpoch(f), .begin)
+        let account = f.machine.account
+        record = try suite.advanceFixtureConfigurationEpoch(f, record, .prepare(account, .host))
+        let archive = try XCTUnwrap(f.machine.store.machineUpdateConfigurationEpoch())
+        let configuration = try XCTUnwrap(archive.configuration(accountID: account))
+        XCTAssertEqual(chmod(f.files.root.path, 0o755), 0)
+        let directory = try ProtectedSetupDirectory(anchor: f.files.root.path, relativePath: "OwnedConfigurationLock",
+            owner: getuid(), visibility: .sharedMetadata)
+        defer { directory.close() }
+        _ = try AdministrativeSetupPublication.publish(configuration.bytes(.host, target: false), file: .commandHost,
+            directory: directory, owner: getuid())
+        try body(.init(archive: archive, accountID: account, directory: directory, machine: f.machine.store,
+            lockPath: f.machine.f.f.root.path + "/machine/writer.lock", openSecond: { try f.machine.f.f.open() }))
+    }
+
     func testConfigurationWriterRequiresWritingAndRetainsEveryPublishedFileOnReplay() throws {
         let f = try Fixture(configurationEpoch: true)
         var record = try advanceFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f), .begin)
