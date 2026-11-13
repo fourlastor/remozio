@@ -12,6 +12,8 @@ enum PreparationStoreError: Error, Equatable {
 
 /// Serialized machine-scoped bookkeeping. Stored copy metadata grants no activation authority.
 public final class PreparationIntentStore {
+    enum Opening { case mutable, retainedPolicyVerification }
+    private let opening: Opening
     public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
@@ -38,16 +40,17 @@ public final class PreparationIntentStore {
     // Internal fixture seam. The connection owns the lease even when initialization fails.
     // A fixture may only lower the ordinary record limit, to model records above it with small fixture values.
     init(lease: InstallationStorageLease, macID: Data, maximumRecords: Int, initialize: Bool,
-         didCommit: (() throws -> Void)? = nil, inventoryRecordLimit: Int32 = 278_528) throws {
+         didCommit: (() throws -> Void)? = nil, inventoryRecordLimit: Int32 = 278_528, opening: Opening = .mutable) throws {
+        self.opening = opening
         self.lease = lease; self.maximumRecords = maximumRecords; self.macID = macID; self.didCommit = didCommit
         self.inventoryRecordLimit = inventoryRecordLimit
         do {
             guard macID.count == 16, (1...4096).contains(maximumRecords),
-                  (32_768...278_528).contains(inventoryRecordLimit) else { throw PreparationStoreError.invalidConfiguration }
+                  (32_768...278_528).contains(inventoryRecordLimit), !initialize || opening == .mutable else { throw PreparationStoreError.invalidConfiguration }
             try lease.validate()
             var connection: OpaquePointer?
             let result = sqlite3_open_v2(lease.databasePath, &connection,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+                (opening == .mutable ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY) | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
             db = connection
             guard result == SQLITE_OK, let connection else { throw PreparationStoreError.storage(result) }
             try lease.validate()
@@ -63,11 +66,15 @@ public final class PreparationIntentStore {
                     throw PreparationStoreError.incompatibleStore
                 }
             } else { try identity(macID) }
-            try exec("PRAGMA journal_mode=DELETE")
-            try exec("PRAGMA synchronous=EXTRA")
-            try exec("PRAGMA fullfsync=ON")
-            guard try scalar("PRAGMA synchronous") == 3, try scalar("PRAGMA fullfsync") == 1,
-                  try scalar("PRAGMA trusted_schema") == 0,
+            if opening == .mutable {
+                try exec("PRAGMA journal_mode=DELETE")
+                try exec("PRAGMA synchronous=EXTRA")
+                try exec("PRAGMA fullfsync=ON")
+                guard try scalar("PRAGMA synchronous") == 3, try scalar("PRAGMA fullfsync") == 1 else { throw PreparationStoreError.invalidConfiguration }
+            } else {
+                guard sqlite3_db_readonly(connection, "main") == 1 else { throw PreparationStoreError.invalidConfiguration }
+            }
+            guard try scalar("PRAGMA trusted_schema") == 0,
                   try statement("PRAGMA journal_mode", { row in
                       guard try step(row) == SQLITE_ROW, let value = sqlite3_column_text(row, 0) else { return false }
                       return String(cString: value) == "delete"
@@ -3903,7 +3910,7 @@ public final class PreparationIntentStore {
                 guard let writer = receipt.writer else { throw JournalLeaseError.invalidated }
                 let lease = try writer.lease.reopenForRetainedPolicyVerification(expected: receipt.machineIdentity)
                 let reader = try PreparationIntentStore(lease: lease, macID: writer.macID, maximumRecords: writer.maximumRecords,
-                    initialize: false, inventoryRecordLimit: writer.inventoryRecordLimit)
+                    initialize: false, inventoryRecordLimit: writer.inventoryRecordLimit, opening: .retainedPolicyVerification)
                 defer { try? reader.close() }
                 let owner = receipt.snapshot.activation.runtime.setup.owner
                 let actual = try reader.retainedSetupPolicySnapshot(owner: owner, candidate: candidate)
@@ -6541,6 +6548,7 @@ public final class PreparationIntentStore {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
+        guard !write || opening == .mutable else { throw PreparationStoreError.invalidTransition }
         do { try lease.validate() } catch { unavailable = true; shutdown(); throw error }
         do { try exec(write ? "BEGIN IMMEDIATE" : "BEGIN") }
         catch {
