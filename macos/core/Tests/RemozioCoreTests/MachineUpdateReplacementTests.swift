@@ -109,10 +109,11 @@ private final class MachineReplacementFixture {
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
-                        let migrations: [UInt64: UInt64] = policyWriterFormats && policyMigration && required.name == "authority.installation-preparation"
+                        let writers = current.writers.union(required.writeVersions)
+                        let migrations: [UInt64: UInt64] = policyWriterFormats && policyMigration && required.name == "authority.installation-preparation" && writers.contains(25)
                             ? current.migrations.merging([24: 25], uniquingKeysWith: { _, new in new }) : [:]
                         formats[index] = try .init(name: current.name, readers: current.readers.union(required.readVersions),
-                            writers: current.writers.union(required.writeVersions), migrations: migrations)
+                            writers: writers, migrations: migrations)
                     } else {
                         formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
                     }
