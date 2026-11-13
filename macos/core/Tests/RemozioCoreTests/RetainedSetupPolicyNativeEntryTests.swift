@@ -180,7 +180,8 @@ final class RetainedSetupPolicyNativeEntryTests: XCTestCase {
             XCTAssertEqual(validations, 2)
             XCTAssertThrowsError(try machine.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
             try f.reopen(nil); let failed = f.machine()
-            XCTAssertThrowsError(try Entry.closedMachine(open: { failed }, validate: { _ in }) { _ in throw Fault.stopped }) {
+            let failingProvider = Entry.closedMachine(open: { failed }, validate: { _ in })
+            XCTAssertThrowsError(try failingProvider { _ in throw Fault.stopped }) {
                 XCTAssertTrue($0 is Fault)
             }
             XCTAssertThrowsError(try failed.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .closed) }
