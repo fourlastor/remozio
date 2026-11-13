@@ -3734,9 +3734,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
+        var runtimeMaterial: RuntimePreparationMaterial?
         try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
             unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration,
-            beforeActivation: { retained = try suite.prepareSecondForeground($0).account }) { fixture, finishing, _ in
+            beforeActivation: { retained = try suite.prepareSecondForeground($0, didPrepareMaterial: { runtimeMaterial = $0 }).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
             let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)
@@ -3758,7 +3759,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
                 journal: pair, candidate: fixture.candidate)
             try pair.close()
-            try body(.init(machine: { fixture.machine }, source: source, candidate: fixture.candidate,
+            try body(.init(machine: { fixture.machine }, source: source, material: XCTUnwrap(runtimeMaterial), candidate: fixture.candidate,
                 directory: directory, admission: admission, verifyPair: {
                     let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
                     defer { try? fresh.close() }
