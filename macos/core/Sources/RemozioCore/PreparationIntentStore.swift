@@ -4358,7 +4358,7 @@ public final class PreparationIntentStore {
         return try writeRetainedSetupPromotionIntent(intent, boundary: boundary, expected: expected, candidate: candidate,
             directory: directory, admission: admission, native: native, retaining: false, observation: observation, verifyScoped: verifyScoped)
     }
-    private func requireRetainedSetupPromotionWriterAvailable() throws {
+    func requireRetainedSetupPromotionWriterAvailable() throws {
         guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil else {
             throw PreparationStoreError.transactionActive

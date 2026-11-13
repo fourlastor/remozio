@@ -89,11 +89,18 @@ final class MachineUpdateStableServiceAccountPreparationTests: XCTestCase {
     func testActualSQLCallbacksBorrowTheExactFrameWithoutReenteringTheMachineReader() throws {
         try fixture { f in
             let before = try snapshot(f), directory = Directory()
-            var storage: ServiceAccountPlanStorage?, seen: [SQLStage] = [], completeReads = 0
+            var storage: ServiceAccountPlanStorage?, seen: [SQLStage] = [], completeReads = 0, gateRefusals = 0
+            XCTAssertNoThrow(try f.machine().requireRetainedSetupPromotionWriterAvailable())
             let result = try resume(f, directory: directory, verify: { actual in
                 try f.admission.validate()
                 XCTAssertEqual(actual.setup.source.actual.inventory, before.setup.source.actual.inventory)
+            }, didStage: { _ in
+                XCTAssertNoThrow(try f.machine().requireRetainedSetupPromotionWriterAvailable())
             }, didSQL: { stage in
+                XCTAssertThrowsError(try f.machine().requireRetainedSetupPromotionWriterAvailable()) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+                }
+                gateRefusals += 1
                 seen.append(stage)
                 let state = try XCTUnwrap(storage).load()
                 if state.complete { completeReads += 1 }
@@ -109,6 +116,8 @@ final class MachineUpdateStableServiceAccountPreparationTests: XCTestCase {
             XCTAssertEqual(seen, [.beforeTransaction, .inTransaction, .afterMutation, .afterCommit,
                 .beforeTransaction, .inTransaction, .afterMutation, .afterCommit])
             XCTAssertEqual(completeReads, 2); XCTAssertTrue(result.complete)
+            XCTAssertEqual(gateRefusals, 8)
+            XCTAssertNoThrow(try f.machine().requireRetainedSetupPromotionWriterAvailable())
             let after = try snapshot(f)
             try after.requirePrepared(from: before)
             XCTAssertEqual(after.state, result); XCTAssertEqual(directory.fixture.writes.count, 4)
