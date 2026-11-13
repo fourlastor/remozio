@@ -37,14 +37,18 @@ final class MachineUpdateStableRuntimeViewTests: XCTestCase {
             XCTAssertEqual(view.accounts.map(\.accountID), input.source.accounts.map(\.accountID))
             XCTAssertEqual(view.description, "MachineUpdateStableRuntimeView(redacted)")
             XCTAssertEqual(view.debugDescription, view.description)
-            let retained = try view.account(f.plan.accountID, ownerUID: f.owner.uid)
+            let retained = try XCTUnwrap(view.accounts.first { $0.accountID == f.plan.accountID && $0.scope.ownerUID == f.owner.uid })
             XCTAssertEqual(retained.scope.origin, .retained)
+            XCTAssertFalse(retained.scope.inInventory)
+            XCTAssertThrowsError(try view.account(f.plan.accountID, ownerUID: f.owner.uid)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .notFound)
+            }
             XCTAssertNil(retained.configuration)
             XCTAssertNil(retained.ordinaryActivation)
             XCTAssertNil(retained.host)
             XCTAssertTrue(retained.runtime?.configurationPublished == true)
             XCTAssertThrowsError(try view.startupAccount(f.plan.accountID, ownerUID: f.owner.uid)) {
-                XCTAssertEqual($0 as? RuntimePreparationError, .incomplete)
+                XCTAssertEqual($0 as? PreparationStoreError, .notFound)
             }
             for account in view.accounts where account.scope.inInventory {
                 XCTAssertEqual(try view.account(account.accountID, ownerUID: account.scope.ownerUID).scope, account.scope)
