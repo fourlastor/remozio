@@ -22,6 +22,7 @@ public final class PreparationIntentStore {
     private var active = false
     private var unavailable = false
     private var retainedSetupPromotionAuthorization: RetainedSetupPromotionAuthorization?
+    private var stableAccountReservationAuthorization: StableAccountReservationAuthorization?
     private static let applicationID: Int64 = 0x524D4953
 
     public static func open(directoryPath: String, macID: Data, maximumRecords: Int = 64,
@@ -3563,6 +3564,140 @@ public final class PreparationIntentStore {
         return source
     }
 
+    private final class StableAccountReservationAuthorization {
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private let original: MachineUpdateStableAccountSetupSnapshot
+        private var expected: MachineUpdateStableAccountSetupSnapshot
+        private let candidate: SignedReleaseEvidence
+        private let directory: ReleaseDestinationLease
+        private let admission: UpdateOrdinaryAdmissionLease.Scope
+        private var protectedDigest: Data?
+        init(writer: PreparationIntentStore, expected: MachineUpdateStableAccountSetupSnapshot,
+            candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope) {
+            self.writer = writer; self.original = expected; self.expected = expected
+            self.candidate = candidate; self.directory = directory; self.admission = admission
+        }
+        func capture(in owner: PreparationIntentStore) throws -> MachineUpdateStableAccountSetupSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
+                  let writer, writer === owner, writer.active, writer.stableAccountReservationAuthorization === self,
+                  let db = writer.db, sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+            try writer.requireUpdateAdmissionDirectory(directory)
+            try admission.validateMachineBoundary(directory: directory, expected: original.source.actual.admission.machine)
+            let actual = try MachineUpdateStableAccountSetupSnapshot(source: writer.loadStableRuntimeSource(candidate: candidate),
+                owner: original.owner)
+            try actual.requireSame(as: expected)
+            let digest = try writer.stableAccountReservationProtectedDigest(excluding: original.owner.uid)
+            if let protectedDigest { guard digest == protectedDigest else { throw PreparationStoreError.staleRevision } }
+            else { protectedDigest = digest }
+            try admission.validate(); return actual
+        }
+        func adopt(_ value: AccountPreparationIntent, in owner: PreparationIntentStore) throws {
+            let actual = try MachineUpdateStableAccountSetupSnapshot(source: owner.loadStableRuntimeSource(candidate: candidate),
+                owner: original.owner)
+            try actual.requireReservation(value, from: original)
+            expected = actual; _ = try capture(in: owner)
+        }
+    }
+
+    /// Reserves inputs before key creation. The authenticated owner separately verifies the current account and installed code.
+    func beginStableAccountPreparation(owner: LocalAccountIdentity, allowedTargetUIDs: Set<UInt32>, disclosureAccepted: Bool,
+        expected: MachineUpdateStableAccountSetupSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        makeInitial: (Data, Data) throws -> AuthorityJournalInitialization,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AccountPreparationIntent {
+        try expected.requireOwner(owner); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
+        guard stableAccountReservationAuthorization == nil, retainedSetupPromotionAuthorization == nil else {
+            throw PreparationStoreError.transactionActive
+        }
+        var commitAttempted = false
+        do { return try admission.withMachineAdmission { loan in
+            let authorization = StableAccountReservationAuthorization(writer: self, expected: expected,
+                candidate: candidate, directory: directory, admission: loan)
+            stableAccountReservationAuthorization = authorization
+            defer { stableAccountReservationAuthorization = nil }
+            let before = try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.beforeTransaction, actual); _ = try authorization.capture(in: self)
+                return actual
+            }
+            // Recovery returns the original grants, key pin, and initial epoch without another write or factory call.
+            if let retained = before.preparation {
+                guard disclosureAccepted, try retained.commandPolicy.allowedTargetUIDs == allowedTargetUIDs else {
+                    throw AccountPreparationError.conflict
+                }
+                return retained
+            }
+            let value = try transaction(write: true, activationWrite: true, stableReservation: authorization,
+                willCommit: { commitAttempted = true }) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.inTransaction, actual); _ = try authorization.capture(in: self)
+                guard actual.account == nil, actual.source.preparations.count < 64 else { throw AccountPreparationError.conflict }
+                var accountID = AccountPreparationIntent.randomID()
+                while actual.source.accounts.contains(where: { $0.accountID == accountID }) {
+                    accountID = AccountPreparationIntent.randomID()
+                }
+                let policy = try CommandElevationPolicy(macID: macID, accountID: accountID, callerUID: owner.uid,
+                    allowedTargetUIDs: allowedTargetUIDs, independentPolicyDisclosureAccepted: disclosureAccepted)
+                let initial = try makeInitial(macID, accountID)
+                try ReleaseGenerationPreflight.validate(candidate, against: initial.codePolicy)
+                for entry in initial.codePolicy.entries {
+                    if let component = candidate.manifest.components.first(where: { $0.role == entry.role }) {
+                        guard entry.installedGeneration == component.generation,
+                              entry.codeDirectoryHash == candidate.codeDirectoryHashes[entry.role] else {
+                            throw AccountPreparationError.conflict
+                        }
+                    }
+                }
+                let inventory = actual.source.actual.inventory
+                let value = try AccountPreparationIntent(setupID: AccountPreparationIntent.randomID(), revision: AccountPreparationIntent.randomID(),
+                    macID: macID, installationID: inventory.installationID, releaseDigest: inventory.releaseDigest, accountID: accountID,
+                    ownerUID: owner.uid, directoryID: owner.directoryID, policyBytes: policy.canonicalBytes,
+                    initializationBytes: initial.initializationBytes)
+                try statement("INSERT INTO account_preparation_v1 VALUES(?,?,?,?)") { row in
+                    try bind(Int64(owner.uid), column: 1, row: row); try bind(accountID, column: 2, row: row)
+                    try bind(value.revision, column: 3, row: row); try bind(value.bytes, column: 4, row: row)
+                    guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                }
+                try authorization.adopt(value, in: self)
+                try verifyScoped(.afterMutation, authorization.capture(in: self)); _ = try authorization.capture(in: self)
+                return value
+            }
+            return try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.afterCommit, actual); _ = try authorization.capture(in: self)
+                guard actual.preparation == value else { throw PreparationStoreError.staleRevision }
+                return value
+            }
+        } } catch {
+            if commitAttempted { unavailable = true; shutdown() }
+            throw error
+        }
+    }
+
+    private func stableAccountReservationProtectedDigest(excluding ownerUID: UInt32) throws -> Data {
+        guard ownerUID > 0, ownerUID < UInt32.max else { throw PreparationStoreError.corruptRecord }
+        let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name") { row in
+            var names: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard names.count < 128, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
+                names.append(String(cString: name))
+            }
+            return names
+        }
+        var hash = SHA256(); hash.update(data: Data("Remozio/StableAccountReservationProtectedRows/v1\0".utf8))
+        hash.update(data: candidateGeneration(UInt64(ownerUID)))
+        hash.update(data: try machineTableDigest("sqlite_schema", maximumCellBytes: RuntimeReleaseBackendPlan.maximumBytes))
+        for table in tables {
+            hash.update(data: try machineTableDigest(table,
+                excludingOwnerUID: table == "account_preparation_v1" ? ownerUID : nil, maximumCellBytes: max(RuntimeReleaseBackendPlan.maximumBytes,
+                    max(MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes, MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes))))
+        }
+        return Data(hash.finalize())
+    }
+
     func stableAccountSetupSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateStableAccountSetupSnapshot {
         try .init(source: stableRuntimeSource(candidate: candidate), owner: owner)
@@ -5032,7 +5167,9 @@ public final class PreparationIntentStore {
         return Data(hash.finalize())
     }
 
-    private func machineTableDigest(_ table: String, maximumCellBytes: Int? = nil) throws -> Data {
+    private func machineTableDigest(_ table: String, excludingOwnerUID: UInt32? = nil, maximumCellBytes: Int? = nil) throws -> Data {
+        guard excludingOwnerUID == nil || table == "account_preparation_v1" && excludingOwnerUID! > 0
+            && excludingOwnerUID! < UInt32.max else { throw PreparationStoreError.corruptRecord }
         guard !table.isEmpty, table.utf8.allSatisfy({ ($0 >= 97 && $0 <= 122) || ($0 >= 48 && $0 <= 57) || $0 == 95 }) else {
             throw PreparationStoreError.corruptRecord
         }
@@ -5040,7 +5177,9 @@ public final class PreparationIntentStore {
             ? MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes
             : table == MachineUpdateRetainedSetupPromotionStorage.tableName
                 ? MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes : 278528)
-        let rows: [Data] = try statement("SELECT * FROM \(table)") { row in
+        let selection = excludingOwnerUID == nil ? "" : " WHERE owner<>?"
+        let rows: [Data] = try statement("SELECT * FROM \(table)\(selection)") { row in
+            if let excludingOwnerUID { try bind(Int64(excludingOwnerUID), column: 1, row: row) }
             var rows: [Data] = []
             while try step(row) == SQLITE_ROW {
                 guard rows.count < 1_048_576 else { throw PreparationStoreError.capacity }
@@ -5347,7 +5486,8 @@ public final class PreparationIntentStore {
         }
     }
     private func transaction<T>(write: Bool, activationWrite: Bool = false,
-        retainedSetupPromotion: RetainedSetupPromotionAuthorization? = nil, willCommit: () -> Void = {},
+        retainedSetupPromotion: RetainedSetupPromotionAuthorization? = nil,
+        stableReservation: StableAccountReservationAuthorization? = nil, willCommit: () -> Void = {},
         _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
@@ -5361,7 +5501,14 @@ public final class PreparationIntentStore {
         active = true; defer { active = false }
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if let retainedSetupPromotion {
+            if let stableReservation {
+                guard retainedSetupPromotion == nil, write, activationWrite,
+                      stableAccountReservationAuthorization === stableReservation,
+                      (24...28).contains(try scalar("PRAGMA user_version")) else {
+                    throw PreparationStoreError.invalidTransition
+                }
+                _ = try stableReservation.capture(in: self)
+            } else if let retainedSetupPromotion {
                 guard write, activationWrite, retainedSetupPromotionAuthorization === retainedSetupPromotion,
                       [Int64(26), 27, 28].contains(try scalar("PRAGMA user_version")) else {
                     throw PreparationStoreError.invalidTransition
@@ -5374,10 +5521,12 @@ public final class PreparationIntentStore {
             }
             let value = try body()
             if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
+            if let stableReservation { _ = try stableReservation.capture(in: self) }
             try lease.validate()
             do {
                 if write { willCommit() }
                 if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
+                if let stableReservation { _ = try stableReservation.capture(in: self) }
                 try exec("COMMIT")
                 if write { try didCommit?() }
             } catch { unavailable = true; throw error }

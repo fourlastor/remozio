@@ -3156,6 +3156,54 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    /// Supplies a real owned store and machine admission. It grants no installed caller or native credential authority.
+    static func withStableAccountReservationWriterFixture(_ body: (StableAccountReservationWriterFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotReadsTheExactInstalledSelectionWithoutWriting"))
+        try suite.withFinishingFixture(stableFormats: true) { fixture, finishing, _ in
+            let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try fixture.machine.withCurrentMachineUpdateReadiness(candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) {
+                    try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: fixture.candidate)
+                }
+            _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { _, _ in }
+            loan.close(); fixture.restart.close()
+            let anchor = fixture.files.f.f.root.path
+            let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                owner: getuid())
+            let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                owner: getuid(), expected: finishing.admission.machine)
+            let admittedDirectory = try ReleaseDestinationLease(anchor: anchor, relativeDirectory: "machine", owner: getuid())
+            let admission = try UpdateOrdinaryAdmissionLease(activity: activity, admission: gate,
+                directory: admittedDirectory, expected: finishing.admission.machine)
+            defer { admission.close() }
+            let source = try fixture.machine.stableRuntimeSource(candidate: fixture.candidate)
+            let uid = try XCTUnwrap(source.accounts.map(\.ownerUID).max()) + 1
+            let owner = LocalAccountIdentity(uid: uid, primaryGroupID: uid, directoryID: UUID())
+            let template = try XCTUnwrap(source.preparations.first).initialAuthority
+            let policy = try AuthorityCodePolicy(entries: template.codePolicy.entries.map { entry in
+                let component = try XCTUnwrap(fixture.candidate.manifest.components.first { $0.role == entry.role })
+                return try .init(role: entry.role, teamID: component.teamID, identifier: component.identifier,
+                    installedGeneration: component.generation, minimumGeneration: component.generation,
+                    codeDirectoryHash: XCTUnwrap(fixture.candidate.codeDirectoryHashes[entry.role]), active: entry.active)
+            })
+            try body(.init(machine: { fixture.machine }, owner: owner, candidate: fixture.candidate,
+                directory: fixture.directory, admission: admission, gate: gate, activity: activity, initial: { mac, account in
+                    let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
+                    let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                        0: .unsigned(1), 1: .bytes(mac), 2: .bytes(account), 3: .bytes(AccountPreparationIntent.randomID()),
+                        4: .unsigned(1), 5: .unsigned(AuditEpochCause.initial.rawValue), 6: .null, 7: .null, 8: .null]),
+                        limits: limits), limits: limits)
+                    return AuthorityJournalInitialization(descriptor: descriptor, codePolicy: policy,
+                        capabilities: template.capabilities, allowedContracts: template.allowedContracts)
+                }, reopen: { hook in try fixture.files.reopen(hook: hook) }, mutate: { sql in
+                    try fixture.machine.close(); try fixture.files.sql(sql); try fixture.files.reopen()
+                }, scalar: { try fixture.files.f.f.sql($0) }))
+        }
+    }
+
     /// Uses owned metadata fixtures. These reads prove no current files, native health, or writer authority.
     private func withStableActivationReadFixture(registerSecondForeground: Bool = false,
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateStableRuntimeActivationSnapshot) throws -> Void) throws {
