@@ -3505,6 +3505,23 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned policy commits and injected rows. It proves no native publication or current file custody.
+    /// Exposes owned read values only. The callback grants no native custody, publication, or dispatch authority.
+    static func withRetainedInitialConfigurationValueFixture(recorded: Bool = true,
+        _ body: (MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary,
+            SignedReleaseEvidence, AuthorityCodePolicy, () throws -> Void) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedConfigurationInitialPreservesBindingAndLeavesMetadataUnchanged"))
+        try suite.withRetainedPolicySourceFixture(recorded: recorded) { fixture, owner, source, snapshot, current in
+            let before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
+            func verifyUnchanged() throws {
+                try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate).requireSame(as: before)
+                try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate).requireSame(as: snapshot)
+            }
+            try body(snapshot, current, fixture.candidate, source.policy.source.policy, verifyUnchanged)
+            try verifyUnchanged()
+        }
+    }
+
     private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
