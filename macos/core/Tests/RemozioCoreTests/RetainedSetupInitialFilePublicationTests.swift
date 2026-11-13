@@ -113,24 +113,24 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
     }
     private func prepare(_ f: Fixture, _ snapshot: Snapshot, _ current: Boundary, state: State,
         custody: Bool = true, verify: @escaping (Snapshot) throws -> Void = { _ in },
-        didStage: (RuntimePublicationController.Stage) throws -> Void = { _ in },
-        inspect: (Publication.Scope) throws -> Void = { _ in }) throws -> Selection {
-        try withSelection(f, snapshot, current, state: state) { selected, selectedScope in
-            try Publication.prepare(selection: selected, selectionScope: selectedScope,
-                machine: f.machine(), expected: snapshot, candidate: f.candidate,
-                directory: f.directory, admission: f.admission, fileCustodyAccepted: custody,
-                verifyCurrent: { actual in
-                    state.fullReads += 1; XCTAssertEqual(state.callbackDepth, 0); try verify(actual)
-                }, verifyServices: { XCTAssertEqual($0, snapshot.activation.runtime.plan) },
-                readMaterial: { scope in try state.borrowed(scope) {
-                    state.materialReads += 1
-                    return try state.materialReader?(state.materialReads) ?? f.material
-                } }, verifyActivity: { activity, scope in try state.borrowed(scope) {
-                    XCTAssertEqual(activity, f.material.serviceActivity); try scope.requireActive()
-                } }, readArtifact: { artifact, scope in try state.borrowed(scope) { try state.read(artifact) } },
-                publish: { scope in try state.borrowed(scope) { try state.publish(scope) } }, didStage: didStage,
-                inspectScope: { scope in state.scope = scope; try inspect(scope) })
-        }
+        didStage: @escaping (RuntimePublicationController.Stage) throws -> Void = { _ in },
+        inspect: @escaping (Publication.Scope) throws -> Void = { _ in }) throws -> Selection {
+        try Publication.prepare(withSelection: { body in
+            try self.withSelection(f, snapshot, current, state: state, body: body)
+        },
+            machine: f.machine(), expected: snapshot, candidate: f.candidate,
+            directory: f.directory, admission: f.admission, fileCustodyAccepted: custody,
+            verifyCurrent: { actual in
+                state.fullReads += 1; XCTAssertEqual(state.callbackDepth, 0); try verify(actual)
+            }, verifyServices: { XCTAssertEqual($0, snapshot.activation.runtime.plan) },
+            readMaterial: { scope in try state.borrowed(scope) {
+                state.materialReads += 1
+                return try state.materialReader?(state.materialReads) ?? f.material
+            } }, verifyActivity: { activity, scope in try state.borrowed(scope) {
+                XCTAssertEqual(activity, f.material.serviceActivity); try scope.requireActive()
+            } }, readArtifact: { artifact, scope in try state.borrowed(scope) { try state.read(artifact) } },
+            publish: { scope in try state.borrowed(scope) { try state.publish(scope) } }, didStage: didStage,
+            inspectScope: { scope in state.scope = scope; try inspect(scope) })
     }
     private func seed(_ f: Fixture) throws {
         let runtime = f.source.runtime, account = runtime.preparation
