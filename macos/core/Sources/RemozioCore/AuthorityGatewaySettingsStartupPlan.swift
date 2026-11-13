@@ -36,6 +36,36 @@ struct AuthorityGatewaySettingsStartupPlan: Sendable, CustomStringConvertible {
         accountID = activation.accountID; options = activation.extensions.authority.material.phonePush
         activeCommitDigest = try current.observationDigest
     }
+    /// Restores retained settings from a validated finishing selection. It grants no consumer readiness or command admission.
+    init(installed backend: RuntimeReleaseBackendPlan, authority: InstalledAuthorityCommandConfiguration) throws {
+        guard backend.policyStage == .completion, backend.configuration.host.canonicalBytes == authority.canonicalBytes,
+              backend.binding.installedReleaseDigest == authority.releaseDigest,
+              backend.binding.accountID == authority.command.accountID else { throw GatewayPreparationError.changedScope }
+        try backend.binding.requireCompletionPolicy(authority.codePolicy)
+        let pair = try GatewayRuntimeExtensions(release: backend)
+        let commit = try GatewayRuntimeCommit(release: backend, pair: pair)
+        accountID = backend.binding.accountID; options = pair.authority.material.phonePush
+        activeCommitDigest = try commit.observationDigest; pendingChange = nil
+        requiresConsumerRecovery = backend.source.revision != nil
+    }
+
+    /// Restores a current settings floor without granting native quiescence or command admission.
+    init(installed backend: RuntimeReleaseBackendPlan, authority: InstalledAuthorityCommandConfiguration,
+        state: GatewayRuntimeSettingsState, candidate: SignedReleaseEvidence) throws {
+        guard (state.pending == nil) == (state.phase == nil) else { throw GatewayPreparationError.changedScope }
+        let current = try backend.projectingSettledInstalledSettings(.init(active: state.active, pending: nil, phase: nil),
+            candidate: candidate)
+        let base = try Self(installed: current, authority: authority)
+        if let pending = state.pending {
+            let publication = try GatewayRuntimeSettingsPublicationPlan(installed: current, revision: pending,
+                previous: state.active, candidate: candidate)
+            let change = try AuthorityPhonePushSettingsChange(publication)
+            guard change.previousCommitDigest == base.activeCommitDigest else { throw GatewayPreparationError.changedScope }
+            pendingChange = change
+        } else { pendingChange = nil }
+        accountID = base.accountID; options = base.options; activeCommitDigest = base.activeCommitDigest
+        requiresConsumerRecovery = state.active != nil && state.pending == nil
+    }
     /// Read through the same protected machine owner before native check-in transfers and closes that owner.
     /// This helper does not acquire native rights or authorize a settings transition.
     static func load(machine: PreparationIntentStore, authority: InstalledAuthorityCommandConfiguration) throws -> Self? {

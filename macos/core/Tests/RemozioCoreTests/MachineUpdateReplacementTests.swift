@@ -1019,6 +1019,111 @@ final class MachineUpdateReplacementTests: XCTestCase {
             startup: plan(configured.startup), completion: plan(configured.completion))
     }
 
+    private func withInstalledBackendSettingsFixture(_ body: (RuntimeReleaseBackendPlan, RuntimeReleaseBackendPlan,
+        SignedReleaseEvidence, GatewayRuntimeSettingsRevision, GatewayRuntimeSettingsRevision) throws -> Void) throws {
+        let (f, setup) = try populatedBackendFixture()
+        _ = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))
+        let store = f.machine.store, journal = try setup.state()
+        let activation = try XCTUnwrap(store.gatewayRuntimeActivation(accountID: f.machine.account).plan)
+        let capture = try fixtureBackendCapture(f, foreground: setup.runtime.plan, activation: activation, journal: journal)
+        let startup = try XCTUnwrap(capture.startup), completion = try XCTUnwrap(capture.completion)
+        let selection = try GatewayRuntimeSettingsSelection(activation: activation, journal: journal,
+            foreground: setup.runtime.plan, inventory: completion.source.inventory)
+        let first = try GatewayRuntimeSettingsRevision(id: Data(repeating: 181, count: 16), selection: selection,
+            activation: activation, journal: journal, foreground: setup.runtime.plan, inventory: completion.source.inventory)
+        let second = try GatewayRuntimeSettingsRevision(id: Data(repeating: 182, count: 16), selection: selection,
+            activation: activation, previous: first, journal: journal, foreground: setup.runtime.plan,
+            inventory: completion.source.inventory)
+        let before = try store.retainedRuntimeCompatibilityInputs()
+        try body(startup, completion, f.newRelease, first, second)
+        XCTAssertEqual(try store.retainedRuntimeCompatibilityInputs(), before)
+    }
+
+    func testInstalledSettingsPublicationKeepsTheReleaseBindingAndExactOldAndNewMarkers() throws {
+        try withInstalledBackendSettingsFixture { startup, backend, candidate, first, second in
+            let plan = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: nil, candidate: candidate)
+            let oldPair = try GatewayRuntimeExtensions(release: backend)
+            let oldCommit = try GatewayRuntimeCommit(release: backend, pair: oldPair)
+            XCTAssertEqual(plan.artifacts.count, 5)
+            XCTAssertEqual(plan.artifacts.last?.file.name, AdministrativeSetupPublication.File.gatewayRuntimeCommit.name)
+            XCTAssertEqual(plan.artifacts.last?.previous, try oldCommit.encoded)
+            XCTAssertEqual(plan.artifacts.last?.selected, try plan.commit.encoded)
+            XCTAssertEqual(try plan.activation.encoded, try backend.source.activation.encoded)
+            try plan.commit.requireRelease(binding: backend.binding, stage: .completion)
+            let next = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: second,
+                previous: first, candidate: candidate)
+            XCTAssertEqual(next.artifacts.last?.previous, try plan.commit.encoded)
+            XCTAssertNotEqual(next.artifacts.last?.selected, plan.artifacts.last?.selected)
+            XCTAssertThrowsError(try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: first, candidate: candidate)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertThrowsError(try GatewayRuntimeSettingsPublicationPlan(installed: startup, revision: first,
+                previous: nil, candidate: candidate)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
+    func testInstalledSettingsStartupRequiresTheCompletionHostAndPreservesTheRecoveryFloor() throws {
+        try withInstalledBackendSettingsFixture { startup, backend, candidate, first, _ in
+            let plan = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: backend.configuration.host)
+            let pair = try GatewayRuntimeExtensions(release: backend)
+            let commit = try GatewayRuntimeCommit(release: backend, pair: pair)
+            XCTAssertEqual(plan.accountID, backend.binding.accountID)
+            XCTAssertEqual(plan.activeCommitDigest, try commit.observationDigest)
+            XCTAssertNil(plan.pendingChange)
+            XCTAssertFalse(plan.requiresConsumerRecovery)
+            XCTAssertTrue(plan.allowsInitialInstallation(commitDigest: try commit.observationDigest))
+            XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: startup,
+                authority: startup.configuration.host)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: backend,
+                authority: startup.configuration.host)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+            let settled = try backend.projectingSettledInstalledSettings(.init(active: first, pending: nil, phase: nil),
+                candidate: candidate)
+            let recovery = try AuthorityGatewaySettingsStartupPlan(installed: settled, authority: settled.configuration.host)
+            XCTAssertTrue(recovery.requiresConsumerRecovery)
+            XCTAssertFalse(recovery.allowsInitialInstallation(commitDigest: recovery.activeCommitDigest))
+        }
+    }
+
+    func testInstalledSettingsStartupKeepsPendingChangesFencedForEveryHistoricalPhase() throws {
+        try withInstalledBackendSettingsFixture { _, backend, candidate, first, second in
+            let authority = backend.configuration.host
+            let empty = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                state: .empty, candidate: candidate)
+            XCTAssertNil(empty.pendingChange)
+            XCTAssertFalse(empty.requiresConsumerRecovery)
+            let settled = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                state: .init(active: first, pending: nil, phase: nil), candidate: candidate)
+            XCTAssertTrue(settled.requiresConsumerRecovery)
+            XCTAssertFalse(settled.allowsInitialInstallation(commitDigest: settled.activeCommitDigest))
+            for phase in GatewayRuntimeSettingsPhase.allCases {
+                let pending = try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                    state: .init(active: first, pending: second, phase: phase), candidate: candidate)
+                let publication = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: second,
+                    previous: first, candidate: candidate)
+                XCTAssertEqual(pending.pendingChange, try AuthorityPhonePushSettingsChange(publication))
+                XCTAssertEqual(pending.activeCommitDigest, settled.activeCommitDigest)
+                XCTAssertTrue(pending.requiresFreshQuiescence)
+                XCTAssertFalse(pending.allowsInitialInstallation(commitDigest: pending.activeCommitDigest))
+            }
+            for state in [GatewayRuntimeSettingsState(active: nil, pending: first, phase: nil),
+                .init(active: first, pending: nil, phase: .retained),
+                .init(active: first, pending: first, phase: .retained)] {
+                XCTAssertThrowsError(try AuthorityGatewaySettingsStartupPlan(installed: backend, authority: authority,
+                    state: state, candidate: candidate)) {
+                    XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+                }
+            }
+        }
+    }
+
     func testGatewayHealthReadsOnlyTheMatchingReleaseBoundPublication() throws {
         let (f, setup) = try populatedBackendFixture()
         _ = try publishFixtureConfigurationEpoch(f, retainFixtureConfigurationEpoch(f))

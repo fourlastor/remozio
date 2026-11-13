@@ -15,6 +15,26 @@ struct GatewayRuntimeSettingsPublicationPlan {
     let commit: GatewayRuntimeCommit
     let artifacts: [Artifact]
 
+    /// Uses installed code with retained settings history. The caller still owns admission and protected reads.
+    init(installed backend: RuntimeReleaseBackendPlan, revision: GatewayRuntimeSettingsRevision,
+        previous: GatewayRuntimeSettingsRevision?, candidate: SignedReleaseEvidence) throws {
+        let old = try backend.projectingSettledInstalledSettings(.init(active: previous, pending: nil, phase: nil),
+            candidate: candidate)
+        try revision.validateSuccessor(of: previous, activation: old.source.activation)
+        let selected = try old.projectingSettledInstalledSettings(.init(active: revision, pending: nil, phase: nil),
+            candidate: candidate)
+        let oldPair = try GatewayRuntimeExtensions(release: old)
+        let oldCommit = try GatewayRuntimeCommit(release: old, pair: oldPair)
+        pair = try .init(release: selected); commit = try .init(release: selected, pair: pair)
+        self.revision = revision; activation = selected.source.activation
+        artifacts = try [
+            .init(file: .gatewayConfiguration, previous: old.gateway.canonicalBytes, selected: selected.gateway.canonicalBytes),
+            .init(file: .authorityGatewayRuntime, previous: oldPair.authority.encoded, selected: pair.authority.encoded),
+            .init(file: .transportGatewayRuntime, previous: oldPair.transport.encoded, selected: pair.transport.encoded),
+            .init(file: .gatewaySettingsRevision, previous: previous.map { try $0.encoded }, selected: revision.encoded),
+            .init(file: .gatewayRuntimeCommit, previous: oldCommit.encoded, selected: commit.encoded)
+        ]
+    }
     init(revision: GatewayRuntimeSettingsRevision, previous: GatewayRuntimeSettingsRevision?,
          activation: GatewayRuntimeActivationPlan, journal: GatewayJournalPreparationState,
          foreground: RuntimeActivationPlan, inventory: InstallationInventory) throws {
