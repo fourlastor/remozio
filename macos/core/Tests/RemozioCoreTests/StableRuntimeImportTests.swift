@@ -263,6 +263,171 @@ final class StableRuntimeImportTests: XCTestCase {
         }
     }
 
+    private typealias ImportPreparation = MachineUpdateStableRuntimeImportPreparation
+    private func prepareImport(_ f: Fixture, expected: Snapshot, journal: SharedSetupImportJournal? = nil, publish: ImportPreparation.Publish,
+        validate: ImportPreparation.Validate) throws -> RuntimePreparationState {
+        if let journal {
+            return try ImportPreparation.prepareInJournal(machine: f.machine(), expected: expected, candidate: f.candidate,
+                directory: f.directory, admission: f.admission, journal: journal, fileCustodyAccepted: true,
+                verifyCurrent: { _ in try f.directory.validate() }, readRelay: { _ in try .init(plan: nil, snapshot: nil) },
+                publish: publish, validatePublished: validate)
+        }
+        return try ImportPreparation.prepare(machine: f.machine(), expected: expected, candidate: f.candidate,
+            directory: f.directory, admission: f.admission, fileCustodyAccepted: true,
+            verifyCurrent: { _ in try f.directory.validate() }, publish: publish, validatePublished: validate)
+    }
+
+    func testStableImportPreparationOrdersValidationBeforeActualAcknowledgementAndDoesNotReplayIt() throws {
+        var armed = false, commits = 0
+        try importFixture(hook: { _ in if armed { commits += 1 } }) { f, intent, store in
+            var events: [String] = [], escaped: (() throws -> Void)?
+            let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+            armed = true
+            let result = try prepareImport(f, expected: expected, journal: store, publish: { retained, relay, verify in
+                events.append("publish"); escaped = verify
+                XCTAssertEqual(retained, intent); XCTAssertNil(relay)
+                let box = CallbackBox(verify), semaphore = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async { box.invoke(); semaphore.signal() }
+                XCTAssertEqual(semaphore.wait(timeout: .now() + 5), .success)
+                XCTAssertEqual(box.result(), .invalidated)
+                try verify(); return expected.state
+            }, validate: { retained, relay, state, verify in
+                events.append("validate"); XCTAssertEqual(retained, intent); XCTAssertNil(relay)
+                XCTAssertEqual(state, expected.state)
+                XCTAssertEqual(try store.current(scope: intent.scope)?.phase, .retained)
+                try verify()
+            })
+            XCTAssertEqual(events, ["publish", "validate"])
+            XCTAssertEqual(result, expected.state); XCTAssertEqual(commits, 1)
+            XCTAssertEqual(try store.current(scope: intent.scope)?.phase, .runtimePublished)
+            XCTAssertThrowsError(try XCTUnwrap(escaped)()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            let acknowledged = try XCTUnwrap(store.current(scope: intent.scope))
+            let current = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+            _ = try prepareImport(f, expected: current, publish: { _, _, verify in try verify(); return current.state },
+                validate: { _, _, state, verify in XCTAssertEqual(state, current.state); try verify() })
+            XCTAssertEqual(commits, 1)
+            XCTAssertEqual(try store.current(scope: intent.scope), acknowledged)
+        }
+    }
+
+    func testStableImportPreparationWithoutAJournalUsesTheActualMetadataWriters() throws {
+        try fixture { f in
+            let expected = try snapshot(f), selected = try reference(expected.plan)
+            let path = f.directory.path + "/SharedSetupImport"
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+            let result = try prepareImport(f, expected: expected, publish: { retained, relay, verify in
+                XCTAssertNil(retained); XCTAssertNil(relay); try verify()
+                // Owned SQL models publication metadata. A native file producer remains a separate prerequisite.
+                _ = try f.machine().retainStableRuntimeMaterial(selected, expected: expected, candidate: f.candidate,
+                    directory: f.directory, admission: f.admission, fileCustodyAccepted: true,
+                    verifyScoped: { _, _ in try f.directory.validate() })
+                _ = try f.machine().completeStableRuntimePublication(selected, expected: snapshot(f), candidate: f.candidate,
+                    directory: f.directory, admission: f.admission, fileCustodyAccepted: true,
+                    verifyScoped: { _, _ in try f.directory.validate() })
+                try verify(); return try snapshot(f).state
+            }, validate: { retained, relay, state, verify in
+                XCTAssertNil(retained); XCTAssertNil(relay)
+                XCTAssertEqual(state, try snapshot(f).state); try verify()
+            })
+            XCTAssertEqual(result.reference, selected); XCTAssertTrue(result.configurationPublished)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+    }
+
+    func testStableImportPreparationRequiresCustodyAndRefusesNativeOrdinaryUIDBeforeCallbacks() throws {
+        try fixture { f in
+            let expected = try snapshot(f)
+            var callbacks = 0
+            let publish: ImportPreparation.Publish = { _, _, _ in callbacks += 1; return expected.state }
+            let validate: ImportPreparation.Validate = { _, _, _, _ in callbacks += 1 }
+            XCTAssertThrowsError(try ImportPreparation.prepare(machine: f.machine(), expected: expected,
+                candidate: f.candidate, directory: f.directory, admission: f.admission, fileCustodyAccepted: false,
+                verifyCurrent: { _ in callbacks += 1 }, publish: publish, validatePublished: validate)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .custodyNotAccepted)
+            }
+            XCTAssertEqual(callbacks, 0)
+            guard getuid() != 0 else { return XCTFail("The fixture requires an ordinary owner") }
+            XCTAssertThrowsError(try ImportPreparation.prepareNative(machine: f.machine(), expected: expected,
+                candidate: f.candidate, directory: f.directory, admission: f.admission, fileCustodyAccepted: true,
+                verifyCurrent: { _ in callbacks += 1 }, publish: publish, validatePublished: validate)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+            XCTAssertEqual(callbacks, 0)
+            try snapshot(f).requireSame(as: expected)
+        }
+    }
+
+    func testStableImportPreparationExpiresEscapedVerificationOnPublishAndValidationFailure() throws {
+        for failDuringPublish in [true, false] {
+            try importFixture { f, intent, store in
+                let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+                var escaped: (() throws -> Void)?, validations = 0
+                XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+                    escaped = verify; try verify()
+                    if failDuringPublish { throw Fault.body }
+                    return expected.state
+                }, validate: { _, _, _, verify in
+                    validations += 1; escaped = verify; try verify(); throw Fault.body
+                })) { XCTAssertTrue($0 is Fault) }
+                XCTAssertEqual(validations, failDuringPublish ? 0 : 1)
+                XCTAssertEqual(try store.current(scope: intent.scope), intent)
+                XCTAssertThrowsError(try XCTUnwrap(escaped)()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            }
+        }
+    }
+
+    func testStableImportPreparationRejectsUnexpectedJournalWritesWithoutRepeatingThem() throws {
+        var armed = false, commits = 0
+        try importFixture(hook: { _ in if armed { commits += 1 } }) { f, intent, store in
+            let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+            armed = true
+            var validations = 0
+            XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+                try verify(); _ = try store.advance(intent, to: .runtimePublished); return expected.state
+            }, validate: { _, _, _, _ in validations += 1 })) {
+                XCTAssertEqual($0 as? SharedSetupImportError, .wrongScope)
+            }
+            XCTAssertEqual(validations, 0); XCTAssertEqual(commits, 1)
+            XCTAssertEqual(try store.current(scope: intent.scope)?.phase, .runtimePublished)
+        }
+    }
+
+    func testStableImportPreparationRefusesAnIncorrectPublishedStateBeforeValidationOrAcknowledgement() throws {
+        try importFixture { f, intent, store in
+            let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+            var validations = 0
+            XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+                try verify(); return .init(reference: nil, configurationPublished: false)
+            }, validate: { _, _, _, _ in validations += 1 })) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+            XCTAssertEqual(validations, 0)
+            XCTAssertEqual(try store.current(scope: intent.scope), intent)
+        }
+    }
+
+    func testStableImportPreparationRefusesAChangedRelayBeforeThePublicationCallback() throws {
+        try importFixture { f, intent, store in
+            let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
+            try withPublicRelaySelection { foreignRelay, _, _ in
+                var reads = 0, publications = 0
+                XCTAssertThrowsError(try ImportPreparation.prepareInJournal(machine: f.machine(), expected: expected,
+                    candidate: f.candidate, directory: f.directory, admission: f.admission, journal: store,
+                    fileCustodyAccepted: true, verifyCurrent: { _ in try f.directory.validate() }, readRelay: { _ in
+                        reads += 1
+                        if reads == 1 { return try .init(plan: nil, snapshot: nil) }
+                        return foreignRelay
+                    }, publish: { _, _, _ in publications += 1; return expected.state }, validatePublished: { _, _, _, _ in
+                        XCTFail("Changed relay reached validation")
+                    })) {
+                    XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+                }
+                XCTAssertEqual(reads, 2); XCTAssertEqual(publications, 0)
+                XCTAssertEqual(try store.current(scope: intent.scope), intent)
+            }
+        }
+    }
+
     func testAbsentImportReadsDoNotCreateAJournalOrDirectory() throws {
         try fixture { f in
             let path = f.directory.path + "/SharedSetupImport", before = try snapshot(f)
