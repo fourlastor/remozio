@@ -6,6 +6,7 @@ struct RetainedPolicyWriterFixture {
     enum JournalMode { case startup, completion, readOnly, foreignStartup }
     let machine: () -> PreparationIntentStore
     let source: MachineUpdateRetainedSetupActivationSource
+    let material: RuntimePreparationMaterial
     let candidate: SignedReleaseEvidence
     let directory: ReleaseDestinationLease
     let admission: UpdateOrdinaryAdmissionLease
