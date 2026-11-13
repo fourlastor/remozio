@@ -14,6 +14,9 @@ struct RetainedPolicyWriterFixture {
     let reopen: ((() throws -> Void)?) throws -> Void
     let scalar: (String) throws -> Int64
     let openPolicyJournal: (JournalMode) throws -> AuthorityJournal
+    let currentAuthorityAccountID: Data
+    let openJournalLease: @Sendable (Data) throws -> sending ProtectedJournalLease
+    let openContinuityLease: @Sendable (Data, ProtectedStorageLease.DirectoryIdentity) throws -> sending ProtectedContinuityLease
 }
 
 /// Owned stores exercise SQL only. Synthetic release declarations grant no installed caller or native policy authority.

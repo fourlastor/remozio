@@ -3759,6 +3759,22 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
                 journal: pair, candidate: fixture.candidate)
             try pair.close()
+            let policyInitializations = Dictionary(uniqueKeysWithValues: fixture.snapshot.source.accounts.compactMap { value in
+                value.initialization.map { (value.accountID, $0) }
+            })
+            let openJournal: @Sendable (Data) throws -> sending ProtectedJournalLease = { id in
+                guard let initial = policyInitializations[id] else { throw ReplacementFixtureError.injected }
+                let path = (initial.journalPath as NSString).deletingLastPathComponent, prefix = anchor + "/"
+                guard path.hasPrefix(prefix) else { throw ReplacementFixtureError.injected }
+                return try ProtectedJournalLease(anchor: anchor, relativeDirectory: String(path.dropFirst(prefix.count)), owner: getuid())
+            }
+            let openContinuity: @Sendable (Data, ProtectedStorageLease.DirectoryIdentity) throws -> sending ProtectedContinuityLease = { id, excluded in
+                guard let initial = policyInitializations[id] else { throw ReplacementFixtureError.injected }
+                let path = (initial.continuityPath as NSString).deletingLastPathComponent, prefix = anchor + "/"
+                guard path.hasPrefix(prefix) else { throw ReplacementFixtureError.injected }
+                return try ProtectedContinuityLease(anchor: anchor, relativeDirectory: String(path.dropFirst(prefix.count)),
+                    owner: getuid(), excludingDirectory: excluded)
+            }
             try body(.init(machine: { fixture.machine }, source: source, material: XCTUnwrap(runtimeMaterial), candidate: fixture.candidate,
                 directory: directory, admission: admission, verifyPair: {
                     let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
@@ -3775,7 +3791,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     case .completion: return try fixture.openPolicyPair(readOnly: false, accountID: account.accountID)
                     case .readOnly: return try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
                     }
-                }))
+                }, currentAuthorityAccountID: fixture.boundary.accountID,
+                openJournalLease: openJournal, openContinuityLease: openContinuity))
         }
     }
 
