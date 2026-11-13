@@ -3625,6 +3625,7 @@ public final class PreparationIntentStore {
     private func stableAccountStorageValues(_ mutation: StableAccountStorageMutation, actual: MachineUpdateStableAccountSetupSnapshot)
         throws -> (AccountPreparationIntent, AuthorityInitializationIntent?) {
         guard let preparation = actual.preparation, let account = actual.account else { throw AccountPreparationError.missing }
+        guard account.origin == .currentRelease else { throw AccountPreparationError.conflict }
         let existing = account.initialization
         switch mutation {
         case .pin(let key):

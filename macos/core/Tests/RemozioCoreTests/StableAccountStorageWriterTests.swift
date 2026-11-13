@@ -319,4 +319,36 @@ final class StableAccountStorageWriterTests: XCTestCase {
             }
         }
     }
+
+    func testRetainedAccountCannotPinOrRecoverInitializationFromTheCurrentRelease() throws {
+        try fixture { f in
+            _ = try validControl(f)
+            let before = try snapshot(f, owner: f.retainedOwner)
+            XCTAssertEqual(before.account?.origin, .retained)
+            let preparation = try XCTUnwrap(before.preparation)
+            let initial = try XCTUnwrap(before.account?.initialization)
+            let retainedKey = try XCTUnwrap(preparation.authorityPublicKey)
+            XCTAssertEqual(preparation.ownerUID, f.retainedOwner.uid)
+            XCTAssertNotEqual(preparation.releaseDigest, before.source.actual.inventory.releaseDigest)
+            var commits = 0, mutationCalls = 0
+            try f.reopen { commits += 1 }
+            let verify: (Stage, Snapshot) throws -> Void = { stage, _ in
+                if stage != .beforeTransaction { mutationCalls += 1 }
+            }
+            for selectedKey in [retainedKey, self.key()] {
+                XCTAssertThrowsError(try pin(f, key: selectedKey, expected: before, verify: verify)) {
+                    XCTAssertEqual($0 as? AccountPreparationError, .conflict)
+                }
+            }
+            XCTAssertThrowsError(try begin(f, expected: before,
+                selectedPaths: (initial.journalPath, initial.continuityPath), verify: verify)) {
+                XCTAssertEqual($0 as? AccountPreparationError, .conflict)
+            }
+            XCTAssertEqual(commits, 0); XCTAssertEqual(mutationCalls, 0)
+            try snapshot(f, owner: f.retainedOwner).requireSame(as: before)
+            try f.admission.validate()
+            XCTAssertNoThrow(try begin(f))
+            XCTAssertEqual(commits, 0)
+        }
+    }
 }
