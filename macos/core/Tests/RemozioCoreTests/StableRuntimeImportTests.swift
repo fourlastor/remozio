@@ -110,6 +110,159 @@ final class StableRuntimeImportTests: XCTestCase {
             candidate: f.candidate, directory: f.directory, admission: f.admission)
     }
 
+    private typealias RetainedInputs = MachineUpdateRetainedSetupRuntimeInputs
+    private typealias RelaySelection = MachineUpdateStableRuntimeImportPreparation.RelaySelection
+    private func withPublicRelaySelection(_ body: (RelaySelection, SharedSetupImportRelayPlan,
+        SharedSetupImportRelayStorage.Snapshot) throws -> Void) throws {
+        let f = try SharedSetupImportFixture(), intent = try f.intent()
+        let directory = try ProtectedSetupDirectory(anchor: f.accountFixture.root.path,
+            relativePath: f.relativeDirectory, owner: getuid(), createIfMissing: false)
+        defer { directory.close() }
+        let plan = try SharedSetupImportRelayPlan(expected: intent, port: 51001)
+        _ = try AdministrativeSetupPublication.publish(plan.bytes,
+            file: .importRelayPlan(accountID: intent.scope.accountID), directory: directory, owner: getuid())
+        let actual = try RelaySelection.read(intent, directory: directory, owner: getuid())
+        try body(actual, plan, XCTUnwrap(actual.snapshot))
+    }
+
+    func testRetainedRuntimeInputsDistinguishAbsentAndEmptyJournalsWithoutCreatingMissingStorage() throws {
+        try fixture { f in
+            let before = try snapshot(f), path = f.directory.path + "/SharedSetupImport"
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+            let absent = try RetainedInputs.capture(expected: before, journal: nil,
+                verifyCurrent: { try before.requireCurrent(machine: f.machine(), candidate: f.candidate) },
+                readRelay: { _ in XCTFail("Absent journal read a relay"); throw Fault.body })
+            XCTAssertFalse(absent.journalPresent); XCTAssertNil(absent.intent); XCTAssertNil(absent.relay)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+            let store = try journal(f, account: before.preparation, initialize: true)
+            defer { try? store.close() }
+            try f.machine().withSharedImportSnapshot(journal: store) { _, _ in
+                let current = try snapshot(f)
+                let empty = try RetainedInputs.capture(expected: current, journal: store,
+                    verifyCurrent: { try current.requireCurrent(machine: f.machine(), candidate: f.candidate) },
+                    readRelay: { _ in XCTFail("Empty journal read a relay"); throw Fault.body })
+                XCTAssertTrue(empty.journalPresent); XCTAssertNil(empty.intent); XCTAssertNil(empty.relay)
+                XCTAssertThrowsError(try empty.requireSame(as: absent)) {
+                    XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+                }
+                try empty.requireSource(current)
+                XCTAssertEqual(empty.description, "MachineUpdateRetainedSetupRuntimeInputs(redacted)")
+                XCTAssertEqual(empty.debugDescription, empty.description)
+            }
+        }
+    }
+
+    func testRetainedRuntimeInputAcknowledgementUsesTheActualImportWriterAndRejectsReplay() throws {
+        try importFixture { f, intent, store in
+            try f.machine().withSharedImportSnapshot(journal: store) { _, _ in
+                let expected = try snapshot(f)
+                var reads = 0
+                let before = try RetainedInputs.capture(expected: expected, journal: store,
+                    verifyCurrent: { try expected.requireCurrent(machine: f.machine(), candidate: f.candidate) },
+                    readRelay: { value in reads += 1; XCTAssertEqual(value, intent); return try .init(plan: nil, snapshot: nil) })
+                XCTAssertEqual(reads, 2)
+                let changed = try advance(f, expected: expected, previous: intent, journal: store)
+                let after = try RetainedInputs.capture(expected: changed.snapshot, journal: store,
+                    verifyCurrent: { try changed.snapshot.requireCurrent(machine: f.machine(), candidate: f.candidate) },
+                    readRelay: { _ in try .init(plan: nil, snapshot: nil) })
+                XCTAssertEqual(after.intent, changed.intent)
+                XCTAssertEqual(try store.current(scope: intent.scope), changed.intent)
+                try after.requirePublicationAcknowledgement(from: before)
+                for (actual, previous) in [(before, before), (after, after), (before, after)] {
+                    XCTAssertThrowsError(try actual.requirePublicationAcknowledgement(from: previous)) {
+                        XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+                    }
+                }
+            }
+        }
+    }
+
+    func testRetainedRuntimeInputsRejectJournalAndRelayChangesDuringTheDoubleRead() throws {
+        try importFixture { f, intent, store in
+            try f.machine().withSharedImportSnapshot(journal: store) { _, _ in
+                let expected = try snapshot(f)
+                var reads = 0
+                XCTAssertThrowsError(try RetainedInputs.capture(expected: expected, journal: store,
+                    verifyCurrent: { try f.directory.validate() }, readRelay: { _ in
+                        reads += 1
+                        _ = try store.advance(intent, to: .runtimePublished)
+                        return try .init(plan: nil, snapshot: nil)
+                    })) {
+                    XCTAssertEqual($0 as? SharedSetupImportError, .wrongScope)
+                }
+                XCTAssertEqual(reads, 1)
+                let published = try snapshot(f)
+                try withPublicRelaySelection { foreignRelay, _, _ in
+                    reads = 0
+                    XCTAssertThrowsError(try RetainedInputs.capture(expected: published, journal: store,
+                        verifyCurrent: { try published.requireCurrent(machine: f.machine(), candidate: f.candidate) },
+                        readRelay: { _ in
+                            reads += 1
+                            if reads == 1 { return try .init(plan: nil, snapshot: nil) }
+                            return foreignRelay
+                        })) {
+                        XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+                    }
+                    XCTAssertEqual(reads, 2)
+                }
+            }
+        }
+    }
+
+    func testRetainedRuntimeInputsRejectWrongDestinationsPrematurePhasesAndNativeOrdinaryUID() throws {
+        try importFixture(published: false) { f, intent, store in
+            try f.machine().withSharedImportSnapshot(journal: store) { _, _ in
+                let expected = try snapshot(f)
+                let foreign = try journal(f, account: expected.preparation, initialize: true,
+                    component: "ForeignInputDestination", installationID: AccountPreparationIntent.randomID())
+                defer { try? foreign.close() }
+                XCTAssertThrowsError(try RetainedInputs.capture(expected: expected, journal: foreign,
+                    verifyCurrent: { try f.directory.validate() }, readRelay: { _ in try .init(plan: nil, snapshot: nil) })) {
+                    XCTAssertEqual($0 as? SharedSetupImportError, .wrongScope)
+                }
+                _ = try store.advance(intent, to: .runtimePublished)
+                XCTAssertThrowsError(try RetainedInputs.capture(expected: snapshot(f), journal: store,
+                    verifyCurrent: { try f.directory.validate() }, readRelay: { _ in try .init(plan: nil, snapshot: nil) })) {
+                    XCTAssertEqual($0 as? RuntimePreparationError, .incomplete)
+                }
+                guard getuid() != 0 else { return XCTFail("The fixture requires an ordinary owner") }
+                var verifications = 0
+                XCTAssertThrowsError(try RetainedInputs.captureNative(expected: expected, verifyCurrent: { verifications += 1 })) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+                }
+                XCTAssertEqual(verifications, 0)
+            }
+        }
+    }
+
+    func testRetainedRuntimeInputsPropagateOwnerFailuresAndRelaySelectionPinsActualPublicBytes() throws {
+        try importFixture { f, _, store in
+            try f.machine().withSharedImportSnapshot(journal: store) { _, _ in
+                let expected = try snapshot(f)
+                for failAt in 1...3 {
+                    var calls = 0
+                    XCTAssertThrowsError(try RetainedInputs.capture(expected: expected, journal: store,
+                        verifyCurrent: {
+                            calls += 1
+                            if calls == failAt { throw Fault.body }
+                            try expected.requireCurrent(machine: f.machine(), candidate: f.candidate)
+                        }, readRelay: { _ in try .init(plan: nil, snapshot: nil) })) { XCTAssertTrue($0 is Fault) }
+                    XCTAssertEqual(calls, failAt)
+                }
+            }
+        }
+        try withPublicRelaySelection { actual, plan, snapshot in
+            XCTAssertEqual(actual.plan, plan)
+            XCTAssertEqual(snapshot.digest, Data(SHA256.hash(data: plan.bytes)))
+            XCTAssertThrowsError(try RelaySelection(plan: plan, snapshot: nil))
+            XCTAssertThrowsError(try RelaySelection(plan: nil, snapshot: snapshot))
+            let changed = SharedSetupImportRelayStorage.Snapshot(identity: snapshot.identity, digest: Data(repeating: 0, count: 32))
+            XCTAssertThrowsError(try RelaySelection(plan: plan, snapshot: changed)) {
+                XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+            }
+        }
+    }
+
     func testAbsentImportReadsDoNotCreateAJournalOrDirectory() throws {
         try fixture { f in
             let path = f.directory.path + "/SharedSetupImport", before = try snapshot(f)
