@@ -13,9 +13,18 @@ struct MachineUpdateRetainedSetupInitialSelection: CustomStringConvertible, Cust
     let digest: Data
     var description: String { "MachineUpdateRetainedSetupInitialSelection(redacted)" }
     var debugDescription: String { description }
+    /// The value carries the actual post-capture frame. It grants no publication authority.
+    struct Frame: CustomStringConvertible, CustomDebugStringConvertible {
+        let selection: MachineUpdateRetainedSetupInitialSelection
+        let snapshot: Snapshot
+        let current: AuthorityJournal.MachineUpdatePolicyBoundary
+        var description: String { "RetainedSetupInitialSelectionFrame(redacted)" }
+        var debugDescription: String { description }
+    }
     struct Scope {
-        fileprivate let checked: () throws -> MachineUpdateRetainedSetupInitialSelection
-        func read() throws -> MachineUpdateRetainedSetupInitialSelection { try checked() }
+        fileprivate let checked: () throws -> Frame
+        func read() throws -> MachineUpdateRetainedSetupInitialSelection { try checked().selection }
+        func readFrame() throws -> Frame { try checked() }
         func verify() throws { _ = try read() }
     }
     private init(snapshot: Snapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary,
@@ -60,27 +69,29 @@ struct MachineUpdateRetainedSetupInitialSelection: CustomStringConvertible, Cust
                 guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
                       active, !violated, writer != nil else { throw JournalLeaseError.invalidated }
             }
-            func verifySource() throws {
+            func verifySource() throws -> (Snapshot, AuthorityJournal.MachineUpdatePolicyBoundary) {
                 try lifetime()
                 guard let writer, let verification, let pairReader else { throw JournalLeaseError.invalidated }
-                try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate).requireSame(as: expected)
-                try verification(expected); try lifetime(); try record.requireRecorded(pairReader())
-                try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate).requireSame(as: expected)
-                try lifetime()
+                try verification(expected); try lifetime()
+                let pair = try pairReader(); try record.requireRecorded(pair); try lifetime()
+                let actual = try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate)
+                try actual.requireSame(as: expected); try lifetime(); return (actual, pair)
             }
-            func capture() throws -> Inputs {
+            func capture() throws -> (inputs: Inputs, snapshot: Snapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary) {
                 try lifetime()
                 guard !reading else { violated = true; throw PreparationStoreError.transactionActive }
                 reading = true; defer { reading = false }
-                try verifySource()
+                _ = try verifySource()
                 let actual = try Inputs.capture(expected: expected.activation.runtime, journal: journal,
-                    verifyCurrent: verifySource, readRelay: readRelay)
-                try verifySource(); return actual
+                    verifyCurrent: lifetime, readRelay: readRelay)
+                let frame = try verifySource(); return (actual, frame.0, frame.1)
             }
-            let selected = try Self(snapshot: expected, current: current, candidate: candidate,
-                recordedStartupPolicy: recordedStartupPolicy, inputs: capture())
+            let initial = try capture()
+            let selected = try Self(snapshot: initial.snapshot, current: initial.current, candidate: candidate,
+                recordedStartupPolicy: recordedStartupPolicy, inputs: initial.inputs)
             let scope = Scope(checked: {
-                try selected.inputs.requireSame(as: capture()); try lifetime(); return selected
+                let actual = try capture(); try selected.inputs.requireSame(as: actual.inputs); try lifetime()
+                return Frame(selection: selected, snapshot: actual.snapshot, current: actual.current)
             })
             try scope.verify(); let result = try body(selected, scope); try scope.verify(); return result
         }

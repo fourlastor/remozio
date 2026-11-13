@@ -24,7 +24,6 @@ enum MachineUpdateRetainedSetupInitialPublication {
         machine: PreparationIntentStore, expected: Snapshot, candidate: SignedReleaseEvidence,
         directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, fileCustodyAccepted: Bool,
         verifyCurrent: (Snapshot) throws -> Void, verifyServices: (ServiceAccountPlan) throws -> Void,
-        readPolicyBoundary: () throws -> AuthorityJournal.MachineUpdatePolicyBoundary,
         readMaterial: (Scope) throws -> RuntimePreparationMaterial,
         verifyActivity: (ServiceReleaseActivityReference, Scope) throws -> Void,
         readArtifact: (RuntimePublishedArtifactValidation.Artifact, Scope) throws -> Data?,
@@ -63,20 +62,20 @@ enum MachineUpdateRetainedSetupInitialPublication {
         func fullCheck() throws -> RuntimePreparationMaterial {
             try lifetime(); guard !reading else { violated = true; throw PreparationStoreError.transactionActive }
             reading = true; defer { reading = false }
-            guard let writer else { throw JournalLeaseError.invalidated }
+            guard writer != nil else { throw JournalLeaseError.invalidated }
             try admission.validateMachineBoundary(directory: directory, expected: boundary)
-            let actual = try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate)
-            try actual.requireSame(as: expected); try verifyCurrent(actual); try lifetime()
-            try verifyServices(actual.activation.runtime.plan); try lifetime()
-            let pair = try readPolicyBoundary(); try record.requireRecorded(pair)
-            try selection.configuration.binding.requireSourceForPublication(actual, current: pair, candidate: candidate)
+            try verifyCurrent(expected); try lifetime()
+            try verifyServices(expected.activation.runtime.plan); try lifetime()
             let material = try loan { try readMaterial($0) }
             guard try material.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
             if let retained, try retained.encoded != material.encoded { throw RuntimePreparationError.conflictingMaterial }
             guard let activity = material.serviceActivity else { throw RuntimePreparationError.incomplete }
-            try reference.validate(account: actual.activation.runtime.preparation, services: actual.activation.runtime.plan)
+            try reference.validate(account: expected.activation.runtime.preparation, services: expected.activation.runtime.plan)
             try loan(material: material) { try verifyActivity(activity, $0) }
-            let selected = try selectionScope.read(); try selected.requireSame(as: selection)
+            let frame = try selectionScope.readFrame(); try frame.snapshot.requireSame(as: expected)
+            try record.requireRecorded(frame.current)
+            try selection.configuration.binding.requireSourceForPublication(frame.snapshot, current: frame.current, candidate: candidate)
+            let selected = frame.selection; try selected.requireSame(as: selection)
             guard selected.digest == digest else { throw RuntimeActivationError.changedScope }
             try admission.validateMachineBoundary(directory: directory, expected: boundary); try lifetime(); return material
         }

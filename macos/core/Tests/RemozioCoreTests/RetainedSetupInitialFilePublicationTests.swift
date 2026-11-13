@@ -60,7 +60,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         var bytes: [String: Data] = [:]
         var files: Files?
         var created = 0, publishCalls = 0, materialReads = 0, pairReads = 0, artifactReads = 0
-        var fullReads = 0, callbackDepth = 0, borrowedCallbacks = 0
+        var fullReads = 0, callbackDepth = 0, borrowedCallbacks = 0, c1SnapshotReads = 0
         var stopAfterCreated: Int?, corruptReadback = false, didPublish = false
         var materialReader: ((Int) throws -> RuntimePreparationMaterial)?
         var afterFile: ((Int) throws -> Void)?
@@ -96,13 +96,15 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         _ body: (Fixture, Snapshot, Boundary) throws -> Void) throws {
         try RetainedSetupInitialPublicationWriterTests.withRecordedInitialSelectionFixture(seed: seed, body: body)
     }
-    private func withSelection<Result>(_ f: Fixture, _ snapshot: Snapshot, _ current: Boundary,
+    private func withSelection<Result>(_ f: Fixture, _ snapshot: Snapshot, _ current: Boundary, state: State? = nil,
         body: (Selection, Selection.Scope) throws -> Result) throws -> Result {
         try Selection.withCurrent(machine: f.machine(), expected: snapshot, candidate: f.candidate,
             recordedStartupPolicy: current.policy.policy, readPolicyBoundary: {
                 let journal = try f.openPolicyJournal(.readOnly); defer { try? journal.close() }
-                return try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(snapshot.activation.runtime.setup.account?.initialization))
-            }, verifyCurrent: { _ in }, body: body)
+                let actual = try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(snapshot.activation.runtime.setup.account?.initialization))
+                if let state { state.pairReads += 1; return try state.pairReader?(state.pairReads) ?? actual }
+                return actual
+            }, verifyCurrent: { _ in state?.c1SnapshotReads += 1; if let state { XCTAssertEqual(state.callbackDepth, 0) } }, body: body)
     }
     private func artifacts(_ f: Fixture, _ snapshot: Snapshot, _ current: Boundary) throws -> [Artifact] {
         try withSelection(f, snapshot, current) { selection, _ in
@@ -113,14 +115,13 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         custody: Bool = true, verify: @escaping (Snapshot) throws -> Void = { _ in },
         didStage: (RuntimePublicationController.Stage) throws -> Void = { _ in },
         inspect: (Publication.Scope) throws -> Void = { _ in }) throws -> Selection {
-        try withSelection(f, snapshot, current) { selected, selectedScope in
+        try withSelection(f, snapshot, current, state: state) { selected, selectedScope in
             try Publication.prepare(selection: selected, selectionScope: selectedScope,
                 machine: f.machine(), expected: snapshot, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, fileCustodyAccepted: custody,
                 verifyCurrent: { actual in
                     state.fullReads += 1; XCTAssertEqual(state.callbackDepth, 0); try verify(actual)
                 }, verifyServices: { XCTAssertEqual($0, snapshot.activation.runtime.plan) },
-                readPolicyBoundary: { state.pairReads += 1; return try state.pairReader?(state.pairReads) ?? current },
                 readMaterial: { scope in try state.borrowed(scope) {
                     state.materialReads += 1
                     return try state.materialReader?(state.materialReads) ?? f.material
@@ -248,7 +249,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
                 checkpoint: current.checkpoint)
             state.pairReader = { $0 == 1 ? current : changed }
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state)) { XCTAssertEqual($0 as? PreparationStoreError, .staleRevision) }
-            XCTAssertEqual(state.publishCalls, 0); XCTAssertEqual(state.artifactReads, 8)
+            XCTAssertEqual(state.publishCalls, 0); XCTAssertEqual(state.artifactReads, 0)
             let material = f.material
             let foreign = try RuntimePreparationMaterial(materialID: AccountPreparationIntent.randomID(), services: material.services,
                 transportIdentity: material.transportIdentity, transportPublicKeyInfo: material.transportPublicKeyInfo,
@@ -419,7 +420,9 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             })
             XCTAssertEqual(state.created, 8); XCTAssertEqual(state.publishCalls, 8)
             XCTAssertEqual(state.fullReads, 2 * 8 + 2); XCTAssertLessThanOrEqual(state.fullReads, 18)
-            XCTAssertEqual(state.materialReads, 18); XCTAssertEqual(state.pairReads, 18)
+            XCTAssertEqual(state.materialReads, 18)
+            XCTAssertEqual(state.c1SnapshotReads, 2 * (18 + 3))
+            XCTAssertEqual(state.pairReads, 1 + state.c1SnapshotReads)
             XCTAssertGreaterThan(state.borrowedCallbacks, 0); XCTAssertEqual(state.callbackDepth, 0)
         }
     }
