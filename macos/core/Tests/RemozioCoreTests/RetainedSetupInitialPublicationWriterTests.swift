@@ -44,6 +44,18 @@ final class RetainedSetupInitialPublicationWriterTests: XCTestCase {
         return try .decode(JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys, .withoutEscapingSlashes]))
     }
 
+    /// Seeds only owned import storage. The body receives a fresh snapshot after the seed, never a proposed native receipt.
+    static func withRecordedInitialSelectionFixture(seed: (RetainedPolicyWriterFixture) throws -> Void = { _ in },
+        body: (RetainedPolicyWriterFixture, MachineUpdateRetainedSetupPolicySnapshot,
+            AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
+        let suite = RetainedSetupInitialPublicationWriterTests(selector: NSSelectorFromString(
+            "testOneActualUpdateRereadsTheExactPublicationTransitionAndClosesPolicyWriters"))
+        try suite.fixture { f, _ in
+            try seed(f); let before = try suite.snapshot(f)
+            try body(f, before, suite.pair(f)); try suite.snapshot(f).requireSame(as: before)
+        }
+    }
+
     func testOneActualUpdateRereadsTheExactPublicationTransitionAndClosesPolicyWriters() throws {
         try fixture { f, before in
             let reference = try XCTUnwrap(before.activation.runtime.state.reference), record = try XCTUnwrap(before.intent)
