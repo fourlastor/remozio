@@ -318,22 +318,50 @@ public final class PreparationIntentStore {
         let ids = retained.map { $0.runtime.preparation.accountID }
         guard Set(ids).count == ids.count else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
         return try transaction(write: false) {
-            let context = StableCompatibilityRead(source: expected, retained: retained)
-            func capture() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
-                try self.loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
-                for supplied in retained {
-                    guard supplied.state.plan != nil else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
-                    try supplied.runtime.setup.source.requireSame(as: expected)
-                    try self.loadRetainedSetupActivationSnapshot(owner: supplied.runtime.setup.owner,
-                        candidate: candidate).requireSame(as: supplied)
-                }
-                return try self.loadRetainedRuntimeCompatibilityInputs(stable: context)
-            }
-            let inputs = try capture()
-            let result = try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs)
-            guard try capture() == inputs else { throw PreparationStoreError.staleRevision }
-            return result
+            try withStableRuntimeCompatibilityRead(expected: expected, retained: retained, candidate: candidate) { $0 }
         }
+    }
+
+    /// Reads compatibility and current gateway journal values under the same checked transaction.
+    func stableRuntimeViewInputs(expected: MachineUpdateStableRuntimeSource,
+        retained: [MachineUpdateRetainedSetupActivationSnapshot], candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateStableRuntimeViewInputs {
+        let ids = retained.map { $0.runtime.preparation.accountID }
+        guard Set(ids).count == ids.count else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
+        return try transaction(write: false) {
+            try withStableRuntimeCompatibilityRead(expected: expected, retained: retained, candidate: candidate) { runtime in
+                var journals: [Data: GatewayJournalPreparationState] = [:]
+                for account in expected.accounts where account.origin == .currentRelease &&
+                    runtime.inputs.gateways.contains(where: { $0.accountID == account.accountID }) {
+                    let state = try loadGatewayJournalPreparation(accountID: account.accountID)
+                    if let intent = state.intent { try requireGatewayJournalScope(intent) }
+                    journals[account.accountID] = state
+                }
+                return try .init(source: expected, retained: retained, runtime: runtime, currentJournals: journals)
+            }
+        }
+    }
+
+    private func withStableRuntimeCompatibilityRead<Value>(expected: MachineUpdateStableRuntimeSource,
+        retained: [MachineUpdateRetainedSetupActivationSnapshot], candidate: SignedReleaseEvidence,
+        _ body: (RuntimeReleaseCompatibilitySnapshot) throws -> Value) throws -> Value {
+        guard active, let db, sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+        let context = StableCompatibilityRead(source: expected, retained: retained)
+        func capture() throws -> RuntimeReleaseCompatibilitySnapshot.Inputs {
+            try self.loadStableRuntimeSource(candidate: candidate).requireSame(as: expected)
+            for supplied in retained {
+                guard supplied.state.plan != nil else { throw RuntimeActivationCompatibilityError.unexpectedRetainedSnapshot }
+                try supplied.runtime.setup.source.requireSame(as: expected)
+                try self.loadRetainedSetupActivationSnapshot(owner: supplied.runtime.setup.owner,
+                    candidate: candidate).requireSame(as: supplied)
+            }
+            return try self.loadRetainedRuntimeCompatibilityInputs(stable: context)
+        }
+        let inputs = try capture()
+        let result = try RuntimeReleaseCompatibilitySnapshot.describe(inputs: inputs)
+        let value = try body(result)
+        guard try capture() == inputs else { throw PreparationStoreError.staleRevision }
+        return value
     }
     private struct StableCompatibilityRead {
         let source: MachineUpdateStableRuntimeSource
