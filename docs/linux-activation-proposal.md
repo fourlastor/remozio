@@ -1,17 +1,18 @@
 # Linux protected services: activation proposal
 
-Status: **unapproved proposal**, 29 October 2026, with the Linux host owner's
-choices for decisions 4 to 8 recorded on 13 November 2026 (see
-[Decisions](#decisions)). Decisions 1, 2 and 3 stay open. Nothing else here is
-accepted policy.
+Status: **unapproved proposal**, 29 October 2026. On 13 November 2026 the Linux
+host owner chose decisions 5, 7 and 8 and put decisions 4 and 6 behind written
+gates (see [Decisions](#decisions)). Decisions 1, 2, 3, 4 and 6 stay open. Nothing
+else here is accepted policy.
 It proposes concrete service identities, paths, ownership and modes, IPC peers,
 startup refusals, recovery behavior and operator gates for the
 [contributor guide's](https://gist.github.com/rock3r/ef069bbc6f931b83febf2e1c159cdbfa)
 Phase 3. It does not approve production activation, change any contract, claim
 hardware key custody, or choose the open
 [line 67 handoff](linux-host-contract.md#candidate-strict-admission-profile).
-Account, unit and path names are chosen (decision 8). Every mode and limit below
-is still a reviewable proposal. Nothing has been
+Account, unit and path names are chosen (decision 8), except the execution
+identity, which stays with decision 2. Every mode and limit below is still a
+reviewable proposal. Nothing has been
 installed, started or provisioned, and no service code exists yet.
 
 The inputs are the [Phase 0 contract](linux-host-contract.md), whose platform table
@@ -48,7 +49,8 @@ The proposal starts with one machine-wide instance of each system service. The M
 host runs per-account jobs (`dev.remozio.account.<hex>.authority`); a per-account
 template (`remozio-authority@<hex>.service`) is the natural Linux extension once a
 second local account is in scope (decision 7). User names follow Ubuntu's plain
-`<package>-<role>` style (decision 8). Stable, preallocated
+`<package>-<role>` style (decision 8); the execution identity stays open
+(decision 2). Stable, preallocated
 system UIDs are required because state ownership is checked against them, so
 `DynamicUser=` is not used.
 
@@ -203,9 +205,9 @@ on the target machine:
 
 ## Decisions
 
-On 13 November 2026 the Linux host owner recorded the choices below for decisions
-4 to 8. Decisions 1, 2 and 3 stay open, and this proposal still chooses none of
-them.
+On 13 November 2026 the Linux host owner chose decisions 5, 7 and 8 and put
+decisions 4 and 6 behind written gates. Decisions 1, 2, 3, 4 and 6 stay open, and
+this proposal still chooses none of them.
 
 1. **Line 67 handoff.** [Contract line 67](linux-host-contract.md#candidate-strict-admission-profile)
    requires the monitor to own and confirm the caller's stop while committing the
