@@ -1111,6 +1111,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 XCTAssertEqual(pending.pendingChange, try AuthorityPhonePushSettingsChange(publication))
                 XCTAssertEqual(pending.activeCommitDigest, settled.activeCommitDigest)
                 XCTAssertTrue(pending.requiresFreshQuiescence)
+                XCTAssertFalse(pending.requiresConsumerRecovery)
                 XCTAssertFalse(pending.allowsInitialInstallation(commitDigest: pending.activeCommitDigest))
             }
             for state in [GatewayRuntimeSettingsState(active: nil, pending: first, phase: nil),

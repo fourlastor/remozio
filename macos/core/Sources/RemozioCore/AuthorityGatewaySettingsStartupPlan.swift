@@ -64,6 +64,7 @@ struct AuthorityGatewaySettingsStartupPlan: Sendable, CustomStringConvertible {
             pendingChange = change
         } else { pendingChange = nil }
         accountID = base.accountID; options = base.options; activeCommitDigest = base.activeCommitDigest
+        // A pending change requires fresh quiescence instead of settled consumer recovery.
         requiresConsumerRecovery = state.active != nil && state.pending == nil
     }
     /// Read through the same protected machine owner before native check-in transfers and closes that owner.
