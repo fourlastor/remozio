@@ -48,6 +48,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 if value[0] == 'authority.installation-preparation':
                     value[1] = list(range(1, 12))
                     value[2] = list(range(1, 12))
+                    value[3].pop(24, None)
                 if value[0] == 'runtime.gateway-settings-consumer-host':
                     value[1] = [1]
                 if value[0] == 'runtime.activation-plan':
@@ -94,8 +95,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             if role in (2, 8):
                 preparation = by_name['authority.installation-preparation']
                 self.assertEqual(preparation[1], list(range(1, 29)))
-                self.assertEqual(preparation[2], list(range(1, 25)))
-                self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
+                self.assertEqual(preparation[2], list(range(1, 26)))
+                self.assertEqual(preparation[3], {1: 2, 24: 25} if role == 2 else {24: 25})
 
     def test_retained_intent_readers_match_the_current_record_codec_versions(self):
         records = (
@@ -111,18 +112,22 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for role in (2, 8):
                 declaration = next(value for value in MANIFEST.declarations(role) if value[0] == name)
                 self.assertIn(version, declaration[1], (record, role))
-                self.assertEqual(declaration[2], [], (record, role))
+                self.assertEqual(declaration[2], [2] if name == 'authority.retained-setup-policy-intent' else [], (record, role))
 
-    def test_retained_setup_policy_is_declared_read_only(self):
+    def test_retained_setup_policy_declares_v2_writer_and_schema25_migration(self):
         name = 'authority.retained-setup-policy-intent'
         for role, *_ in MANIFEST.COMPONENTS:
             by_name = {value[0]: value for value in MANIFEST.declarations(role)}
             if role in (2, 8):
-                self.assertEqual(by_name[name], {0: name, 1: [2], 2: [], 3: {}})
+                self.assertEqual(by_name[name], {0: name, 1: [2], 2: [2], 3: {}})
                 preparation = by_name['authority.installation-preparation']
                 self.assertIn(25, preparation[1])
-                self.assertNotIn(25, preparation[2])
-                self.assertNotIn(24, preparation[3])
+                self.assertEqual(preparation[2], list(range(1, 26)))
+                self.assertEqual(preparation[3], {1: 2, 24: 25} if role == 2 else {24: 25})
+                for version in (26, 27, 28):
+                    self.assertNotIn(version, preparation[2])
+                for version in (25, 26, 27, 28):
+                    self.assertNotIn(version, preparation[3])
             else:
                 self.assertNotIn(name, by_name)
 
@@ -147,8 +152,8 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(by_name[name], {0: name, 1: [1], 2: [], 3: {}})
                 preparation = by_name['authority.installation-preparation']
                 self.assertEqual(preparation[1], list(range(1, 29)))
-                self.assertEqual(preparation[2], list(range(1, 25)))
-                self.assertEqual(preparation[3], {1: 2} if role == 2 else {})
+                self.assertEqual(preparation[2], list(range(1, 26)))
+                self.assertEqual(preparation[3], {1: 2, 24: 25} if role == 2 else {24: 25})
             else:
                 self.assertNotIn(name, by_name)
 
@@ -160,7 +165,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertEqual(by_name[name], {0: name, 1: [1], 2: [], 3: {}})
                 preparation = by_name['authority.installation-preparation']
                 self.assertEqual(preparation[1], list(range(1, 29)))
-                self.assertEqual(preparation[2], list(range(1, 25)))
+                self.assertEqual(preparation[2], list(range(1, 26)))
                 self.assertNotIn(27, preparation[3])
             else:
                 self.assertNotIn(name, by_name)
@@ -408,7 +413,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         self.assertEqual(declarations['authority.command-config'][1], [1, 2])
         self.assertEqual(declarations['authority.command-host-config'][1], [1, 2, 3, 4])
         self.assertEqual(declarations['authority.installation-preparation'],
-                         {0: 'authority.installation-preparation', 1: list(range(1, 29)), 2: list(range(1, 25)), 3: {1: 2}})
+                         {0: 'authority.installation-preparation', 1: list(range(1, 29)), 2: list(range(1, 26)), 3: {1: 2, 24: 25}})
         self.assertEqual(declarations['authority.installation-inventory'], {0: 'authority.installation-inventory', 1: [1, 2], 2: [1, 2], 3: {1: 2}})
         self.assertEqual(declarations['authority.journal'][1], [12, 13, 14, 15, 16, 17])
         self.assertEqual(declarations['authority.journal'][3], {v: 12 for v in range(1, 12)})
@@ -419,7 +424,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role in (1, 8):
             self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)), list(range(1, 12))))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], list(range(1, 29)))
-        self.assertEqual(by_role[8]['authority.installation-preparation'][3], {})
+        self.assertEqual(by_role[8]['authority.installation-preparation'][3], {24: 25})
         for role in (4, 5, 6, 11, 12):
             self.assertNotIn('authority.installation-preparation', by_role[role])
             self.assertNotIn('setup.local-ipc', by_role[role])
@@ -686,12 +691,15 @@ class RetainedRuntimeManifestReaderTests(unittest.TestCase):
             else:
                 self.assertNotIn(name, declarations)
 
-    def test_reader_extensions_leave_retained_and_later_schema_writers_disabled(self):
+    def test_reader_extensions_leave_completion_and_later_schema_writers_disabled(self):
         by_role = self.by_role()
         for role in (2, 8):
-            self.assertEqual(by_role[role]['authority.installation-preparation'][2], list(range(1, 25)))
-            for name, version in (('authority.retained-setup-policy-intent', 2),
-                                  ('authority.retained-setup-completion-intent', 1),
+            self.assertEqual(by_role[role]['authority.installation-preparation'][2], list(range(1, 26)))
+            self.assertEqual(by_role[role]['authority.retained-setup-policy-intent'],
+                             {0: 'authority.retained-setup-policy-intent', 1: [2], 2: [2], 3: {}})
+            self.assertEqual(by_role[role]['authority.installation-preparation'][3],
+                             {1: 2, 24: 25} if role == 2 else {24: 25})
+            for name, version in (('authority.retained-setup-completion-intent', 1),
                                   ('authority.retained-setup-promotion-intent', 1),
                                   ('authority.retained-setup-promotion-ready', 1)):
                 self.assertEqual(by_role[role][name], {0: name, 1: [version], 2: [], 3: {}})
