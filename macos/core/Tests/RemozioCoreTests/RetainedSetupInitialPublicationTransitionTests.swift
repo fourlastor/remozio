@@ -8,7 +8,7 @@ final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
     private typealias Record = MachineUpdateRetainedSetupPolicyIntentRecord
     private func fixture(_ body: (Snapshot, SignedReleaseEvidence, () throws -> Void) throws -> Void) throws {
         try MachineUpdateReplacementTests.withRetainedInitialConfigurationValueFixture { snapshot, _, candidate, _, unchanged in
-            try body(snapshot, candidate, unchanged)
+            try body(snapshot, candidate, { try unchanged() })
         }
     }
     private func image(_ before: Snapshot, candidate: SignedReleaseEvidence, published: Bool, intent: Record?,
