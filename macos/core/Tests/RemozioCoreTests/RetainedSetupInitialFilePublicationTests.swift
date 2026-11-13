@@ -372,4 +372,35 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             XCTAssertEqual(state.created, 1); XCTAssertEqual(state.bytes.count, 1)
         }
     }
+
+    func testChangedActualRelayAfterTheFirstFileStopsBeforeTheSecondFile() throws {
+        try fixture(seed: seed) { f, snapshot, current in
+            let state = State()
+            let name = AdministrativeSetupPublication.File.importRelayPlan(accountID: snapshot.activation.runtime.preparation.accountID).name
+            let path = f.directory.path + "/SharedSetupImport/" + name
+            let original = try Data(contentsOf: URL(fileURLWithPath: path))
+            let imported = try withSelection(f, snapshot, current) { selected, _ in try XCTUnwrap(selected.inputs.intent) }
+            func replace(_ bytes: Data) throws {
+                let fd = Darwin.open(path, O_WRONLY | O_TRUNC | O_NOFOLLOW | O_CLOEXEC)
+                guard fd >= 0 else { throw JournalLeaseError.system(errno) }; defer { Darwin.close(fd) }
+                var offset = 0
+                while offset < bytes.count {
+                    let count = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
+                    if count < 0 && errno == EINTR { continue }
+                    guard count > 0 else { throw Fault.stopped }; offset += count
+                }
+                guard fsync(fd) == 0 else { throw JournalLeaseError.system(errno) }
+            }
+            defer { XCTAssertNoThrow(try replace(original)) }
+            state.afterFile = { count in
+                if count == 1 {
+                    let changed = try SharedSetupImportRelayPlan(expected: imported, port: 45679)
+                    try replace(changed.bytes)
+                }
+            }
+            XCTAssertThrowsError(try prepare(f, snapshot, current, state: state))
+            XCTAssertEqual(state.created, 1); XCTAssertEqual(state.bytes.count, 1)
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).verify()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        }
+    }
 }

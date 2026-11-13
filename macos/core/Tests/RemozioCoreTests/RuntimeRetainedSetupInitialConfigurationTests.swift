@@ -107,6 +107,19 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
             }
             XCTAssertThrowsError(try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: oldPolicy)) { XCTAssertEqual($0 as? RuntimeActivationError, .changedScope) }
+            let imported = try imports(snapshot, presence, 45678)
+            let conflictingPresence = try PresenceConfiguration(idleMilliseconds: 654000,
+                observationLifetimeMilliseconds: 8000, unavailableGraceMilliseconds: 42000)
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot,
+                current: current, candidate: candidate, currentCodePolicy: current.policy.policy,
+                importIntent: imported.0, presencePolicyOverride: conflictingPresence, relayPlan: imported.1)) {
+                XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+            }
+            XCTAssertThrowsError(try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot,
+                current: current, candidate: candidate, currentCodePolicy: current.policy.policy,
+                importIntent: imported.0, relayPlan: imported.1, relayPortOverride: 45679)) {
+                XCTAssertEqual($0 as? SharedSetupImportError, .conflict)
+            }
             let otherRevision = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
                 policy: .init(revision: UUID(), policy: current.policy.policy, roleRevisions: current.policy.roleRevisions),
                 checkpoint: current.checkpoint)
