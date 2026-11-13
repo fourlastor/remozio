@@ -6,7 +6,7 @@ enum MachineUpdateRetainedSetupPolicyStorage {
     static let tableName = "retained_setup_policy_intents_v1"
     static let createSQL = "CREATE TABLE retained_setup_policy_intents_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),id BLOB NOT NULL CHECK(length(id)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 131072)) STRICT"
 
-    static let stableSchemaVersions: Set<Int64> = [24, 25, 26, 27, 28]
+    static let stableSchemaVersions = Set(24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion)
     static let policySchemaVersions: Set<Int64> = [25, 26, 27, 28]
     /// Requirements for a future policy writer. These values do not declare a reachable manifest producer.
     static var requirements: [RetainedReleaseFormat] { get throws {
