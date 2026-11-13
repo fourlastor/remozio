@@ -74,7 +74,9 @@ def declarations(role):
     if role in (2, 8):
         preparation = next(value for value in values if value[0] == 'authority.installation-preparation')
         preparation[1].extend((25, 26, 27, 28))
-        values.append({0: 'authority.retained-setup-policy-intent', 1: [2], 2: [], 3: {}})
+        preparation[2].append(25)
+        preparation[3][24] = 25
+        values.append({0: 'authority.retained-setup-policy-intent', 1: [2], 2: [2], 3: {}})
         values.append({0: 'authority.retained-setup-completion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-ready', 1: [1], 2: [], 3: {}})

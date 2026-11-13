@@ -36,6 +36,7 @@ private final class MachineReplacementFixture {
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
          stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
          enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
+         policyWriterFormats: Bool = false, policyMigration: Bool = true,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
@@ -82,6 +83,7 @@ private final class MachineReplacementFixture {
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
+            if policyWriterFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.requirements }
             if retainedPolicySourceFormats {
                 requiredFormats += try RuntimeRetainedSetupReleaseBinding.requirements
                     + MachineUpdatePreflightCompatibility.retainedSetupActivationRequirements
@@ -107,8 +109,10 @@ private final class MachineReplacementFixture {
             for required in requiredFormats where required.role == c.role {
                     if let index = formats.firstIndex(where: { $0.name == required.name }) {
                         let current = formats[index]
+                        let migrations: [UInt64: UInt64] = policyWriterFormats && policyMigration && required.name == "authority.installation-preparation"
+                            ? current.migrations.merging([24: 25], uniquingKeysWith: { _, new in new }) : [:]
                         formats[index] = try .init(name: current.name, readers: current.readers.union(required.readVersions),
-                            writers: current.writers.union(required.writeVersions))
+                            writers: current.writers.union(required.writeVersions), migrations: migrations)
                     } else {
                         formats.append(try .init(name: required.name, readers: required.readVersions, writers: required.writeVersions))
                     }
@@ -1818,7 +1822,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
-        enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
+        policyWriterFormats: Bool = false, policyMigration: Bool = true, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
@@ -1826,7 +1831,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations, beforeActivation: { files in
+            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
+            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
             }
@@ -2447,6 +2453,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false, unchangedCodeGenerations: Bool = false,
+        policyWriterFormats: Bool = false, policyMigration: Bool = true,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
@@ -2454,7 +2461,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
-            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations, didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
+            enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
+            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration,
+            didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
             func readPair(_ accountID: Data) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
@@ -3716,6 +3725,46 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
             try body(snapshot, current, fixture.candidate, source.policy.source.policy, verifyUnchanged)
             try verifyUnchanged()
+        }
+    }
+
+    static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true,
+        _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
+        var retained: AccountPreparationIntent?
+        try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
+            policyWriterFormats: writerFormats, policyMigration: migration,
+            beforeActivation: { retained = try suite.prepareSecondForeground($0).account }) { fixture, finishing, _ in
+            let account = try XCTUnwrap(retained)
+            let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
+            let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try fixture.machine.withCurrentMachineUpdateReadiness(candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: fixture.candidate) }
+            _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { _, _ in }
+            loan.close(); fixture.restart.close()
+            let anchor = fixture.files.f.f.root.path
+            let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid())
+            let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                owner: getuid(), expected: finishing.admission.machine)
+            let directory = try ReleaseDestinationLease(anchor: anchor, relativeDirectory: "machine", owner: getuid())
+            let admission = try UpdateOrdinaryAdmissionLease(activity: activity, admission: gate, directory: directory, expected: finishing.admission.machine)
+            defer { admission.close(); directory.close() }
+            let pair = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
+            defer { try? pair.close() }
+            let source = try MachineUpdateRetainedSetupActivationSource.capture(owner: owner, machine: fixture.machine,
+                journal: pair, candidate: fixture.candidate)
+            try pair.close()
+            try body(.init(machine: { fixture.machine }, source: source, candidate: fixture.candidate,
+                directory: directory, admission: admission, verifyPair: {
+                    let fresh = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
+                    defer { try? fresh.close() }
+                    let initial = try XCTUnwrap(source.runtime.setup.account?.initialization)
+                    XCTAssertEqual(try fresh.captureUnactivatedSetupPolicySource(expected: initial), source.accountPolicy)
+                }, reopen: { hook in try fixture.files.reopen(hook: hook) },
+                scalar: { try fixture.files.f.f.sql($0) }))
         }
     }
 
