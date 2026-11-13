@@ -133,9 +133,18 @@ final class RetainedSetupInitialSelectionTests: XCTestCase {
 
     func testTheCurrentAuthorityPolicyCannotReplaceTheRecordedTargetStartupPolicy() throws {
         try fixture { f, snapshot, pair in
-            XCTAssertNotEqual(try pair.policy.policy.bytes, try f.source.policy.source.policy.bytes)
+            let account = f.currentAuthorityAccountID
+            let initial = try XCTUnwrap(f.source.runtime.setup.source.accounts.first { $0.accountID == account }?.initialization)
+            let openJournal = f.openJournalLease, openContinuity = f.openContinuityLease
+            let journal = try MachineUpdateRetainedSetupPolicyNativeEntry.openJournal(access: .readOnly, initial: initial,
+                openJournalLease: { try openJournal(account) }, openContinuityLease: { try openContinuity(account, $0) },
+                verifySelf: { _ in })
+            defer { try? journal.close() }
+            let authority = try journal.captureRetainedSetupPolicyBoundary(expected: initial).policy.policy
+            try journal.close()
+            XCTAssertNotEqual(try pair.policy.policy.bytes, try authority.bytes)
             var called = false
-            XCTAssertThrowsError(try withSelection(f, snapshot, pair, policy: f.source.policy.source.policy) { _, _ in called = true }) {
+            XCTAssertThrowsError(try withSelection(f, snapshot, pair, policy: authority) { _, _ in called = true }) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
             }
             XCTAssertFalse(called); XCTAssertFalse(FileManager.default.fileExists(atPath: f.directory.path + "/SharedSetupImport"))
