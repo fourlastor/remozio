@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 import SQLite3
@@ -100,6 +101,48 @@ final class SharedSetupImportJournal {
     func close() throws {
         guard !active else { throw SharedSetupImportError.transactionActive }
         shutdown()
+    }
+    func requireDestination(macID: Data, installationID: Data) throws {
+        guard !unavailable else { throw SharedSetupImportError.unavailable }
+        guard db != nil else { throw SharedSetupImportError.closed }
+        guard !active else { throw SharedSetupImportError.transactionActive }
+        guard self.macID == macID, self.installationID == installationID else { throw SharedSetupImportError.wrongScope }
+        try validateLease()
+    }
+    func requireDirectory(_ directory: ProtectedSetupDirectory) throws {
+        try validateLease(); try directory.validate()
+        guard directory.path == (lease.databasePath as NSString).deletingLastPathComponent else {
+            throw SharedSetupImportError.wrongScope
+        }
+    }
+    /// Captures fresh public records through this journal's actual held lease. It does not reopen or cache the journal.
+    func compatibilitySnapshot(directory relayDirectory: ProtectedSetupDirectory) throws -> SharedSetupImportCompatibilitySnapshot {
+        try requireDirectory(relayDirectory)
+            let intents = try records()
+            try SharedSetupImportRelayStorage.validateTrackedFiles(records: intents, directory: relayDirectory)
+            let records = try intents.map { intent -> SharedSetupImportCompatibilitySnapshot.Record in
+                let plan = try SharedSetupImportRelayStorage.read(expected: intent, directory: relayDirectory, owner: owner)
+                let tunnel = try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: relayDirectory, owner: owner)
+                let access = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel, directory: relayDirectory, owner: owner)
+                return try .init(accountID: intent.scope.accountID, operationID: intent.operationID, revision: intent.revision,
+                    phase: intent.phase.rawValue, digest: Data(SHA256.hash(data: intent.bytes)),
+                    portableVersion: intent.originalPortableVersion, settingsVersion: intent.recipe.settingsVersion,
+                    relay: SharedSetupImportRelayStorage.snapshot(expected: intent, directory: relayDirectory, owner: owner),
+                    relayProvisioning: SharedSetupRelayProvisioningStorage.snapshot(expected: intent,
+                        plan: SharedSetupImportRelayStorage.read(expected: intent, directory: relayDirectory, owner: owner),
+                        directory: relayDirectory, owner: owner),
+                    accessApplication: SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
+                        createdTunnel: tunnel, directory: relayDirectory, owner: owner),
+                    dnsRecord: SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
+                        application: access, directory: relayDirectory, owner: owner),
+                    runCredential: SharedSetupRelayRunReferenceStorage.snapshot(expected: intent, plan: plan, created: tunnel,
+                        directory: relayDirectory, owner: owner))
+            }
+            let result = try SharedSetupImportCompatibilitySnapshot(directories: lease.directoryIdentities(), database: lease.fileIdentity(name: "setup-import.sqlite"),
+                writer: lease.fileIdentity(name: "writer.lock"), records: records)
+        try validateLease(); try relayDirectory.validate()
+        guard try self.records() == intents else { throw SharedSetupImportError.staleRevision }
+        return result
     }
     func records() throws -> [SharedSetupImportIntent] {
         try transaction(write: false) { try identity(); return try loadAll() }

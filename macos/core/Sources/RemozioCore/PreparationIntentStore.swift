@@ -175,6 +175,63 @@ public final class PreparationIntentStore {
             return retained
         }
     }
+    private final class SharedImportReadBorrow {
+        private let processID = getpid(), thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private var active = true
+        let journal: SharedSetupImportJournal
+        let directory: ProtectedSetupDirectory
+        let owner: uid_t
+        let installationID: Data
+        init(writer: PreparationIntentStore, journal: SharedSetupImportJournal, directory: ProtectedSetupDirectory,
+            owner: uid_t, installationID: Data) {
+            self.writer = writer; self.journal = journal; self.directory = directory; self.owner = owner
+            self.installationID = installationID
+        }
+        func validate(in actual: PreparationIntentStore, journal: SharedSetupImportJournal? = nil) throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0 else { throw JournalLeaseError.invalidated }
+            guard active, let writer, writer === actual, !writer.unavailable, writer.db != nil, writer.sharedImportReadBorrow === self,
+                  journal == nil || journal === self.journal else { throw JournalLeaseError.invalidated }
+            try writer.lease.validate()
+            try self.journal.requireDestination(macID: writer.macID, installationID: installationID)
+            try self.journal.requireDirectory(directory)
+        }
+        func capture(in actual: PreparationIntentStore, installationID: Data?) throws -> SharedSetupImportCompatibilitySnapshot {
+            try validate(in: actual)
+            guard installationID == self.installationID else { throw SharedSetupImportError.wrongScope }
+            return try journal.compatibilitySnapshot(directory: directory)
+        }
+        func expire() { active = false; writer = nil }
+    }
+    private var sharedImportReadBorrow: SharedImportReadBorrow?
+    /// Uses the same actual journal for nested source reads. Every capture remains fresh and the callback expires synchronously.
+    func withSharedImportSnapshot<Value>(journal: SharedSetupImportJournal,
+        _ body: (ProtectedSetupDirectory, uid_t) throws -> Value) throws -> Value {
+        guard !unavailable else { throw PreparationStoreError.unavailable }
+        guard db != nil else { throw PreparationStoreError.closed }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        if let borrowed = sharedImportReadBorrow {
+            try borrowed.validate(in: self, journal: journal)
+            let value = try body(borrowed.directory, borrowed.owner)
+            try borrowed.validate(in: self, journal: journal); return value
+        }
+        guard let inventory = try self.inventory() else { throw PreparationStoreError.inventoryNotEnabled }
+        try journal.requireDestination(macID: macID, installationID: inventory.installationID)
+        return try lease.withSharedImportRelayDirectory { directory, owner in
+            let borrowed = SharedImportReadBorrow(writer: self, journal: journal, directory: directory,
+                owner: owner, installationID: inventory.installationID)
+            sharedImportReadBorrow = borrowed
+            defer { sharedImportReadBorrow = nil; borrowed.expire() }
+            try borrowed.validate(in: self)
+            let value = try body(directory, owner)
+            try borrowed.validate(in: self); return value
+        }
+    }
+    private func sharedImportCompatibilitySnapshot(installationID: Data?) throws -> SharedSetupImportCompatibilitySnapshot? {
+        if let borrowed = sharedImportReadBorrow { return try borrowed.capture(in: self, installationID: installationID) }
+        return try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: installationID)
+    }
+
     func withSharedImportJournal<Value>(_ body: (SharedSetupImportJournal?) throws -> Value) throws -> Value {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
@@ -297,7 +354,7 @@ public final class PreparationIntentStore {
             guard schema <= 22 else { throw PreparationStoreError.invalidTransition }
         }
         let inventory = finishing?.historicalInventory ?? actualInventory
-        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: inventory?.installationID)
+        let sharedImport = try sharedImportCompatibilitySnapshot(installationID: inventory?.installationID)
         guard schema >= 6 else {
             guard sharedImport?.records.allSatisfy({ $0.runCredential == nil }) ?? true else { throw PreparationStoreError.corruptRecord }
             return .init(schemaVersion: schema, macID: macID, inventory: inventory?.canonicalBytes, runtimes: [], gateways: [], sharedImport: sharedImport)
@@ -1142,7 +1199,7 @@ public final class PreparationIntentStore {
             throw RuntimePreparationError.changedScope
         }
         if verifyImport {
-            let imports = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: p.sourceInventory.installationID)
+            let imports = try sharedImportCompatibilitySnapshot(installationID: p.sourceInventory.installationID)
             guard imports?.records.first(where: { $0.accountID == account }) == p.sourceImport?.source else { throw RuntimePreparationError.changedScope }
         }
     }
@@ -1353,7 +1410,7 @@ public final class PreparationIntentStore {
     }
     private func requireRuntimeAuditCutoverImport(_ graph: RuntimeAuditUpgradeGraph, target: Bool) throws {
         let p = graph.snapshot.plan
-        let imports = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: p.sourceInventory.installationID)
+        let imports = try sharedImportCompatibilitySnapshot(installationID: p.sourceInventory.installationID)
         let current = imports?.records.first { $0.accountID == p.sourceAccount.accountID }
         if !target { guard current == p.sourceImport?.source else { throw RuntimePreparationError.changedScope }; return }
         guard let old = p.sourceImport?.source else {
@@ -3845,6 +3902,37 @@ public final class PreparationIntentStore {
         return Data(hash.finalize())
     }
 
+    /// Advances only the held import journal. Every machine row remains exact while the external source digest changes.
+    func advanceStableRuntimeImport(expected: MachineUpdateStableRuntimePreparationSnapshot, previous: SharedSetupImportIntent,
+        journal: SharedSetupImportJournal, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease) throws -> (intent: SharedSetupImportIntent, snapshot: MachineUpdateStableRuntimePreparationSnapshot) {
+        guard expected.setup.account?.origin == .currentRelease else { throw RuntimePreparationError.changedScope }
+        guard let borrowed = sharedImportReadBorrow else { throw SharedSetupImportError.wrongScope }
+        try borrowed.validate(in: self, journal: journal)
+        try expected.requireCurrent(machine: self, candidate: candidate)
+        guard expected.state.configurationPublished, expected.state.reference != nil, previous.phase == .retained else {
+            throw RuntimePreparationError.incomplete
+        }
+        let provisioning = try expected.setup.source.provisioningInventory(accountID: expected.preparation.accountID,
+            ownerUID: expected.preparation.ownerUID, releaseDigest: expected.preparation.releaseDigest)
+        guard previous.scope == (try SharedSetupImportIntent.Scope(account: expected.preparation, inventory: provisioning)) else {
+            throw SharedSetupImportError.wrongScope
+        }
+        try admission.validateMachineBoundary(directory: directory, expected: expected.setup.source.actual.admission.machine)
+        let before = try transaction(write: false) { try stableRuntimePreparationProtectedDigest(excluding: nil) }
+        try borrowed.validate(in: self, journal: journal)
+        let next = try journal.advance(previous, to: .runtimePublished)
+        try borrowed.validate(in: self, journal: journal)
+        let after = try transaction(write: false) { try stableRuntimePreparationProtectedDigest(excluding: nil) }
+        guard before == after, try journal.current(scope: previous.scope) == next else { throw PreparationStoreError.staleRevision }
+        let actual = try stableRuntimePreparationSnapshot(owner: expected.setup.owner, candidate: candidate)
+        try actual.requirePublished(from: expected)
+        guard actual.state == expected.state else { throw RuntimePreparationError.changedScope }
+        try admission.validateMachineBoundary(directory: directory, expected: expected.setup.source.actual.admission.machine)
+        try borrowed.validate(in: self, journal: journal)
+        return (next, actual)
+    }
+
     private enum StableAccountStorageMutation {
         case pin(Data)
         case beginInitialization(journalPath: String, continuityPath: String)
@@ -5699,7 +5787,7 @@ public final class PreparationIntentStore {
         }
         var hash = SHA256(); hash.update(data: Data("Remozio/MachineEpochSource/v1\0".utf8))
         hash.update(data: candidateGeneration(UInt64(digestSchema)))
-        let sharedImport = try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: installationID)
+        let sharedImport = try sharedImportCompatibilitySnapshot(installationID: installationID)
         hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
         for table in tables where table != "machine_update_configuration_epoch_v1" &&
             table != "machine_update_activation_v1" && table != "machine_update_backend_epoch_v1" &&
