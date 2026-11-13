@@ -7,10 +7,19 @@ import RemozioProtocol
 public enum AuthorityAccountInitialization {
     public static func resume(machine: PreparationIntentStore, expected: AuthorityInitializationIntent) throws -> AuthorityInitializationIntent {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try resumeNative(machine: machine, expected: expected, storage: nil)
+    }
+    static func resumeStable(machine: PreparationIntentStore, expected: AuthorityInitializationIntent,
+        storage: Storage) throws -> AuthorityInitializationIntent {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try resumeNative(machine: machine, expected: expected, storage: storage)
+    }
+    private static func resumeNative(machine: PreparationIntentStore, expected: AuthorityInitializationIntent,
+        storage: Storage?) throws -> AuthorityInitializationIntent {
         let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
         let journalDirectory = (expected.journalPath as NSString).deletingLastPathComponent
         let continuityDirectory = (expected.continuityPath as NSString).deletingLastPathComponent
-        return try resume(machine: machine, expected: expected,
+        return try resume(machine: machine, expected: expected, storage: storage,
             prepareJournal: { _ = try SetupDatabaseFileProvisioning.prepare(directoryPath: journalDirectory, kind: .journal) },
             openDirectories: {
                 let journal = try ProtectedSetupDirectory(anchor: "/", relativePath: String(journalDirectory.dropFirst()), owner: 0,
@@ -38,17 +47,31 @@ public enum AuthorityAccountInitialization {
             })
     }
 
+    /// The synchronous account owner binds these calls to its actual stable frame and admission.
+    struct Storage {
+        let validate: (AuthorityInitializationIntent) throws -> Void
+        let capture: (AuthorityInitializationIntent, AuthorityJournalInitialization, JournalDatabase) throws -> AuthorityInitializationIntent
+        let complete: (AuthorityInitializationIntent, JournalDatabase, ContinuityStore) throws -> AuthorityInitializationIntent
+        static func legacy(_ machine: PreparationIntentStore) -> Self {
+            .init(validate: machine.validateInitialization,
+                capture: { try machine.captureInitialization(expected: $0, initial: $1, journal: $2) },
+                complete: { try machine.completeInitialization(expected: $0, journal: $1, continuity: $2) })
+        }
+    }
+
     enum Stage: CaseIterable { case journalProvisioned, directoriesOpened, journalOpened, checkpointCaptured, continuityProvisioned, continuityOpened, completed }
     /// Same-owner controls use actual protected leases, provisioners and SQLite stores.
     /// Product callers cannot replace these factories or inject fault hooks.
     static func resume(machine: PreparationIntentStore, expected: AuthorityInitializationIntent,
+                       storage: Storage? = nil,
                        prepareJournal: () throws -> Void,
                        openDirectories: () throws -> Directories,
                        openJournal: (Bool, AuthorityJournalInitialization, Directories) throws -> JournalDatabase,
                        prepareContinuity: () throws -> Void,
                        openContinuity: (ContinuityCheckpoint?, Directories) throws -> ContinuityStore,
                        didStage: (Stage) throws -> Void = { _ in }) throws -> AuthorityInitializationIntent {
-        try machine.validateInitialization(expected)
+        let storage = storage ?? .legacy(machine)
+        try storage.validate(expected)
         // Completion is retained setup progress, not current health. Never reinitialize a completed account.
         if expected.complete { return expected }
         let initial = try expected.initialAuthority
@@ -58,43 +81,43 @@ public enum AuthorityAccountInitialization {
         var directories: Directories?
         do {
             if progress.checkpoint == nil {
-                try machine.validateInitialization(progress)
+                try storage.validate(progress)
                 try prepareJournal(); try didStage(.journalProvisioned)
             }
-            try machine.validateInitialization(progress)
+            try storage.validate(progress)
             let scope = try openDirectories(); directories = scope
             try didStage(.directoriesOpened)
             try scope.validate()
-            try machine.validateInitialization(progress)
+            try storage.validate(progress)
             do { journal = try openJournal(false, initial, scope) }
             catch JournalDatabaseError.incompatibleStore {
                 // A captured checkpoint proves the journal committed. Its loss cannot authorize initialization.
                 guard progress.checkpoint == nil else { throw AuthorityInitializationError.invalidBoundary }
-                try machine.validateInitialization(progress)
+                try storage.validate(progress)
                 try scope.validate()
                 journal = try openJournal(true, initial, scope)
             }
             let liveJournal = try required(journal)
             try didStage(.journalOpened)
             try scope.validate()
-            progress = try machine.captureInitialization(expected: progress, initial: initial, journal: liveJournal)
+            progress = try storage.capture(progress, initial, liveJournal)
             try didStage(.checkpointCaptured)
             let checkpoint = try required(progress.checkpoint)
-            try machine.validateInitialization(progress)
+            try storage.validate(progress)
             try scope.validate()
             try prepareContinuity(); try didStage(.continuityProvisioned)
-            try machine.validateInitialization(progress)
+            try storage.validate(progress)
             try scope.validate()
             do { continuity = try openContinuity(nil, scope) }
             catch ContinuityStoreError.incompatibleStore {
-                try machine.validateInitialization(progress)
+                try storage.validate(progress)
                 try scope.validate()
                 continuity = try openContinuity(checkpoint, scope)
             }
             let liveContinuity = try required(continuity)
             try didStage(.continuityOpened)
             try scope.validate()
-            progress = try machine.completeInitialization(expected: progress, journal: liveJournal, continuity: liveContinuity)
+            progress = try storage.complete(progress, liveJournal, liveContinuity)
             try didStage(.completed)
             liveContinuity.close(); continuity = nil
             try liveJournal.close(); journal = nil

@@ -3565,6 +3565,16 @@ public final class PreparationIntentStore {
         return source
     }
 
+    func stableServiceAccountSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence) throws -> MachineUpdateStableServiceAccountSnapshot {
+        try transaction(write: false) { try loadStableServiceAccountSnapshot(owner: owner, candidate: candidate) }
+    }
+    private func loadStableServiceAccountSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence) throws -> MachineUpdateStableServiceAccountSnapshot {
+        let setup = try MachineUpdateStableAccountSetupSnapshot(source: loadStableRuntimeSource(candidate: candidate), owner: owner)
+        guard setup.account?.origin == .currentRelease else { throw ServiceAccountProvisioningError.changedScope }
+        guard let preparation = setup.preparation else { throw AccountPreparationError.missing }
+        return try .init(setup: setup, state: loadServiceAccountPlan(accountID: preparation.accountID), reservedNumbers: loadReservedServiceAccountNumbers())
+    }
+
     private enum StableAccountStorageMutation {
         case pin(Data)
         case beginInitialization(journalPath: String, continuityPath: String)
