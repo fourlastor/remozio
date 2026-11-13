@@ -1,13 +1,18 @@
 # Linux protected services: activation proposal
 
-Status: **unapproved proposal**, 29 October 2026. Nothing here is accepted policy.
+Status: **unapproved proposal**, 29 October 2026. On 13 November 2026 the Linux
+host owner chose decisions 5, 7 and 8 and put decisions 4 and 6 behind written
+gates (see [Decisions](#decisions)). Decisions 1, 2, 3, 4 and 6 stay open. Nothing
+else here is accepted policy.
 It proposes concrete service identities, paths, ownership and modes, IPC peers,
 startup refusals, recovery behavior and operator gates for the
 [contributor guide's](https://gist.github.com/rock3r/ef069bbc6f931b83febf2e1c159cdbfa)
 Phase 3. It does not approve production activation, change any contract, claim
 hardware key custody, or choose the open
 [line 67 handoff](linux-host-contract.md#candidate-strict-admission-profile).
-Every name, path, mode and limit below is a reviewable proposal. Nothing has been
+Account, unit and path names are chosen (decision 8), except the execution
+identity, which stays with decision 2. Every mode and limit below is still a
+reviewable proposal. Nothing has been
 installed, started or provisioned, and no service code exists yet.
 
 The inputs are the [Phase 0 contract](linux-host-contract.md), whose platform table
@@ -43,8 +48,9 @@ for it; the authority itself needs no Root privilege.
 The proposal starts with one machine-wide instance of each system service. The Mac
 host runs per-account jobs (`dev.remozio.account.<hex>.authority`); a per-account
 template (`remozio-authority@<hex>.service`) is the natural Linux extension once a
-second local account is in scope. User names follow Ubuntu's plain
-`<package>-<role>` style and are placeholders until review. Stable, preallocated
+second local account is in scope (decision 7). User names follow Ubuntu's plain
+`<package>-<role>` style (decision 8); the execution identity stays open
+(decision 2). Stable, preallocated
 system UIDs are required because state ownership is checked against them, so
 `DynamicUser=` is not used.
 
@@ -197,9 +203,11 @@ on the target machine:
 | `CapabilityBoundingSet=` | empty | empty | open decision 2 |
 | `SystemCallFilter=@system-service` | yes | yes | open decision 3 |
 
-## Open decisions
+## Decisions
 
-These are listed so review can choose them; this proposal chooses none.
+On 13 November 2026 the Linux host owner chose decisions 5, 7 and 8 and put
+decisions 4 and 6 behind written gates. Decisions 1, 2, 3, 4 and 6 stay open, and
+this proposal still chooses none of them.
 
 1. **Line 67 handoff.** [Contract line 67](linux-host-contract.md#candidate-strict-admission-profile)
    requires the monitor to own and confirm the caller's stop while committing the
@@ -208,6 +216,8 @@ These are listed so review can choose them; this proposal chooses none.
    candidate readings (A: detect and record, as in the fixture; B: a single owner
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
+   **Open.** It depends on the protected-launch design (decision 5); review it
+   again when that design has a candidate.
 2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
    default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
    attach only to its descendants. Being the frontend's parent satisfies only that
@@ -219,6 +229,8 @@ These are listed so review can choose them; this proposal chooses none.
    design stays open. Starting a command as the target user needs
    `CAP_SETUID` and `CAP_SETGID`, or Root. The contract already flags that a
    narrowly privileged monitor needs its own review (lines 110–114).
+   **Open.** It depends on the protected-launch design (decision 5) and on where
+   the monitor runs.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths
@@ -226,6 +238,8 @@ These are listed so review can choose them; this proposal chooses none.
    capability set, or commands start as transient units through PID 1 with the
    retained descriptors passed as standard streams. The second changes how stream
    retention and the line 67 handoff are proved.
+   **Open.** It depends on the protected-launch design (decision 5) and on the
+   reading chosen for decision 1.
 4. **TPM role isolation.** On Ubuntu `/dev/tpmrm0` is shared by group. Any account
    allowed to open it can use any object whose authorization it holds, so role
    separation would rest on per-role key authorization stored in each role's 0600
@@ -235,13 +249,31 @@ These are listed so review can choose them; this proposal chooses none.
    is unresolved too: `PrivateDevices=yes` gives a unit a private `/dev` without
    physical device nodes, and `DeviceAllow=` grants access without adding the node,
    so a TPM-using role needs an explicitly reviewed exposure and device policy.
+   **Open behind a gate.** No service uses the TPM until per-role key authorization
+   and the device exposure policy are measured on the target hardware in an
+   attended session, under the
+   [hardware gate rules](linux-validation.md#human-testing-boundary).
 5. **Protected frontend launch and code policy.** The contract's largest open gate
    (lines 95–108). The frontend path above is placement only.
+   **Direction chosen: strict first.** The Linux host keeps the Mac guarantee. The
+   next work is a protected-launch design and an experiment on Ubuntu. Production
+   execution stays off until that experiment passes. If it shows that Ubuntu
+   cannot meet the claim, the capability is reported as unsupported, and a
+   narrower guarantee needs the separately reviewed contract decision that the
+   contract already requires.
 6. **Package and update trust.** Release manifests, version floors and update
    serialization have no Linux design yet. Updates must also avoid a
    `systemd-tmpfiles --create` run that would repair live `/run/remozio` paths.
+   **Open behind a gate.** Installation stays a manual, attended operator step
+   (see [Operator gates](#operator-gates)) until a design for release manifests,
+   version floors and update serialization exists.
 7. **Instances.** Machine-wide services first, or per-account templates from the start.
+   **Chosen:** one machine-wide instance of each system service first, and a
+   per-account template (`remozio-authority@<hex>.service`) once a second local
+   account is in scope.
 8. **Names.** Account, unit and path names.
+   **Chosen:** the account, unit and path names in the tables above. The execution
+   identity itself stays with decision 2.
 
 ## Operator gates
 
