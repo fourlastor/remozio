@@ -3183,13 +3183,15 @@ final class MachineUpdateReplacementTests: XCTestCase {
             let uid = try XCTUnwrap(source.accounts.map(\.ownerUID).max()) + 1
             let owner = LocalAccountIdentity(uid: uid, primaryGroupID: uid, directoryID: UUID())
             let template = try XCTUnwrap(source.preparations.first).initialAuthority
+            let retained = try XCTUnwrap(source.accounts.first { $0.origin == .retained }?.preparation)
+            let retainedOwner = LocalAccountIdentity(uid: retained.ownerUID, primaryGroupID: getgid(), directoryID: retained.directoryID)
             let policy = try AuthorityCodePolicy(entries: template.codePolicy.entries.map { entry in
                 let component = try XCTUnwrap(fixture.candidate.manifest.components.first { $0.role == entry.role })
-                return try .init(role: entry.role, teamID: component.teamID, identifier: component.identifier,
+                return try .init(role: entry.role, teamID: XCTUnwrap(component.teamID), identifier: component.identifier,
                     installedGeneration: component.generation, minimumGeneration: component.generation,
                     codeDirectoryHash: XCTUnwrap(fixture.candidate.codeDirectoryHashes[entry.role]), active: entry.active)
             })
-            try body(.init(machine: { fixture.machine }, owner: owner, candidate: fixture.candidate,
+            try body(.init(machine: { fixture.machine }, owner: owner, retainedOwner: retainedOwner, candidate: fixture.candidate,
                 directory: fixture.directory, admission: admission, gate: gate, activity: activity, initial: { mac, account in
                     let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
                     let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([

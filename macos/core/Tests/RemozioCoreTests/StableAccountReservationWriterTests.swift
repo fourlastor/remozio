@@ -8,6 +8,7 @@ import XCTest
 struct StableAccountReservationWriterFixture {
     let machine: () -> PreparationIntentStore
     let owner: LocalAccountIdentity
+    let retainedOwner: LocalAccountIdentity
     let candidate: SignedReleaseEvidence
     let directory: ReleaseDestinationLease
     let admission: UpdateOrdinaryAdmissionLease
@@ -86,6 +87,27 @@ final class StableAccountReservationWriterTests: XCTestCase {
             XCTAssertEqual(stages, [.beforeTransaction])
             try snapshot(f).requireSame(as: before)
             XCTAssertEqual(try recovered.bytes, try value.bytes)
+        }
+    }
+
+    func testRecoveryRefusesTheSameOwnersRetainedAccountWithoutChangingItsState() throws {
+        try fixture { f in
+            let current = try begin(f)
+            XCTAssertEqual(try snapshot(f).account?.origin, .currentRelease)
+            XCTAssertEqual(try begin(f), current)
+            let before = try snapshot(f, owner: f.retainedOwner)
+            XCTAssertEqual(before.account?.origin, .retained)
+            let retained = try XCTUnwrap(before.preparation)
+            XCTAssertEqual(retained.ownerUID, f.retainedOwner.uid)
+            XCTAssertNotEqual(retained.releaseDigest, before.source.actual.inventory.releaseDigest)
+            var calls = 0
+            XCTAssertThrowsError(try begin(f, owner: f.retainedOwner, expected: before,
+                targets: retained.commandPolicy.allowedTargetUIDs,
+                initial: { _, _ in calls += 1; throw Fault.factory })) {
+                XCTAssertEqual($0 as? AccountPreparationError, .conflict)
+            }
+            XCTAssertEqual(calls, 0)
+            try snapshot(f, owner: f.retainedOwner).requireSame(as: before)
         }
     }
 

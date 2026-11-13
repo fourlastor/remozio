@@ -3624,7 +3624,8 @@ public final class PreparationIntentStore {
             }
             // Recovery returns the original grants, key pin, and initial epoch without another write or factory call.
             if let retained = before.preparation {
-                guard disclosureAccepted, try retained.commandPolicy.allowedTargetUIDs == allowedTargetUIDs else {
+                guard before.account?.origin == .currentRelease, disclosureAccepted,
+                      try retained.commandPolicy.allowedTargetUIDs == allowedTargetUIDs else {
                     throw AccountPreparationError.conflict
                 }
                 return retained
