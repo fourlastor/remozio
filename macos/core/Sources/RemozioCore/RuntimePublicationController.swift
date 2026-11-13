@@ -127,29 +127,45 @@ enum RuntimePublicationController {
         return result
     }
 
-    /// The A11 caller supplies native custody. The selection scope stays active around each fixed file operation.
-    static func publishRetainedInitialNative(_ selection: MachineUpdateRetainedSetupInitialSelection,
-        scope: MachineUpdateRetainedSetupInitialPublication.Scope, material: RuntimePreparationMaterial,
+    /// Publishes one fixed artifact from an active owner frame. The A11 caller supplies native custody.
+    static func publishRetainedInitialNative(_ scope: MachineUpdateRetainedSetupInitialPublication.Scope,
         verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        func verify() throws {
-            try scope.read().requireSame(as: selection); try verifyCurrent()
-            try scope.read().requireSame(as: selection)
-        }
-        try verify(); try selection.configuration.binding.requireHistoricalRuntime(material.reference)
-        let bundle = selection.configuration.bundle
-        let artifacts = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: material)
-        guard artifacts.count == 8 else { throw RuntimePreparationError.incomplete }
-        for artifact in artifacts {
-            try verify(); let existing: Data?
-            do { existing = try RuntimePublishedArtifactValidation.nativeRead(artifact) }
-            catch JournalLeaseError.system(let code) where code == ENOENT { existing = nil }
-            if let existing, existing != artifact.bytes { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+        try scope.withActive {
+            func verify() throws { try scope.requireActive(); try verifyCurrent(); try scope.requireActive() }
+            try verify()
+            guard let material = scope.material, let artifact = scope.artifact,
+                  let transport = material.services.claims.first(where: { $0.role == .transport }) else {
+                throw RuntimePreparationError.incomplete
+            }
+            let configuration = scope.selection.configuration, bundle = configuration.bundle, owner = material.services.ownerUID
+            try configuration.binding.requireHistoricalRuntime(material.reference)
+            let expected = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: material)
+            guard expected.count == 8, expected.contains(where: {
+                $0.path == artifact.path && $0.bytes == artifact.bytes && $0.access == artifact.access
+            }) else { throw RuntimeActivationError.changedScope }
+            let fixed: [(AdministrativeSetupPublication.File, String, ProtectedSetupDirectory.Visibility)] = [
+                (.elevationPolicy, bundle.paths.privateDirectory, .privateState),
+                (.commandConfiguration, bundle.paths.privateDirectory, .privateState),
+                (.transportIdentity(ownerUID: transport.number, groupID: transport.number), bundle.paths.serviceDirectory, .sharedMetadata),
+                (.transportConfiguration, bundle.paths.serviceDirectory, .sharedMetadata),
+                (.gatewaySettingsHost, bundle.paths.serviceDirectory, .sharedMetadata),
+                (.presenceClient(ownerUID: owner), RuntimePreparationPaths.sharedDirectory, .sharedMetadata),
+                (.pairingClient(ownerUID: owner), RuntimePreparationPaths.sharedDirectory, .sharedMetadata),
+                (.frontendClient(ownerUID: owner), RuntimePreparationPaths.sharedDirectory, .sharedMetadata)
+            ]
+            guard let (file, path, visibility) = fixed.first(where: { $0.1 + "/" + $0.0.name == artifact.path }) else {
+                throw RuntimeActivationError.changedScope
+            }
+            let global = try ProtectedSetupDirectory.createOrOpen(path: RuntimePreparationPaths.sharedDirectory, visibility: .sharedMetadata)
+            defer { global.close() }; try verify()
+            let services = try ProtectedSetupDirectory.createOrOpen(path: RuntimePreparationPaths.sharedDirectory + "/Services", visibility: .sharedMetadata)
+            defer { services.close() }; try verify()
+            let destination = try ProtectedSetupDirectory.createOrOpen(path: path, visibility: visibility)
+            defer { destination.close() }; try verify()
+            _ = try AdministrativeSetupPublication.publish(artifact.bytes, file: file, directory: destination, owner: 0, verify: verify)
             try verify()
         }
-        try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
-        try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: material, verifyCurrent: verify)
-        try verify()
     }
 
     private static func publishNative(bundle: RuntimeConfigurationBundle, material: RuntimePreparationMaterial,

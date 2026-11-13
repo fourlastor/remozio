@@ -60,6 +60,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         var bytes: [String: Data] = [:]
         var files: Files?
         var created = 0, publishCalls = 0, materialReads = 0, pairReads = 0, artifactReads = 0
+        var fullReads = 0, callbackDepth = 0, borrowedCallbacks = 0
         var stopAfterCreated: Int?, corruptReadback = false, didPublish = false
         var materialReader: ((Int) throws -> RuntimePreparationMaterial)?
         var afterFile: ((Int) throws -> Void)?
@@ -71,23 +72,24 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             if let files { return try files.read(artifact) }
             return bytes[artifact.path]
         }
-        func publish(_ selection: Selection, material: RuntimePreparationMaterial,
-            scope: Publication.Scope) throws {
+        func borrowed<Result>(_ scope: Publication.Scope, _ body: () throws -> Result) throws -> Result {
+            callbackDepth += 1; borrowedCallbacks += 1; defer { callbackDepth -= 1 }
+            return try scope.withActive(body)
+        }
+        func publish(_ scope: Publication.Scope) throws {
             publishCalls += 1
-            for artifact in try RuntimePublishedArtifactValidation.artifacts(bundle: selection.configuration.bundle, material: material) {
-                try scope.verify()
-                let result: AdministrativeSetupPublicationResult
-                if let files { result = try files.publish(artifact, verify: scope.verify) }
-                else if let previous = bytes[artifact.path] {
-                    guard previous == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
-                    result = .retained
-                } else { bytes[artifact.path] = artifact.bytes; result = .created }
-                if result == .created { created += 1 }
-                try afterFile?(created)
-                if created == stopAfterCreated { throw Fault.stopped }
-                try scope.verify()
-            }
-            didPublish = true
+            let artifact = try XCTUnwrap(scope.artifact)
+            try scope.requireActive()
+            let result: AdministrativeSetupPublicationResult
+            if let files { result = try files.publish(artifact, verify: scope.requireActive) }
+            else if let previous = bytes[artifact.path] {
+                guard previous == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+                result = .retained
+            } else { bytes[artifact.path] = artifact.bytes; result = .created }
+            if result == .created { created += 1 }
+            didPublish = true; try afterFile?(created)
+            if created == stopAfterCreated { throw Fault.stopped }
+            try scope.requireActive()
         }
     }
     private func fixture(seed: (Fixture) throws -> Void = { _ in },
@@ -115,15 +117,17 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             try Publication.prepare(selection: selected, selectionScope: selectedScope,
                 machine: f.machine(), expected: snapshot, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, fileCustodyAccepted: custody,
-                verifyCurrent: verify, verifyServices: { XCTAssertEqual($0, snapshot.activation.runtime.plan) },
+                verifyCurrent: { actual in
+                    state.fullReads += 1; XCTAssertEqual(state.callbackDepth, 0); try verify(actual)
+                }, verifyServices: { XCTAssertEqual($0, snapshot.activation.runtime.plan) },
                 readPolicyBoundary: { state.pairReads += 1; return try state.pairReader?(state.pairReads) ?? current },
-                readMaterial: { scope in
-                    try scope.verify(); state.materialReads += 1
+                readMaterial: { scope in try state.borrowed(scope) {
+                    state.materialReads += 1
                     return try state.materialReader?(state.materialReads) ?? f.material
-                }, verifyActivity: { activity, scope in
-                    try scope.verify(); XCTAssertEqual(activity, f.material.serviceActivity); try scope.verify()
-                }, readArtifact: { artifact, scope in try scope.verify(); return try state.read(artifact) },
-                publish: { state.scope = $2; try state.publish($0, material: $1, scope: $2) }, didStage: didStage,
+                } }, verifyActivity: { activity, scope in try state.borrowed(scope) {
+                    XCTAssertEqual(activity, f.material.serviceActivity); try scope.requireActive()
+                } }, readArtifact: { artifact, scope in try state.borrowed(scope) { try state.read(artifact) } },
+                publish: { scope in try state.borrowed(scope) { try state.publish(scope) } }, didStage: didStage,
                 inspectScope: { scope in state.scope = scope; try inspect(scope) })
         }
     }
@@ -156,7 +160,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             let state = State(); var stages: [RuntimePublicationController.Stage] = []
             let selected = try prepare(f, snapshot, current, state: state, didStage: { stages.append($0) })
             let expected = try RuntimePublishedArtifactValidation.artifacts(bundle: selected.configuration.bundle, material: f.material)
-            XCTAssertEqual(expected.count, 8); XCTAssertEqual(state.created, 8); XCTAssertEqual(state.publishCalls, 1)
+            XCTAssertEqual(expected.count, 8); XCTAssertEqual(state.created, 8); XCTAssertEqual(state.publishCalls, 8)
             XCTAssertEqual(stages, [.materialRestored, .filesPublished]); XCTAssertGreaterThanOrEqual(state.materialReads, 2)
             XCTAssertEqual(expected.filter { $0.access == .privateRoot }.count, 2)
             XCTAssertEqual(expected.filter { $0.access == .publicRoot }.count, 5)
@@ -236,7 +240,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         }
     }
 
-    func testChangedPairAndMaterialBetweenReadsRefuseBeforeAnyFileOperation() throws {
+    func testChangedPairAndMaterialBeforeWritingRefusePublication() throws {
         try fixture { f, snapshot, current in
             let state = State()
             let changed = Boundary(macID: current.macID, accountID: current.accountID,
@@ -244,7 +248,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
                 checkpoint: current.checkpoint)
             state.pairReader = { $0 == 1 ? current : changed }
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state)) { XCTAssertEqual($0 as? PreparationStoreError, .staleRevision) }
-            XCTAssertEqual(state.publishCalls, 0); XCTAssertEqual(state.artifactReads, 0)
+            XCTAssertEqual(state.publishCalls, 0); XCTAssertEqual(state.artifactReads, 8)
             let material = f.material
             let foreign = try RuntimePreparationMaterial(materialID: AccountPreparationIntent.randomID(), services: material.services,
                 transportIdentity: material.transportIdentity, transportPublicKeyInfo: material.transportPublicKeyInfo,
@@ -253,7 +257,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: next)) {
                 XCTAssertEqual($0 as? RuntimePreparationError, .conflictingMaterial)
             }
-            XCTAssertGreaterThanOrEqual(next.materialReads, 2); XCTAssertEqual(next.publishCalls, 0); XCTAssertEqual(next.artifactReads, 0)
+            XCTAssertGreaterThanOrEqual(next.materialReads, 2); XCTAssertEqual(next.publishCalls, 0); XCTAssertEqual(next.artifactReads, 8)
         }
     }
 
@@ -263,7 +267,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             defer { XCTAssertNoThrow(try files.close()) }; state.files = files; state.stopAfterCreated = 3
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state)) { XCTAssertTrue($0 is Fault) }
             let retained = Array(try artifacts(f, snapshot, current).prefix(3)), stamps = try retained.map { try files.stamp($0) }
-            XCTAssertThrowsError(try XCTUnwrap(state.scope).verify()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             state.stopAfterCreated = nil
             _ = try prepare(f, snapshot, current, state: state); XCTAssertEqual(state.created, 8)
             for (index, artifact) in retained.enumerated() { XCTAssertEqual(try files.stamp(artifact), stamps[index]) }
@@ -276,8 +280,8 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state)) {
                 XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .conflictingConfiguration)
             }
-            XCTAssertEqual(state.created, 8)
-            XCTAssertThrowsError(try XCTUnwrap(state.scope).verify()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertEqual(state.created, 1)
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             state.corruptReadback = false
             _ = try prepare(f, snapshot, current, state: state); XCTAssertEqual(state.created, 8)
         }
@@ -286,19 +290,21 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
     func testVerificationLoansExpireOnReturnAndOnCallbackFailure() throws {
         try fixture { f, snapshot, current in
             let state = State(); _ = try prepare(f, snapshot, current, state: state)
-            XCTAssertThrowsError(try XCTUnwrap(state.scope).read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             let failed = State()
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: failed, didStage: { _ in throw Fault.stopped })) { XCTAssertTrue($0 is Fault) }
-            XCTAssertThrowsError(try XCTUnwrap(failed.scope).read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(failed.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         }
     }
 
     func testRecursiveVerificationPoisonsTheInvocationAndAnotherThreadCannotReadTheScope() throws {
         try fixture { f, snapshot, current in
             let state = State()
-            XCTAssertThrowsError(try prepare(f, snapshot, current, state: state, verify: { _ in
-                if let scope = state.scope {
-                    XCTAssertThrowsError(try scope.verify()) { XCTAssertEqual($0 as? PreparationStoreError, .transactionActive) }
+            XCTAssertThrowsError(try prepare(f, snapshot, current, state: state, inspect: { scope in
+                try scope.withActive {
+                    XCTAssertThrowsError(try scope.withActive {}) {
+                        XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
+                    }
                 }
             })) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             XCTAssertEqual(state.materialReads, 0)
@@ -307,10 +313,10 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
                 let shared = SharedScope(scope), rejected = Mutex(false), done = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async {
                     defer { done.signal() }
-                    do { try shared.scope.verify() } catch { rejected.withLock { $0 = error as? JournalLeaseError == .invalidated } }
+                    do { try shared.scope.requireActive() } catch { rejected.withLock { $0 = error as? JournalLeaseError == .invalidated } }
                 }
                 XCTAssertEqual(done.wait(timeout: .now() + 5), .success); XCTAssertTrue(rejected.withLock { $0 })
-                try scope.verify()
+                try scope.requireActive()
             })
         }
     }
@@ -335,9 +341,8 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
         try fixture { f, snapshot, current in
             var called = false
             _ = try prepare(f, snapshot, current, state: State(), inspect: { scope in
-                let selected = try scope.read()
-                XCTAssertThrowsError(try RuntimePublicationController.publishRetainedInitialNative(selected,
-                    scope: scope, material: f.material, verifyCurrent: { called = true })) {
+                XCTAssertThrowsError(try RuntimePublicationController.publishRetainedInitialNative(scope,
+                    verifyCurrent: { called = true })) {
                     XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
                 }
             })
@@ -356,7 +361,7 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
                 XCTAssertEqual($0 as? RuntimePreparationError, .conflictingMaterial)
             }
             XCTAssertEqual(state.created, 1); XCTAssertEqual(state.bytes.count, 1)
-            XCTAssertThrowsError(try XCTUnwrap(state.scope).verify()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         }
     }
     func testChangedPairAfterTheFirstFileStopsBeforeTheSecondFile() throws {
@@ -400,7 +405,22 @@ final class RetainedSetupInitialFilePublicationTests: XCTestCase {
             }
             XCTAssertThrowsError(try prepare(f, snapshot, current, state: state))
             XCTAssertEqual(state.created, 1); XCTAssertEqual(state.bytes.count, 1)
-            XCTAssertThrowsError(try XCTUnwrap(state.scope).verify()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try XCTUnwrap(state.scope).requireActive()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        }
+    }
+
+    func testOwnerReadsTheSnapshotEighteenTimesAndBorrowedCallbacksMakeNoFullRead() throws {
+        try fixture { f, snapshot, current in
+            let state = State()
+            _ = try prepare(f, snapshot, current, state: state, inspect: { scope in
+                let before = state.fullReads
+                try scope.requireActive(); try scope.withActive { try scope.requireActive() }
+                XCTAssertEqual(state.fullReads, before)
+            })
+            XCTAssertEqual(state.created, 8); XCTAssertEqual(state.publishCalls, 8)
+            XCTAssertEqual(state.fullReads, 2 * 8 + 2); XCTAssertLessThanOrEqual(state.fullReads, 18)
+            XCTAssertEqual(state.materialReads, 18); XCTAssertEqual(state.pairReads, 18)
+            XCTAssertGreaterThan(state.borrowedCallbacks, 0); XCTAssertEqual(state.callbackDepth, 0)
         }
     }
 }

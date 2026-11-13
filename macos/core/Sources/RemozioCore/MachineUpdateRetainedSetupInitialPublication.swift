@@ -1,25 +1,34 @@
 import Darwin
 import Foundation
 
-/// Publishes eight initial files. The native caller must prove identity, placement and file custody separately.
+/// Publishes eight initial files. The native caller proves identity, placement and file custody separately.
 enum MachineUpdateRetainedSetupInitialPublication {
     typealias Selection = MachineUpdateRetainedSetupInitialSelection
     typealias Snapshot = MachineUpdateRetainedSetupPolicySnapshot
-    struct Scope {
-        fileprivate let checked: () throws -> Selection
-        func read() throws -> Selection { try checked() }
-        func verify() throws { _ = try read() }
+    /// Borrows checked values for one callback. It performs no snapshot, import, policy or material query.
+    struct Scope: CustomStringConvertible, CustomDebugStringConvertible {
+        fileprivate let check: (Bool) throws -> Void
+        fileprivate let leave: () -> Void
+        let selection: Selection
+        let material: RuntimePreparationMaterial?
+        let artifact: RuntimePublishedArtifactValidation.Artifact?
+        var description: String { "RetainedSetupInitialPublicationScope(redacted)" }
+        var debugDescription: String { description }
+        func requireActive() throws { try check(false) }
+        func withActive<Result>(_ body: () throws -> Result) throws -> Result {
+            try check(true); defer { leave() }
+            let result = try body(); try requireActive(); return result
+        }
     }
-    /// A new invocation reads actual files. Callbacks must not change metadata or replay uncertain operations.
     static func prepare(selection: Selection, selectionScope: Selection.Scope,
         machine: PreparationIntentStore, expected: Snapshot, candidate: SignedReleaseEvidence,
         directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, fileCustodyAccepted: Bool,
-        verifyCurrent: @escaping (Snapshot) throws -> Void, verifyServices: @escaping (ServiceAccountPlan) throws -> Void,
-        readPolicyBoundary: @escaping () throws -> AuthorityJournal.MachineUpdatePolicyBoundary,
-        readMaterial: @escaping (Scope) throws -> RuntimePreparationMaterial,
-        verifyActivity: @escaping (ServiceReleaseActivityReference, Scope) throws -> Void,
+        verifyCurrent: (Snapshot) throws -> Void, verifyServices: (ServiceAccountPlan) throws -> Void,
+        readPolicyBoundary: () throws -> AuthorityJournal.MachineUpdatePolicyBoundary,
+        readMaterial: (Scope) throws -> RuntimePreparationMaterial,
+        verifyActivity: (ServiceReleaseActivityReference, Scope) throws -> Void,
         readArtifact: (RuntimePublishedArtifactValidation.Artifact, Scope) throws -> Data?,
-        publish: (Selection, RuntimePreparationMaterial, Scope) throws -> Void,
+        publish: (Scope) throws -> Void,
         didStage: (RuntimePublicationController.Stage) throws -> Void = { _ in },
         inspectScope: (Scope) throws -> Void = { _ in }) throws -> Selection {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
@@ -28,65 +37,69 @@ enum MachineUpdateRetainedSetupInitialPublication {
               let reference = expected.activation.runtime.state.reference else { throw RuntimeActivationError.incomplete }
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
         let processID = getpid(), thread = pthread_self(), digest = selection.digest
-        var active = true, reading = false, checking = false, violated = false
+        let boundary = expected.activation.runtime.setup.source.actual.admission.machine
+        var active = true, reading = false, violated = false
         weak var writer = machine
-        var currentVerification: ((Snapshot) throws -> Void)? = verifyCurrent
-        var serviceVerification: ((ServiceAccountPlan) throws -> Void)? = verifyServices
-        var boundaryReader: (() throws -> AuthorityJournal.MachineUpdatePolicyBoundary)? = readPolicyBoundary
-        defer { active = false; writer = nil; currentVerification = nil; serviceVerification = nil; boundaryReader = nil }
+        defer { active = false; writer = nil }
         func lifetime() throws {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
                   active, !violated, writer != nil else { throw JournalLeaseError.invalidated }
         }
-        func read() throws -> Selection {
-            try lifetime()
-            guard !reading else { violated = true; throw PreparationStoreError.transactionActive }
+        func loan<Result>(material: RuntimePreparationMaterial? = nil,
+            artifact: RuntimePublishedArtifactValidation.Artifact? = nil, _ body: (Scope) throws -> Result) throws -> Result {
+            var lent = true, checking = false, operating = false
+            defer { lent = false }
+            let scope = Scope(check: { enter in
+                try lifetime(); guard lent else { throw JournalLeaseError.invalidated }
+                guard !checking, !enter || !operating else { violated = true; throw PreparationStoreError.transactionActive }
+                checking = true; defer { checking = false }
+                if enter { operating = true }
+                try admission.validateMachineBoundary(directory: directory, expected: boundary); try lifetime()
+            }, leave: { operating = false }, selection: selection, material: material, artifact: artifact)
+            try scope.requireActive(); try inspectScope(scope); try scope.requireActive()
+            let result = try body(scope); try scope.requireActive(); return result
+        }
+        var retained: RuntimePreparationMaterial?
+        func fullCheck() throws -> RuntimePreparationMaterial {
+            try lifetime(); guard !reading else { violated = true; throw PreparationStoreError.transactionActive }
             reading = true; defer { reading = false }
-            guard let writer, let currentVerification, let serviceVerification, let boundaryReader else {
-                throw JournalLeaseError.invalidated
-            }
-            let boundary = expected.activation.runtime.setup.source.actual.admission.machine
+            guard let writer else { throw JournalLeaseError.invalidated }
             try admission.validateMachineBoundary(directory: directory, expected: boundary)
             let actual = try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate)
-            try actual.requireSame(as: expected); try currentVerification(actual); try lifetime()
-            try serviceVerification(actual.activation.runtime.plan); try lifetime()
-            let pair = try boundaryReader(); try record.requireRecorded(pair)
+            try actual.requireSame(as: expected); try verifyCurrent(actual); try lifetime()
+            try verifyServices(actual.activation.runtime.plan); try lifetime()
+            let pair = try readPolicyBoundary(); try record.requireRecorded(pair)
             try selection.configuration.binding.requireSourceForPublication(actual, current: pair, candidate: candidate)
+            let material = try loan { try readMaterial($0) }
+            guard try material.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
+            if let retained, try retained.encoded != material.encoded { throw RuntimePreparationError.conflictingMaterial }
+            guard let activity = material.serviceActivity else { throw RuntimePreparationError.incomplete }
+            try reference.validate(account: actual.activation.runtime.preparation, services: actual.activation.runtime.plan)
+            try loan(material: material) { try verifyActivity(activity, $0) }
             let selected = try selectionScope.read(); try selected.requireSame(as: selection)
             guard selected.digest == digest else { throw RuntimeActivationError.changedScope }
-            try writer.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate).requireSame(as: expected)
-            try record.requireRecorded(boundaryReader())
-            try admission.validateMachineBoundary(directory: directory, expected: boundary); try lifetime(); return selected
+            try admission.validateMachineBoundary(directory: directory, expected: boundary); try lifetime(); return material
         }
-        let sourceScope = Scope(checked: read)
-        try sourceScope.verify(); try inspectScope(sourceScope); try sourceScope.verify()
-        let material = try readMaterial(sourceScope); try sourceScope.verify()
-        guard try material.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
-        guard let activity = material.serviceActivity else { throw RuntimePreparationError.incomplete }
-        try reference.validate(account: expected.activation.runtime.preparation, services: expected.activation.runtime.plan)
-        try sourceScope.verify(); try didStage(.materialRestored); try sourceScope.verify()
-        func verify() throws -> Selection {
-            try lifetime()
-            guard !checking else { violated = true; throw PreparationStoreError.transactionActive }
-            checking = true; defer { checking = false }
-            let current = try sourceScope.read()
-            let retained = try readMaterial(sourceScope)
-            guard try retained.encoded == material.encoded else { throw RuntimePreparationError.conflictingMaterial }
-            try sourceScope.verify(); try verifyActivity(activity, sourceScope); try sourceScope.verify(); return current
-        }
-        let scope = Scope(checked: verify)
-        try scope.verify()
+        retained = try fullCheck(); guard let material = retained else { throw RuntimePreparationError.incomplete }
+        try didStage(.materialRestored); try lifetime()
         let artifacts = try RuntimePublishedArtifactValidation.artifacts(bundle: selection.configuration.bundle, material: material)
         guard artifacts.count == 8, Set(artifacts.map(\.path)).count == 8 else { throw RuntimePreparationError.incomplete }
         for artifact in artifacts {
-            try scope.verify(); let present = try readArtifact(artifact, scope); try scope.verify()
+            let present = try loan(material: material, artifact: artifact) { try readArtifact(artifact, $0) }
             if let present, present != artifact.bytes { throw AdministrativeSetupPublicationError.conflictingConfiguration }
         }
-        try scope.verify(); try publish(selection, material, scope); try scope.verify()
         for artifact in artifacts {
-            try scope.verify(); let actual = try readArtifact(artifact, scope); try scope.verify()
+            _ = try fullCheck()
+            try loan(material: material, artifact: artifact, publish)
+            let actual = try loan(material: material, artifact: artifact) { try readArtifact(artifact, $0) }
+            guard actual == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+            _ = try fullCheck()
+        }
+        try didStage(.filesPublished); try lifetime()
+        for artifact in artifacts {
+            let actual = try loan(material: material, artifact: artifact) { try readArtifact(artifact, $0) }
             guard actual == artifact.bytes else { throw AdministrativeSetupPublicationError.conflictingConfiguration }
         }
-        try scope.verify(); try didStage(.filesPublished); try scope.verify(); return selection
+        _ = try fullCheck(); return selection
     }
 }
