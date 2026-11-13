@@ -59,7 +59,7 @@ struct AuthorityGatewaySettingsStartupPlan: Sendable, CustomStringConvertible {
         if let pending = state.pending {
             let publication = try GatewayRuntimeSettingsPublicationPlan(installed: current, revision: pending,
                 previous: state.active, candidate: candidate)
-            let change = try AuthorityPhonePushSettingsChange(publication)
+            let change = try AuthorityPhonePushSettingsChange(installed: publication)
             guard change.previousCommitDigest == base.activeCommitDigest else { throw GatewayPreparationError.changedScope }
             pendingChange = change
         } else { pendingChange = nil }

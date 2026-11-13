@@ -1092,6 +1092,39 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    func testInstalledSettingsChangeReadsReleaseMarkersAndKeepsTheOrdinaryDecoderClosed() throws {
+        try withInstalledBackendSettingsFixture { _, backend, candidate, first, _ in
+            let publication = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: first,
+                previous: nil, candidate: candidate)
+            let marker = try XCTUnwrap(publication.artifacts.last)
+            let previous = try XCTUnwrap(marker.previous)
+            let change = try AuthorityPhonePushSettingsChange(installed: publication)
+            let old = try GatewayRuntimeCommit.decodeForReleaseArchive(previous)
+            let selected = try GatewayRuntimeCommit.decodeForReleaseArchive(marker.selected)
+            try old.requireRelease(binding: backend.binding, stage: .completion)
+            try selected.requireRelease(binding: backend.binding, stage: .completion)
+            XCTAssertEqual(change.previousCommitDigest, try old.observationDigest)
+            XCTAssertEqual(change.selectedCommitDigest, try selected.observationDigest)
+            XCTAssertEqual(change.revisionDigest, try first.digest)
+            XCTAssertGreaterThan(marker.selected.count, 1024)
+            XCTAssertThrowsError(try GatewayRuntimeCommit.decode(marker.selected))
+            XCTAssertThrowsError(try AuthorityPhonePushSettingsChange(publication))
+        }
+    }
+
+    func testInstalledSettingsChangeRefusesAnOrdinaryPublicationAndPreservesItsExistingEntry() throws {
+        try withInstalledBackendSettingsFixture { _, backend, _, first, _ in
+            let source = backend.source
+            let ordinary = try GatewayRuntimeSettingsPublicationPlan(revision: first, previous: nil,
+                activation: source.activation, journal: source.journal, foreground: source.foreground, inventory: source.inventory)
+            XCTAssertNil(ordinary.commit.release)
+            XCTAssertNoThrow(try AuthorityPhonePushSettingsChange(ordinary))
+            XCTAssertThrowsError(try AuthorityPhonePushSettingsChange(installed: ordinary)) {
+                XCTAssertEqual($0 as? GatewayPreparationError, .changedScope)
+            }
+        }
+    }
+
     func testInstalledSettingsStartupKeepsPendingChangesFencedForEveryHistoricalPhase() throws {
         try withInstalledBackendSettingsFixture { _, backend, candidate, first, second in
             let authority = backend.configuration.host
@@ -1108,7 +1141,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     state: .init(active: first, pending: second, phase: phase), candidate: candidate)
                 let publication = try GatewayRuntimeSettingsPublicationPlan(installed: backend, revision: second,
                     previous: first, candidate: candidate)
-                XCTAssertEqual(pending.pendingChange, try AuthorityPhonePushSettingsChange(publication))
+                XCTAssertEqual(pending.pendingChange, try AuthorityPhonePushSettingsChange(installed: publication))
                 XCTAssertEqual(pending.activeCommitDigest, settled.activeCommitDigest)
                 XCTAssertTrue(pending.requiresFreshQuiescence)
                 XCTAssertFalse(pending.requiresConsumerRecovery)
