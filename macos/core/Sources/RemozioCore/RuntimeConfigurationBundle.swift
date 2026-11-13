@@ -119,6 +119,39 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             relayPlan: relayPlan, relayPortOverride: relayPortOverride)
     }
 
+    /// Derives initial bytes from held actual inputs. It grants no publication or completed runtime authority.
+    static func retainedSetupInitialObservation(snapshot: MachineUpdateRetainedSetupPolicySnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        inputs: MachineUpdateRetainedSetupRuntimeInputs) throws -> Self {
+        let runtime = snapshot.activation.runtime, policy = current.policy.policy
+        try inputs.requireSource(runtime)
+        if !runtime.state.configurationPublished {
+            return try retainedSetupInitial(snapshot: snapshot, current: current, candidate: candidate,
+                currentCodePolicy: policy, importIntent: inputs.intent, relayPlan: inputs.relay?.plan)
+        }
+        let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: candidate)
+        try binding.requireStartupPolicy(policy)
+        guard snapshot.activation.origin == .retained, snapshot.activation.installed == nil,
+              snapshot.activation.state.plan == nil, !snapshot.activation.state.jobsRegistered,
+              runtime.setup.account?.inInventory == false,
+              let reference = runtime.state.reference, reference.serviceActivity != nil,
+              let initialization = runtime.setup.account?.initialization else { throw RuntimePreparationError.changedScope }
+        let account = runtime.preparation
+        let provisioning = try runtime.setup.source.provisioningInventory(accountID: account.accountID,
+            ownerUID: account.ownerUID, releaseDigest: account.releaseDigest)
+        let selected = try initialSelection(account: account, inventory: provisioning, importIntent: inputs.intent,
+            presencePolicyOverride: nil, relayPlan: inputs.relay?.plan, relayPortOverride: nil)
+        let derived = try Self(checkedAccount: account, initialization: initialization, reference: reference,
+            codeInventory: runtime.setup.source.actual.inventory, codePolicy: policy, retainedSetupBinding: binding,
+            presencePolicy: selected.presence, relayPort: selected.relayPort,
+            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
+            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
+            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+        return try stableCompleted(snapshot: runtime, reference: reference, candidate: candidate, currentCodePolicy: policy,
+            command: derived.command, transport: derived.transport,
+            clients: .init(presence: derived.presenceClient, pairing: derived.pairingClient, frontend: derived.frontendClient))
+    }
+
     private static func stableInitial(snapshot: MachineUpdateStableRuntimePreparationSnapshot, reference: RuntimeMaterialReference,
         candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
         retainedSetupBinding: RuntimeRetainedSetupReleaseBinding?, importIntent: SharedSetupImportIntent? = nil, presencePolicyOverride: PresenceConfiguration? = nil,
