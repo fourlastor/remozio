@@ -255,6 +255,8 @@ final class StableAccountStorageCompletionWriterTests: XCTestCase {
                 }
                 if stage == .afterMutation { try pair.journal.close() }
             }))
+            XCTAssertThrowsError(try f.machine().inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+            try f.reopen(nil)
             try snapshot(f).requireSame(as: before)
             let reopened = try openJournal(pair.root, preparation: XCTUnwrap(before.preparation), initialize: false)
             defer { try? reopened.close() }
