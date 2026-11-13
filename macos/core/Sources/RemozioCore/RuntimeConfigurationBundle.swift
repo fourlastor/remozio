@@ -48,6 +48,11 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
     let frontendClient: CommandFrontendConfiguration
     let elevationPolicy: CommandElevationPolicy
     var description: String { "RuntimeConfigurationBundle(redacted)" }
+    private static let initialEnvironment: [CapturedEnvironmentEntry] = [
+        .init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)
+    ]
+    private static let initialCaptureLimits = try! CBORLimits(maxBytes: 65536, maxDepth: 16, maxItems: 8192)
+
 
     static func initial(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,
                         reference: RuntimeMaterialReference, inventory: InstallationInventory,
@@ -58,9 +63,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
             presencePolicyOverride: presencePolicyOverride, relayPlan: relayPlan, relayPortOverride: relayPortOverride)
         return try .init(account: account, initialization: initialization, reference: reference, inventory: inventory,
             presencePolicy: selected.presence, relayPort: selected.relayPort,
-            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
-            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
-            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+            environment: initialEnvironment, submissionLimits: initialCaptureLimits, captureLimits: initialCaptureLimits)
     }
 
     private static func initialSelection(account: AccountPreparationIntent, inventory: InstallationInventory,
@@ -144,9 +147,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
         let derived = try Self(checkedAccount: account, initialization: initialization, reference: reference,
             codeInventory: runtime.setup.source.actual.inventory, codePolicy: policy, retainedSetupBinding: binding,
             presencePolicy: selected.presence, relayPort: selected.relayPort,
-            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
-            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
-            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+            environment: initialEnvironment, submissionLimits: initialCaptureLimits, captureLimits: initialCaptureLimits)
         return try stableCompleted(snapshot: runtime, reference: reference, candidate: candidate, currentCodePolicy: policy,
             command: derived.command, transport: derived.transport,
             clients: .init(presence: derived.presenceClient, pairing: derived.pairingClient, frontend: derived.frontendClient))
@@ -190,9 +191,7 @@ struct RuntimeConfigurationBundle: CustomStringConvertible {
         return try .init(checkedAccount: account, initialization: initialization, reference: reference,
             codeInventory: actual.inventory, codePolicy: currentCodePolicy, retainedSetupBinding: retainedSetupBinding,
             presencePolicy: selected.presence, relayPort: selected.relayPort,
-            environment: [.init(name: Data("PATH".utf8), value: Data("/usr/bin:/bin:/usr/sbin:/sbin".utf8), source: .minimal)],
-            submissionLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192),
-            captureLimits: .init(maxBytes: 65536, maxDepth: 16, maxItems: 8192))
+            environment: initialEnvironment, submissionLimits: initialCaptureLimits, captureLimits: initialCaptureLimits)
     }
 
     init(account: AccountPreparationIntent, initialization: AuthorityInitializationIntent,

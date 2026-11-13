@@ -164,7 +164,7 @@ enum RuntimePublicationController {
             let destination = try ProtectedSetupDirectory.createOrOpen(path: path, visibility: visibility)
             defer { destination.close() }; try verify()
             _ = try AdministrativeSetupPublication.publish(artifact.bytes, file: file, directory: destination, owner: 0, verify: verify)
-            try verify()
+            try global.validate(); try services.validate(); try verify()
         }
     }
 
