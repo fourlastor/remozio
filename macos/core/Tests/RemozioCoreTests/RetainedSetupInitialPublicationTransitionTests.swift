@@ -6,9 +6,9 @@ import XCTest
 final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
     private typealias Snapshot = MachineUpdateRetainedSetupPolicySnapshot
     private typealias Record = MachineUpdateRetainedSetupPolicyIntentRecord
-    private func fixture(_ body: (Snapshot, SignedReleaseEvidence, () throws -> Void) throws -> Void) throws {
+    private func fixture(_ body: (Snapshot, SignedReleaseEvidence) throws -> Void) throws {
         try MachineUpdateReplacementTests.withRetainedInitialConfigurationValueFixture { snapshot, _, candidate, _, unchanged in
-            try body(snapshot, candidate, { try unchanged() })
+            try body(snapshot, candidate); try unchanged()
         }
     }
     private func image(_ before: Snapshot, candidate: SignedReleaseEvidence, published: Bool, intent: Record?,
@@ -36,19 +36,19 @@ final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
     }
 
     func testExactRecordedTransitionAcceptsOnlyPublicationAndAChangedRowsDigest() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let reference = try XCTUnwrap(before.activation.runtime.state.reference)
             var digest = before.activation.runtime.setup.source.actual.currentRowsDigest; digest[digest.startIndex] ^= 1
             let after = try image(before, candidate: candidate, published: true, intent: before.intent, rowsDigest: digest)
             XCTAssertNoThrow(try after.requirePublication(from: before, reference: reference))
             XCTAssertEqual(after.intent, before.intent); XCTAssertEqual(after.activation.runtime.state.reference, reference)
             XCTAssertNil(after.activation.state.plan); XCTAssertFalse(after.activation.state.jobsRegistered)
-            XCTAssertFalse(before.activation.runtime.state.configurationPublished); try unchanged()
+            XCTAssertFalse(before.activation.runtime.state.configurationPublished)
         }
     }
 
     func testMissingPreparedAndWritingMarkersCannotAuthorizePublication() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let original = try XCTUnwrap(before.intent), reference = try XCTUnwrap(before.activation.runtime.state.reference)
             var markers: [Record?] = [nil]
             for phase in [Record.Phase.prepared, .writing] {
@@ -63,12 +63,12 @@ final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
                     XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
                 }
             }
-            try unchanged()
+
         }
     }
 
     func testAnotherValidMarkerIdentityOrRevisionCannotReplaceTheRecordedRow() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let original = try XCTUnwrap(before.intent), reference = try XCTUnwrap(before.activation.runtime.state.reference)
             for field in ["id", "revision"] {
                 let changed = try record(original) { $0[field] = UUID().uuidString }
@@ -78,36 +78,36 @@ final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
                     XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
                 }
             }
-            try unchanged()
+
         }
     }
 
     func testPublicationRequiresUnpublishedBeforeAndPublishedAfter() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let reference = try XCTUnwrap(before.activation.runtime.state.reference)
             let published = try image(before, candidate: candidate, published: true, intent: before.intent)
             XCTAssertThrowsError(try before.requirePublication(from: before, reference: reference))
             XCTAssertThrowsError(try published.requirePublication(from: published, reference: reference))
             XCTAssertThrowsError(try before.requirePublication(from: published, reference: reference))
-            XCTAssertNoThrow(try published.requireSame(as: published)); try unchanged()
+            XCTAssertNoThrow(try published.requireSame(as: published))
         }
     }
 
     func testAnotherValidAccountsRequestedMaterialReferenceIsRefused() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let after = try image(before, candidate: candidate, published: true, intent: before.intent)
-            try fixture { other, _, otherUnchanged in
+            try fixture { other, _ in
                 let foreign = try XCTUnwrap(other.activation.runtime.state.reference)
                 XCTAssertNotEqual(foreign.services.accountID, before.activation.runtime.preparation.accountID)
                 XCTAssertThrowsError(try after.requirePublication(from: before, reference: foreign))
-                try otherUnchanged()
+
             }
-            try unchanged()
+
         }
     }
 
     func testAnAdditionalValidReservationCannotHideInsideThePublicationFrame() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             var extra: UInt32 = 29999
             while before.activation.runtime.reservedNumbers.contains(extra) { extra += 1 }
             let after = try image(before, candidate: candidate, published: true, intent: before.intent,
@@ -115,30 +115,30 @@ final class RetainedSetupInitialPublicationTransitionTests: XCTestCase {
             XCTAssertThrowsError(try after.requirePublication(from: before, reference: XCTUnwrap(before.activation.runtime.state.reference))) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
-            try unchanged()
+
         }
     }
 
     func testSchemaMigrationIsNotAPublicationTransition() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let reference = try XCTUnwrap(before.activation.runtime.state.reference)
             let changedSchema = before.activation.runtime.setup.source.actual.schemaVersion + 1
             let after = try image(before, candidate: candidate, published: true, intent: before.intent, schema: changedSchema)
             XCTAssertThrowsError(try after.requirePublication(from: before, reference: reference)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
-            try unchanged()
+
         }
     }
 
     func testPublicationComparisonDoesNotGrantPolicyRetentionOrTransitionAuthority() throws {
-        try fixture { before, candidate, unchanged in
+        try fixture { before, candidate in
             let reference = try XCTUnwrap(before.activation.runtime.state.reference), marker = try XCTUnwrap(before.intent)
             let after = try image(before, candidate: candidate, published: true, intent: marker)
             XCTAssertNoThrow(try after.requirePublication(from: before, reference: reference))
             XCTAssertThrowsError(try after.requireRetention(marker, from: before))
             XCTAssertThrowsError(try after.requireTransition(marker, from: before))
-            XCTAssertThrowsError(try after.requireSame(as: before)); try unchanged()
+            XCTAssertThrowsError(try after.requireSame(as: before))
         }
     }
 
