@@ -40,8 +40,15 @@ final class RetainedSetupPolicyNativeEntryTests: XCTestCase {
         })
         defer { try? storage.close() }
         let policy = try storage.journal.read { try XCTUnwrap($0.codePolicy()) }, state = try storage.continuity.read()
+        let changed = try policy.policy.retainingFormat(with: policy.policy.entries.map { entry in
+            guard entry.role == .app else { return entry }
+            var hash = entry.codeDirectoryHash; hash[hash.startIndex] ^= 1
+            return try .init(role: entry.role, teamID: entry.teamID, identifier: entry.identifier,
+                installedGeneration: entry.installedGeneration, minimumGeneration: entry.minimumGeneration,
+                codeDirectoryHash: hash, active: entry.active)
+        })
         _ = try CheckpointedJournal(journal: storage.journal, continuity: storage.continuity).write(epoch: state.committed.journalEpoch) {
-            try $0.installCodePolicy(policy.policy, expectedRevision: policy.revision)
+            try $0.installCodePolicy(changed, expectedRevision: policy.revision)
         }
     }
 
