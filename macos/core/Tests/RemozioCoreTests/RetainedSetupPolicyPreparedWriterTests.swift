@@ -3,6 +3,7 @@ import XCTest
 @testable import RemozioCore
 
 struct RetainedPolicyWriterFixture {
+    enum JournalMode { case startup, completion, readOnly, foreignStartup }
     let machine: () -> PreparationIntentStore
     let source: MachineUpdateRetainedSetupActivationSource
     let candidate: SignedReleaseEvidence
@@ -11,6 +12,7 @@ struct RetainedPolicyWriterFixture {
     let verifyPair: () throws -> Void
     let reopen: ((() throws -> Void)?) throws -> Void
     let scalar: (String) throws -> Int64
+    let openPolicyJournal: (JournalMode) throws -> AuthorityJournal
 }
 
 /// Owned stores exercise SQL only. Synthetic release declarations grant no installed caller or native policy authority.

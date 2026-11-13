@@ -9,6 +9,23 @@ final class InstallationStorageLease {
     private let relativeDirectory: String
     var databasePath: String { storage.databasePath }
 
+    struct RetainedPolicyVerificationIdentity: Equatable {
+        let directories: [ProtectedStorageLease.DirectoryIdentity]
+        let database: ProtectedStorageLease.DirectoryIdentity
+        let lock: ProtectedStorageLease.DirectoryIdentity
+    }
+    func retainedPolicyVerificationIdentity() throws -> RetainedPolicyVerificationIdentity {
+        try .init(directories: storage.directoryIdentities(), database: storage.fileIdentity(name: "installation.sqlite"),
+            lock: storage.fileIdentity(name: "writer.lock"))
+    }
+    func reopenForRetainedPolicyVerification(expected: RetainedPolicyVerificationIdentity) throws -> InstallationStorageLease {
+        let reopened = try InstallationStorageLease(anchor: anchor, relativeDirectory: relativeDirectory, owner: owner)
+        do {
+            guard try reopened.retainedPolicyVerificationIdentity() == expected else { throw JournalLeaseError.invalidated }
+            return reopened
+        } catch { reopened.close(); throw error }
+    }
+
     static func acquire(directoryPath: String) throws -> InstallationStorageLease {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard directoryPath.hasPrefix("/") else { throw JournalLeaseError.invalidPath }

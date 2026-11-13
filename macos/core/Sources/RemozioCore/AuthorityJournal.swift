@@ -15,6 +15,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var requestStartupAttempted = false
     private(set) var updateHealthOnly = false
     private var updateCompletionOnly = false
+    private var retainedSetupPolicyOnly = false
     private var updatePolicyOperationActive = false
     private let commandExchanges = AuthorityCommandExchangeOwnership()
     private var commandExecutions: [Data: CommandExecution] = [:]
@@ -96,6 +97,13 @@ public final class AuthorityJournal: @unchecked Sendable {
             try? storage.close()
             throw error
         }
+    }
+
+    /// Opens a separate startup-policy mode without recovery or request startup.
+    convenience init(retainedSetupPolicyStorage storage: sending AuthorityStorage,
+        validateSelf: (JournalTransaction) throws -> Void) throws {
+        try self.init(updateCompletionStorage: storage, validateSelf: validateSelf)
+        retainedSetupPolicyOnly = true
     }
 
     /// Owns the configured stores for trust-only service work. Action recovery remains a separate gate.
@@ -564,7 +572,7 @@ public final class AuthorityJournal: @unchecked Sendable {
         verifyNative: (MachineUpdatePolicyCommitStage) throws -> Void) throws -> MachineUpdatePolicyCommitReceipt {
         try lock.withLock {
             try requireNoRequestOperation()
-            guard updateCompletionOnly, let storage, requests == nil, !requestStartupAttempted,
+            guard updateCompletionOnly, !retainedSetupPolicyOnly, let storage, requests == nil, !requestStartupAttempted,
                   commandExecutions.isEmpty, !commandExchanges.hasActive else { throw JournalDatabaseError.readOnly }
             let record = try permit.consume(in: scope)
             try record.requireSnapshot(scope.read().restart, candidate: candidate)
@@ -600,6 +608,53 @@ public final class AuthorityJournal: @unchecked Sendable {
             let receipt = MachineUpdatePolicyCommitReceipt(source: source, policy: current.policy, checkpoint: current.checkpoint)
             _ = try record.recording(receipt)
             return receipt
+        }
+    }
+
+    /// Internal startup hook. No production caller uses it before the complete P03c sequence.
+    func commitRetainedSetupStartupPolicy(source: MachineUpdateRetainedSetupActivationSource,
+        use: PreparationIntentStore.RetainedSetupPolicyWriteReceipt.Use, candidate: SignedReleaseEvidence,
+        verifyExternal: (MachineUpdatePolicyCommitStage) throws -> Void) throws -> MachineUpdatePolicyCommitReceipt {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard updateCompletionOnly, retainedSetupPolicyOnly, let storage, requests == nil, !requestStartupAttempted,
+                  commandExecutions.isEmpty, !commandExchanges.hasActive else { throw JournalDatabaseError.readOnly }
+            try use.validate(); try use.intent.requireSource(source)
+            guard use.intent.phase == .writing, let initial = source.runtime.setup.account?.initialization,
+                  initial.complete, let initialCheckpoint = initial.checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+            try storage.journal.requireInitializationPath(initial.journalPath)
+            try storage.continuity.requireInitializationScope(path: initial.continuityPath, mac: initial.macID, account: initial.accountID)
+            guard try storage.journal.initialAuthorityCheckpoint(initial: initial.initialAuthority,
+                databasePath: initial.journalPath) == initialCheckpoint else { throw AuthorityInitializationError.invalidBoundary }
+            let original = try validatedMachineUpdatePolicyBoundary(storage)
+            guard original == source.accountPolicy, original.checkpoint == initialCheckpoint else { throw PreparationStoreError.staleRevision }
+            let target = try MachineUpdatePolicyPlan(source: original.policy, candidate: candidate).startupPolicy
+            guard try target.bytes == use.intent.startupPolicy else { throw PreparationStoreError.staleRevision }
+            try use.verifyCurrentMarker(candidate: candidate); try use.claimJournalWrite()
+            updatePolicyOperationActive = true; defer { updatePolicyOperationActive = false }
+            func verify(_ stage: MachineUpdatePolicyCommitStage) throws {
+                try use.validate(); try use.verifyCurrentMarker(candidate: candidate)
+                try verifyExternal(stage)
+                try use.verifyCurrentMarker(candidate: candidate); try use.validate()
+            }
+            let expected = try ContinuityState(committed: original.checkpoint, pending: nil, recoveryRequired: false)
+            try verify(.beforeCommit)
+            guard try storage.continuity.read() == expected else { throw JournalDatabaseError.unavailable }
+            if original.policy.policy != target {
+                let writer = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)
+                _ = try writer.write(epoch: original.checkpoint.journalEpoch, recoverRejectedBody: true) { transaction in
+                    guard try transaction.codePolicy() == original.policy,
+                          try storage.continuity.read() == expected else { throw AuthorityCodePolicyError.staleRevision }
+                    try verify(.inTransaction)
+                    let value = try transaction.installCodePolicy(target, expectedRevision: original.policy.revision)
+                    try verify(.afterMutation); return value
+                }
+            }
+            let current = try validatedMachineUpdatePolicyBoundary(storage)
+            try verify(.afterCommit)
+            guard try validatedMachineUpdatePolicyBoundary(storage) == current else { throw AuthorityCodePolicyError.staleRevision }
+            let receipt = MachineUpdatePolicyCommitReceipt(source: original, policy: current.policy, checkpoint: current.checkpoint)
+            _ = try use.intent.recording(receipt); return receipt
         }
     }
 

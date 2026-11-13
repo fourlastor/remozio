@@ -3897,6 +3897,20 @@ public final class PreparationIntentStore {
                 guard let receipt else { throw JournalLeaseError.invalidated }
                 try receipt.validateUse(intent: intent)
             }
+            func verifyCurrentMarker(candidate: SignedReleaseEvidence) throws {
+                guard let receipt else { throw JournalLeaseError.invalidated }
+                try receipt.validateUse(intent: intent)
+                guard let writer = receipt.writer else { throw JournalLeaseError.invalidated }
+                let lease = try writer.lease.reopenForRetainedPolicyVerification(expected: receipt.machineIdentity)
+                let reader = try PreparationIntentStore(lease: lease, macID: writer.macID, maximumRecords: writer.maximumRecords,
+                    initialize: false, inventoryRecordLimit: writer.inventoryRecordLimit)
+                defer { try? reader.close() }
+                let owner = receipt.snapshot.activation.runtime.setup.owner
+                let actual = try reader.retainedSetupPolicySnapshot(owner: owner, candidate: candidate)
+                try actual.requireSame(as: receipt.snapshot)
+                try reader.retainedSetupPolicySnapshot(owner: owner, candidate: candidate).requireSame(as: actual)
+                try reader.close(); try receipt.validateUse(intent: intent)
+            }
             func claimJournalWrite() throws {
                 guard let receipt else { throw JournalLeaseError.invalidated }
                 try receipt.validateUse(intent: intent)
@@ -3909,11 +3923,13 @@ public final class PreparationIntentStore {
         let snapshot: MachineUpdateRetainedSetupPolicySnapshot
         let changed: Bool
         private weak var writer: PreparationIntentStore?
+        private let machineIdentity: InstallationStorageLease.RetainedPolicyVerificationIdentity
         private let processID = getpid(), thread = pthread_self()
         private var consumed = false, active = false, journalWriteClaimed = false
         fileprivate init(previous: MachineUpdateRetainedSetupPolicyIntentRecord, current: MachineUpdateRetainedSetupPolicyIntentRecord,
-            snapshot: MachineUpdateRetainedSetupPolicySnapshot, changed: Bool, writer: PreparationIntentStore) {
+            snapshot: MachineUpdateRetainedSetupPolicySnapshot, changed: Bool, writer: PreparationIntentStore) throws {
             self.previous = previous; self.current = current; self.snapshot = snapshot; self.changed = changed; self.writer = writer
+            machineIdentity = try writer.lease.retainedPolicyVerificationIdentity()
         }
         /// The synchronous loan expires on return or throw. A repeated marker cannot grant another first write.
         func withFirstWritingUse<Value>(_ body: (Use) throws -> Value) throws -> Value {
@@ -3983,7 +3999,7 @@ public final class PreparationIntentStore {
                 try verifyScoped(.beforeTransaction, actual); _ = try authorization.capture(in: self); return actual
             }
             if before.intent == next {
-                return RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: before, changed: false, writer: self)
+                return try RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: before, changed: false, writer: self)
             }
             try transaction(write: true, activationWrite: true, retainedSetupPolicy: authorization,
                 willCommit: { commitAttempted = true }) {
@@ -4004,7 +4020,7 @@ public final class PreparationIntentStore {
                 let actual = try authorization.capture(in: self)
                 try verifyScoped(.afterCommit, actual); _ = try authorization.capture(in: self)
                 guard actual.intent == next else { throw PreparationStoreError.staleRevision }
-                return RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: actual, changed: true, writer: self)
+                return try RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: actual, changed: true, writer: self)
             } } catch { unavailable = true; shutdown(); throw error }
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
