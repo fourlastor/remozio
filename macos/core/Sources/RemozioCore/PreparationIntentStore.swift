@@ -3568,7 +3568,12 @@ public final class PreparationIntentStore {
     private enum StableAccountStorageMutation {
         case pin(Data)
         case beginInitialization(journalPath: String, continuityPath: String)
-        var changesPreparation: Bool { if case .pin = self { return true }; return false }
+        case captureCheckpoint(JournalDatabase)
+        case completeInitialization(JournalDatabase, ContinuityStore)
+        case completePreparation
+        var changesPreparation: Bool {
+            switch self { case .pin, .completePreparation: return true; default: return false }
+        }
     }
     private final class StableAccountStorageAuthorization {
         private let processID = getpid(), thread = pthread_self()
@@ -3594,6 +3599,7 @@ public final class PreparationIntentStore {
             let actual = try MachineUpdateStableAccountSetupSnapshot(source: writer.loadStableRuntimeSource(candidate: candidate),
                 owner: original.owner)
             try actual.requireSame(as: expected)
+            try writer.requireStableAccountStorageBoundary(mutation, actual: actual)
             let digest = try writer.stableAccountStorageProtectedDigest(preparation: preparation, changesPreparation: mutation.changesPreparation)
             if let protectedDigest { guard digest == protectedDigest else { throw PreparationStoreError.staleRevision } }
             else { protectedDigest = digest }
@@ -3622,6 +3628,76 @@ public final class PreparationIntentStore {
             expected: expected, candidate: candidate, directory: directory, admission: admission, verifyScoped: verifyScoped)
         guard let initialization = actual.account?.initialization else { throw AuthorityInitializationError.missingIntent }; return initialization
     }
+    /// Captures the actual pristine journal boundary. A retained checkpoint cannot follow later journal changes.
+    func captureStableAccountInitialization(journal: JournalDatabase, expected: MachineUpdateStableAccountSetupSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AuthorityInitializationIntent {
+        let actual = try changeStableAccountStorage(.captureCheckpoint(journal), expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+        guard let initial = actual.account?.initialization else { throw AuthorityInitializationError.missingIntent }; return initial
+    }
+
+    /// Requires both live stores at the exact retained checkpoint. Completion grants no runtime admission.
+    func completeStableAccountInitialization(journal: JournalDatabase, continuity: ContinuityStore,
+        expected: MachineUpdateStableAccountSetupSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AuthorityInitializationIntent {
+        let actual = try changeStableAccountStorage(.completeInitialization(journal, continuity), expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+        guard let initial = actual.account?.initialization else { throw AuthorityInitializationError.missingIntent }; return initial
+    }
+
+    /// Records completed setup progress. It grants no current health proof and never repairs missing storage.
+    func completeStableAccountPreparation(expected: MachineUpdateStableAccountSetupSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AccountPreparationIntent {
+        let actual = try changeStableAccountStorage(.completePreparation, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+        guard let preparation = actual.preparation else { throw AccountPreparationError.missing }; return preparation
+    }
+
+    private func requireStableAccountStorageBoundary(_ mutation: StableAccountStorageMutation,
+        actual: MachineUpdateStableAccountSetupSnapshot) throws {
+        switch mutation {
+        case .pin, .beginInitialization: return
+        default:
+            guard actual.account?.origin == .currentRelease else { throw AccountPreparationError.conflict }
+        }
+        switch mutation {
+        case .captureCheckpoint(let journal):
+            guard let preparation = actual.preparation, preparation.authorityPublicKey != nil,
+                  let initial = actual.account?.initialization else { throw AuthorityInitializationError.missingIntent }
+            guard !initial.complete else { throw AuthorityInitializationError.completed }
+            let checkpoint = try journal.initialAuthorityCheckpoint(initial: preparation.initialAuthority, databasePath: initial.journalPath)
+            if let retained = initial.checkpoint, retained != checkpoint { throw AuthorityInitializationError.invalidBoundary }
+        case .completeInitialization(let journal, let continuity):
+            guard let preparation = actual.preparation, preparation.authorityPublicKey != nil,
+                  let initial = actual.account?.initialization, let checkpoint = initial.checkpoint else {
+                throw AuthorityInitializationError.invalidBoundary
+            }
+            try journal.requireInitializationPath(initial.journalPath)
+            try continuity.requireInitializationScope(path: initial.continuityPath, mac: initial.macID, account: initial.accountID)
+            guard let journalDirectory = try journal.directoryIdentities().last,
+                  let continuityDirectory = try continuity.directoryIdentities().last,
+                  journalDirectory != continuityDirectory,
+                  !(try continuity.directoryIdentities()).contains(journalDirectory),
+                  !(try journal.directoryIdentities()).contains(continuityDirectory) else { throw AuthorityInitializationError.invalidBoundary }
+            let state = try continuity.read()
+            guard !state.recoveryRequired, state.pending == nil, state.committed == checkpoint,
+                  try journal.read({ try CheckpointedJournal.checkpoint(transaction: $0, epoch: checkpoint.journalEpoch,
+                    generation: 1, authorityGeneration: 1) }) == checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+        case .completePreparation:
+            guard let preparation = actual.preparation, let initial = actual.account?.initialization else {
+                throw AccountPreparationError.incomplete
+            }
+            guard preparation.authorityPublicKey != nil, initial.complete,
+                  initial.macID == preparation.macID, initial.accountID == preparation.accountID,
+                  initial.installationID == preparation.installationID, initial.releaseDigest == preparation.releaseDigest,
+                  initial.initializationBytes == preparation.initializationBytes else { throw AccountPreparationError.incomplete }
+        case .pin, .beginInitialization: break
+        }
+    }
+
     private func stableAccountStorageValues(_ mutation: StableAccountStorageMutation, actual: MachineUpdateStableAccountSetupSnapshot)
         throws -> (AccountPreparationIntent, AuthorityInitializationIntent?) {
         guard let preparation = actual.preparation, let account = actual.account else { throw AccountPreparationError.missing }
@@ -3653,6 +3729,24 @@ public final class PreparationIntentStore {
                 installationID: preparation.installationID, macID: preparation.macID, accountID: preparation.accountID,
                 releaseDigest: preparation.releaseDigest, initializationDigest: initial.initializationDigest,
                 initializationBytes: preparation.initializationBytes, journalPath: journal, continuityPath: continuity))
+        case .captureCheckpoint(let journal):
+            guard let existing else { throw AuthorityInitializationError.missingIntent }
+            let checkpoint = try journal.initialAuthorityCheckpoint(initial: preparation.initialAuthority, databasePath: existing.journalPath)
+            if let retained = existing.checkpoint {
+                guard retained == checkpoint else { throw AuthorityInitializationError.invalidBoundary }; return (preparation, existing)
+            }
+            guard !preparation.storagePrepared, !account.inInventory else { throw AccountPreparationError.conflict }
+            return (preparation, try existing.advancing(checkpoint: checkpoint, complete: false))
+        case .completeInitialization:
+            guard let existing, let checkpoint = existing.checkpoint else { throw AuthorityInitializationError.invalidBoundary }
+            if existing.complete { return (preparation, existing) }
+            guard !preparation.storagePrepared, !account.inInventory else { throw AccountPreparationError.conflict }
+            return (preparation, try existing.advancing(checkpoint: checkpoint, complete: true))
+        case .completePreparation:
+            guard let existing else { throw AccountPreparationError.incomplete }
+            let next = try preparation.prepared(initialization: existing)
+            if next != preparation { guard !account.inInventory else { throw AccountPreparationError.conflict } }
+            return (next, existing)
         }
     }
     private func changeStableAccountStorage(_ mutation: StableAccountStorageMutation, expected: MachineUpdateStableAccountSetupSnapshot,
@@ -3688,11 +3782,15 @@ public final class PreparationIntentStore {
                             guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw AccountPreparationError.staleRevision }
                         }
                     } else {
-                        guard let initialization, before.account?.initialization == nil else { throw AuthorityInitializationError.conflictingIntent }
-                        try statement("INSERT INTO authority_initialization_v1 VALUES(?,?,?)") { row in
-                            try bind(initialization.accountID, column: 1, row: row); try bind(initialization.revision, column: 2, row: row)
-                            try bind(initialization.bytes, column: 3, row: row)
-                            guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                        guard let initialization else { throw AuthorityInitializationError.conflictingIntent }
+                        if let previous = before.account?.initialization {
+                            try saveInitialization(initialization, expected: previous)
+                        } else {
+                            try statement("INSERT INTO authority_initialization_v1 VALUES(?,?,?)") { row in
+                                try bind(initialization.accountID, column: 1, row: row); try bind(initialization.revision, column: 2, row: row)
+                                try bind(initialization.bytes, column: 3, row: row)
+                                guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                            }
                         }
                     }
                     try authorization.adopt(preparation: preparation, initialization: initialization, in: self)
