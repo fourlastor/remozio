@@ -4378,6 +4378,116 @@ final class MachineUpdateReplacementTests: XCTestCase {
             initialization: initialization, artifacts: artifacts))
     }
 
+    private func withStablePublishedSelectionFixture(_ body: (RetainedSelectionFixture,
+        MachineUpdateStableRuntimePreparationSnapshot, MachineUpdateStableRuntimeView) throws -> Void) throws {
+        try withRetainedSelectionFixture { f in
+            let snapshot = try f.fixture.machine.stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.fixture.candidate)
+            let inputs = try f.fixture.machine.stableRuntimeViewInputs(expected: snapshot.setup.source,
+                retained: [], candidate: f.fixture.candidate)
+            let view = try MachineUpdateStableRuntimeView(compatibility: inputs, candidate: f.fixture.candidate)
+            try body(f, snapshot, view)
+        }
+    }
+
+    func testStablePublishedSelectionReusesRetainedValidationAndRereadsEveryExactArtifact() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            let before = try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate)
+            var events: [String] = []
+            func verify() throws {
+                events.append("verify")
+                try f.verifyMarker()
+                try snapshot.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+                try view.requireCurrent(machine: f.fixture.machine, candidate: f.fixture.candidate)
+            }
+            func read(_ artifact: RuntimePublishedArtifactValidation.Artifact) throws -> Data {
+                events.append("read"); return try f.read(artifact)
+            }
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: { events.append("pair"); return try f.boundary() },
+                verifyCurrent: verify, read: read)
+            XCTAssertEqual(Set(selected.artifacts.map(\.path)), Set(f.artifacts.keys))
+            for artifact in selected.artifacts {
+                let expected = try XCTUnwrap(f.artifacts[artifact.path])
+                XCTAssertEqual(artifact.bytes, expected.bytes)
+                XCTAssertEqual(artifact.access, expected.access)
+            }
+            XCTAssertEqual(selected.bundle.command.canonicalBytes, f.bundle.command.canonicalBytes)
+            XCTAssertEqual(selected.bundle.transport.canonicalBytes, f.bundle.transport.canonicalBytes)
+            XCTAssertEqual(selected.description, "MachineUpdateStableRuntimePublishedSelection(redacted)")
+            XCTAssertEqual(selected.debugDescription, selected.description)
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: verify, read: read)
+            for index in events.indices where events[index] == "read" {
+                guard index > 0, index + 1 < events.count else { return XCTFail("Missing read boundary") }
+                XCTAssertEqual(events[index - 1], "verify")
+                XCTAssertEqual(events[index + 1], "verify")
+            }
+            try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate).requireSame(as: before)
+        }
+    }
+
+    func testStablePublishedSelectionRequiresRecordedPolicyAtCaptureAndEveryLaterRead() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            var reads = 0
+            XCTAssertThrowsError(try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                verifyCurrent: f.verifyMarker, read: { reads += 1; return try f.read($0) })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            XCTAssertEqual(reads, 0)
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+            XCTAssertThrowsError(try selected.validate(verifyCurrent: f.verifyMarker,
+                read: { reads += 1; return try f.read($0) })) {
+                XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
+            }
+            XCTAssertEqual(reads, 0)
+            let revised = AuthorityJournal.MachineUpdatePolicyBoundary(macID: f.current.macID, accountID: f.current.accountID,
+                policy: .init(revision: UUID(), policy: f.current.policy.policy, roleRevisions: f.current.policy.roleRevisions),
+                checkpoint: f.current.checkpoint)
+            for changedAfter in 0...selected.artifacts.count {
+                reads = 0
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: {
+                    if reads >= changedAfter { return revised }
+                    return try f.boundary()
+                }, verifyCurrent: f.verifyMarker, read: { reads += 1; return try f.read($0) })) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
+                }
+                XCTAssertEqual(reads, changedAfter)
+            }
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+        }
+    }
+
+    func testStablePublishedSelectionRejectsChangedBytesAndPropagatesTheOwnerFailure() throws {
+        try withStablePublishedSelectionFixture { f, snapshot, view in
+            let selected = try MachineUpdateStableRuntimePublishedSelection.capture(snapshot: snapshot, view: view,
+                material: f.material, candidate: f.fixture.candidate, currentCodePolicy: f.current.policy.policy,
+                retained: f.snapshot, readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+            for target in selected.artifacts {
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker,
+                    read: { artifact in
+                        let bytes = try f.read(artifact)
+                        return artifact.path == target.path ? bytes + Data([0]) : bytes
+                    })) {
+                    XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .conflictingConfiguration)
+                }
+            }
+            for beforeRead in [true, false] {
+                var reads = 0
+                XCTAssertThrowsError(try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: {
+                    try f.verifyMarker()
+                    if beforeRead || reads > 0 { throw RuntimeActivationError.unavailable }
+                }, read: { reads += 1; return try f.read($0) })) {
+                    XCTAssertEqual($0 as? RuntimeActivationError, .unavailable)
+                }
+                XCTAssertEqual(reads, beforeRead ? 0 : 1)
+            }
+            try selected.validate(readPolicyBoundary: f.boundary, verifyCurrent: f.verifyMarker, read: f.read)
+        }
+    }
+
     func testRetainedSelectionReadsOnlyScopedInjectedFilesAndPreservesTheirBytes() throws {
         try withRetainedSelectionFixture { f in
             let before = try f.fixture.machine.stableMachineUpdateSnapshot(candidate: f.fixture.candidate)
