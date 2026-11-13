@@ -35,6 +35,34 @@ struct MachineUpdateRetainedSetupPolicySnapshot {
         try record.requireTransition(from: previous)
         try requireUnchangedRuntime(from: before, allowMigration: false)
     }
+    /// Compares the publication bit only. A private retained writer must pin the actual catalog and every other row.
+    func requirePublication(from before: Self, reference: RuntimeMaterialReference) throws {
+        let runtime = activation.runtime, previousRuntime = before.activation.runtime
+        let source = runtime.setup.source, previousSource = previousRuntime.setup.source
+        let actual = source.actual, previous = previousSource.actual
+        try reference.validate(account: previousRuntime.preparation, services: previousRuntime.plan)
+        try runtime.setup.requireOwner(previousRuntime.setup.owner)
+        guard let recorded = before.intent, recorded.phase == .recorded, intent == recorded,
+              previousRuntime.state == .init(reference: reference, configurationPublished: false),
+              runtime.state == .init(reference: reference, configurationPublished: true),
+              MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(previous.schemaVersion),
+              actual.schemaVersion == previous.schemaVersion,
+              actual.inventory == previous.inventory, actual.activation == previous.activation,
+              actual.admission == previous.admission, actual.candidate == previous.candidate,
+              actual.installed.record == previous.installed.record, actual.installed.artifacts == previous.installed.artifacts,
+              try actual.seal.encoded == previous.seal.encoded,
+              source.historicalInventory == previousSource.historicalInventory,
+              source.provisioningHistory == previousSource.provisioningHistory,
+              source.preparations == previousSource.preparations, source.initializations == previousSource.initializations,
+              source.accounts == previousSource.accounts,
+              runtime.preparation == previousRuntime.preparation, runtime.plan == previousRuntime.plan,
+              runtime.reservedNumbers == previousRuntime.reservedNumbers,
+              activation.origin == before.activation.origin,
+              try activation.installed?.encoded == before.activation.installed?.encoded else {
+            throw PreparationStoreError.staleRevision
+        }
+        try activation.requireState(before.activation.state)
+    }
     private func requireUnchangedRuntime(from before: Self, allowMigration: Bool) throws {
         let actual = activation.runtime.setup.source, previous = before.activation.runtime.setup.source
         let frame = actual.actual, prior = previous.actual
