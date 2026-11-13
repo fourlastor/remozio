@@ -3881,8 +3881,7 @@ public final class PreparationIntentStore {
     }
     private func retainedSetupPolicyProtectedDigest(excluding accountID: Data) throws -> Data {
         guard accountID.count == 16 else { throw PreparationStoreError.corruptRecord }
-        let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' AND name<>? ORDER BY name") { row in
-            try bind(MachineUpdateRetainedSetupPolicyStorage.tableName, column: 1, row: row)
+        let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' AND name<>'retained_setup_policy_intents_v1' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
                 guard names.count < 128, sqlite3_column_type(row, 0) == SQLITE_TEXT,
