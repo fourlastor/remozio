@@ -3797,6 +3797,8 @@ public final class PreparationIntentStore {
     }
 
     private final class RetainedSetupPolicyAuthorization {
+        enum Change { case retention, transition }
+        private let change: Change
         private let processID = getpid(), thread = pthread_self()
         private weak var writer: PreparationIntentStore?
         private let original: MachineUpdateRetainedSetupPolicySnapshot
@@ -3806,9 +3808,9 @@ public final class PreparationIntentStore {
         private let admission: UpdateOrdinaryAdmissionLease.Scope
         private var protectedDigest: Data?
         init(writer: PreparationIntentStore, expected: MachineUpdateRetainedSetupPolicySnapshot,
-            candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope) {
+            candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope, change: Change = .retention) {
             self.writer = writer; original = expected; self.expected = expected; self.candidate = candidate
-            self.directory = directory; self.admission = admission
+            self.directory = directory; self.admission = admission; self.change = change
         }
         func capture(in owner: PreparationIntentStore) throws -> MachineUpdateRetainedSetupPolicySnapshot {
             guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
@@ -3825,7 +3827,10 @@ public final class PreparationIntentStore {
         }
         func adopt(_ intent: MachineUpdateRetainedSetupPolicyIntentRecord, in owner: PreparationIntentStore) throws {
             let actual = try owner.loadRetainedSetupPolicySnapshot(owner: original.activation.runtime.setup.owner, candidate: candidate)
-            try actual.requireRetention(intent, from: original)
+            switch change {
+            case .retention: try actual.requireRetention(intent, from: original)
+            case .transition: try actual.requireTransition(intent, from: original)
+            }
             expected = actual; _ = try capture(in: owner)
         }
     }
@@ -3879,6 +3884,131 @@ public final class PreparationIntentStore {
             } } catch { unavailable = true; shutdown(); throw error }
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
+    /// Requires this exact machine connection to close before a future journal permit can use an acknowledgement.
+    func requireClosedForRetainedSetupPolicyWrite() throws {
+        guard !active, db == nil else { throw PreparationStoreError.transactionActive }
+    }
+    /// Acknowledges metadata only. The future permit owner separately checks the actual journal and native custody.
+    final class RetainedSetupPolicyWriteReceipt {
+        struct Use {
+            fileprivate weak var receipt: RetainedSetupPolicyWriteReceipt?
+            let intent: MachineUpdateRetainedSetupPolicyIntentRecord
+            func validate() throws {
+                guard let receipt else { throw JournalLeaseError.invalidated }
+                try receipt.validateUse(intent: intent)
+            }
+            func claimJournalWrite() throws {
+                guard let receipt else { throw JournalLeaseError.invalidated }
+                try receipt.validateUse(intent: intent)
+                guard !receipt.journalWriteClaimed else { throw JournalLeaseError.invalidated }
+                receipt.journalWriteClaimed = true
+            }
+        }
+        let previous: MachineUpdateRetainedSetupPolicyIntentRecord
+        let current: MachineUpdateRetainedSetupPolicyIntentRecord
+        let snapshot: MachineUpdateRetainedSetupPolicySnapshot
+        let changed: Bool
+        private weak var writer: PreparationIntentStore?
+        private let processID = getpid(), thread = pthread_self()
+        private var consumed = false, active = false, journalWriteClaimed = false
+        fileprivate init(previous: MachineUpdateRetainedSetupPolicyIntentRecord, current: MachineUpdateRetainedSetupPolicyIntentRecord,
+            snapshot: MachineUpdateRetainedSetupPolicySnapshot, changed: Bool, writer: PreparationIntentStore) {
+            self.previous = previous; self.current = current; self.snapshot = snapshot; self.changed = changed; self.writer = writer
+        }
+        /// The synchronous loan expires on return or throw. A repeated marker cannot grant another first write.
+        func withFirstWritingUse<Value>(_ body: (Use) throws -> Value) throws -> Value {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
+                  changed, previous.phase == .prepared, current.phase == .writing, !consumed, !active,
+                  let writer else { throw JournalLeaseError.invalidated }
+            try writer.requireClosedForRetainedSetupPolicyWrite()
+            consumed = true; active = true; defer { active = false }
+            let use = Use(receipt: self, intent: current)
+            try use.validate(); let result = try body(use); try use.validate(); return result
+        }
+        private func validateUse(intent: MachineUpdateRetainedSetupPolicyIntentRecord) throws {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
+                  active, consumed, changed, current == intent, let writer else { throw JournalLeaseError.invalidated }
+            try writer.requireClosedForRetainedSetupPolicyWrite()
+        }
+    }
+    private enum RetainedSetupPolicyMutation {
+        case writing(MachineUpdateRetainedSetupActivationSource)
+        case recorded(AuthorityJournal.MachineUpdatePolicyBoundary)
+        func validate(_ next: MachineUpdateRetainedSetupPolicyIntentRecord) throws {
+            switch self {
+            case .writing(let source):
+                guard next.phase == .writing else { throw PreparationStoreError.invalidTransition }
+                try next.requireSource(source)
+            case .recorded(let boundary): try next.requireRecorded(boundary)
+            }
+        }
+    }
+    func beginRetainedSetupPolicyWrite(_ writing: MachineUpdateRetainedSetupPolicyIntentRecord,
+        source: MachineUpdateRetainedSetupActivationSource, expected: MachineUpdateRetainedSetupPolicySnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPolicySnapshot) throws -> Void) throws -> RetainedSetupPolicyWriteReceipt {
+        try changeRetainedSetupPolicyIntent(writing, mutation: .writing(source), expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+    }
+    func recordRetainedSetupPolicyWrite(_ recorded: MachineUpdateRetainedSetupPolicyIntentRecord,
+        boundary: AuthorityJournal.MachineUpdatePolicyBoundary, expected: MachineUpdateRetainedSetupPolicySnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPolicySnapshot) throws -> Void) throws -> RetainedSetupPolicyWriteReceipt {
+        try changeRetainedSetupPolicyIntent(recorded, mutation: .recorded(boundary), expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+    }
+    private func changeRetainedSetupPolicyIntent(_ next: MachineUpdateRetainedSetupPolicyIntentRecord,
+        mutation: RetainedSetupPolicyMutation, expected: MachineUpdateRetainedSetupPolicySnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPolicySnapshot) throws -> Void) throws -> RetainedSetupPolicyWriteReceipt {
+        guard let previous = expected.intent, !expected.activation.runtime.state.configurationPublished,
+              MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(expected.activation.runtime.setup.source.actual.schemaVersion) else {
+            throw PreparationStoreError.invalidTransition
+        }
+        try mutation.validate(next); try next.requireSnapshot(expected.activation, candidate: candidate)
+        try MachineUpdateRetainedSetupPolicyStorage.requireSchema(expected.activation.runtime.setup.source.actual.schemaVersion, candidate: candidate)
+        if previous != next { try next.requireTransition(from: previous) }
+        let encoded = try next.encoded
+        guard retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, stableServiceAccountAuthorization == nil,
+              stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
+              retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        var commitAttempted = false
+        do { return try admission.withMachineAdmission { loan in
+            let authorization = RetainedSetupPolicyAuthorization(writer: self, expected: expected, candidate: candidate,
+                directory: directory, admission: loan, change: .transition)
+            retainedSetupPolicyAuthorization = authorization; defer { retainedSetupPolicyAuthorization = nil }
+            let before = try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.beforeTransaction, actual); _ = try authorization.capture(in: self); return actual
+            }
+            if before.intent == next {
+                return RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: before, changed: false, writer: self)
+            }
+            try transaction(write: true, activationWrite: true, retainedSetupPolicy: authorization,
+                willCommit: { commitAttempted = true }) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.inTransaction, actual); _ = try authorization.capture(in: self)
+                try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes) {
+                    try statement("UPDATE retained_setup_policy_intents_v1 SET revision=?,record=? WHERE account=? AND id=? AND revision=?") { row in
+                        try bind(bytes(next.revision), column: 1, row: row); try bind(encoded, column: 2, row: row)
+                        try bind(previous.accountID, column: 3, row: row); try bind(bytes(previous.id), column: 4, row: row)
+                        try bind(bytes(previous.revision), column: 5, row: row)
+                        guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                    }
+                }
+                try authorization.adopt(next, in: self)
+                try verifyScoped(.afterMutation, authorization.capture(in: self)); _ = try authorization.capture(in: self)
+            }
+            do { return try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.afterCommit, actual); _ = try authorization.capture(in: self)
+                guard actual.intent == next else { throw PreparationStoreError.staleRevision }
+                return RetainedSetupPolicyWriteReceipt(previous: previous, current: next, snapshot: actual, changed: true, writer: self)
+            } } catch { unavailable = true; shutdown(); throw error }
+        } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
+    }
+
     private func retainedSetupPolicyProtectedDigest(excluding accountID: Data) throws -> Data {
         guard accountID.count == 16 else { throw PreparationStoreError.corruptRecord }
         let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' AND name<>'retained_setup_policy_intents_v1' ORDER BY name") { row in

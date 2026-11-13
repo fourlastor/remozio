@@ -3729,13 +3729,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true,
+    static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true, noPolicyChange: Bool = false,
         _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
         try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
-            policyWriterFormats: writerFormats, policyMigration: migration,
+            unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration,
             beforeActivation: { retained = try suite.prepareSecondForeground($0).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
