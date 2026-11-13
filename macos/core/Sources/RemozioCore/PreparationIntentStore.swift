@@ -4516,22 +4516,25 @@ public final class PreparationIntentStore {
     /// Reads policy metadata and activation facts in one transaction. It grants no journal write or publication authority.
     func retainedSetupPolicySnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupPolicySnapshot {
-        try transaction(write: false) {
-            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
-            let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
-            let activation = try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(
-                runtime: runtime, state: state, candidate: candidate)
-            let actual = runtime.setup.source.actual
-            let intent: MachineUpdateRetainedSetupPolicyIntentRecord?
-            if actual.schemaVersion >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
-                intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
-                    .first { $0.accountID == runtime.preparation.accountID }
-            } else { intent = nil }
-            let result = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation, intent: intent, candidate: candidate)
-            try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
-            try activation.requireState(loadRuntimeActivation(accountID: runtime.preparation.accountID))
-            return result
-        }
+        try transaction(write: false) { try loadRetainedSetupPolicySnapshot(owner: owner, candidate: candidate) }
+    }
+
+    private func loadRetainedSetupPolicySnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupPolicySnapshot {
+        let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+        let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
+        let activation = try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(
+            runtime: runtime, state: state, candidate: candidate)
+        let actual = runtime.setup.source.actual
+        let intent: MachineUpdateRetainedSetupPolicyIntentRecord?
+        if actual.schemaVersion >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
+            intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                .first { $0.accountID == runtime.preparation.accountID }
+        } else { intent = nil }
+        let result = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation, intent: intent, candidate: candidate)
+        try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+        try activation.requireState(loadRuntimeActivation(accountID: runtime.preparation.accountID))
+        return result
     }
 
     /// Reads retained activation and its exact startup receipt in one transaction. It grants no write authority.
