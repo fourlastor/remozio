@@ -55,28 +55,7 @@ struct SharedSetupImportCompatibilitySnapshot: Equatable, Sendable {
             let relayDirectory = try ProtectedSetupDirectory(anchor: anchor, relativePath: relativeMachineDirectory + "/SharedSetupImport",
                 owner: owner, createIfMissing: false)
             defer { relayDirectory.close() }
-            let intents = try journal.records()
-            try SharedSetupImportRelayStorage.validateTrackedFiles(records: intents, directory: relayDirectory)
-            let records = try intents.map { intent -> Record in
-                let plan = try SharedSetupImportRelayStorage.read(expected: intent, directory: relayDirectory, owner: owner)
-                let tunnel = try SharedSetupRelayProvisioningStorage.read(expected: intent, plan: plan, directory: relayDirectory, owner: owner)
-                let access = try SharedSetupAccessApplicationStorage.read(expected: intent, plan: plan, createdTunnel: tunnel, directory: relayDirectory, owner: owner)
-                return try .init(accountID: intent.scope.accountID, operationID: intent.operationID, revision: intent.revision,
-                    phase: intent.phase.rawValue, digest: Data(SHA256.hash(data: intent.bytes)),
-                    portableVersion: intent.originalPortableVersion, settingsVersion: intent.recipe.settingsVersion,
-                    relay: SharedSetupImportRelayStorage.snapshot(expected: intent, directory: relayDirectory, owner: owner),
-                    relayProvisioning: SharedSetupRelayProvisioningStorage.snapshot(expected: intent,
-                        plan: SharedSetupImportRelayStorage.read(expected: intent, directory: relayDirectory, owner: owner),
-                        directory: relayDirectory, owner: owner),
-                    accessApplication: SharedSetupAccessApplicationStorage.snapshot(expected: intent, plan: plan,
-                        createdTunnel: tunnel, directory: relayDirectory, owner: owner),
-                    dnsRecord: SharedSetupDNSStorage.snapshot(expected: intent, plan: plan, createdTunnel: tunnel,
-                        application: access, directory: relayDirectory, owner: owner),
-                    runCredential: SharedSetupRelayRunReferenceStorage.snapshot(expected: intent, plan: plan, created: tunnel,
-                        directory: relayDirectory, owner: owner))
-            }
-            return try .init(directories: lease.directoryIdentities(), database: lease.fileIdentity(name: "setup-import.sqlite"),
-                writer: lease.fileIdentity(name: "writer.lock"), records: records)
+            return try journal.compatibilitySnapshot(directory: relayDirectory)
         }
     }
 }
