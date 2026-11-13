@@ -68,7 +68,8 @@ enum MachineUpdateRetainedSetupPolicyNativeContext {
             throw MachineUpdateActivationError.wrongBoundary
         }
         func fresh() throws {
-            let machine = try PreparationIntentStore.open(directoryPath: machineDirectory, macID: initial.macID)
+            let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: machineDirectory),
+                macID: initial.macID, maximumRecords: 64, initialize: false, opening: .retainedPolicyVerification)
             defer { try? machine.close() }
             try machine.retainedSetupPolicySnapshot(owner: expected.activation.runtime.setup.owner, candidate: candidate).requireSame(as: expected)
             _ = try RuntimeStableCompatibilityCapture.capture(machine: machine,
