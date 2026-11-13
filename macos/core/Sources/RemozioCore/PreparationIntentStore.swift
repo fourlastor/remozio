@@ -24,6 +24,7 @@ public final class PreparationIntentStore {
     private var retainedSetupPromotionAuthorization: RetainedSetupPromotionAuthorization?
     private var stableAccountReservationAuthorization: StableAccountReservationAuthorization?
     private var stableAccountStorageAuthorization: StableAccountStorageAuthorization?
+    private var stableServiceAccountAuthorization: StableServiceAccountAuthorization?
     private static let applicationID: Int64 = 0x524D4953
 
     public static func open(directoryPath: String, macID: Data, maximumRecords: Int = 64,
@@ -3575,6 +3576,137 @@ public final class PreparationIntentStore {
         return try .init(setup: setup, state: loadServiceAccountPlan(accountID: preparation.accountID), reservedNumbers: loadReservedServiceAccountNumbers())
     }
 
+    private final class StableServiceAccountAuthorization {
+        private let processID = getpid()
+        private let thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private let original: MachineUpdateStableServiceAccountSnapshot
+        private var expected: MachineUpdateStableServiceAccountSnapshot
+        private let candidate: SignedReleaseEvidence
+        private let directory: ReleaseDestinationLease
+        private let admission: UpdateOrdinaryAdmissionLease.Scope
+        private var protectedDigest: Data?
+        init(writer: PreparationIntentStore, expected: MachineUpdateStableServiceAccountSnapshot,
+            candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope) {
+            self.writer = writer; self.original = expected; self.expected = expected; self.candidate = candidate
+            self.directory = directory; self.admission = admission
+        }
+        func capture(in owner: PreparationIntentStore) throws -> MachineUpdateStableServiceAccountSnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
+                  let writer, writer === owner, writer.active, writer.stableServiceAccountAuthorization === self,
+                  let db = writer.db, sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+            try writer.requireUpdateAdmissionDirectory(directory)
+            try admission.validateMachineBoundary(directory: directory, expected: original.setup.source.actual.admission.machine)
+            let actual = try writer.loadStableServiceAccountSnapshot(owner: original.setup.owner, candidate: candidate)
+            try actual.requireSame(as: expected)
+            let digest = try writer.stableServiceAccountProtectedDigest(excluding: original.preparation.accountID)
+            if let protectedDigest { guard digest == protectedDigest else { throw PreparationStoreError.staleRevision } }
+            else { protectedDigest = digest }
+            try admission.validate(); return actual
+        }
+        func adopt(plan: ServiceAccountPlan, complete: Bool, in owner: PreparationIntentStore) throws {
+            let actual = try owner.loadStableServiceAccountSnapshot(owner: original.setup.owner, candidate: candidate)
+            try actual.requireChange(plan: plan, complete: complete, from: original)
+            expected = actual; _ = try capture(in: owner)
+        }
+    }
+
+    /// Retains exact numeric and UUID claims before directory work. It creates no system account.
+    func retainStableServiceAccountPlan(_ plan: ServiceAccountPlan, expected: MachineUpdateStableServiceAccountSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableServiceAccountSnapshot) throws -> Void) throws -> ServiceAccountPlanStorage.State {
+        try changeStableServiceAccountPlan(plan, complete: false, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+    }
+    /// The native owner verifies every directory record around this metadata transition. This marker grants no runtime authority.
+    func completeStableServiceAccountPlan(_ plan: ServiceAccountPlan, expected: MachineUpdateStableServiceAccountSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableServiceAccountSnapshot) throws -> Void) throws -> ServiceAccountPlanStorage.State {
+        try changeStableServiceAccountPlan(plan, complete: true, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, verifyScoped: verifyScoped)
+    }
+    private func changeStableServiceAccountPlan(_ plan: ServiceAccountPlan, complete: Bool,
+        expected: MachineUpdateStableServiceAccountSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableServiceAccountSnapshot) throws -> Void) throws -> ServiceAccountPlanStorage.State {
+        guard expected.setup.account?.origin == .currentRelease else { throw ServiceAccountProvisioningError.changedScope }
+        try plan.validate(account: expected.preparation); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
+        guard stableServiceAccountAuthorization == nil, stableAccountStorageAuthorization == nil,
+              stableAccountReservationAuthorization == nil, retainedSetupPromotionAuthorization == nil else {
+            throw PreparationStoreError.transactionActive
+        }
+        var commitAttempted = false
+        do { return try admission.withMachineAdmission { loan in
+            let authorization = StableServiceAccountAuthorization(writer: self, expected: expected, candidate: candidate,
+                directory: directory, admission: loan)
+            stableServiceAccountAuthorization = authorization
+            defer { stableServiceAccountAuthorization = nil }
+            let before = try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.beforeTransaction, actual); _ = try authorization.capture(in: self); return actual
+            }
+            if let retained = before.state.plan {
+                guard retained == plan else { throw ServiceAccountProvisioningError.conflictingRecord }
+                if !complete || before.state.complete { return before.state }
+            } else {
+                guard !complete else { throw ServiceAccountProvisioningError.missingRecord }
+                guard Set(plan.claims.map(\.number)).isDisjoint(with: before.reservedNumbers) else { throw ServiceAccountProvisioningError.conflictingRecord }
+            }
+            guard before.setup.account?.inInventory == false else { throw ServiceAccountProvisioningError.changedScope }
+            try transaction(write: true, activationWrite: true, stableServiceAccount: authorization,
+                willCommit: { commitAttempted = true }) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.inTransaction, actual); _ = try authorization.capture(in: self)
+                if complete {
+                    try statement("UPDATE service_accounts_v1 SET complete=1 WHERE account=? AND record=? AND complete=0") { row in
+                        try bind(plan.accountID, column: 1, row: row); try bind(plan.encoded, column: 2, row: row)
+                        guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw ServiceAccountProvisioningError.conflictingRecord }
+                    }
+                } else {
+                    guard try scalar("SELECT COUNT(*) FROM service_accounts_v1") < 64 else { throw ServiceAccountProvisioningError.exhausted }
+                    try statement("INSERT INTO service_accounts_v1 VALUES(?,?,?,0,?)") { row in
+                        try bind(plan.accountID, column: 1, row: row)
+                        try bind(Int64(serviceAccountNumber(plan, role: .transport)), column: 2, row: row)
+                        try bind(Int64(serviceAccountNumber(plan, role: .gateway)), column: 3, row: row)
+                        try bind(plan.encoded, column: 4, row: row)
+                        guard try step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }
+                    }
+                }
+                try authorization.adopt(plan: plan, complete: complete, in: self)
+                try verifyScoped(.afterMutation, authorization.capture(in: self)); _ = try authorization.capture(in: self)
+            }
+            do {
+                return try transaction(write: false) {
+                    let actual = try authorization.capture(in: self)
+                    try verifyScoped(.afterCommit, actual); _ = try authorization.capture(in: self); return actual.state
+                }
+            } catch { unavailable = true; shutdown(); throw error }
+        } } catch {
+            if commitAttempted { unavailable = true; shutdown() }
+            throw error
+        }
+    }
+    private func stableServiceAccountProtectedDigest(excluding accountID: Data) throws -> Data {
+        guard accountID.count == 16 else { throw PreparationStoreError.corruptRecord }
+        let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name") { row in
+            var names: [String] = []
+            while try step(row) == SQLITE_ROW {
+                guard names.count < 128, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let name = sqlite3_column_text(row, 0) else { throw PreparationStoreError.corruptRecord }
+                names.append(String(cString: name))
+            }
+            return names
+        }
+        var hash = SHA256(); hash.update(data: Data("Remozio/StableServiceAccountProtectedRows/v1\0".utf8)); hash.update(data: accountID)
+        hash.update(data: try machineTableDigest("sqlite_schema", maximumCellBytes: RuntimeReleaseBackendPlan.maximumBytes))
+        for table in tables {
+            hash.update(data: try machineTableDigest(table, excludingAccount: table == "service_accounts_v1" ? accountID : nil,
+                maximumCellBytes: max(RuntimeReleaseBackendPlan.maximumBytes,
+                    max(MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes, MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes))))
+        }
+        return Data(hash.finalize())
+    }
+
     private enum StableAccountStorageMutation {
         case pin(Data)
         case beginInitialization(journalPath: String, continuityPath: String)
@@ -3765,7 +3897,7 @@ public final class PreparationIntentStore {
         try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         guard expected.preparation != nil else { throw AccountPreparationError.missing }
         guard stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
-              retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+              retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
         var commitAttempted = false
         do {
             return try admission.withMachineAdmission { loan in
@@ -3884,7 +4016,7 @@ public final class PreparationIntentStore {
         verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AccountPreparationIntent {
         try expected.requireOwner(owner); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         guard stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil,
-              retainedSetupPromotionAuthorization == nil else {
+              retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else {
             throw PreparationStoreError.transactionActive
         }
         var commitAttempted = false
@@ -4239,7 +4371,7 @@ public final class PreparationIntentStore {
         try intent.requireSource(expected.completion, current: boundary, candidate: candidate)
         _ = try intent.encoded
         try native.requireActive()
-        guard retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
         let claims = try retainedSetupCompatibilityOwners(expected: expected.completion.activation.runtime.setup.source, candidate: candidate)
         let owners = try claims.map { claim in
             let owner: LocalAccountIdentity
@@ -4254,7 +4386,7 @@ public final class PreparationIntentStore {
             return try admission.withMachineAdmission { scope in
                 let authorization = RetainedSetupPromotionAuthorization(writer: self, expected: expected, candidate: candidate,
                     directory: directory, admission: scope, owners: owners, retaining: retaining)
-                guard retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+                guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
                 retainedSetupPromotionAuthorization = authorization
                 defer { retainedSetupPromotionAuthorization = nil }
                 func verify(_ stage: CompletionIntentStorageStage, _ actual: MachineUpdateRetainedSetupPromotionSnapshot) throws {
@@ -5446,7 +5578,7 @@ public final class PreparationIntentStore {
 
     private func machineTableDigest(_ table: String, excludingOwnerUID: UInt32? = nil, excludingAccount: Data? = nil,
         maximumCellBytes: Int? = nil) throws -> Data {
-        guard excludingAccount == nil || table == "authority_initialization_v1" && excludingAccount?.count == 16
+        guard excludingAccount == nil || ["authority_initialization_v1", "service_accounts_v1"].contains(table) && excludingAccount?.count == 16
             && excludingOwnerUID == nil else { throw PreparationStoreError.corruptRecord }
         guard excludingOwnerUID == nil || table == "account_preparation_v1" && excludingOwnerUID! > 0
             && excludingOwnerUID! < UInt32.max else { throw PreparationStoreError.corruptRecord }
@@ -5769,7 +5901,8 @@ public final class PreparationIntentStore {
     private func transaction<T>(write: Bool, activationWrite: Bool = false,
         retainedSetupPromotion: RetainedSetupPromotionAuthorization? = nil,
         stableReservation: StableAccountReservationAuthorization? = nil,
-        stableAccountStorage: StableAccountStorageAuthorization? = nil, willCommit: () -> Void = {},
+        stableAccountStorage: StableAccountStorageAuthorization? = nil,
+        stableServiceAccount: StableServiceAccountAuthorization? = nil, willCommit: () -> Void = {},
         _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
@@ -5783,7 +5916,12 @@ public final class PreparationIntentStore {
         active = true; defer { active = false }
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if let stableAccountStorage {
+            if let stableServiceAccount {
+                guard stableAccountStorage == nil, stableReservation == nil, retainedSetupPromotion == nil, write, activationWrite,
+                      stableServiceAccountAuthorization === stableServiceAccount,
+                      (24...28).contains(try scalar("PRAGMA user_version")) else { throw PreparationStoreError.invalidTransition }
+                _ = try stableServiceAccount.capture(in: self)
+            } else if let stableAccountStorage {
                 guard stableReservation == nil, retainedSetupPromotion == nil, write, activationWrite,
                       stableAccountStorageAuthorization === stableAccountStorage,
                       (24...28).contains(try scalar("PRAGMA user_version")) else { throw PreparationStoreError.invalidTransition }
@@ -5810,12 +5948,14 @@ public final class PreparationIntentStore {
             if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
             if let stableReservation { _ = try stableReservation.capture(in: self) }
             if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }
+            if let stableServiceAccount { _ = try stableServiceAccount.capture(in: self) }
             try lease.validate()
             do {
                 if write { willCommit() }
                 if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
                 if let stableReservation { _ = try stableReservation.capture(in: self) }
                 if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }
+                if let stableServiceAccount { _ = try stableServiceAccount.capture(in: self) }
                 try exec("COMMIT")
                 if write { try didCommit?() }
             } catch { unavailable = true; throw error }
