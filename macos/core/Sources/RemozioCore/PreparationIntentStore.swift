@@ -4358,6 +4358,12 @@ public final class PreparationIntentStore {
         return try writeRetainedSetupPromotionIntent(intent, boundary: boundary, expected: expected, candidate: candidate,
             directory: directory, admission: admission, native: native, retaining: false, observation: observation, verifyScoped: verifyScoped)
     }
+    private func requireRetainedSetupPromotionWriterAvailable() throws {
+        guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
+              stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil else {
+            throw PreparationStoreError.transactionActive
+        }
+    }
     private func writeRetainedSetupPromotionIntent(_ intent: MachineUpdateRetainedSetupPromotionIntentRecord,
         boundary: AuthorityJournal.MachineUpdatePolicyBoundary, expected: MachineUpdateRetainedSetupPromotionSnapshot,
         candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
@@ -4371,7 +4377,7 @@ public final class PreparationIntentStore {
         try intent.requireSource(expected.completion, current: boundary, candidate: candidate)
         _ = try intent.encoded
         try native.requireActive()
-        guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        try requireRetainedSetupPromotionWriterAvailable()
         let claims = try retainedSetupCompatibilityOwners(expected: expected.completion.activation.runtime.setup.source, candidate: candidate)
         let owners = try claims.map { claim in
             let owner: LocalAccountIdentity
@@ -4386,7 +4392,7 @@ public final class PreparationIntentStore {
             return try admission.withMachineAdmission { scope in
                 let authorization = RetainedSetupPromotionAuthorization(writer: self, expected: expected, candidate: candidate,
                     directory: directory, admission: scope, owners: owners, retaining: retaining)
-                guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
+                try requireRetainedSetupPromotionWriterAvailable()
                 retainedSetupPromotionAuthorization = authorization
                 defer { retainedSetupPromotionAuthorization = nil }
                 func verify(_ stage: CompletionIntentStorageStage, _ actual: MachineUpdateRetainedSetupPromotionSnapshot) throws {
@@ -4530,6 +4536,7 @@ public final class PreparationIntentStore {
     /// If either error escapes, the transaction quarantines this store.
     func withOwnedRetainedSetupPromotionSQLFixture<Value>(_ body: (OwnedRetainedSetupPromotionSQLFixture) throws -> Value) throws -> Value {
         guard getuid() != 0 else { throw JournalLeaseError.unsafeMetadata }
+        try requireRetainedSetupPromotionWriterAvailable()
         try lease.validate()
         var output: Value?
         do {
