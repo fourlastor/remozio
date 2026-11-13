@@ -3736,7 +3736,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
                 return try .capture(owner: owner, machine: fixture.machine, journal: pair, candidate: fixture.candidate)
             }
             let source = try capture(), before = try fixture.machine.stableMachineUpdateSnapshot(candidate: fixture.candidate)
-            try body(.init(source: source, candidate: fixture.candidate, capture: capture, read: read, commit: { policy, revision in
+            try body(.init(source: source, candidate: fixture.candidate,
+                snapshot: { try fixture.machine.retainedSetupPolicySnapshot(owner: owner, candidate: fixture.candidate) },
+                capture: capture, read: read, commit: { policy, revision in
                 let storage = try fixture.policyStorage(readOnly: false, accountID: material.runtime.preparation.accountID)
                 defer { try? storage.close() }
                 let commits = CheckpointedJournal(journal: storage.journal, continuity: storage.continuity)

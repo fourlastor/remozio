@@ -6,6 +6,7 @@ import XCTest
 struct RetainedPolicyProposalFixture {
     let source: MachineUpdateRetainedSetupActivationSource
     let candidate: SignedReleaseEvidence
+    let snapshot: () throws -> MachineUpdateRetainedSetupPolicySnapshot
     let capture: () throws -> MachineUpdateRetainedSetupActivationSource
     let read: () throws -> AuthorityJournal.MachineUpdatePolicyBoundary
     let commit: (AuthorityCodePolicy, UUID) throws -> AuthorityJournal.MachineUpdatePolicyBoundary
