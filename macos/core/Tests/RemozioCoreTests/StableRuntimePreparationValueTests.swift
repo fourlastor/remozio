@@ -6,6 +6,13 @@ import XCTest
 
 /// Owned SQL models completed account and service metadata. It proves no native initialization, directory state, or runtime file publication.
 final class StableRuntimePreparationValueTests: XCTestCase {
+    static func withCurrentRuntimeFrame(_ body: (StableAccountReservationWriterFixture,
+        MachineUpdateStableRuntimePreparationSnapshot) throws -> Void) throws {
+        let suite = StableRuntimePreparationValueTests(selector: NSSelectorFromString(
+            "testExistingCurrentAndRetainedReadersStayReadOnlyAndRetainedTransitionsRefuse"))
+        try suite.fixture { f in try body(f, suite.snapshot(f)) }
+    }
+
     private typealias Fixture = StableAccountReservationWriterFixture
     private typealias Snapshot = MachineUpdateStableRuntimePreparationSnapshot
     private func hex(_ value: Data) -> String { value.map { String(format: "%02x", $0) }.joined() }

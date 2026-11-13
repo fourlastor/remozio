@@ -1779,7 +1779,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     private func prepareSecondForeground(_ files: BoundAdmissionRegistrationFixture, offset: UInt32 = 1000,
-        firstServiceUID: UInt32 = 20002, didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
+        firstServiceUID: UInt32 = 20002, retainMaterial: Bool = true, didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in })
         throws -> (account: AccountPreparationIntent, reference: RuntimeMaterialReference) {
         let store = files.machine.store
         let account = try reserveRestartAccount(files, offset: offset, complete: true)
@@ -1794,7 +1794,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         let material = try RuntimePreparationMaterial.create(services: services, notValidBefore: now.addingTimeInterval(-60),
             notValidAfter: now.addingTimeInterval(600), serviceActivity: activity, auditDeliveryVersion: 1)
         let reference = try material.reference
-        try store.retainRuntimeMaterial(reference)
+        if retainMaterial { try store.retainRuntimeMaterial(reference) }
         didPrepareMaterial(material)
         return (account, reference)
     }
@@ -3440,6 +3440,38 @@ final class MachineUpdateReplacementTests: XCTestCase {
             XCTAssertThrowsError(try snapshot.requireCurrent(machine: fixture.machine, candidate: fixture.candidate)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
+        }
+    }
+
+    static func withRetainedMaterialWriterFixture(hasReference: Bool = false,
+        _ body: (RetainedMaterialWriterFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testStableActivationSnapshotSeparatesUnpublishedMaterialFromPublishedFacts"))
+        var account: AccountPreparationIntent?, material: RuntimePreparationMaterial?
+        try suite.withFinishingFixture(stableFormats: true, retainedPolicySourceFormats: true, beforeActivation: { files in
+            account = try suite.prepareSecondForeground(files, retainMaterial: hasReference, didPrepareMaterial: { material = $0 }).account
+        }) { fixture, finishing, _ in
+            let selected = try XCTUnwrap(account), held = try XCTUnwrap(material)
+            let loan = try suite.stableFixtureLoan(fixture, finishing: finishing)
+            defer { loan.close() }
+            let plan = try fixture.machine.withCurrentMachineUpdateReadiness(candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { try MachineUpdateInstalledReadinessPlan(scope: $0, candidate: fixture.candidate) }
+            _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: fixture.candidate,
+                directory: fixture.directory, loan: loan) { _, _ in }
+            loan.close(); fixture.restart.close()
+            let anchor = fixture.files.f.f.root.path
+            let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid())
+            let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                owner: getuid(), expected: finishing.admission.machine)
+            let directory = try ReleaseDestinationLease(anchor: anchor, relativeDirectory: "machine", owner: getuid())
+            let admission = try UpdateOrdinaryAdmissionLease(activity: activity, admission: gate,
+                directory: directory, expected: finishing.admission.machine)
+            defer { admission.close(); directory.close() }
+            let owner = LocalAccountIdentity(uid: selected.ownerUID, primaryGroupID: getgid(), directoryID: selected.directoryID)
+            try body(.init(machine: { fixture.machine }, owner: owner, candidate: fixture.candidate,
+                directory: directory, admission: admission, material: held,
+                reopen: { hook in try fixture.files.reopen(hook: hook) },
+                scalar: { try fixture.files.f.f.sql($0) }))
         }
     }
 
