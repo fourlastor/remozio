@@ -127,6 +127,31 @@ enum RuntimePublicationController {
         return result
     }
 
+    /// The A11 caller supplies native custody. The selection scope stays active around each fixed file operation.
+    static func publishRetainedInitialNative(_ selection: MachineUpdateRetainedSetupInitialSelection,
+        scope: MachineUpdateRetainedSetupInitialPublication.Scope, material: RuntimePreparationMaterial,
+        verifyCurrent: () throws -> Void) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        func verify() throws {
+            try scope.read().requireSame(as: selection); try verifyCurrent()
+            try scope.read().requireSame(as: selection)
+        }
+        try verify(); try selection.configuration.binding.requireHistoricalRuntime(material.reference)
+        let bundle = selection.configuration.bundle
+        let artifacts = try RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: material)
+        guard artifacts.count == 8 else { throw RuntimePreparationError.incomplete }
+        for artifact in artifacts {
+            try verify(); let existing: Data?
+            do { existing = try RuntimePublishedArtifactValidation.nativeRead(artifact) }
+            catch JournalLeaseError.system(let code) where code == ENOENT { existing = nil }
+            if let existing, existing != artifact.bytes { throw AdministrativeSetupPublicationError.conflictingConfiguration }
+            try verify()
+        }
+        try publishNative(bundle: bundle, material: material, verifyCurrent: verify)
+        try RuntimePublishedArtifactValidation.validate(bundle: bundle, material: material, verifyCurrent: verify)
+        try verify()
+    }
+
     private static func publishNative(bundle: RuntimeConfigurationBundle, material: RuntimePreparationMaterial,
                                       verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }

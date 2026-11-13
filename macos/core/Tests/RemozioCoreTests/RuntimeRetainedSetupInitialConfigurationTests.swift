@@ -8,15 +8,46 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
     private typealias Configuration = RuntimeRetainedSetupInitialConfiguration
     private typealias Fixture = MachineUpdateReplacementTests
 
+
+    private func imports(_ snapshot: MachineUpdateRetainedSetupPolicySnapshot, _ presence: PresenceConfiguration?,
+        _ port: UInt16?) throws -> (SharedSetupImportIntent?, SharedSetupImportRelayPlan?) {
+        guard presence != nil || port != nil else { return (nil, nil) }
+        let runtime = snapshot.activation.runtime, account = runtime.preparation
+        let inventory = try runtime.setup.source.provisioningInventory(accountID: account.accountID,
+            ownerUID: account.ownerUID, releaseDigest: account.releaseDigest)
+        let cloud = try port.map { _ in try SetupCloudflareConfiguration(accountID: String(repeating: "a", count: 32),
+            zoneID: String(repeating: "b", count: 32), dnsSuffix: "owned.example", apiToken: "synthetic-only") }
+        let proposal = PortableSetup(defaults: try .init(presence: presence ?? .init(observationLifetimeMilliseconds: 5000,
+            unavailableGraceMilliseconds: 30000), gateway: GatewaySetupForm().settingsSelection()), cloudflare: cloud)
+        let intent = try SharedSetupImportIntent(scope: .init(account: account, inventory: inventory), proposal: proposal)
+        return (intent, try port.map { try SharedSetupImportRelayPlan(expected: intent, port: $0) })
+    }
+    private func configuration(snapshot: MachineUpdateRetainedSetupPolicySnapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary,
+        candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
+        presencePolicyOverride: PresenceConfiguration? = nil, relayPortOverride: UInt16? = nil) throws -> Configuration {
+        let (intent, relay) = try imports(snapshot, presencePolicyOverride, relayPortOverride)
+        return try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            currentCodePolicy: currentCodePolicy, importIntent: intent, relayPlan: relay)
+    }
+    private func requireSource(_ value: Configuration, snapshot: MachineUpdateRetainedSetupPolicySnapshot,
+        current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
+        currentCodePolicy: AuthorityCodePolicy, presencePolicyOverride: PresenceConfiguration? = nil,
+        relayPortOverride: UInt16? = nil) throws {
+        let (intent, relay) = try imports(snapshot, presencePolicyOverride, relayPortOverride)
+        try value.requireSourceForPublication(snapshot: snapshot, current: current, candidate: candidate,
+            currentCodePolicy: currentCodePolicy, importIntent: intent, relayPlan: relay)
+    }
+
     func testInitialConfigurationKeepsTheExactBindingHostsClientsAndRequestedTunables() throws {
         try Fixture.withRetainedInitialConfigurationValueFixture { snapshot, current, candidate, _, verify in
             let presence = try PresenceConfiguration(idleMilliseconds: 123000,
                 observationLifetimeMilliseconds: 9000, unavailableGraceMilliseconds: 41000)
-            let actual = try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            let actual = try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, presencePolicyOverride: presence, relayPortOverride: 45678)
+            let selectedImports = try imports(snapshot, presence, 45678)
             let bundle = try RuntimeConfigurationBundle.retainedSetupInitial(snapshot: snapshot, current: current,
                 candidate: candidate, currentCodePolicy: current.policy.policy,
-                presencePolicyOverride: presence, relayPortOverride: 45678)
+                importIntent: selectedImports.0, relayPlan: selectedImports.1)
             let binding = try RuntimeRetainedSetupReleaseBinding(snapshot: snapshot, current: current, candidate: candidate)
             XCTAssertEqual(actual.binding, binding)
             XCTAssertEqual(actual.host.command.canonicalBytes, bundle.command.canonicalBytes)
@@ -45,7 +76,7 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
             }
             XCTAssertThrowsError(try GatewaySettingsConsumerHostConfiguration.decode(transport.encoded))
             XCTAssertThrowsError(try TransportPairingStartupConfiguration.decode(actual.bundle.transport.canonicalBytes))
-            try actual.requireSourceForPublication(snapshot: snapshot, current: current, candidate: candidate,
+            try requireSource(actual, snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, presencePolicyOverride: presence, relayPortOverride: 45678)
             XCTAssertEqual(try actual.digest.count, 32)
             try verify()
@@ -54,32 +85,32 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
 
     func testSourceFenceKeepsPolicyRevisionPresenceRelayAndCanonicalBytesExact() throws {
         try Fixture.withRetainedInitialConfigurationValueFixture { snapshot, current, candidate, oldPolicy, verify in
-            let actual = try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            let actual = try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, relayPortOverride: 45678)
-            let same = try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            let same = try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, relayPortOverride: 45678)
             XCTAssertEqual(try actual.digest, try same.digest)
-            try actual.requireSourceForPublication(snapshot: snapshot, current: current, candidate: candidate,
+            try requireSource(actual, snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, relayPortOverride: 45678)
             let presence = try PresenceConfiguration(idleMilliseconds: 321000,
                 observationLifetimeMilliseconds: 8000, unavailableGraceMilliseconds: 42000)
-            let changed = try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            let changed = try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, presencePolicyOverride: presence, relayPortOverride: 45678)
             XCTAssertNotEqual(try actual.digest, try changed.digest)
-            XCTAssertThrowsError(try actual.requireSourceForPublication(snapshot: snapshot, current: current, candidate: candidate,
+            XCTAssertThrowsError(try requireSource(actual, snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, presencePolicyOverride: presence, relayPortOverride: 45678)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
             }
-            XCTAssertThrowsError(try actual.requireSourceForPublication(snapshot: snapshot, current: current, candidate: candidate,
+            XCTAssertThrowsError(try requireSource(actual, snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy, relayPortOverride: 45679)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .changedScope)
             }
-            XCTAssertThrowsError(try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            XCTAssertThrowsError(try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: oldPolicy)) { XCTAssertEqual($0 as? RuntimeActivationError, .changedScope) }
             let otherRevision = AuthorityJournal.MachineUpdatePolicyBoundary(macID: current.macID, accountID: current.accountID,
                 policy: .init(revision: UUID(), policy: current.policy.policy, roleRevisions: current.policy.roleRevisions),
                 checkpoint: current.checkpoint)
-            XCTAssertThrowsError(try actual.requireSourceForPublication(snapshot: snapshot, current: otherRevision,
+            XCTAssertThrowsError(try requireSource(actual, snapshot: snapshot, current: otherRevision,
                 candidate: candidate, currentCodePolicy: current.policy.policy, relayPortOverride: 45678)) {
                 XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
             }
@@ -90,7 +121,7 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
     func testUnrecordedPolicyCannotProduceAnInitialConfiguration() throws {
         try Fixture.withRetainedInitialConfigurationValueFixture(recorded: false) { snapshot, current, candidate, _, verify in
             XCTAssertEqual(snapshot.intent?.phase, .prepared)
-            XCTAssertThrowsError(try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            XCTAssertThrowsError(try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy)) {
                 XCTAssertEqual($0 as? RuntimeActivationError, .incomplete)
             }
@@ -100,7 +131,7 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
 
     func testAlreadyPublishedRuntimeCannotBeRebuiltAsAnInitialConfiguration() throws {
         try Fixture.withRetainedInitialConfigurationValueFixture { snapshot, current, candidate, _, verify in
-            XCTAssertNoThrow(try Configuration(snapshot: snapshot, current: current, candidate: candidate,
+            XCTAssertNoThrow(try configuration(snapshot: snapshot, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy))
             let before = snapshot.activation.runtime
             let runtime = try MachineUpdateStableRuntimePreparationSnapshot(setup: before.setup,
@@ -109,7 +140,7 @@ final class RuntimeRetainedSetupInitialConfigurationTests: XCTestCase {
             let activation = try MachineUpdateStableRuntimeActivationSnapshot(runtime: runtime,
                 state: snapshot.activation.state, candidate: candidate)
             let published = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation, intent: snapshot.intent, candidate: candidate)
-            XCTAssertThrowsError(try Configuration(snapshot: published, current: current, candidate: candidate,
+            XCTAssertThrowsError(try configuration(snapshot: published, current: current, candidate: candidate,
                 currentCodePolicy: current.policy.policy)) {
                 XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
             }
