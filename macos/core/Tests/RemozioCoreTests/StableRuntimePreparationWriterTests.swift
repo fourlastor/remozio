@@ -71,6 +71,18 @@ final class StableRuntimePreparationWriterTests: XCTestCase {
         try f.scalar("SELECT COUNT(*) FROM runtime_preparation_v1")
     }
 
+    /// Supplies an owned current-release runtime. The callback grants no installed caller or native file custody.
+    static func withCurrentReleasePublicationRefusalFixture(_ body: (StableAccountReservationWriterFixture,
+        MachineUpdateStableRuntimePreparationSnapshot, RuntimeMaterialReference) throws -> Void) throws {
+        let suite = StableRuntimePreparationWriterTests(selector: NSSelectorFromString(
+            "testPublicationWithoutRetentionRefusesAndExactRecoveryMakesNoCommit"))
+        try suite.fixture { f in
+            let before = try suite.snapshot(f), reference = try suite.reference(before.plan)
+            try body(f, before, reference)
+            try suite.snapshot(f).requireSame(as: before)
+        }
+    }
+
     func testBothSQLTransitionsUseExactFramesAndExcludeOtherGatesInBothDirections() throws {
         try fixture { f in
             let before = try snapshot(f), selected = try reference(before.plan), count = try bytes(f)
