@@ -327,7 +327,7 @@ final class RetainedSetupInitialObservationTests: XCTestCase {
             XCTAssertThrowsError(try observe(f, published, files) { _ = try $0.read(published) }) {
                 XCTAssertEqual($0 as? AdministrativeSetupPublicationError, .conflictingConfiguration)
             }
-            XCTAssertEqual(try files.read(command), try defaults.bundle.command.canonicalBytes)
+            XCTAssertEqual(try files.read(command), defaults.bundle.command.canonicalBytes)
             try snapshot(f).requireSame(as: published)
         }
     }
