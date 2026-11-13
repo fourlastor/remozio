@@ -29,6 +29,7 @@ public final class PreparationIntentStore {
     private var stableServiceAccountAuthorization: StableServiceAccountAuthorization?
     private var retainedSetupPolicyAuthorization: RetainedSetupPolicyAuthorization?
     private var retainedMaterialAuthorization: RetainedMaterialAuthorization?
+    private var retainedPublicationAuthorization: RetainedPublicationAuthorization?
     private var stableRuntimePreparationAuthorization: StableRuntimePreparationAuthorization?
     private static let applicationID: Int64 = 0x524D4953
 
@@ -3727,7 +3728,7 @@ public final class PreparationIntentStore {
         guard expected.setup.account?.origin == .currentRelease else { throw ServiceAccountProvisioningError.changedScope }
         try plan.validate(account: expected.preparation); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         guard stableServiceAccountAuthorization == nil, stableAccountStorageAuthorization == nil,
-              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               stableAccountReservationAuthorization == nil, retainedSetupPromotionAuthorization == nil else {
             throw PreparationStoreError.transactionActive
         }
@@ -3852,7 +3853,7 @@ public final class PreparationIntentStore {
         try intent.requireSnapshot(expected.activation, candidate: candidate)
         try MachineUpdateRetainedSetupPolicyStorage.requireSchema(expected.activation.runtime.setup.source.actual.schemaVersion, candidate: candidate)
         let encoded = try intent.encoded
-        guard retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil,
+        guard retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil,
               stableRuntimePreparationAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
               retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
@@ -3992,7 +3993,7 @@ public final class PreparationIntentStore {
         try MachineUpdateRetainedSetupPolicyStorage.requireSchema(expected.activation.runtime.setup.source.actual.schemaVersion, candidate: candidate)
         if previous != next { try next.requireTransition(from: previous) }
         let encoded = try next.encoded
-        guard retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil,
+        guard retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil,
               stableRuntimePreparationAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
               retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
@@ -4061,6 +4062,99 @@ public final class PreparationIntentStore {
         return Data(hash.finalize())
     }
 
+    private final class RetainedPublicationAuthorization {
+        private let processID = getpid(), thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private let original: MachineUpdateRetainedSetupPolicySnapshot
+        private var expected: MachineUpdateRetainedSetupPolicySnapshot
+        private let candidate: SignedReleaseEvidence
+        private let reference: RuntimeMaterialReference
+        private let directory: ReleaseDestinationLease
+        private let admission: UpdateOrdinaryAdmissionLease.Scope
+        private var protectedDigest: Data?
+        init(writer: PreparationIntentStore, expected: MachineUpdateRetainedSetupPolicySnapshot,
+            reference: RuntimeMaterialReference, candidate: SignedReleaseEvidence,
+            directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease.Scope) {
+            self.writer = writer; original = expected; self.expected = expected; self.reference = reference
+            self.candidate = candidate; self.directory = directory; self.admission = admission
+        }
+        func capture(in owner: PreparationIntentStore) throws -> MachineUpdateRetainedSetupPolicySnapshot {
+            guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0,
+                  let writer, writer === owner, writer.active, writer.retainedPublicationAuthorization === self,
+                  let db = writer.db, sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+            try writer.requireUpdateAdmissionDirectory(directory); try writer.identity(writer.macID)
+            try admission.validateMachineBoundary(directory: directory, expected: original.activation.runtime.setup.source.actual.admission.machine)
+            let actual = try writer.loadRetainedSetupPolicySnapshot(owner: original.activation.runtime.setup.owner, candidate: candidate)
+            try actual.requireSame(as: expected)
+            let maximum = max(RuntimeReleaseBackendPlan.maximumBytes, MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes)
+            let digest = try writer.withRetainedSetupRecordLimit(maximumBytes: maximum) {
+                var hash = SHA256()
+                hash.update(data: try writer.stableRuntimePreparationProtectedDigest(excluding: reference.services.accountID))
+                let sharedImport = try writer.sharedImportCompatibilitySnapshot(installationID: original.activation.runtime.setup.source.actual.inventory.installationID)
+                hash.update(data: try RuntimeReleaseCompatibilitySnapshot.externalSourceDigest(sharedImport: sharedImport))
+                return Data(hash.finalize())
+            }
+            if let protectedDigest { guard digest == protectedDigest else { throw PreparationStoreError.staleRevision } }
+            else { protectedDigest = digest }
+            try admission.validate(); return actual
+        }
+        func adopt(in owner: PreparationIntentStore) throws {
+            let actual = try owner.loadRetainedSetupPolicySnapshot(owner: original.activation.runtime.setup.owner, candidate: candidate)
+            try actual.requirePublication(from: original, reference: reference)
+            expected = actual; _ = try capture(in: owner)
+        }
+    }
+    /// The publication owner verifies files and the paired journal around each actual frame. This grants no runtime admission.
+    func completeRetainedSetupRuntimePublication(_ reference: RuntimeMaterialReference,
+        expected: MachineUpdateStableRuntimePreparationSnapshot, policy: MachineUpdateRetainedSetupPolicyIntentRecord,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        fileCustodyAccepted: Bool,
+        verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupPolicySnapshot) throws -> Void) throws
+        -> MachineUpdateRetainedSetupPolicySnapshot {
+        guard expected.setup.account?.origin == .retained else { throw RuntimePreparationError.changedScope }
+        guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
+        guard policy.phase == .recorded,
+              MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(expected.setup.source.actual.schemaVersion) else {
+            throw PreparationStoreError.invalidTransition
+        }
+        try reference.validate(account: expected.preparation, services: expected.plan)
+        guard expected.state.reference == reference else { throw RuntimePreparationError.conflictingMaterial }
+        try MachineUpdateRetainedSetupPolicyStorage.requireSchema(expected.setup.source.actual.schemaVersion, candidate: candidate)
+        let activation = try MachineUpdateStableRuntimeActivationSnapshot.retainedSetupPolicyMaterial(runtime: expected,
+            state: .init(plan: nil, jobsRegistered: false), candidate: candidate)
+        let snapshot = try MachineUpdateRetainedSetupPolicySnapshot(activation: activation, intent: policy, candidate: candidate)
+        guard retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil, retainedMaterialAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, stableServiceAccountAuthorization == nil,
+              stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
+              retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        var commitAttempted = false
+        do { return try admission.withMachineAdmission { loan in
+            let authorization = RetainedPublicationAuthorization(writer: self, expected: snapshot, reference: reference,
+                candidate: candidate, directory: directory, admission: loan)
+            retainedPublicationAuthorization = authorization; defer { retainedPublicationAuthorization = nil }
+            let before = try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.beforeTransaction, actual); _ = try authorization.capture(in: self); return actual
+            }
+            if before.activation.runtime.state.configurationPublished { return before }
+            try transaction(write: true, activationWrite: true, retainedPublication: authorization,
+                willCommit: { commitAttempted = true }) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.inTransaction, actual); _ = try authorization.capture(in: self)
+                try statement("UPDATE runtime_preparation_v1 SET complete=1 WHERE account=? AND record=? AND complete=0") { row in
+                    try bind(reference.services.accountID, column: 1, row: row); try bind(reference.encoded, column: 2, row: row)
+                    guard try step(row) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw RuntimePreparationError.conflictingMaterial }
+                }
+                try authorization.adopt(in: self)
+                try verifyScoped(.afterMutation, authorization.capture(in: self)); _ = try authorization.capture(in: self)
+            }
+            do { return try transaction(write: false) {
+                let actual = try authorization.capture(in: self)
+                try verifyScoped(.afterCommit, actual); _ = try authorization.capture(in: self); return actual
+            } } catch { unavailable = true; shutdown(); throw error }
+        } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
+    }
+
     private final class RetainedMaterialAuthorization {
         private let processID = getpid(), thread = pthread_self()
         private weak var writer: PreparationIntentStore?
@@ -4102,7 +4196,7 @@ public final class PreparationIntentStore {
         verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupMaterialSnapshot) throws -> Void) throws -> RuntimePreparationState {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
         try expected.requireReference(reference); try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
-        guard retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil, stableRuntimePreparationAuthorization == nil,
+        guard retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil, stableRuntimePreparationAuthorization == nil,
               stableServiceAccountAuthorization == nil, stableAccountStorageAuthorization == nil,
               stableAccountReservationAuthorization == nil, retainedSetupPromotionAuthorization == nil else {
             throw PreparationStoreError.transactionActive
@@ -4218,7 +4312,7 @@ public final class PreparationIntentStore {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
         try reference.validate(account: expected.preparation, services: expected.plan)
         try MachineUpdateStableReleaseRecord.requireFormats(candidate)
-        guard stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil, stableServiceAccountAuthorization == nil,
+        guard stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
               retainedSetupPromotionAuthorization == nil else { throw PreparationStoreError.transactionActive }
         var commitAttempted = false
@@ -4516,7 +4610,7 @@ public final class PreparationIntentStore {
         try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         guard expected.preparation != nil else { throw AccountPreparationError.missing }
         guard stableAccountStorageAuthorization == nil, stableAccountReservationAuthorization == nil,
-              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else { throw PreparationStoreError.transactionActive }
         var commitAttempted = false
         do {
@@ -4636,7 +4730,7 @@ public final class PreparationIntentStore {
         verifyScoped: (CompletionIntentStorageStage, MachineUpdateStableAccountSetupSnapshot) throws -> Void) throws -> AccountPreparationIntent {
         try expected.requireOwner(owner); try MachineUpdateStableReleaseRecord.requireFormats(candidate)
         guard stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil,
-              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil else {
             throw PreparationStoreError.transactionActive
         }
@@ -4984,7 +5078,7 @@ public final class PreparationIntentStore {
     }
     func requireRetainedSetupPromotionWriterAvailable() throws {
         guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
-              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedSetupPolicyAuthorization == nil,
+              stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil else {
             throw PreparationStoreError.transactionActive
         }
@@ -6542,6 +6636,7 @@ public final class PreparationIntentStore {
         stableAccountStorage: StableAccountStorageAuthorization? = nil,
         retainedSetupPolicy: RetainedSetupPolicyAuthorization? = nil,
         retainedMaterial: RetainedMaterialAuthorization? = nil,
+        retainedPublication: RetainedPublicationAuthorization? = nil,
         stableRuntimePreparation: StableRuntimePreparationAuthorization? = nil,
         stableServiceAccount: StableServiceAccountAuthorization? = nil, willCommit: () -> Void = {},
         _ body: () throws -> T) throws -> T {
@@ -6549,6 +6644,9 @@ public final class PreparationIntentStore {
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
         guard !write || opening == .mutable else { throw PreparationStoreError.invalidTransition }
+        guard !write || retainedPublicationAuthorization == nil || retainedPublicationAuthorization === retainedPublication else {
+            throw PreparationStoreError.transactionActive
+        }
         do { try lease.validate() } catch { unavailable = true; shutdown(); throw error }
         do { try exec(write ? "BEGIN IMMEDIATE" : "BEGIN") }
         catch {
@@ -6558,7 +6656,16 @@ public final class PreparationIntentStore {
         active = true; defer { active = false }
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if let retainedSetupPolicy {
+            if let retainedPublication {
+                guard retainedSetupPolicy == nil, retainedMaterial == nil, stableRuntimePreparation == nil,
+                      stableServiceAccount == nil, stableAccountStorage == nil, stableReservation == nil,
+                      retainedSetupPromotion == nil, write, activationWrite,
+                      retainedPublicationAuthorization === retainedPublication,
+                      MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(try scalar("PRAGMA user_version")) else {
+                    throw PreparationStoreError.invalidTransition
+                }
+                _ = try retainedPublication.capture(in: self)
+            } else if let retainedSetupPolicy {
                 guard retainedMaterial == nil, stableRuntimePreparation == nil, stableServiceAccount == nil,
                       stableAccountStorage == nil, stableReservation == nil, retainedSetupPromotion == nil,
                       write, activationWrite, retainedSetupPolicyAuthorization === retainedSetupPolicy,
@@ -6611,6 +6718,7 @@ public final class PreparationIntentStore {
             if let stableReservation { _ = try stableReservation.capture(in: self) }
             if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }
             if let stableServiceAccount { _ = try stableServiceAccount.capture(in: self) }
+            if let retainedPublication { _ = try retainedPublication.capture(in: self) }
             if let retainedSetupPolicy { _ = try retainedSetupPolicy.capture(in: self) }; if let retainedMaterial { _ = try retainedMaterial.capture(in: self) }; if let stableRuntimePreparation { _ = try stableRuntimePreparation.capture(in: self) }
             try lease.validate()
             do {
@@ -6619,6 +6727,7 @@ public final class PreparationIntentStore {
                 if let stableReservation { _ = try stableReservation.capture(in: self) }
                 if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }
                 if let stableServiceAccount { _ = try stableServiceAccount.capture(in: self) }
+                if let retainedPublication { _ = try retainedPublication.capture(in: self) }
                 if let retainedSetupPolicy { _ = try retainedSetupPolicy.capture(in: self) }; if let retainedMaterial { _ = try retainedMaterial.capture(in: self) }; if let stableRuntimePreparation { _ = try stableRuntimePreparation.capture(in: self) }
                 try exec("COMMIT")
                 if write { try didCommit?() }
