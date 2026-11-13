@@ -303,7 +303,7 @@ final class StableRuntimeImportTests: XCTestCase {
             XCTAssertThrowsError(try XCTUnwrap(escaped)()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             let acknowledged = try XCTUnwrap(store.current(scope: intent.scope))
             let current = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
-            _ = try prepareImport(f, expected: current, publish: { _, _, verify in try verify(); return current.state },
+            _ = try prepareImport(f, expected: current, journal: store, publish: { _, _, verify in try verify(); return current.state },
                 validate: { _, _, state, verify in XCTAssertEqual(state, current.state); try verify() })
             XCTAssertEqual(commits, 1)
             XCTAssertEqual(try store.current(scope: intent.scope), acknowledged)
@@ -362,13 +362,13 @@ final class StableRuntimeImportTests: XCTestCase {
             try importFixture { f, intent, store in
                 let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
                 var escaped: (() throws -> Void)?, validations = 0
-                XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+                XCTAssertThrowsError(try prepareImport(f, expected: expected, journal: store, publish: { _, _, verify in
                     escaped = verify; try verify()
                     if failDuringPublish { throw Fault.body }
                     return expected.state
                 }, validate: { _, _, _, verify in
                     validations += 1; escaped = verify; try verify(); throw Fault.body
-                })) { XCTAssertTrue($0 is Fault) }
+                })) { XCTAssertTrue($0 is Fault, "\($0)") }
                 XCTAssertEqual(validations, failDuringPublish ? 0 : 1)
                 XCTAssertEqual(try store.current(scope: intent.scope), intent)
                 XCTAssertThrowsError(try XCTUnwrap(escaped)()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
@@ -382,7 +382,7 @@ final class StableRuntimeImportTests: XCTestCase {
             let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
             armed = true
             var validations = 0
-            XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+            XCTAssertThrowsError(try prepareImport(f, expected: expected, journal: store, publish: { _, _, verify in
                 try verify(); _ = try store.advance(intent, to: .runtimePublished); return expected.state
             }, validate: { _, _, _, _ in validations += 1 })) {
                 XCTAssertEqual($0 as? SharedSetupImportError, .wrongScope)
@@ -396,7 +396,7 @@ final class StableRuntimeImportTests: XCTestCase {
         try importFixture { f, intent, store in
             let expected = try f.machine().withSharedImportSnapshot(journal: store) { _, _ in try snapshot(f) }
             var validations = 0
-            XCTAssertThrowsError(try prepareImport(f, expected: expected, publish: { _, _, verify in
+            XCTAssertThrowsError(try prepareImport(f, expected: expected, journal: store, publish: { _, _, verify in
                 try verify(); return .init(reference: nil, configurationPublished: false)
             }, validate: { _, _, _, _ in validations += 1 })) {
                 XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
