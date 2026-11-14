@@ -74,31 +74,6 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             }
         }
     }
-    private func snapshot(_ f: Fixture) throws -> Snapshot {
-        try f.machine().retainedSetupPolicySnapshot(owner: f.source.runtime.setup.owner, candidate: f.candidate)
-    }
-    private func pair(_ f: Fixture) throws -> Boundary {
-        let journal = try f.openPolicyJournal(.readOnly); defer { try? journal.close() }
-        return try journal.captureRetainedSetupPolicyBoundary(expected: XCTUnwrap(f.source.runtime.setup.account?.initialization))
-    }
-    private func fixture(_ body: (Fixture, Snapshot, Boundary) throws -> Void) throws {
-        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture { f in
-            let before = try snapshot(f)
-            let recorded = try MachineUpdateRetainedSetupPolicyOwner.resume(expected: before, candidate: f.candidate,
-                directory: f.directory, admission: f.admission, useMachine: { body in
-                    try f.reopen(nil); let machine = f.machine(); defer { try? machine.close() }; return try body(machine)
-                }, openJournal: { try f.openPolicyJournal($0 == .readOnly ? .readOnly : .startup) }, verifySnapshot: { _ in })
-            try f.reopen(nil); defer { try? f.machine().close() }; try body(f, recorded, pair(f))
-        }
-    }
-    private func files(_ f: Fixture, _ before: Snapshot, _ current: Boundary, seed: Bool = true) throws -> Files {
-        let configuration = try RuntimeRetainedSetupInitialConfiguration(snapshot: before, current: current,
-            candidate: f.candidate, currentCodePolicy: current.policy.policy, importIntent: nil, relayPlan: nil)
-        return try Files(RuntimePublishedArtifactValidation.artifacts(bundle: configuration.bundle, material: f.material),
-            owner: before.activation.runtime.preparation.ownerUID, seed: seed)
-    }
-
-
     private final class State {
         let owner: LocalAccountIdentity, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease
         let admission: UpdateOrdinaryAdmissionLease, material: RuntimePreparationMaterial
