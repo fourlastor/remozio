@@ -50,7 +50,7 @@ enum MachineUpdateRetainedSetupRuntimeSequence {
                     relay: (SharedSetupImportIntent) throws -> Inputs.RelaySelection) throws -> Frame {
                     let actual = try machine.retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate)
                     let inputs = try Inputs.capture(expected: actual.runtime, journal: journal,
-                        verifyCurrent: machine.validateStorageLease, readRelay: relay)
+                        verifyCurrent: { try machine.validateStorageLease() }, readRelay: relay)
                     try admission.validateMachineBoundary(directory: directory,
                         expected: actual.runtime.setup.source.actual.admission.machine)
                     try verifyCurrent(actual); try lifetime(); return (actual, inputs)
