@@ -36,7 +36,7 @@ private final class MachineReplacementFixture {
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
          stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
          enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
-         policyWriterFormats: Bool = false, policyMigration: Bool = true,
+         policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
         self.installedReadiness = installedReadiness
         self.readinessAlreadyEnabled = readinessAlreadyEnabled
@@ -82,6 +82,12 @@ private final class MachineReplacementFixture {
             }
             if installedReadiness { requiredFormats += try MachineUpdateAuthorityReadinessJobTransition.formatRequirements }
             if stableFormats { requiredFormats += try MachineUpdateStableReleaseRecord.requirements }
+            if sharedImportFormats {
+                requiredFormats.append(try .init(role: .setupController, name: SharedSetupImportJournal.formatName,
+                    readVersions: SharedSetupImportJournal.supportedVersions, writeVersions: SharedSetupImportJournal.supportedVersions))
+                requiredFormats.append(try .init(role: .setupController, name: PortableSetup.formatName,
+                    readVersions: PortableSetup.supportedVersions, writeVersions: PortableSetup.supportedVersions))
+            }
             if policyReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.readerRequirements }
             if policyWriterFormats { requiredFormats += try MachineUpdateRetainedSetupPolicyStorage.requirements }
             if retainedPolicySourceFormats {
@@ -1824,7 +1830,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
         enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
-        policyWriterFormats: Bool = false, policyMigration: Bool = true, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture) throws -> Void) throws {
         var gateway: GatewayJournalSetupExchangeTests.Fixture?
@@ -1833,7 +1839,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
             enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
-            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, beforeActivation: { files in
+            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, sharedImportFormats: sharedImportFormats, beforeActivation: { files in
             if registerSecondForeground {
                 additionalForeground = [try self.registerSecondForeground(files, didPrepareMaterial: didPrepareSecondMaterial)]
             }
@@ -2454,7 +2460,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
         policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false, unchangedCodeGenerations: Bool = false,
-        policyWriterFormats: Bool = false, policyMigration: Bool = true,
+        policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, MachineUpdateFinalizationSnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
@@ -2463,7 +2469,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
             stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
             enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
-            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration,
+            policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, sharedImportFormats: sharedImportFormats,
             didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
             let machine = fixture.machine, snapshot = fixture.snapshot, candidate = fixture.candidate
             let directory = fixture.directory, restart = fixture.restart
@@ -3730,13 +3736,14 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true, noPolicyChange: Bool = false,
+        sharedImportFormats: Bool = false,
         _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
         var runtimeMaterial: RuntimePreparationMaterial?
         try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
-            unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration,
+            unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration, sharedImportFormats: sharedImportFormats,
             beforeActivation: { retained = try suite.prepareSecondForeground($0, didPrepareMaterial: { runtimeMaterial = $0 }).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let owner = LocalAccountIdentity(uid: account.ownerUID, primaryGroupID: getgid(), directoryID: account.directoryID)
