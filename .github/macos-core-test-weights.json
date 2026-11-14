@@ -1,5 +1,5 @@
 {
- "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class",
+ "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests and its methods: local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh",
  "weights": {
   "AcceptedInputMemoTests": 0.0,
   "AccountPreparationTests": 1.69,
@@ -358,6 +358,7 @@
   "RetainedSetupConsumerHostArchiveTests": 0.69,
   "RetainedSetupHealthGuardTests": 0.41,
   "RetainedSetupHealthTranscriptTests": 0.81,
+  "RetainedSetupInitialRuntimeTests": 315.61,
   "RetainedSetupPromotionArchiveTests": 1.2,
   "RetainedSetupPromotionGateExclusionTests": 15.71,
   "RetainedSetupPromotionTransitionTests": 1.55,
@@ -760,6 +761,14 @@
    "testRuntimeClientsAndMaterialRejectChangesAfterAValidRead": 101.45,
    "testUnrecordedCompletionIsRejectedBeforeReadingThePair": 13.67,
    "testWritingPairCannotChangeItsValidClassificationDuringTheScope": 14.68
+  },
+  "RetainedSetupInitialRuntimeTests": {
+   "testExactPublicationAlsoRejectsMissingCustodyAndInvalidScopes": 53.11,
+   "testLostCompletionCommitAcknowledgementRequiresReadOnlyRecoveryWithoutPublication": 52.26,
+   "testPartialPublicationFailureThenFreshPartialCompletion": 54.96,
+   "testPublishedRecoveryAndAllMissingOrConflictingFilesDoNotWrite": 49.66,
+   "testRealPublicationClosesSelectionBeforeCompletionAndAssertsTheReadBudget": 50.7,
+   "testStaleProviderResultCannotMasqueradeAsTheActualCompletedFrame": 54.92
   }
  }
 }
