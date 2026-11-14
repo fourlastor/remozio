@@ -102,6 +102,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
     fileprivate static func withOwnedContext<Value>(expected: Frame, candidate: SignedReleaseEvidence, controls: Controls,
         perform: (Context) throws -> Value) throws -> Value {
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
+        try MachineUpdateRetainedSetupPolicyStorage.requireMaintenanceWriteFormats(expected.entry.runtime.setup.source.actual.schemaVersion, candidate: candidate)
         try Entry(runtime: expected.entry.runtime, activation: expected.entry.activation,
             intent: expected.entry.intent, candidate: candidate).requireSame(as: expected.entry)
         try expected.inputs.requireSource(expected.entry.runtime)
@@ -239,6 +240,7 @@ enum MachineUpdateRetainedSetupRuntimeNativeContext {
             throw MachineUpdateActivationError.wrongBoundary
         }
         try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
+        try MachineUpdateRetainedSetupPolicyStorage.requireMaintenanceWriteFormats(expected.entry.runtime.setup.source.actual.schemaVersion, candidate: candidate)
         func fresh() throws {
             _ = try readCustodyFrame(expected: expected, candidate: candidate, openMachine: {
                 let machine = try PreparationIntentStore(lease: InstallationStorageLease.acquire(directoryPath: machineDirectory),

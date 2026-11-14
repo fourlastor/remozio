@@ -16,7 +16,7 @@ struct RuntimeMaintenanceReaderFixture {
     func mutate(_ sql: String) throws { try edit([sql]) }
 }
 
-func runtimeMaintenanceFixtureRows(_ databasePath: String, omitMaintenance: Bool = false, excludingAccount: Data? = nil) throws -> [String: [Data]] {
+func runtimeMaintenanceFixtureRows(_ databasePath: String, omitMaintenance: Bool = false, excludingAccount: Data? = nil, excludingRowsForAccounts: [String: Data] = [:]) throws -> [String: [Data]] {
     var connection: OpaquePointer?
     guard sqlite3_open_v2(databasePath, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK,
           let db = connection else { throw PreparationStoreError.invalidConfiguration }
@@ -51,8 +51,8 @@ func runtimeMaintenanceFixtureRows(_ databasePath: String, omitMaintenance: Bool
     while sqlite3_step(names) == SQLITE_ROW {
         let table = String(cString: sqlite3_column_text(names, 0))
         if omitMaintenance && table == RuntimeMaintenanceWindowStorage.tableName { continue }
-        let selection = table == RuntimeMaintenanceWindowStorage.tableName && excludingAccount != nil
-            ? " WHERE account<>X'\(excludingAccount!.map { String(format: "%02x", $0) }.joined())'" : ""
+        let excluded = excludingRowsForAccounts[table] ?? (table == RuntimeMaintenanceWindowStorage.tableName ? excludingAccount : nil)
+        let selection = excluded.map { " WHERE account<>X'\($0.map { String(format: "%02x", $0) }.joined())'" } ?? ""
         result[table] = try query("SELECT * FROM \(table)\(selection)")
     }
     let exclusion = omitMaintenance ? " WHERE name NOT LIKE '%runtime_maintenance_windows_v1%'" : ""
@@ -170,7 +170,7 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
             XCTAssertNoThrow(try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate))
         }
     }
-    func testOldReadersAndExistingWritersRefuseSchema29() throws {
+    func testOldReadersUndeclaredProducersAndOrdinaryWritersRefuseSchema29() throws {
         try fixture { f in
             try enable(f)
             let before = try rows(f)
@@ -186,8 +186,8 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
                 XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
             }
             try f.reopen()
-            XCTAssertFalse(MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(29))
-            XCTAssertFalse(MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(29))
+            XCTAssertTrue(MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(29))
+            XCTAssertTrue(MachineUpdateRetainedSetupPolicyStorage.policySchemaVersions.contains(29))
             XCTAssertThrowsError(try MachineUpdateRetainedSetupPolicyStorage.requireSchema(29, candidate: f.candidate))
             XCTAssertThrowsError(try MachineUpdateRetainedSetupPromotionStorage.requireWriteFormats(f.candidate,
                 sourceSchema: 29, operation: .retainPrepared))

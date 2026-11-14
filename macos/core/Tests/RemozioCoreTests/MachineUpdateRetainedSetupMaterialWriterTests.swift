@@ -11,6 +11,7 @@ struct RetainedMaterialWriterFixture {
     let material: RuntimePreparationMaterial
     let reopen: ((() throws -> Void)?) throws -> Void
     let scalar: (String) throws -> Int64
+    let databasePath: String
 }
 
 /// Owned SQL proves metadata isolation and rollback, without protected native files or running services.
