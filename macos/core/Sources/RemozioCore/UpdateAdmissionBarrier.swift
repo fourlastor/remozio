@@ -115,6 +115,11 @@ final class UpdateAdmissionBarrier: @unchecked Sendable {
         guard accountID.count == 16 else { throw MachineUpdateActivationError.wrongBoundary }
         try validateScopedToken(id, directory: directory, expected: identity, scope: .account(accountID), mode: .admission)
     }
+    fileprivate func validateAccountDrain(_ id: UUID, directory: ReleaseDestinationLease,
+        accountID: Data, expected identity: PreparationFileIdentity) throws {
+        guard accountID.count == 16 else { throw MachineUpdateActivationError.wrongBoundary }
+        try validateScopedToken(id, directory: directory, expected: identity, scope: .account(accountID), mode: .drain)
+    }
     private func validateScopedToken(_ id: UUID, directory: ReleaseDestinationLease,
         expected identity: PreparationFileIdentity, scope expectedScope: UpdateAdmissionScope, mode expectedMode: Mode) throws {
         guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
@@ -195,6 +200,9 @@ final class UpdateDrainToken: Sendable {
     func validate() throws { try barrier.validateDrain(id) }
     func validateMachineBoundary(directory: ReleaseDestinationLease, expected: PreparationFileIdentity) throws {
         try barrier.validateMachineDrain(id, directory: directory, expected: expected)
+    }
+    func validateAccountBoundary(directory: ReleaseDestinationLease, accountID: Data, expected: PreparationFileIdentity) throws {
+        try barrier.validateAccountDrain(id, directory: directory, accountID: accountID, expected: expected)
     }
     func close() { barrier.release(id) }
     deinit { close() }
