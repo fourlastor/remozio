@@ -16,6 +16,50 @@ struct RuntimeMaintenanceReaderFixture {
     func mutate(_ sql: String) throws { try edit([sql]) }
 }
 
+func runtimeMaintenanceFixtureRows(_ databasePath: String, omitMaintenance: Bool = false, excludingAccount: Data? = nil) throws -> [String: [Data]] {
+    var connection: OpaquePointer?
+    guard sqlite3_open_v2(databasePath, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK,
+          let db = connection else { throw PreparationStoreError.invalidConfiguration }
+    defer { sqlite3_close(db) }
+    func query(_ sql: String) throws -> [Data] {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let row = statement else {
+            throw PreparationStoreError.corruptRecord
+        }
+        defer { sqlite3_finalize(row) }
+        var values: [Data] = []
+        while true {
+            let result = sqlite3_step(row)
+            if result == SQLITE_DONE { return values.sorted { $0.lexicographicallyPrecedes($1) } }
+            guard result == SQLITE_ROW else { throw PreparationStoreError.storage(result) }
+            var value = Data()
+            for column in 0..<sqlite3_column_count(row) {
+                value.append(UInt8(sqlite3_column_type(row, column)))
+                let count = Int(sqlite3_column_bytes(row, column))
+                var size = UInt64(count).bigEndian
+                withUnsafeBytes(of: &size) { value.append(contentsOf: $0) }
+                if count > 0, let bytes = sqlite3_column_blob(row, column) { value.append(Data(bytes: bytes, count: count)) }
+            }
+            values.append(value)
+        }
+    }
+    var names: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'", -1, &names, nil) == SQLITE_OK,
+          let names else { throw PreparationStoreError.corruptRecord }
+    defer { sqlite3_finalize(names) }
+    var result: [String: [Data]] = [:]
+    while sqlite3_step(names) == SQLITE_ROW {
+        let table = String(cString: sqlite3_column_text(names, 0))
+        if omitMaintenance && table == RuntimeMaintenanceWindowStorage.tableName { continue }
+        let selection = table == RuntimeMaintenanceWindowStorage.tableName && excludingAccount != nil
+            ? " WHERE account<>X'\(excludingAccount!.map { String(format: "%02x", $0) }.joined())'" : ""
+        result[table] = try query("SELECT * FROM \(table)\(selection)")
+    }
+    let exclusion = omitMaintenance ? " WHERE name NOT LIKE '%runtime_maintenance_windows_v1%'" : ""
+    result["catalog"] = try query("SELECT type,name,tbl_name,sql FROM sqlite_schema\(exclusion)")
+    return result
+}
+
 final class RuntimeMaintenanceReaderTests: XCTestCase {
     private typealias Record = RuntimeMaintenanceWindowRecord
     private typealias Storage = RuntimeMaintenanceWindowStorage
@@ -50,45 +94,7 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
     }
     /// Reads every cell with its SQLite type. The catalog and rows are compared without using the production digest.
     private func rows(_ f: RuntimeMaintenanceReaderFixture, omitMaintenance: Bool = false) throws -> [String: [Data]] {
-        var connection: OpaquePointer?
-        guard sqlite3_open_v2(f.databasePath, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK,
-              let db = connection else { throw PreparationStoreError.invalidConfiguration }
-        defer { sqlite3_close(db) }
-        func query(_ sql: String) throws -> [Data] {
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let row = statement else {
-                throw PreparationStoreError.corruptRecord
-            }
-            defer { sqlite3_finalize(row) }
-            var values: [Data] = []
-            while true {
-                let result = sqlite3_step(row)
-                if result == SQLITE_DONE { return values.sorted { $0.lexicographicallyPrecedes($1) } }
-                guard result == SQLITE_ROW else { throw PreparationStoreError.storage(result) }
-                var value = Data()
-                for column in 0..<sqlite3_column_count(row) {
-                    value.append(UInt8(sqlite3_column_type(row, column)))
-                    let count = Int(sqlite3_column_bytes(row, column))
-                    var size = UInt64(count).bigEndian
-                    withUnsafeBytes(of: &size) { value.append(contentsOf: $0) }
-                    if count > 0, let bytes = sqlite3_column_blob(row, column) { value.append(Data(bytes: bytes, count: count)) }
-                }
-                values.append(value)
-            }
-        }
-        var names: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'", -1, &names, nil) == SQLITE_OK,
-              let names else { throw PreparationStoreError.corruptRecord }
-        defer { sqlite3_finalize(names) }
-        var result: [String: [Data]] = [:]
-        while sqlite3_step(names) == SQLITE_ROW {
-            let table = String(cString: sqlite3_column_text(names, 0))
-            if omitMaintenance && table == Storage.tableName { continue }
-            result[table] = try query("SELECT * FROM \(table)")
-        }
-        let exclusion = omitMaintenance ? " WHERE name NOT LIKE '%runtime_maintenance_windows_v1%'" : ""
-        result["catalog"] = try query("SELECT type,name,tbl_name,sql FROM sqlite_schema\(exclusion)")
-        return result
+        try runtimeMaintenanceFixtureRows(f.databasePath, omitMaintenance: omitMaintenance)
     }
     func testOpeningSchema28DoesNotMigrateOrChangeAnyRow() throws {
         try fixture { f in

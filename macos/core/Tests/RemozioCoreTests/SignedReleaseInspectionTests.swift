@@ -53,7 +53,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let preparation = try XCTUnwrap(component.formats.first { $0.name == "authority.installation-preparation" })
                 let versions = Set(PreparationIntentStore.supportedSchemaVersions.map(UInt64.init))
                 XCTAssertEqual(preparation.readers, versions)
-                XCTAssertEqual(preparation.writers, Set(1...25))
+                XCTAssertEqual(preparation.writers, role == .setupController ? Set(1...25).union([29]) : Set(1...25))
                 XCTAssertEqual(preparation.migrations[24], 25)
                 let policy = try XCTUnwrap(component.formats.first { $0.name == MachineUpdateRetainedSetupPolicyIntentRecord.formatName })
                 XCTAssertEqual(policy.readers, [MachineUpdateRetainedSetupPolicyIntentRecord.currentFormatVersion])
@@ -76,9 +76,9 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertTrue(ready.migrations.isEmpty)
                 let maintenance = try XCTUnwrap(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
                 XCTAssertEqual(maintenance.readers, [1])
-                XCTAssertTrue(maintenance.writers.isEmpty)
+                XCTAssertEqual(maintenance.writers, role == .setupController ? [1] : [])
                 XCTAssertTrue(maintenance.migrations.isEmpty)
-                XCTAssertNil(preparation.migrations[28])
+                XCTAssertEqual(preparation.migrations[28], role == .setupController ? 29 : nil)
                 XCTAssertNil(preparation.migrations[29])
                 let settings = try XCTUnwrap(component.formats.first { $0.name == "authority.gateway-settings-control" })
                 XCTAssertEqual(settings.readers, GatewaySettingsControlInterface.supportedVersions)
@@ -88,6 +88,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.supportedVersions)
             }
             try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence)
+            try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 28)
+            try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 29)
             for component in evidence.manifest.components where ![AuthorityCodeRole.authority, .setupController].contains(component.role) {
                 XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
             }

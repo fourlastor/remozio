@@ -20,6 +20,15 @@ enum RuntimeMaintenanceWindowStorage {
             }
         }
     }
+    /// Only Setup produces windows. Authority declarations cannot replace the Setup producer contract.
+    static func requireWriteFormats(_ candidate: SignedReleaseEvidence, sourceSchema: Int64) throws {
+        guard [Int64(28), 29].contains(sourceSchema) else { throw PreparationStoreError.invalidTransition }
+        try requireReaderFormats(candidate)
+        guard let setup = candidate.manifest.components.first(where: { $0.role == .setupController }),
+              let installation = setup.formats.first(where: { $0.name == "authority.installation-preparation" }),
+              installation.writers.contains(29), setup.formats.first(where: { $0.name == RuntimeMaintenanceWindowRecord.formatName })?.writers.contains(1) == true,
+              sourceSchema != 28 || installation.migrations[28] == 29 else { throw PreparationStoreError.incompatibleStore }
+    }
     /// The caller supplies indexed columns and bytes from one protected transaction. No machine query occurs here.
     static func decode(accountID: Data, attemptID: Data, revision: Data, phase: UInt64,
                        bytes: Data) throws -> RuntimeMaintenanceWindowRecord {

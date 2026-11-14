@@ -118,6 +118,18 @@ final class RuntimeMaintenanceWindowRecordTests: XCTestCase {
         }
     }
 
+    func testReopenPendingPreservesCancellationAndRejectsAnyStartedOperation() throws {
+        let pending = try record(phase: .reopenPending, service: .notStopped)
+        XCTAssertEqual(try Record.decode(pending.encoded), pending)
+        for operation in Record.OperationOutcome.allCases where operation != .notStarted {
+            XCTAssertThrowsError(try record(phase: .reopenPending, operation: operation, service: .notStopped))
+            var changed = try fields(pending); changed[7] = .unsigned(operation.rawValue)
+            XCTAssertThrowsError(try decode(changed))
+            let restarted = try record(phase: .reopenPending, operation: operation, service: .healthy)
+            XCTAssertEqual(try Record.decode(restarted.encoded), restarted)
+        }
+    }
+
     func testUnknownFieldsTagsVersionsEnumsAndWrongTypesRefuse() throws {
         let original = try fields(record())
         for key in original.keys {
