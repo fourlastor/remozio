@@ -34,6 +34,19 @@ public final class PreparationIntentStore {
     private var retainedMaterialAuthorization: RetainedMaterialAuthorization?
     private var retainedPublicationAuthorization: RetainedPublicationAuthorization?
     private var stableRuntimePreparationAuthorization: StableRuntimePreparationAuthorization?
+    private final class RuntimeMaintenanceAuthorization {
+        private let process = getpid(), thread = pthread_self()
+        private weak var writer: PreparationIntentStore?
+        private let verify: () throws -> Void
+        init(writer: PreparationIntentStore, verify: @escaping () throws -> Void) { self.writer = writer; self.verify = verify }
+        func capture(in owner: PreparationIntentStore) throws {
+            guard getpid() == process, pthread_equal(pthread_self(), thread) != 0, writer === owner,
+                  owner.active, owner.runtimeMaintenanceAuthorization === self, let db = owner.db,
+                  sqlite3_get_autocommit(db) == 0 else { throw JournalLeaseError.invalidated }
+            try verify()
+        }
+    }
+    private var runtimeMaintenanceAuthorization: RuntimeMaintenanceAuthorization?
     private static let applicationID: Int64 = 0x524D4953
 
     public static func open(directoryPath: String, macID: Data, maximumRecords: Int = 64,
@@ -105,13 +118,13 @@ public final class PreparationIntentStore {
     func validateStorageLease(nativeDirectory: String? = nil) throws {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil, runtimeMaintenanceAuthorization == nil else { throw PreparationStoreError.transactionActive }
         if let nativeDirectory { try lease.requireNativeLocation(nativeDirectory) }
         else { try lease.validate() }
     }
 
     public func close() throws {
-        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil, runtimeMaintenanceAuthorization == nil else { throw PreparationStoreError.transactionActive }
         shutdown()
     }
     /// Explicit storage upgrade only. It grants no service registration or update activation authority.
@@ -4395,9 +4408,10 @@ public final class PreparationIntentStore {
             throw error
         }
     }
-    private func stableRuntimePreparationProtectedDigest(excluding accountID: Data?) throws -> Data {
+    private func stableRuntimePreparationProtectedDigest(excluding accountID: Data?, maintenanceAccount: Data? = nil) throws -> Data {
         observeStoreRead?(.protectedRows)
-        guard accountID == nil || accountID?.count == 16 else { throw PreparationStoreError.corruptRecord }
+        guard accountID == nil || accountID?.count == 16,
+              maintenanceAccount == nil || accountID == nil && maintenanceAccount?.count == 16 else { throw PreparationStoreError.corruptRecord }
         let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name") { row in
             var names: [String] = []
             while try step(row) == SQLITE_ROW {
@@ -4408,8 +4422,15 @@ public final class PreparationIntentStore {
             return names
         }
         var hash = SHA256(); hash.update(data: Data("Remozio/StableRuntimePreparationProtectedRows/v1\0".utf8)); hash.update(data: Data([accountID == nil ? 0 : 1])); if let accountID { hash.update(data: accountID) }
-        hash.update(data: try machineTableDigest("sqlite_schema", maximumCellBytes: RuntimeReleaseBackendPlan.maximumBytes))
-        for table in tables {
+        hash.update(data: try machineTableDigest("sqlite_schema", maximumCellBytes: RuntimeReleaseBackendPlan.maximumBytes,
+            catalogScope: maintenanceAccount == nil ? nil : .maintenanceMetadata))
+        if let maintenanceAccount {
+            hash.update(data: maintenanceAccount)
+            hash.update(data: try scalar("PRAGMA user_version") >= 29
+                ? machineTableDigest(RuntimeMaintenanceWindowStorage.tableName, excludingAccount: maintenanceAccount)
+                : machineEpochTableDigest(RuntimeMaintenanceWindowStorage.tableName, rows: []))
+        }
+        for table in tables where maintenanceAccount == nil || table != RuntimeMaintenanceWindowStorage.tableName {
             hash.update(data: try machineTableDigest(table,
                 excludingAccount: table == "runtime_preparation_v1" ? accountID : nil, maximumCellBytes: max(RuntimeReleaseBackendPlan.maximumBytes,
                     max(MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes, MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes))))
@@ -5239,7 +5260,7 @@ public final class PreparationIntentStore {
             directory: directory, admission: admission, native: native, retaining: false, observation: observation, verifyScoped: verifyScoped)
     }
     func requireRetainedSetupPromotionWriterAvailable() throws {
-        guard retainedImportAuthorization == nil, retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
+        guard runtimeMaintenanceAuthorization == nil, retainedImportAuthorization == nil, retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil else {
             throw PreparationStoreError.transactionActive
@@ -5716,6 +5737,77 @@ public final class PreparationIntentStore {
             admission: admission, candidate: candidate, installed: installed, seal: seal, currentRowsDigest: current.digest)
         let windows = schema >= 29 ? try loadRuntimeMaintenanceWindows() : []
         return (snapshot, completion, promotions, ready, windows)
+    }
+
+    /// Setup metadata only. Native grants, digest semantics and lifecycle proof remain M07/M15 obligations.
+    func writeRuntimeMaintenanceWindow(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord?,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
+        try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion)
+        _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded); try next.requireReplacing(previous)
+        try requireRetainedSetupPromotionWriterAvailable()
+        var commitAttempted = false
+        do { return try admission.withMachineAdmission { scope in
+            func boundary() throws {
+                try requireUpdateAdmissionDirectory(directory)
+                try scope.validateMachineBoundary(directory: directory, expected: expected.admission.machine)
+            }
+            func footprint() throws -> Data {
+                try withRetainedSetupRecordLimit(maximumBytes: max(RuntimeReleaseBackendPlan.maximumBytes, MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes)) {
+                    try stableRuntimePreparationProtectedDigest(excluding: nil, maintenanceAccount: next.scope.authority.accountID)
+                }
+            }
+            try boundary()
+            let protectedRows = try transaction(write: false) {
+                try loadStableMachineUpdate(candidate: candidate).requireSame(as: expected)
+                let source = try loadStableRuntimeSource(candidate: candidate)
+                guard next.scope.macID == macID, next.scope.installationID == expected.inventory.installationID,
+                      next.scope.releaseDigest == expected.inventory.releaseDigest,
+                      expected.inventory.accounts.contains(where: { $0.accountID == next.scope.authority.accountID }) else { throw RuntimePreparationError.changedScope }
+                for account in [next.scope.authority, next.scope.target] {
+                    guard let prepared = source.preparations.first(where: { $0.accountID == account.accountID }),
+                          prepared.ownerUID == account.ownerUID, bytes(prepared.directoryID) == account.directoryID else { throw RuntimePreparationError.changedScope }
+                }
+                _ = try RuntimeMaintenanceAdmissionProjection(record: next, macID: macID,
+                    installationID: expected.inventory.installationID, account: next.scope.authority, registration: expected.admission)
+                let current = expected.schemaVersion == 29 ? try loadRuntimeMaintenanceWindows().first { $0.scope.authority.accountID == next.scope.authority.accountID } : nil
+                guard current == previous else { throw PreparationStoreError.staleRevision }
+                try verifyScoped(.beforeTransaction); try loadStableMachineUpdate(candidate: candidate).requireSame(as: expected)
+                return try footprint()
+            }
+            var row = previous, schema = expected.schemaVersion
+            let owner = RuntimeMaintenanceAuthorization(writer: self) {
+                try boundary(); try self.identity(self.macID)
+                let current = schema == 29 ? try self.loadRuntimeMaintenanceWindows().first { $0.scope.authority.accountID == next.scope.authority.accountID } : nil
+                guard try self.scalar("PRAGMA user_version") == schema, current == row,
+                      try footprint() == protectedRows else { throw PreparationStoreError.staleRevision }
+            }
+            runtimeMaintenanceAuthorization = owner; defer { runtimeMaintenanceAuthorization = nil }
+            try transaction(write: true, activationWrite: true, runtimeMaintenance: owner, willCommit: { commitAttempted = true }) {
+                try verifyScoped(.inTransaction); try owner.capture(in: self)
+                if schema == 28 { try exec(RuntimeMaintenanceWindowStorage.createSQL); try exec("PRAGMA user_version=29") }
+                if let previous {
+                    try statement("DELETE FROM runtime_maintenance_windows_v1 WHERE account=? AND attempt=? AND revision=?") { statement in
+                        try bind(next.scope.authority.accountID, column: 1, row: statement); try bind(previous.id, column: 2, row: statement)
+                        try bind(previous.revision, column: 3, row: statement)
+                        guard try step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                    }
+                }
+                guard try scalar("SELECT COUNT(*) FROM runtime_maintenance_windows_v1") < 64 else { throw PreparationStoreError.capacity }
+                try statement("INSERT OR IGNORE INTO runtime_maintenance_windows_v1 VALUES(?,?,?,?,?)") { statement in
+                    try bind(next.scope.authority.accountID, column: 1, row: statement); try bind(next.id, column: 2, row: statement)
+                    try bind(next.revision, column: 3, row: statement); try bind(Int64(next.phase.rawValue), column: 4, row: statement)
+                    try bind(next.encoded, column: 5, row: statement)
+                    guard try step(statement) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw PreparationStoreError.staleRevision }
+                }
+                row = next; schema = 29; try owner.capture(in: self)
+                try verifyScoped(.afterMutation); try owner.capture(in: self)
+            }
+            return try transaction(write: false, runtimeMaintenance: owner) {
+                try verifyScoped(.afterCommit); try owner.capture(in: self); return next
+            }
+        } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
 
     /// Reads startup restrictions only. The host must apply the local hold before it admits requests.
@@ -6496,13 +6588,13 @@ public final class PreparationIntentStore {
         return Data(hash.finalize())
     }
 
-    private enum MachineEpochCatalogScope: Equatable { case retainedPolicyMetadata }
+    private enum MachineEpochCatalogScope: Equatable { case retainedPolicyMetadata, maintenanceMetadata }
     private func machineTableDigest(_ table: String, excludingOwnerUID: UInt32? = nil, excludingAccount: Data? = nil,
         maximumCellBytes: Int? = nil, catalogScope: MachineEpochCatalogScope? = nil) throws -> Data {
         guard catalogScope == nil || (table == "sqlite_schema" && excludingOwnerUID == nil && excludingAccount == nil) else {
             throw PreparationStoreError.corruptRecord
         }
-        guard excludingAccount == nil || ["authority_initialization_v1", "service_accounts_v1", "runtime_preparation_v1"].contains(table) && excludingAccount?.count == 16
+        guard excludingAccount == nil || ["authority_initialization_v1", "service_accounts_v1", "runtime_preparation_v1", RuntimeMaintenanceWindowStorage.tableName].contains(table) && excludingAccount?.count == 16
             && excludingOwnerUID == nil else { throw PreparationStoreError.corruptRecord }
         guard excludingOwnerUID == nil || table == "account_preparation_v1" && excludingOwnerUID! > 0
             && excludingOwnerUID! < UInt32.max else { throw PreparationStoreError.corruptRecord }
@@ -6513,8 +6605,9 @@ public final class PreparationIntentStore {
             ? MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes
             : table == MachineUpdateRetainedSetupPromotionStorage.tableName
                 ? MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes : 278528)
-        let selection = catalogScope != nil
-            ? " WHERE name NOT IN ('retained_setup_policy_intents_v1','sqlite_autoindex_retained_setup_policy_intents_v1_1')"
+        let selection = catalogScope == .maintenanceMetadata
+            ? " WHERE name NOT IN ('runtime_maintenance_windows_v1','sqlite_autoindex_runtime_maintenance_windows_v1_1','sqlite_autoindex_runtime_maintenance_windows_v1_2','sqlite_autoindex_runtime_maintenance_windows_v1_3')"
+            : catalogScope == .retainedPolicyMetadata ? " WHERE name NOT IN ('retained_setup_policy_intents_v1','sqlite_autoindex_retained_setup_policy_intents_v1_1')"
             : excludingAccount != nil ? " WHERE account<>?" : excludingOwnerUID == nil ? "" : " WHERE owner<>?"
         let rows: [Data] = try statement("SELECT * FROM \(table)\(selection)") { row in
             if let excludingOwnerUID { try bind(Int64(excludingOwnerUID), column: 1, row: row) }
@@ -6833,6 +6926,7 @@ public final class PreparationIntentStore {
         }
     }
     private func transaction<T>(write: Bool, activationWrite: Bool = false,
+        runtimeMaintenance: RuntimeMaintenanceAuthorization? = nil,
         retainedSetupPromotion: RetainedSetupPromotionAuthorization? = nil,
         stableReservation: StableAccountReservationAuthorization? = nil,
         stableAccountStorage: StableAccountStorageAuthorization? = nil,
@@ -6846,7 +6940,8 @@ public final class PreparationIntentStore {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
-        guard retainedImportAuthorization == nil || retainedImportAuthorization === retainedImport else { throw PreparationStoreError.transactionActive }
+        guard retainedImportAuthorization == nil || retainedImportAuthorization === retainedImport,
+              runtimeMaintenanceAuthorization == nil || runtimeMaintenanceAuthorization === runtimeMaintenance else { throw PreparationStoreError.transactionActive }
         guard !write || opening == .mutable else { throw PreparationStoreError.invalidTransition }
         guard !write || retainedPublicationAuthorization == nil || retainedPublicationAuthorization === retainedPublication else {
             throw PreparationStoreError.transactionActive
@@ -6861,7 +6956,13 @@ public final class PreparationIntentStore {
         observeStoreRead?(write ? .writeTransaction : .readTransaction)
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
-            if let retainedPublication {
+            if let runtimeMaintenance {
+                guard runtimeMaintenanceAuthorization === runtimeMaintenance, !write || activationWrite,
+                      retainedPublication == nil, retainedSetupPolicy == nil, retainedMaterial == nil,
+                      stableRuntimePreparation == nil, stableServiceAccount == nil, stableAccountStorage == nil,
+                      stableReservation == nil, retainedSetupPromotion == nil, retainedImport == nil else { throw PreparationStoreError.invalidTransition }
+                try runtimeMaintenance.capture(in: self)
+            } else if let retainedPublication {
                 guard retainedSetupPolicy == nil, retainedMaterial == nil, stableRuntimePreparation == nil,
                       stableServiceAccount == nil, stableAccountStorage == nil, stableReservation == nil,
                       retainedSetupPromotion == nil, write, activationWrite,
@@ -6919,6 +7020,7 @@ public final class PreparationIntentStore {
                 throw PreparationStoreError.invalidTransition
             }
             let value = try body()
+            if let runtimeMaintenance { try runtimeMaintenance.capture(in: self) }
             if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
             if let stableReservation { _ = try stableReservation.capture(in: self) }
             if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }
@@ -6928,6 +7030,7 @@ public final class PreparationIntentStore {
             try lease.validate()
             do {
                 if write { willCommit() }
+                if let runtimeMaintenance { try runtimeMaintenance.capture(in: self) }
                 if let retainedSetupPromotion { _ = try retainedSetupPromotion.capture(in: self) }
                 if let stableReservation { _ = try stableReservation.capture(in: self) }
                 if let stableAccountStorage { _ = try stableAccountStorage.capture(in: self) }

@@ -33,7 +33,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
             return try .init(accountID: maintenanceData(a[0], count: 16), ownerUID: UInt32(uid), directoryID: maintenanceData(a[2], count: 16))
         }
     }
-    /// Digests bind protected operands and existing grants. No authorization form or caller path is retained.
+    /// Digests are opaque immutable references. M07 must prove their semantics, including candidateDigest; bytes grant no authority.
     struct Scope: Equatable, Sendable {
         let macID: Data, installationID: Data
         let authority: Account, target: Account
@@ -117,7 +117,7 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
               ![Phase.authorized, .draining, .stopping, .stopped].contains(phase) || operation == .notStarted,
               phase != .executing || operation == .unknown,
               phase != .needsOwnerRecovery || failure != nil,
-              phase != .reopenPending || service == .healthy,
+              phase != .reopenPending || service == .healthy || (service == .notStopped && operation == .notStarted),
               phase != .restored || (failure == nil && (service == .healthy || (service == .notStopped && operation == .notStarted))
                 && gate?.hold == .released && gate?.admission == .available) else {
             throw RuntimePreparationError.invalidRecord
@@ -129,6 +129,34 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
         guard id == other.id, purpose == other.purpose, scope == other.scope else {
             throw RuntimePreparationError.changedScope
         }
+    }
+    func requireReplacing(_ previous: Self?) throws {
+        guard revision != previous?.revision else { throw PreparationStoreError.staleRevision }
+        guard let previous, previous.id == id else {
+            guard previous == nil || previous?.phase == .restored, phase == .authorized,
+                  operation == .notStarted, service == .notStopped, failure == nil, gate == nil else {
+                throw PreparationStoreError.invalidTransition
+            }
+            return
+        }
+        try requireSameScope(as: previous)
+        let edges: [Phase: Set<Phase>] = [
+            .authorized: [.draining, .reopenPending, .needsOwnerRecovery], .draining: [.stopping, .reopenPending, .needsOwnerRecovery],
+            .stopping: [.stopped, .needsOwnerRecovery], .stopped: [.executing, .restoring, .needsOwnerRecovery],
+            .executing: [.workSettled, .needsOwnerRecovery], .workSettled: [.restoring, .needsOwnerRecovery],
+            .restoring: [.reopenPending, .needsOwnerRecovery], .reopenPending: [.restored, .needsOwnerRecovery],
+            .needsOwnerRecovery: [.restoring, .needsOwnerRecovery], .restored: []]
+        let outcome: Bool
+        switch previous.operation {
+        case .committed, .failed: outcome = operation == previous.operation
+        case .unknown: outcome = operation != .notStarted
+        case .notStarted: outcome = operation == .notStarted || previous.phase == .stopped && phase == .executing && operation == .unknown
+        }
+        guard edges[previous.phase]?.contains(phase) == true, outcome,
+              phase != .reopenPending || ![Phase.authorized, .draining].contains(previous.phase)
+                || (service == .notStopped && operation == .notStarted),
+              previous.phase != .reopenPending || previous.service != .notStopped || service == .notStopped,
+              phase != .restored || gate?.requestRevision == previous.revision else { throw PreparationStoreError.invalidTransition }
     }
     var encoded: Data { get throws {
         try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
