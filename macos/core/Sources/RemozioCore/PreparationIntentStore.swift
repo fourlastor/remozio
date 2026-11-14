@@ -14,6 +14,9 @@ enum PreparationStoreError: Error, Equatable {
 public final class PreparationIntentStore {
     enum Opening { case mutable, retainedPolicyVerification }
     private let opening: Opening
+    enum InitialRuntimeRead: Hashable { case readTransaction, writeTransaction, runtime, frame, activation, policyScan, policyMarker, sharedImport }
+    // Internal fixture observation carries counts only, without source values or authority.
+    var observeInitialRuntimeRead: ((InitialRuntimeRead) -> Void)?
     public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
@@ -238,6 +241,7 @@ public final class PreparationIntentStore {
         }
     }
     private func sharedImportCompatibilitySnapshot(installationID: Data?) throws -> SharedSetupImportCompatibilitySnapshot? {
+        observeInitialRuntimeRead?(.sharedImport)
         if let borrowed = sharedImportReadBorrow { return try borrowed.capture(in: self, installationID: installationID) }
         return try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: installationID)
     }
@@ -640,7 +644,8 @@ public final class PreparationIntentStore {
         }
     }
     private func loadRuntimeActivation(accountID: Data) throws -> RuntimeActivationState {
-        try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
+        observeInitialRuntimeRead?(.activation)
+        return try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
             try bind(accountID, column: 1, row: row)
             if try step(row) == SQLITE_DONE { return .init(plan: nil, jobsRegistered: false) }
             let bytes = try blob(row, column: 3, maximum: 262144), plan: RuntimeActivationPlan
@@ -4835,6 +4840,7 @@ public final class PreparationIntentStore {
 
     private func loadStableRuntimePreparationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateStableRuntimePreparationSnapshot {
+        observeInitialRuntimeRead?(.runtime)
         let setup = try MachineUpdateStableAccountSetupSnapshot(source: loadStableRuntimeSource(candidate: candidate), owner: owner)
         guard let preparation = setup.preparation else { throw AccountPreparationError.missing }
         let account = preparation.accountID
@@ -4871,6 +4877,27 @@ public final class PreparationIntentStore {
         throws -> MachineUpdateRetainedSetupPolicyMaterial {
         let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
         return try .init(runtime: runtime, activation: loadRuntimeActivation(accountID: runtime.preparation.accountID))
+    }
+
+    /// Reads initial material and policy in one transaction. The entry grants no write or native authority.
+    func retainedSetupInitialRuntimeEntry(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
+        throws -> MachineUpdateRetainedSetupInitialRuntimeEntry {
+        try transaction(write: false) {
+            let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
+            let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
+            let actual = runtime.setup.source.actual
+            let intent: MachineUpdateRetainedSetupPolicyIntentRecord?
+            if actual.schemaVersion >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
+                observeInitialRuntimeRead?(.policyMarker)
+                intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
+                    .first { $0.accountID == runtime.preparation.accountID }
+            } else { intent = nil }
+            let result = try MachineUpdateRetainedSetupInitialRuntimeEntry(runtime: runtime, activation: state,
+                intent: intent, candidate: candidate)
+            try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
+            try result.requireActivation(loadRuntimeActivation(accountID: runtime.preparation.accountID))
+            return result
+        }
     }
 
     /// Reads policy metadata and activation facts in one transaction. It grants no journal write or publication authority.
@@ -5333,7 +5360,8 @@ public final class PreparationIntentStore {
     }
 
     private func loadRetainedSetupPolicyIntents(installationID: Data) throws -> [MachineUpdateRetainedSetupPolicyIntentRecord] {
-        try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes) {
+        observeInitialRuntimeRead?(.policyScan)
+        return try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes) {
             try statement("SELECT account,id,revision,record FROM retained_setup_policy_intents_v1 ORDER BY account LIMIT 65") { row in
                 var records: [MachineUpdateRetainedSetupPolicyIntentRecord] = []
                 var accounts = Set<Data>()
@@ -5509,6 +5537,7 @@ public final class PreparationIntentStore {
     private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence)
         throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
             promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord]) {
+        observeInitialRuntimeRead?(.frame)
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
         guard (24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(schema) else {
@@ -6654,6 +6683,7 @@ public final class PreparationIntentStore {
             throw error
         }
         active = true; defer { active = false }
+        observeInitialRuntimeRead?(write ? .writeTransaction : .readTransaction)
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
             if let retainedPublication {
