@@ -17,7 +17,7 @@ struct MachineUpdateRetainedSetupCompletionSnapshot {
         guard activation.state.jobsRegistered, activation.runtime.setup.account?.inInventory == true,
               activation.state.plan != nil else { throw RuntimeActivationError.incomplete }
         if let intent {
-            guard [MachineUpdateRetainedSetupCompletionStorage.schemaVersion, MachineUpdateRetainedSetupPromotionStorage.schemaVersion, MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion].contains(schema) else { throw PreparationStoreError.staleRevision }
+            guard [MachineUpdateRetainedSetupCompletionStorage.schemaVersion, MachineUpdateRetainedSetupPromotionStorage.schemaVersion, MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion, RuntimeMaintenanceWindowStorage.schemaVersion].contains(schema) else { throw PreparationStoreError.staleRevision }
             try intent.requireSnapshot(activation, candidate: candidate)
         }
         self.activation = activation; self.intent = intent

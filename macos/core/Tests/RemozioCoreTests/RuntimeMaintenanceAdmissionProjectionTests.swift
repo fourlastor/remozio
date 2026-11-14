@@ -77,6 +77,20 @@ final class RuntimeMaintenanceAdmissionProjectionTests: XCTestCase {
         XCTAssertThrowsError(try projection(record(.restored), registration: registration(identity: wrongGate)))
         XCTAssertFalse(try projection(nil, other: true, registration: registration(omitA: true)).requiresLocalHold)
     }
+    func testStartupScopeFailureHoldsAAndExposesRecoveryWithoutThrowing() throws {
+        for value in [try record(mac: data(99)), try record(installation: data(99)),
+                      try record(.restored, gate: .init(device: 99, inode: 99))] {
+            let actual = try Projection.startup(record: value, macID: data(1), installationID: data(2),
+                account: account(), registration: registration())
+            XCTAssertTrue(actual.requiresLocalHold); XCTAssertTrue(actual.needsOwnerRecovery)
+            XCTAssertNil(actual.attemptID); XCTAssertNil(actual.revision)
+        }
+        let recovery = try projection(record(.needsOwnerRecovery))
+        XCTAssertTrue(recovery.requiresLocalHold); XCTAssertTrue(recovery.needsOwnerRecovery)
+        let other = try Projection.startup(record: record(.reopenPending), macID: data(1), installationID: data(2),
+            account: account(true), registration: registration(omitA: true))
+        XCTAssertFalse(other.requiresLocalHold); XCTAssertFalse(other.needsOwnerRecovery)
+    }
     func testIndexedReaderRequiresExactCanonicalRecordAndColumns() throws {
         let value = try record(.draining), encoded = try value.encoded
         func read(account: Data? = nil, attempt: Data? = nil, revision: Data? = nil,
@@ -99,7 +113,7 @@ final class RuntimeMaintenanceAdmissionProjectionTests: XCTestCase {
                 revision: current.revision, phase: phase.rawValue, bytes: current.encoded), current)
         }
     }
-    func testReaderDeclarationsRequireBothRolesAndPreviousFormatsWithoutAdmittingSchema() throws {
+    func testReaderDeclarationsRequireBothRolesAndPreviousFormats() throws {
         let all = try Storage.readerRequirements + MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements
             + MachineUpdateRetainedSetupPromotionStorage.readerRequirements + MachineUpdateRetainedSetupCompletionStorage.readerRequirements
         func candidate(omitRole: AuthorityCodeRole? = nil, omitName: String? = nil,
@@ -133,7 +147,7 @@ final class RuntimeMaintenanceAdmissionProjectionTests: XCTestCase {
             }
         }
         XCTAssertEqual(Storage.schemaVersion, 29)
-        XCTAssertFalse(PreparationIntentStore.supportedSchemaVersions.contains(Storage.schemaVersion))
+        XCTAssertTrue(PreparationIntentStore.supportedSchemaVersions.contains(Storage.schemaVersion))
     }
     func testDeclaredSQLBoundsAndUniqueAttemptsAndRevisions() throws {
         var db: OpaquePointer?

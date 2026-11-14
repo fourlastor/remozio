@@ -14,7 +14,7 @@ struct MachineUpdateRetainedSetupActivationSnapshot: CustomStringConvertible, Cu
         guard setup.account?.origin == .retained,
               try actual.installed.configuration().configuration(accountID: preparation.accountID)?.completion == nil,
               runtime.state.configurationPublished, runtime.state.reference != nil,
-              setup.account?.initialization?.complete == true, (25...28).contains(actual.schemaVersion),
+              setup.account?.initialization?.complete == true, (25...RuntimeMaintenanceWindowStorage.schemaVersion).contains(actual.schemaVersion),
               intent.phase == .recorded, intent.macID == preparation.macID, intent.installationID == preparation.installationID,
               intent.accountID == preparation.accountID, intent.ownerUID == preparation.ownerUID else {
             throw RuntimeActivationError.changedScope
@@ -37,7 +37,8 @@ struct MachineUpdateRetainedSetupActivationSnapshot: CustomStringConvertible, Cu
         try MachineUpdateRetainedSetupPolicyStorage.requireReaderFormats(candidate)
         if schema >= 26 { try MachineUpdateRetainedSetupCompletionStorage.requireReaderFormats(candidate) }
         if schema >= 27 { try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(candidate) }
-        if schema == 28 { try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(candidate) }
+        if schema >= 28 { try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(candidate) }
+        if schema >= 29 { try RuntimeMaintenanceWindowStorage.requireReaderFormats(candidate) }
     }
     /// Reuses reader declarations for this validated snapshot. It accepts no unchecked schema operand.
     func requireCompletionReaderFormats(candidate: SignedReleaseEvidence) throws {

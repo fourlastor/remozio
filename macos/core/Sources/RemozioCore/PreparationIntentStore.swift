@@ -17,7 +17,7 @@ public final class PreparationIntentStore {
     enum InitialRuntimeRead: Hashable { case readTransaction, writeTransaction, runtime, frame, activation, policyScan, policyMarker, sharedImport, protectedRows, importInputs }
     // Test-only, never assigned in Sources. The observer carries read kinds, without payload or authority.
     var observeStoreRead: ((InitialRuntimeRead) -> Void)?
-    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
+    public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
     private let maximumRecords: Int
@@ -3539,7 +3539,7 @@ public final class PreparationIntentStore {
     private func installedCurrentSourceProjection(inventory: InstallationInventory,
         installed: MachineUpdateInstalledReleaseEpoch.Archive, schema: Int64)
         throws -> (historicalInventory: InstallationInventory, historicalSchemaVersion: Int64, digest: Data) {
-        guard (23...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(schema),
+        guard (23...RuntimeMaintenanceWindowStorage.schemaVersion).contains(schema),
               try scalar("PRAGMA user_version") == schema,
               try loadInventoryRecord() == inventory else { throw PreparationStoreError.staleRevision }
         let configuration = try installed.configuration(), intent = try installed.completionIntent()
@@ -5069,7 +5069,7 @@ public final class PreparationIntentStore {
         throws -> MachineUpdateRetainedSetupActivationSnapshot {
         let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
         let actual = runtime.setup.source.actual, account = runtime.preparation.accountID
-        guard (25...28).contains(actual.schemaVersion),
+        guard (25...RuntimeMaintenanceWindowStorage.schemaVersion).contains(actual.schemaVersion),
               let intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
                 .first(where: { $0.accountID == account }) else { throw RuntimeActivationError.incomplete }
         let state = try loadRetainedSetupActivation(accountID: account)
@@ -5671,11 +5671,12 @@ public final class PreparationIntentStore {
 
     private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence)
         throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
-            promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord]) {
+            promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord],
+            maintenanceWindows: [RuntimeMaintenanceWindowRecord]) {
         observeStoreRead?(.frame)
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
-        guard (24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(schema) else {
+        guard (24...RuntimeMaintenanceWindowStorage.schemaVersion).contains(schema) else {
             throw PreparationStoreError.invalidTransition
         }
         let hasRetainedPolicy = schema >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion
@@ -5687,6 +5688,7 @@ public final class PreparationIntentStore {
         if hasRetainedCompletion { try MachineUpdateRetainedSetupCompletionStorage.requireReaderFormats(release) }
         if hasRetainedPromotion { try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(release) }
         if hasRetainedReady { try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(release) }
+        if schema >= 29 { try RuntimeMaintenanceWindowStorage.requireReaderFormats(release) }
         guard let inventory = try loadInventoryRecord(), let candidate = try loadUpdateCandidate(),
               let activation = try loadMachineUpdateActivationRecord(), let admission = try loadUpdateAdmissionRegistration(),
               try loadAll().first(where: { $0.id == candidate.preparation.id }) == candidate.preparation else {
@@ -5712,7 +5714,33 @@ public final class PreparationIntentStore {
         let current = try installedCurrentSourceProjection(inventory: inventory, installed: installed, schema: schema)
         let snapshot = MachineUpdateStableReleaseSnapshot(schemaVersion: schema, inventory: inventory, activation: activation,
             admission: admission, candidate: candidate, installed: installed, seal: seal, currentRowsDigest: current.digest)
-        return (snapshot, completion, promotions, ready)
+        let windows = schema >= 29 ? try loadRuntimeMaintenanceWindows() : []
+        return (snapshot, completion, promotions, ready, windows)
+    }
+
+    /// Reads startup restrictions only. The host must apply the local hold before it admits requests.
+    func runtimeMaintenanceStartupProjection(account: RuntimeMaintenanceWindowRecord.Account,
+        candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceAdmissionProjection {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+            return RuntimeMaintenanceAdmissionProjection.startup(record: frame.maintenanceWindows.first {
+                $0.scope.authority.accountID == account.accountID
+            }, macID: macID, installationID: current.inventory.installationID,
+                account: account, registration: current.admission)
+        }
+    }
+    private func loadRuntimeMaintenanceWindows() throws -> [RuntimeMaintenanceWindowRecord] {
+        try statement("SELECT account,attempt,revision,phase,record FROM runtime_maintenance_windows_v1 ORDER BY account LIMIT 65") { row in
+            var values: [RuntimeMaintenanceWindowRecord] = []
+            while try step(row) == SQLITE_ROW {
+                guard values.count < 64, sqlite3_column_type(row, 3) == SQLITE_INTEGER,
+                      (1...10).contains(sqlite3_column_int64(row, 3)) else { throw PreparationStoreError.corruptRecord }
+                values.append(try RuntimeMaintenanceWindowStorage.decode(accountID: blob(row, column: 0, maximum: 16),
+                    attemptID: blob(row, column: 1, maximum: 16), revision: blob(row, column: 2, maximum: 16),
+                    phase: UInt64(sqlite3_column_int64(row, 3)), bytes: blob(row, column: 4, maximum: 4096)))
+            }
+            return values
+        }
     }
 
     private func loadMachineUpdateFinalization(candidate release: SignedReleaseEvidence) throws -> MachineUpdateFinalizationSnapshot {
@@ -6741,6 +6769,7 @@ public final class PreparationIntentStore {
         if version >= MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion {
             expected.append(MachineUpdateRetainedSetupPromotionReadyStorage.tableName)
         }
+        if version >= 29 { expected.append(RuntimeMaintenanceWindowStorage.tableName) }
         expected.sort()
         guard try scalar("PRAGMA application_id") == Self.applicationID, Self.supportedSchemaVersions.contains(version),
               try scalar("SELECT COUNT(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == Int64(expected.count) else {
@@ -6770,6 +6799,13 @@ public final class PreparationIntentStore {
                 guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_TEXT,
                       let sql = sqlite3_column_text(row, 0),
                       String(cString: sql) == MachineUpdateRetainedSetupPromotionReadyStorage.createSQL,
+                      try step(row) == SQLITE_DONE else { throw PreparationStoreError.incompatibleStore }
+            }
+        }
+        if version >= 29 {
+            try statement("SELECT sql FROM sqlite_schema WHERE name='runtime_maintenance_windows_v1' AND type='table'") { row in
+                guard try step(row) == SQLITE_ROW, sqlite3_column_type(row, 0) == SQLITE_TEXT,
+                      let sql = sqlite3_column_text(row, 0), String(cString: sql) == RuntimeMaintenanceWindowStorage.createSQL,
                       try step(row) == SQLITE_DONE else { throw PreparationStoreError.incompatibleStore }
             }
         }

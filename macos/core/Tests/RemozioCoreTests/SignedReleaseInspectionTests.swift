@@ -74,12 +74,22 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(ready.readers, [1])
                 XCTAssertTrue(ready.writers.isEmpty)
                 XCTAssertTrue(ready.migrations.isEmpty)
+                let maintenance = try XCTUnwrap(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
+                XCTAssertEqual(maintenance.readers, [1])
+                XCTAssertTrue(maintenance.writers.isEmpty)
+                XCTAssertTrue(maintenance.migrations.isEmpty)
+                XCTAssertNil(preparation.migrations[28])
+                XCTAssertNil(preparation.migrations[29])
                 let settings = try XCTUnwrap(component.formats.first { $0.name == "authority.gateway-settings-control" })
                 XCTAssertEqual(settings.readers, GatewaySettingsControlInterface.supportedVersions)
                 XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
                 let host = try XCTUnwrap(component.formats.first { $0.name == "authority.command-host-config" })
                 XCTAssertEqual(host.readers, InstalledAuthorityCommandConfiguration.supportedVersions)
                 XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.supportedVersions)
+            }
+            try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence)
+            for component in evidence.manifest.components where ![AuthorityCodeRole.authority, .setupController].contains(component.role) {
+                XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
             }
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })

@@ -8,13 +8,13 @@ struct MachineUpdateRetainedSetupPromotionSnapshot {
     init(completion: MachineUpdateRetainedSetupCompletionSnapshot,
         intent: MachineUpdateRetainedSetupPromotionIntentRecord?, candidate: SignedReleaseEvidence) throws {
         let schema = completion.activation.runtime.setup.source.actual.schemaVersion
-        guard [Int64(26), 27, 28].contains(schema), completion.intent?.phase == .recorded else {
+        guard (26...RuntimeMaintenanceWindowStorage.schemaVersion).contains(schema), completion.intent?.phase == .recorded else {
             throw RuntimeActivationError.incomplete
         }
         try MachineUpdateRetainedSetupPromotionStorage.requireReaderFormats(candidate)
         try completion.requireSame(as: .init(activation: completion.activation, intent: completion.intent, candidate: candidate))
         if let intent {
-            guard [Int64(27), 28].contains(schema) else { throw PreparationStoreError.corruptRecord }
+            guard (27...RuntimeMaintenanceWindowStorage.schemaVersion).contains(schema) else { throw PreparationStoreError.corruptRecord }
             try intent.requireSnapshot(completion, candidate: candidate)
         }
         self.completion = completion; self.intent = intent

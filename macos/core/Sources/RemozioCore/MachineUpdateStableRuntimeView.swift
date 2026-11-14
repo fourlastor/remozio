@@ -35,7 +35,7 @@ struct MachineUpdateStableRuntimeView: CustomStringConvertible, CustomDebugStrin
         let currentJournals = compatibility.currentJournals
         let source = compatibility.source, actual = source.actual, inputs = compatibility.runtime.inputs
         let ids = Set(source.accounts.map(\.accountID))
-        guard (24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(inputs.schemaVersion), inputs.inventory == actual.inventory.canonicalBytes,
+        guard (24...RuntimeMaintenanceWindowStorage.schemaVersion).contains(inputs.schemaVersion), inputs.inventory == actual.inventory.canonicalBytes,
               Set(inputs.runtimes.map { $0.reference.services.accountID }).count == inputs.runtimes.count,
               Set(inputs.gateways.map(\.accountID)).count == inputs.gateways.count,
               inputs.runtimes.allSatisfy({ ids.contains($0.reference.services.accountID) }),

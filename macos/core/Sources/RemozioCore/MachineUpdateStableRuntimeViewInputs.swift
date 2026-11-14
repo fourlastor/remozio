@@ -10,7 +10,7 @@ struct MachineUpdateStableRuntimeViewInputs {
     init(source: MachineUpdateStableRuntimeSource, retained: [MachineUpdateRetainedSetupActivationSnapshot],
         runtime: RuntimeReleaseCompatibilitySnapshot, currentJournals: [Data: GatewayJournalPreparationState]) throws {
         let actual = source.actual, inputs = runtime.inputs
-        guard (24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(inputs.schemaVersion),
+        guard (24...RuntimeMaintenanceWindowStorage.schemaVersion).contains(inputs.schemaVersion),
               inputs.schemaVersion == actual.schemaVersion, inputs.macID == actual.inventory.macID,
               inputs.inventory == actual.inventory.canonicalBytes,
               try inputs.machineUpdateActivation == actual.activation.encoded,

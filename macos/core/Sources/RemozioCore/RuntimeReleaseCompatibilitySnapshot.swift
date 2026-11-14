@@ -157,6 +157,7 @@ struct RuntimeReleaseCompatibilitySnapshot: Sendable {
             if inputs.schemaVersion >= 26 { stable += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if inputs.schemaVersion >= 27 { stable += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             if inputs.schemaVersion >= 28 { stable += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
+            if inputs.schemaVersion >= 29 { stable += try RuntimeMaintenanceWindowStorage.readerRequirements }
             for item in stable { try include(item.role, item.name, item.readVersions, item.writeVersions) }
         }
         if native {

@@ -1,5 +1,5 @@
 {
- "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh",
+ "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests, RuntimeMaintenanceReaderTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh",
  "weights": {
   "AcceptedInputMemoTests": 0.0,
   "AccountPreparationTests": 1.69,
@@ -412,6 +412,7 @@
   "RuntimeJobProcessObservationTests": 0.7,
   "RuntimeJobRegistrationTests": 0.01,
   "RuntimeJobStopSessionTests": 0.01,
+  "RuntimeMaintenanceReaderTests": 80.98,
   "RuntimeMaterialAuditCodecTests": 0.84,
   "RuntimePhoneUpdateSchedulingCompatibilityTests": 1.76,
   "RuntimePreparationMaterialTests": 0.81,
@@ -864,6 +865,15 @@
    "testStaleMaterialAndPolicyResultsStopBeforePublicationThenFreshStateRecovers": 76.77,
    "testStalePublicationAndLostAcknowledgementRequireFreshReadOnlyRecovery": 78.28,
    "testUnresolvedWritingRefusesBeforeMaterialPublicationOrAcknowledgement": 26.0
+  },
+  "RuntimeMaintenanceReaderTests": {
+   "testIndexedCorruptionAndNoncanonicalTableDeclarationsRefuse": 18.91,
+   "testOldReadersAndExistingWritersRefuseSchema29": 9.42,
+   "testOpeningSchema28DoesNotMigrateOrChangeAnyRow": 9.55,
+   "testSchema29CompatibilityUsesAnActualRetainedActivationPlan": 13.41,
+   "testSchema29RetainsEveryOtherRowAndReadsTheStableCompletionChain": 9.98,
+   "testStartupChangedScopeKeepsAHeldAndReportsOwnerRecovery": 9.66,
+   "testWindowRowsParticipateInTheStableDigestAndHoldOnlyTheirAccount": 10.05
   },
   "SetupRetainedInvocationTests": {
    "testConstructionFailureDoesNotStealAnotherReservationOrLeakRights": 8.67,

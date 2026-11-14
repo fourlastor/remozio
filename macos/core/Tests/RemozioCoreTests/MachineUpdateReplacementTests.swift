@@ -34,7 +34,7 @@ private final class MachineReplacementFixture {
     var preparedURL: URL { URL(fileURLWithPath: machine.destination.path).appendingPathComponent(candidate.preparation.bundleName) }
     init(configurationEpoch: Bool = false, backendEpoch: Bool = false, installedReadiness: Bool = false,
          completionIntent: Bool = false, admitEveryAccount: Bool = false, readinessAlreadyEnabled: Bool = false,
-         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
+         stableFormats: Bool = false, policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
          enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
          policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
          beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in }) throws {
@@ -97,6 +97,7 @@ private final class MachineReplacementFixture {
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             if readinessReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
+            if maintenanceReaderFormats { requiredFormats += try RuntimeMaintenanceWindowStorage.readerRequirements }
             if promotionProposalFormats {
                 requiredFormats += try RuntimeRetainedSetupCompletionBinding.completedHostRequirements
                 for role in [AuthorityCodeRole.authority, .setupController] {
@@ -1828,7 +1829,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
     private func withCompletionFixture(installedReadiness: Bool = false, actualPolicyPair: Bool = false,
         registerForeground: Bool = true, registerGateway: Bool = false, registerSecondForeground: Bool = false,
         readinessAlreadyEnabled: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
         enableSecondReadiness: Bool = false, unchangedCodeGenerations: Bool = false,
         policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false, didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         beforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -1837,7 +1838,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var additionalForeground: [RuntimeActivationPlan] = []
         let f = try Fixture(backendEpoch: true, installedReadiness: installedReadiness, completionIntent: true,
             admitEveryAccount: registerSecondForeground, readinessAlreadyEnabled: readinessAlreadyEnabled,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
             enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
             policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, sharedImportFormats: sharedImportFormats, beforeActivation: { files in
             if registerSecondForeground {
@@ -2458,7 +2459,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     private func withFinishingFixture(registerForeground: Bool = true, registerGateway: Bool = false,
         registerSecondForeground: Bool = false, publishGatewayWithoutRegistration: Bool = false, stableFormats: Bool = false,
-        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
+        policyReaderFormats: Bool = false, completionReaderFormats: Bool = false, promotionReaderFormats: Bool = false, readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, retainedPolicySourceFormats: Bool = false, promotionProposalFormats: Bool = false,
         enableSecondReadiness: Bool = false, publishCompletionFiles: Bool = false, unchangedCodeGenerations: Bool = false,
         policyWriterFormats: Bool = false, policyMigration: Bool = true, sharedImportFormats: Bool = false,
         didPrepareSecondMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
@@ -2467,7 +2468,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         try withCompletionFixture(installedReadiness: true, actualPolicyPair: true,
             registerForeground: registerForeground, registerGateway: registerGateway,
             registerSecondForeground: registerSecondForeground, publishGatewayWithoutRegistration: publishGatewayWithoutRegistration,
-            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
+            stableFormats: stableFormats, policyReaderFormats: policyReaderFormats, completionReaderFormats: completionReaderFormats, promotionReaderFormats: promotionReaderFormats, readinessReaderFormats: readinessReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, retainedPolicySourceFormats: retainedPolicySourceFormats, promotionProposalFormats: promotionProposalFormats,
             enableSecondReadiness: enableSecondReadiness, unchangedCodeGenerations: unchangedCodeGenerations,
             policyWriterFormats: policyWriterFormats, policyMigration: policyMigration, sharedImportFormats: sharedImportFormats,
             didPrepareSecondMaterial: didPrepareSecondMaterial, beforeActivation: beforeActivation) { fixture in
@@ -3505,7 +3506,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withUnpublishedActivationReadFixture(policySourceFormats: Bool = false, completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         unchangedCodeGenerations: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
@@ -3513,7 +3514,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: policySourceFormats,
             completionReaderFormats: completionReaderFormats, promotionReaderFormats: completionReaderFormats,
-            readinessReaderFormats: completionReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
+            readinessReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, retainedPolicySourceFormats: policySourceFormats, promotionProposalFormats: promotionProposalFormats,
             unchangedCodeGenerations: unchangedCodeGenerations, beforeActivation: {
                 retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account
                 try additionalBeforeActivation($0)
@@ -3838,12 +3839,12 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withRetainedPolicySourceFixture(recorded: Bool = false, completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (CompletionFixture, LocalAccountIdentity, MachineUpdateRetainedSetupActivationSource,
             MachineUpdateRetainedSetupPolicySnapshot, AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Void) throws {
-        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial, additionalBeforeActivation: additionalBeforeActivation) { fixture, owner, material in
+        try withUnpublishedActivationReadFixture(policySourceFormats: true, completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: didPrepareMaterial, additionalBeforeActivation: additionalBeforeActivation) { fixture, owner, material in
             try withRetainedPolicyAfterStable(fixture: fixture, owner: owner, material: material,
                 recorded: recorded, body)
         }
@@ -4520,11 +4521,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
+    private func withRetainedSelectionFixture(completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false,
         additionalBeforeActivation: (BoundAdmissionRegistrationFixture) throws -> Void = { _ in },
         _ body: (RetainedSelectionFixture) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
-        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }, additionalBeforeActivation: additionalBeforeActivation) {
+        try withRetainedPolicySourceFixture(recorded: true, completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats, didPrepareMaterial: { material = $0 }, additionalBeforeActivation: additionalBeforeActivation) {
             fixture, owner, _, unpublished, current in
             try withRetainedSelectionAfterPolicy(fixture: fixture, owner: owner, unpublished: unpublished,
                 current: current, retainedMaterial: XCTUnwrap(material), body)
@@ -4950,9 +4951,9 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    private func withRetainedActivationValueFixture(completionReaderFormats: Bool = false, promotionProposalFormats: Bool = false, _ body: (RetainedSelectionFixture,
+    private func withRetainedActivationValueFixture(completionReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, promotionProposalFormats: Bool = false, _ body: (RetainedSelectionFixture,
         MachineUpdateRetainedSetupActivationSnapshot, RuntimeRetainedSetupActivationPlan) throws -> Void) throws {
-        try withRetainedSelectionFixture(completionReaderFormats: completionReaderFormats, promotionProposalFormats: promotionProposalFormats) { f in
+        try withRetainedSelectionFixture(completionReaderFormats: completionReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats, promotionProposalFormats: promotionProposalFormats) { f in
             let selected = try f.capture()
             let plan = try RuntimeRetainedSetupActivationPlan.retainingRetainedSetup(snapshot: f.snapshot,
                 selection: selected, current: f.current, candidate: f.fixture.candidate)
@@ -6017,13 +6018,13 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Links owned machine rows to decoded archive operands. It proves no live publication or startup.
-    private func withPromotionReaderFixture(readinessReaderFormats: Bool = false, published: Bool = false,
+    private func withPromotionReaderFixture(readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, published: Bool = false,
         didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         _ body: (CompletionFixture, AccountPreparationIntent,
         MachineUpdateRetainedSetupCompletionIntentRecord, MachineUpdateRetainedSetupPromotionIntentRecord) throws -> Void) throws {
         var retained: AccountPreparationIntent?
         try withFinishingFixture(stableFormats: true, policyReaderFormats: true, completionReaderFormats: true, promotionReaderFormats: true,
-            readinessReaderFormats: readinessReaderFormats,
+            readinessReaderFormats: readinessReaderFormats, maintenanceReaderFormats: maintenanceReaderFormats,
             beforeActivation: { retained = try self.prepareSecondForeground($0, didPrepareMaterial: didPrepareMaterial).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
             let candidate = fixture.candidate
@@ -6243,11 +6244,11 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned fixture keys and a historical exchange. It proves no native peer or fresh readiness.
-    private func withReadinessReaderFixture(readerFormats: Bool = true, differentOwnerUID: Bool = false,
+    private func withReadinessReaderFixture(readerFormats: Bool = true, maintenanceReaderFormats: Bool = false, differentOwnerUID: Bool = false,
         _ body: (CompletionFixture, AccountPreparationIntent, MachineUpdateRetainedSetupCompletionIntentRecord,
             MachineUpdateRetainedSetupPromotionIntentRecord, MachineUpdateRetainedSetupPromotionReadyRecord) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
-        try withPromotionReaderFixture(readinessReaderFormats: readerFormats, published: true,
+        try withPromotionReaderFixture(readinessReaderFormats: readerFormats, maintenanceReaderFormats: maintenanceReaderFormats, published: true,
             didPrepareMaterial: { material = $0 }) { fixture, account, completion, promotion in
             let material = try XCTUnwrap(material)
             guard case .map(let identity) = try DeterministicCBOR.decode(material.transportIdentity,
@@ -6274,6 +6275,41 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try fixture.files.sql("INSERT INTO retained_setup_promotion_ready_v1 VALUES(X'\(hex(account.accountID))',X'\(id)',X'\(revision)',X'\(record)')")
             try fixture.files.reopen()
             try body(fixture, account, completion, promotion, ready)
+        }
+    }
+
+    static func withMaintenanceRuntimeCompatibilityFixture(_ body: (RetainedRuntimeCompatibilityFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedActivationSQLReadsV6AndTheOrdinaryStateReaderStillRejectsIt"))
+        try suite.withRetainedActivationValueFixture(completionReaderFormats: true, maintenanceReaderFormats: true) { f, _, plan in
+            try suite.injectRetainedActivationRow(f, bytes: plan.encoded, materialID: plan.reference.materialID)
+            try f.fixture.machine.close()
+            for sql in [MachineUpdateRetainedSetupCompletionStorage.createSQL,
+                MachineUpdateRetainedSetupPromotionStorage.createSQL, MachineUpdateRetainedSetupPromotionReadyStorage.createSQL,
+                RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29"] { try f.fixture.files.sql(sql) }
+            try f.fixture.files.reopen()
+            try body(suite.compatibilityFixture(f, plan: plan))
+        }
+    }
+
+    static func withMaintenanceReaderFixture(_ body: (RuntimeMaintenanceReaderFixture) throws -> Void) throws {
+        let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
+            "testRetainedSetupReadinessReadsSchema28AndRejectsOrdinaryWrites"))
+        try suite.withReadinessReaderFixture(maintenanceReaderFormats: true) { f, account, _, _, _ in
+            let source = try f.machine.stableRuntimeSource(candidate: f.candidate)
+            let authority = try XCTUnwrap(source.preparations.first { preparation in
+                source.actual.admission.accounts.contains { $0.accountID == preparation.accountID }
+            })
+            var directory = authority.directoryID.uuid
+            let current = try RuntimeMaintenanceWindowRecord.Account(accountID: authority.accountID, ownerUID: authority.ownerUID,
+                directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+            try body(.init(machine: { f.machine }, candidate: f.candidate, account: account, authority: current,
+                databasePath: f.files.f.f.root.path + "/machine/installation.sqlite",
+                reopen: { try f.files.reopen() }, edit: { commands in
+                    try f.machine.close()
+                    for sql in commands { try f.files.sql(sql) }
+                    try f.files.reopen()
+                }))
         }
     }
 
