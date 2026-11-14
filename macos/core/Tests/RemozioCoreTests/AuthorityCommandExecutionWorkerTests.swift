@@ -160,3 +160,65 @@ final class AuthorityCommandExecutionWorkerTests: XCTestCase {
     }
 
 }
+
+extension AuthorityCommandExecutionWorkerTests {
+    @MainActor func testMaintenanceWorkRetainsQueuedTurnsAndDoesNotCountADuplicateTwice() async throws {
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in
+            entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+        }, rejectUnowned: { _ in })
+        try worker.start(); defer { resume.signal(); resume.signal() }
+        let first = notice(3)
+        XCTAssertEqual(worker.enqueue(first), .queued)
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 1)
+        XCTAssertEqual(worker.enqueue(first), .duplicate)
+        XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 1)
+        XCTAssertEqual(worker.enqueue(notice(4)), .queued)
+        let observed = worker.maintenanceExecutionWork
+        XCTAssertEqual(observed.queuedTurns, 2); XCTAssertEqual(observed.rejectedTurns, 0)
+        XCTAssertTrue(observed.started); XCTAssertFalse(observed.stopping); XCTAssertFalse(observed.failed)
+        resume.signal(); resume.signal(); await worker.close()
+        XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 0)
+        XCTAssertEqual(worker.maintenanceExecutionWork.rejectedTurns, 0)
+        XCTAssertEqual(observed.queuedTurns, 2)
+    }
+    func testMaintenanceWorkIncludesRejectedStartsOutsideThePendingDictionary() async throws {
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail("No start is permitted") },
+            rejectUnowned: { _ in entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success) })
+        try worker.start(); worker.requestStop(); defer { resume.signal() }
+        let item = notice(3)
+        let rejection = Task.detached { worker.enqueue(item) }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        let observed = worker.maintenanceExecutionWork
+        XCTAssertEqual(observed.queuedTurns, 0); XCTAssertEqual(observed.rejectedTurns, 1)
+        XCTAssertTrue(observed.stopping)
+        resume.signal(); let result = await rejection.value; XCTAssertEqual(result, .closed)
+        await worker.close()
+        XCTAssertEqual(worker.maintenanceExecutionWork.rejectedTurns, 0)
+        XCTAssertEqual(observed.rejectedTurns, 1)
+    }
+    @MainActor func testMaintenanceWorkKeepsTheReservationThroughTheReportCallback() async throws {
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in }, rejectUnowned: { _ in XCTFail() },
+            report: { _, _ in entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success) })
+        try worker.start(); defer { resume.signal() }
+        XCTAssertEqual(worker.enqueue(notice(3)), .queued)
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 1)
+        XCTAssertEqual(worker.maintenanceExecutionWork.rejectedTurns, 0)
+        resume.signal(); await worker.close()
+        XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 0)
+    }
+    func testMaintenanceZeroCountsRetainUnstartedStoppedAndFailedState() async throws {
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in XCTFail() },
+            rejectUnowned: { _ in throw AuthorityCommandExecutionWorkerError.closed })
+        XCTAssertFalse(worker.maintenanceExecutionWork.started)
+        XCTAssertEqual(worker.enqueue(notice(3)), .closed)
+        let observed = worker.maintenanceExecutionWork
+        XCTAssertTrue(observed.failed); XCTAssertTrue(observed.stopping)
+        XCTAssertEqual(observed.queuedTurns, 0); XCTAssertEqual(observed.rejectedTurns, 0)
+        await worker.close()
+    }
+}

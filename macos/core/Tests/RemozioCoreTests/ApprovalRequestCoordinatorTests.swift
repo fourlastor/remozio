@@ -2453,3 +2453,44 @@ extension ApprovalRequestCoordinatorTests {
         }
     }
 }
+
+extension ApprovalRequestCoordinatorTests {
+    func testMaintenanceJournalObservationPreservesLiveRequestsClockAndActivity() throws {
+        let fixture = try Fixture(), journal = try journalOwner(fixture), gate = try UpdateAdmissionTestFixture()
+        defer { try? journal.close() }
+        try journal.attachReleaseActivityBarrier(gate.activity.open())
+        let draft = try draft(), at = now(), later = now(200)
+        let initial = try journal.maintenanceJournalWork()
+        XCTAssertEqual(initial.requests.liveRequests, 0)
+        let request = try journal.withRequests { try $0.admitFixture(draft, now: at, receiptTimeMs: nil) }
+        let before = try journal.withRequests { try $0.state(requestID: request.requestID) }
+        let observed = try journal.maintenanceJournalWork()
+        XCTAssertEqual(observed.requests.liveRequests, 1); XCTAssertEqual(observed.requests.activityOwners, 1)
+        XCTAssertEqual(observed.nativeExecutions, 0); XCTAssertEqual(observed.exchanges.active, 0)
+        XCTAssertFalse(observed.exchanges.stopped)
+        XCTAssertEqual(try journal.maintenanceJournalWork(), observed)
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID) }, before)
+        XCTAssertThrowsError(try gate.activity.open().acquireExclusive())
+        _ = try journal.withRequests { try $0.expirePending(now: later, receiptTimeMs: nil) }
+        let settled = try journal.maintenanceJournalWork()
+        XCTAssertEqual(settled.requests.liveRequests, 0); XCTAssertEqual(settled.requests.activityOwners, 0)
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .expired)
+        XCTAssertEqual(observed.requests.liveRequests, 1)
+        let activity = try gate.activity.open().acquireExclusive(); activity.close()
+    }
+    func testMaintenanceJournalObservationRefusesReentryAndClosedOwnership() throws {
+        let fixture = try Fixture(), journal = try journalOwner(fixture)
+        try journal.withRequests { _ in
+            XCTAssertThrowsError(try journal.maintenanceJournalWork()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+        }
+        try journal.read { _ in
+            XCTAssertThrowsError(try journal.maintenanceJournalWork()) {
+                XCTAssertEqual($0 as? JournalDatabaseError, .transactionActive)
+            }
+        }
+        XCTAssertEqual(try journal.maintenanceJournalWork().requests.liveRequests, 0)
+        try journal.close(); XCTAssertThrowsError(try journal.maintenanceJournalWork())
+    }
+}

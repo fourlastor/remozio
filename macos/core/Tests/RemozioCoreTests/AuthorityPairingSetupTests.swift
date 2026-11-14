@@ -633,3 +633,106 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         }
     }
 }
+
+extension AuthorityPairingSetupTests {
+    func testMaintenancePairingObservationRetainsStagedWorkWithoutClockOrJournalMutation() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let endpoint = try f.endpoint(); defer { endpoint.close() }
+        XCTAssertFalse(try endpoint.maintenancePairingWork().ready)
+        try hello(endpoint)
+        let value = try staged(endpoint, proposal: f.proposal()), records = try f.records(), time = f.environment.time.value
+        let observed = try endpoint.maintenancePairingWork()
+        XCTAssertTrue(observed.ready); XCTAssertEqual(observed.stagedAttempts, 1)
+        XCTAssertEqual(observed.activityOwners, 1); XCTAssertFalse(observed.operationActive)
+        XCTAssertEqual(try endpoint.maintenancePairingWork(), observed)
+        XCTAssertEqual(try f.journal.maintenanceJournalWork().requests.liveRequests, 0)
+        XCTAssertEqual(try f.records(), records); XCTAssertEqual(f.environment.time.value, time)
+        XCTAssertThrowsError(try activity.open().acquireExclusive())
+        XCTAssertEqual(value.setupID.count, 16)
+        endpoint.cancelPairing { XCTAssertTrue($0) }
+        XCTAssertEqual(try endpoint.maintenancePairingWork().stagedAttempts, 0)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
+        XCTAssertEqual(observed.stagedAttempts, 1)
+        let replacement = try activity.open().acquireExclusive(); replacement.close()
+    }
+    func testMaintenancePairingObservationFromAnotherThreadSeesCommitAfterStagingClears() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let hold = Box(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+        let completed = DispatchSemaphore(value: 0), result = Box<Data?>(nil), operationThread = Box<UInt32>(0)
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+            authorize: { _ in
+                if hold.value {
+                    operationThread.value = pthread_mach_thread_np(pthread_self()); entered.signal()
+                    XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+                }
+            }, invalidate: {})
+        defer { resume.signal(); endpoint.close() }
+        try hello(endpoint)
+        let value = try staged(endpoint, proposal: f.proposal()), authorization = authorization
+        let digest = try value.digest(), proof = try f.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        hold.value = true
+        DispatchQueue.global().async {
+            endpoint.commitPairing(value.setupID, confirmedDigest: digest, biometricProof: proof,
+                authorization: authorization) { result.value = $0 }
+            completed.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertNotEqual(operationThread.value, pthread_mach_thread_np(pthread_self()))
+        let observed = try endpoint.maintenancePairingWork()
+        XCTAssertTrue(observed.operationActive); XCTAssertEqual(observed.stagedAttempts, 0)
+        XCTAssertEqual(observed.activityOwners, 1)
+        XCTAssertThrowsError(try activity.open().acquireExclusive())
+        resume.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+        XCTAssertNotNil(result.value); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
+        XCTAssertFalse(try endpoint.maintenancePairingWork().operationActive)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
+        endpoint.close(); XCTAssertThrowsError(try endpoint.maintenancePairingWork())
+    }
+    func testMaintenancePairingOwnerSurvivesWorkReturnBeforeReplyStarts() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let result = Box<UInt64>(0), budget = try AuthorityXPCWorkBudget(maximum: 1)
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: budget, verify: {},
+            authorize: { _ in }, invalidate: {}, onHandshake: {
+                entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+            })
+        defer { resume.signal(); endpoint.close() }
+        DispatchQueue.global().async {
+            endpoint.pairingHello { result.value = $0 }; completed.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(result.value, 0)
+        XCTAssertTrue(budget.acquire()); budget.release()
+        let observed = try endpoint.maintenancePairingWork()
+        XCTAssertTrue(observed.ready); XCTAssertTrue(observed.operationActive)
+        XCTAssertEqual(observed.stagedAttempts, 0); XCTAssertEqual(observed.activityOwners, 1)
+        XCTAssertThrowsError(try activity.open().acquireExclusive())
+        resume.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(result.value, 1); XCTAssertFalse(try endpoint.maintenancePairingWork().operationActive)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
+        let update = try activity.open().acquireExclusive(); update.close()
+    }
+    func testMaintenancePairingOwnerSurvivesReplyUntilItsActivityActuallyCloses() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let endpoint = try f.endpoint(); try hello(endpoint)
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), completed = DispatchSemaphore(value: 0)
+        let result = Box<Data?>(nil)
+        defer { resume.signal(); endpoint.close() }
+        DispatchQueue.global().async {
+            endpoint.pairingContext { bytes in
+                result.value = bytes; entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+            }
+            completed.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertNotNil(result.value)
+        let observed = try endpoint.maintenancePairingWork()
+        XCTAssertTrue(observed.operationActive); XCTAssertEqual(observed.activityOwners, 1)
+        XCTAssertEqual(observed.stagedAttempts, 0)
+        XCTAssertThrowsError(try activity.open().acquireExclusive())
+        resume.signal(); XCTAssertEqual(completed.wait(timeout: .now() + 3), .success)
+        XCTAssertFalse(try endpoint.maintenancePairingWork().operationActive)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
+        let update = try activity.open().acquireExclusive(); update.close()
+    }
+}

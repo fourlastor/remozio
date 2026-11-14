@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Security
+import Synchronization
 
 /// Local pairing setup only. This protocol carries no command decision or credential release.
 @objc public protocol AuthorityPairingXPCProtocol {
@@ -21,11 +22,29 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private let authorize: (Data) throws -> Void
     private let invalidate: () -> Void
     private let onHandshake: @Sendable () -> Void
-    private var ready = false
-    private var closed = false
-    private var busy = false
-    private var attempt: PairingEnrollmentAttempt?
-    private var attemptActivity: ReleaseActivityToken?
+    private struct WorkState {
+        var ready = false, closed = false, busy = false
+        var attempt: PairingEnrollmentAttempt?
+        var activity: ReleaseActivityToken?
+        var operations: [UUID: Bool] = [:]
+    }
+    private let state = Mutex(WorkState())
+    private var ready: Bool { get { state.withLock { $0.ready } } set { state.withLock { $0.ready = newValue } } }
+    private var closed: Bool { get { state.withLock { $0.closed } } set { state.withLock { $0.closed = newValue } } }
+    private var busy: Bool { get { state.withLock { $0.busy } } set { state.withLock { $0.busy = newValue } } }
+    private var attempt: PairingEnrollmentAttempt? { state.withLock { $0.attempt } }
+    private var attemptActivity: ReleaseActivityToken? { state.withLock { $0.activity } }
+    private final class Completion {
+        let activity: ReleaseActivityToken?
+        let finish: () -> Void
+        let closed = Mutex(false)
+        init(activity: ReleaseActivityToken?, finish: @escaping () -> Void) { self.activity = activity; self.finish = finish }
+        func close() {
+            guard closed.withLock({ if $0 { return false }; $0 = true; return true }) else { return }
+            activity?.close(); finish()
+        }
+        deinit { close() }
+    }
     private var expiryTimer: DispatchSourceTimer?
 
     convenience init(connection: NSXPCConnection, policy: XPCPeerPolicy, access: AuthorityPairingSetupAccess,
@@ -47,6 +66,15 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
         self.invalidate = invalidate; self.onHandshake = onHandshake
     }
     deinit { expiryTimer?.cancel(); attemptActivity?.close() }
+    /// Samples actual ownership without waiting for the operation lock or mutating the pairing lifetime.
+    func maintenancePairingWork() throws -> AuthorityMaintenancePairingWork {
+        try state.withLock {
+            guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+            return .init(ready: $0.ready, stagedAttempts: $0.attempt == nil ? 0 : 1,
+                activityOwners: ($0.activity == nil ? 0 : 1) + $0.operations.values.filter { $0 }.count,
+                operationActive: $0.busy || !$0.operations.isEmpty)
+        }
+    }
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
@@ -57,7 +85,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func pairingHello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             let completed = try work(handshake: true) { ready = true }
-            defer { completed.activity?.close() }
+            defer { completed.completion.close() }
             onHandshake(); send { reply(1) }
         } catch { close(); reply(0) }
     }
@@ -74,7 +102,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             defer { if !transferred { activity?.close() } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
-            attempt = staged; attemptActivity = activity; transferred = true
+            state.withLock { $0.attempt = staged; $0.activity = activity }; transferred = true
             startExpiryTimer()
             return bytes
         }
@@ -94,7 +122,7 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     func cancelPairing(reply: @escaping @Sendable (Bool) -> Void) {
         do {
             let completed = try work { clearAttempt() }
-            defer { completed.activity?.close() }
+            defer { completed.completion.close() }
             send { reply(true) }
         }
         catch { close(); reply(false) }
@@ -102,30 +130,44 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
     private func respond(_ reply: @escaping @Sendable (Data?) -> Void, _ body: () throws -> Data) {
         do {
             let completed = try work(body)
-            defer { completed.activity?.close() }
+            defer { completed.completion.close() }
             send { reply(completed.value) }
         }
         catch { close(); reply(nil) }
     }
-    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> (value: T, activity: ReleaseActivityToken?) {
+    private func work<T>(handshake: Bool = false, _ body: () throws -> T) throws -> (value: T, completion: Completion) {
         // Native checks stay on the original exported invocation stack.
         try verify()
         return try lock.withLock {
             guard !closed, !busy, ready != handshake, budget.acquire() else { throw AuthorityPairingSetupError.unavailable }
-            busy = true; defer { busy = false; budget.release() }
+            let id = UUID()
+            state.withLock { $0.busy = true; $0.operations[id] = false }
+            var completion: Completion?, transferred = false
+            defer {
+                busy = false; budget.release()
+                if !transferred {
+                    if let completion { completion.close() }
+                    else { _ = state.withLock { $0.operations.removeValue(forKey: id) } }
+                }
+            }
             let activity = try access.acquireReleaseActivity()
-            var transferred = false
-            defer { if !transferred { activity?.close() } }
+            state.withLock { $0.operations[id] = activity != nil }
+            let owned = Completion(activity: activity) { [self] in
+                _ = state.withLock { $0.operations.removeValue(forKey: id) }
+            }
+            completion = owned
             try access.verifyCurrent()
             let value = try body()
             try activity?.validate()
             transferred = true
-            return (value, activity)
+            return (value, owned)
         }
     }
     private func clearAttempt() {
         expiryTimer?.cancel(); expiryTimer = nil
-        attempt = nil; attemptActivity?.close(); attemptActivity = nil
+        state.withLock { $0.attempt = nil }
+        attemptActivity?.close()
+        state.withLock { $0.activity = nil }
     }
     private func startExpiryTimer() {
         let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))

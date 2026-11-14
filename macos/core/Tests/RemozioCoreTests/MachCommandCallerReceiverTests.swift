@@ -6114,6 +6114,11 @@ extension MachCommandCallerReceiverTests {
         let before = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
         XCTAssertEqual(before?.revision, 2)
         XCTAssertEqual(authority.activeCommandCount, 1)
+        let retainedWork = try authority.maintenanceJournalWork()
+        XCTAssertEqual(retainedWork.requests.liveRequests, 0)
+        XCTAssertEqual(retainedWork.requests.commandCaptures, 0)
+        XCTAssertEqual(retainedWork.nativeExecutions, 1)
+
         XCTAssertThrowsError(try receive.receiveExecutionEvent(timeoutMilliseconds: 10)) { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
         let lateInput = try CommandStreamFrame(sequence: 0, body: .input(Data("late".utf8))).encode(binding: binding)
         XCTAssertTrue(try MachCommandWire.sendStream(lateInput, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
@@ -6121,6 +6126,8 @@ extension MachCommandCallerReceiverTests {
         XCTAssertTrue(try MachCommandWire.sendStream(acknowledgment, destination: XCTUnwrap(control).borrowed(), toAuthority: true))
         XCTAssertEqual(try ownerTerminal(terminal, submission: submission, admission: admission).outcome, .exited(7))
         try awaitDispatchCleanup(authority)
+        XCTAssertEqual(try authority.maintenanceJournalWork().nativeExecutions, 0)
+
         let after = try authority.withRequests { try $0.historicalOutcome(requestID: request.requestID) }
         XCTAssertEqual(after?.revision, before?.revision)
         XCTAssertThrowsError(try beginDispatch(fixture, request: request, launcher: launcher))
@@ -9213,5 +9220,52 @@ extension MachCommandCallerReceiverTests {
                 } else { XCTAssertEqual($0 as? MachCommandCallerError, .timeout) }
             }
         }
+    }
+}
+
+extension MachCommandCallerReceiverTests {
+    @MainActor func testMaintenanceObservationTracksAuthorizationThroughItsPostLockCallback() async throws {
+        let fixture = try CommandRequestFixture(checkpointed: true, owned: true)
+        let journal = try XCTUnwrap(fixture.authority), admissionPort = try Endpoint(), terminal = try Endpoint()
+        let (_, command, submission, profile) = try ownerIOCommand(admission: admissionPort, terminal: terminal)
+        let request = try admitOwnedCommand(command, fixture: fixture)
+        let admission = try ownerAdmission(admissionPort, submission: submission, profile: profile)
+        let before = try journal.maintenanceJournalWork()
+        XCTAssertEqual(before.requests.liveRequests, 1); XCTAssertEqual(before.requests.commandCaptures, 1)
+        let (body, signature) = try noticeDecision(request, fixture: fixture), time = fixture.now(130)
+        let entered = Mutex(false), resume = DispatchSemaphore(value: 0)
+        let worker = try AuthorityCommandExecutionWorker(begin: { _, _ in throw CommandExecutionError.unavailable },
+            rejectUnowned: { notice in
+                XCTAssertTrue(try journal.cancelUnownedCommandExecution(notice, now: time, receiptTimeMs: nil))
+            })
+        try worker.start(); defer { resume.signal(); worker.requestStop() }
+        let exchange = Task.detached {
+            try journal.withValidatedCommandExchange(requestID: request.requestID, decisionSupplied: true,
+                validate: { _ in }, body: { owner in
+                    _ = try owner.consume(canonicalDecision: body, signature: signature,
+                        authenticatedPhoneID: Data(repeating: 5, count: 16), authenticatedEnrollmentEpoch: Data(repeating: 9, count: 16),
+                        now: time, receiptTimeMs: nil)
+                    return 17
+                }, onCommandAuthorized: { notice in
+                    entered.withLock { $0 = true }
+                    XCTAssertEqual(resume.wait(timeout: .now() + 3), .success)
+                    XCTAssertEqual(worker.enqueue(notice), .queued)
+                })
+        }
+        for _ in 0..<200 where !entered.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(entered.withLock { $0 })
+        let gap = try journal.maintenanceJournalWork()
+        XCTAssertEqual(gap.exchanges.active, 1); XCTAssertFalse(gap.exchanges.stopped)
+        XCTAssertEqual(gap.requests.liveRequests, 1); XCTAssertEqual(gap.requests.commandCaptures, 1)
+        XCTAssertEqual(gap.nativeExecutions, 0); XCTAssertEqual(worker.maintenanceExecutionWork.queuedTurns, 0)
+        XCTAssertEqual(try journal.withRequests { try $0.state(requestID: request.requestID).phase }, .authorized)
+        XCTAssertEqual(try journal.maintenanceJournalWork(), gap)
+        resume.signal(); _ = try await exchange.value
+        await worker.close()
+        let after = try journal.maintenanceJournalWork()
+        XCTAssertEqual(after.exchanges.active, 0); XCTAssertFalse(after.exchanges.stopped)
+        XCTAssertEqual(after.requests.commandCaptures, 0); XCTAssertEqual(after.requests.liveRequests, 0)
+        XCTAssertEqual(try ownerTerminal(terminal, submission: submission,
+            admission: admission).outcome, .cancelledBeforeStart)
     }
 }

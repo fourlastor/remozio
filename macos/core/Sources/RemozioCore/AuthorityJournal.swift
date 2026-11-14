@@ -320,6 +320,20 @@ public final class AuthorityJournal: @unchecked Sendable {
         }
     }
 
+    /// Observes the actual owners under the journal lock without cancelling work or polling native cleanup.
+    /// The worker and receiver have separate ownership. This value cannot establish whole-runtime settlement.
+    func maintenanceJournalWork() throws -> AuthorityMaintenanceJournalWork {
+        try lock.withLock {
+            try requireNoRequestOperation()
+            guard !updateHealthOnly, !updateCompletionOnly, !retainedSetupPolicyOnly, let requests else {
+                throw ApprovalCoordinatorError.unavailable
+            }
+            try database.read { _ in () } // Health check: reject closed storage and transaction-callback entry.
+            return try .init(requests: requests.maintenanceRequestWork(), exchanges: commandExchanges.maintenanceWork,
+                nativeExecutions: commandExecutions.count, executionActivityOwners: commandActivity.count)
+        }
+    }
+
     /// Transfers a command into the serialized request owner, without a Sendable capture wrapper.
     /// A failed first transfer closes its objects. Rejected reentry leaves previously owned objects intact.
     /// The host completes negotiation and current elevation-policy validation before this call.

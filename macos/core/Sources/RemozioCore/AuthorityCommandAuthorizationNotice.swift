@@ -15,6 +15,9 @@ final class AuthorityCommandExchangeOwnership: Sendable {
     }
     func end() { state.withLock { $0.active -= 1; completion.leave() } }
     var hasActive: Bool { state.withLock { $0.active > 0 } }
+    var maintenanceWork: AuthorityMaintenanceExchangeWork {
+        state.withLock { .init(active: $0.active, stopped: $0.stopped) }
+    }
     func stop() { state.withLock { $0.stopped = true } }
     func stopAndDrain() async {
         stop()

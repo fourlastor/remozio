@@ -11,6 +11,7 @@ private final class CommandExecutionWorkerOwnership: Sendable {
         var started = false
         var stopping = false
         var failed = false
+        var reservations = 0
         var pending: [Data: AuthorityCommandAuthorizationNotice] = [:]
     }
     let state = Mutex(State())
@@ -65,14 +66,17 @@ public final class AuthorityCommandExecutionWorker: Sendable {
         let ownership = self.ownership
         let admitted: EnqueueResult = ownership.state.withLock { state in
             guard state.pending[notice.requestID] == nil else { return .duplicate }
-            ownership.completion.enter()
+            ownership.completion.enter(); state.reservations += 1
             guard state.started, !state.stopping else { return .closed }
             guard state.pending.count < maximumPending else { state.stopping = true; return .capacity }
             state.pending[notice.requestID] = notice; return .queued
         }
         guard admitted == .queued else {
             guard admitted != .duplicate else { return admitted }
-            defer { ownership.completion.leave() }
+            defer {
+                ownership.state.withLock { $0.reservations -= 1 }
+                ownership.completion.leave()
+            }
             // The journal must settle this exact unowned approval before capacity retirement.
             do {
                 try rejectUnowned(notice)
@@ -84,7 +88,9 @@ public final class AuthorityCommandExecutionWorker: Sendable {
         let begin = begin, rejectUnowned = rejectUnowned, report = report
         queue.async {
             defer {
-                _ = ownership.state.withLock { $0.pending.removeValue(forKey: notice.requestID) }
+                ownership.state.withLock {
+                    $0.pending.removeValue(forKey: notice.requestID); $0.reservations -= 1
+                }
                 ownership.completion.leave()
             }
             do {
@@ -100,6 +106,14 @@ public final class AuthorityCommandExecutionWorker: Sendable {
             }
         }
         return .queued
+    }
+
+    /// Includes rejected starts through their actual rejection and report callbacks, not only queued notices.
+    var maintenanceExecutionWork: AuthorityMaintenanceExecutionWork {
+        ownership.state.withLock {
+            .init(started: $0.started, stopping: $0.stopping, failed: $0.failed,
+                queuedTurns: $0.pending.count, rejectedTurns: $0.reservations - $0.pending.count)
+        }
     }
 
     func requireOrdinaryReadiness() throws {
