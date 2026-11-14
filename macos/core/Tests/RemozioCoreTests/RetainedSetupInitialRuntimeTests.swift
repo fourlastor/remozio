@@ -185,36 +185,54 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
             for body in state.bodies { XCTAssertThrowsError(try body(f.machine())) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) } }
         }
     }
-    func testUnpublishedExactFilesCompleteWithoutChangingAnyExistingFile() throws {
+    func testExactPublicationAlsoRejectsMissingCustodyAndInvalidScopes() throws {
         try fixture { f, before, current in
             let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }
+            let refused = State()
+            XCTAssertThrowsError(try prepare(f, before, files, state: refused, custody: false)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .custodyNotAccepted)
+            }
+            XCTAssertEqual(refused.calls + refused.captures + refused.pairReads + refused.materialReads + refused.artifactReads, 0)
+            XCTAssertTrue(refused.counts.isEmpty)
+            let recursive = State(); recursive.onScope = { scope in
+                let shared = SharedScope(scope), rejected = Mutex(false), done = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async {
+                    defer { done.signal() }
+                    do { try shared.scope.requireActive() } catch { rejected.withLock { $0 = error as? JournalLeaseError == .invalidated } }
+                }
+                XCTAssertEqual(done.wait(timeout: .now() + 2), .success); XCTAssertTrue(rejected.withLock { $0 })
+                try scope.withActive { XCTAssertThrowsError(try scope.withActive {}) { XCTAssertEqual($0 as? PreparationStoreError, .transactionActive) } }
+            }
+            XCTAssertThrowsError(try prepare(f, before, files, state: recursive))
+            XCTAssertEqual(recursive.commits, 0); XCTAssertEqual(files.publicationCalls, 0)
             let stamps = try files.stamps(), state = State()
             XCTAssertTrue(try prepare(f, before, files, state: state).activation.runtime.state.configurationPublished)
             XCTAssertEqual(try files.stamps(), stamps); XCTAssertEqual(state.commits, 1); budget(state, published: false)
         }
     }
-    func testUnpublishedPartialFilesAreCompletedBeforeTheMetadataMarker() throws {
+    func testPartialPublicationFailureThenFreshPartialCompletion() throws {
         try fixture { f, before, current in
             let files = try files(f, before, current, seed: false); defer { XCTAssertNoThrow(try files.close()) }
+            let failed = State(); failed.failPublicationAt = 3
+            XCTAssertThrowsError(try prepare(f, before, files, state: failed)) { XCTAssertTrue($0 is Fault) }
+            XCTAssertEqual(files.publicationCalls, 3); XCTAssertTrue(failed.stages.isEmpty); XCTAssertEqual(failed.commits, 0)
+            try f.reopen(nil); try snapshot(f).requireSame(as: before)
             for artifact in files.artifacts.prefix(4) { try files.put(artifact, bytes: artifact.bytes) }
-            XCTAssertTrue(try prepare(f, before, files).activation.runtime.state.configurationPublished)
-            XCTAssertEqual(files.publicationCalls, 8)
+            let callsBeforeCompletion = files.publicationCalls
+            let actual = try prepare(f, before, files)
+            XCTAssertTrue(actual.activation.runtime.state.configurationPublished); XCTAssertEqual(files.publicationCalls, 11)
+            XCTAssertTrue(actual.activation.runtime.state.configurationPublished)
+            XCTAssertEqual(files.publicationCalls - callsBeforeCompletion, 8)
             for artifact in files.artifacts { XCTAssertEqual(try files.read(artifact), artifact.bytes) }
         }
     }
-    func testPublishedRecoverySkipsSelectionAndPublicationAndAssertsSixReadTransactions() throws {
+    func testPublishedRecoveryAndAllMissingOrConflictingFilesDoNotWrite() throws {
         try fixture { f, before, current in
             let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }
             let published = try markPublished(f, before), state = State(), stamps = try files.stamps()
             try prepare(f, published, files, state: state).requireSame(as: published)
             budget(state, published: true); XCTAssertEqual(files.publicationCalls, 0); XCTAssertEqual(state.commits, 0)
             XCTAssertEqual(try files.stamps(), stamps)
-        }
-    }
-    func testEachMissingPublishedFileRefusesWithoutRepairOrAnotherCommit() throws {
-        try fixture { f, before, current in
-            let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }
-            let published = try markPublished(f, before)
             for artifact in files.artifacts {
                 try FileManager.default.removeItem(at: files.url(artifact)); let state = State()
                 XCTAssertThrowsError(try prepare(f, published, files, state: state))
@@ -222,29 +240,12 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
                 XCTAssertFalse(FileManager.default.fileExists(atPath: files.url(artifact).path))
                 try files.put(artifact, bytes: artifact.bytes)
             }
-        }
-    }
-    func testEachConflictingPublishedFileRefusesWithoutRepairOrAnotherCommit() throws {
-        try fixture { f, before, current in
-            let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }
-            let published = try markPublished(f, before)
             for artifact in files.artifacts {
                 try files.put(artifact, bytes: Data([0])); let state = State()
                 XCTAssertThrowsError(try prepare(f, published, files, state: state))
                 XCTAssertEqual(state.commits, 0); XCTAssertEqual(files.publicationCalls, 0)
                 XCTAssertEqual(try files.read(artifact), Data([0])); try files.put(artifact, bytes: artifact.bytes)
             }
-        }
-    }
-    func testPartialPublicationFailureNeverStartsCompletionAndRequiresAFreshInvocation() throws {
-        try fixture { f, before, current in
-            let files = try files(f, before, current, seed: false); defer { XCTAssertNoThrow(try files.close()) }
-            let failed = State(); failed.failPublicationAt = 3
-            XCTAssertThrowsError(try prepare(f, before, files, state: failed)) { XCTAssertTrue($0 is Fault) }
-            XCTAssertEqual(files.publicationCalls, 3); XCTAssertTrue(failed.stages.isEmpty); XCTAssertEqual(failed.commits, 0)
-            try f.reopen(nil); try snapshot(f).requireSame(as: before)
-            let actual = try prepare(f, before, files)
-            XCTAssertTrue(actual.activation.runtime.state.configurationPublished); XCTAssertEqual(files.publicationCalls, 11)
         }
     }
     func testLostCompletionCommitAcknowledgementRequiresReadOnlyRecoveryWithoutPublication() throws {
@@ -270,28 +271,6 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
             XCTAssertTrue(actual.activation.runtime.state.configurationPublished)
             let recovered = State(); try prepare(f, actual, files, state: recovered).requireSame(as: actual)
             budget(recovered, published: true); XCTAssertEqual(files.publicationCalls, 8)
-        }
-    }
-    func testCustodyRefusalPrecedesAllReadsAndRecursiveOrForeignScopesCannotBeUsed() throws {
-        try fixture { f, before, current in
-            let files = try files(f, before, current); defer { XCTAssertNoThrow(try files.close()) }
-            let refused = State()
-            XCTAssertThrowsError(try prepare(f, before, files, state: refused, custody: false)) {
-                XCTAssertEqual($0 as? RuntimePreparationError, .custodyNotAccepted)
-            }
-            XCTAssertEqual(refused.calls + refused.captures + refused.pairReads + refused.materialReads + refused.artifactReads, 0)
-            XCTAssertTrue(refused.counts.isEmpty)
-            let recursive = State(); recursive.onScope = { scope in
-                let shared = SharedScope(scope), rejected = Mutex(false), done = DispatchSemaphore(value: 0)
-                DispatchQueue.global().async {
-                    defer { done.signal() }
-                    do { try shared.scope.requireActive() } catch { rejected.withLock { $0 = error as? JournalLeaseError == .invalidated } }
-                }
-                XCTAssertEqual(done.wait(timeout: .now() + 2), .success); XCTAssertTrue(rejected.withLock { $0 })
-                try scope.withActive { XCTAssertThrowsError(try scope.withActive {}) { XCTAssertEqual($0 as? PreparationStoreError, .transactionActive) } }
-            }
-            XCTAssertThrowsError(try prepare(f, before, files, state: recursive))
-            XCTAssertEqual(recursive.commits, 0); XCTAssertEqual(files.publicationCalls, 0)
         }
     }
 }
