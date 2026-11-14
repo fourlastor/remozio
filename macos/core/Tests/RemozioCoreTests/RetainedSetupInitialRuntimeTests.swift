@@ -49,7 +49,11 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
         }
         func put(_ artifact: Artifact, bytes: Data) throws {
             try bytes.write(to: url(artifact))
-            guard chmod(url(artifact).path, try file(artifact).mode) == 0 else { throw JournalLeaseError.system(errno) }
+            let metadata = try file(artifact)
+            if let group = metadata.groupID {
+                guard chown(url(artifact).path, uid_t.max, group) == 0 else { throw JournalLeaseError.system(errno) }
+            }
+            guard chmod(url(artifact).path, metadata.mode) == 0 else { throw JournalLeaseError.system(errno) }
         }
         func read(_ artifact: Artifact) throws -> Data? {
             try ProtectedServiceConfiguration.readOptional(anchor: directory.path,
@@ -152,6 +156,9 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
         XCTAssertEqual(state.materialReads, published ? 8 : 38)
         XCTAssertEqual(state.artifactReads, published ? 32 : 104)
         XCTAssertEqual(state.pairReads, published ? 8 : 64)
+        guard state.byCall.count == (published ? 3 : 5) else {
+            XCTFail("The expected machine calls did not finish"); return
+        }
         for i in published ? [0, 2] : [0, 2, 4] {
             XCTAssertEqual(state.byCall[i][.readTransaction], 1)
             XCTAssertEqual(state.byCall[i][.runtime], 2)
