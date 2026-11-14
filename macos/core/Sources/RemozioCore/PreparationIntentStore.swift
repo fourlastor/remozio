@@ -14,9 +14,9 @@ enum PreparationStoreError: Error, Equatable {
 public final class PreparationIntentStore {
     enum Opening { case mutable, retainedPolicyVerification }
     private let opening: Opening
-    enum InitialRuntimeRead: Hashable { case readTransaction, writeTransaction, runtime, frame, activation, policyScan, policyMarker, sharedImport }
-    // Internal fixture observation carries counts only, without source values or authority.
-    var observeInitialRuntimeRead: ((InitialRuntimeRead) -> Void)?
+    enum InitialRuntimeRead: Hashable { case readTransaction, writeTransaction, runtime, frame, activation, policyScan, policyMarker, sharedImport, protectedRows, importInputs }
+    // Test-only, never assigned in Sources. The observer carries read kinds, without payload or authority.
+    var observeStoreRead: ((InitialRuntimeRead) -> Void)?
     public static let supportedSchemaVersions: Set<Int64> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
     private let lease: InstallationStorageLease
     private var db: OpaquePointer?
@@ -105,13 +105,13 @@ public final class PreparationIntentStore {
     func validateStorageLease(nativeDirectory: String? = nil) throws {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         if let nativeDirectory { try lease.requireNativeLocation(nativeDirectory) }
         else { try lease.validate() }
     }
 
     public func close() throws {
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         shutdown()
     }
     /// Explicit storage upgrade only. It grants no service registration or update activation authority.
@@ -222,7 +222,7 @@ public final class PreparationIntentStore {
         _ body: (ProtectedSetupDirectory, uid_t) throws -> Value) throws -> Value {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         if let borrowed = sharedImportReadBorrow {
             try borrowed.validate(in: self, journal: journal)
             let value = try body(borrowed.directory, borrowed.owner)
@@ -241,7 +241,7 @@ public final class PreparationIntentStore {
         }
     }
     private func sharedImportCompatibilitySnapshot(installationID: Data?) throws -> SharedSetupImportCompatibilitySnapshot? {
-        observeInitialRuntimeRead?(.sharedImport)
+        observeStoreRead?(.sharedImport)
         if let borrowed = sharedImportReadBorrow { return try borrowed.capture(in: self, installationID: installationID) }
         return try lease.sharedImportCompatibilitySnapshot(macID: macID, installationID: installationID)
     }
@@ -249,7 +249,7 @@ public final class PreparationIntentStore {
     func withSharedImportJournal<Value>(_ body: (SharedSetupImportJournal?) throws -> Value) throws -> Value {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         guard let inventory = try self.inventory() else { throw PreparationStoreError.inventoryNotEnabled }
         return try lease.withSharedImportJournal(macID: macID, installationID: inventory.installationID, body: body)
     }
@@ -257,7 +257,7 @@ public final class PreparationIntentStore {
     func withSharedImportRelayDirectory<Value>(_ body: (ProtectedSetupDirectory, uid_t) throws -> Value) throws -> Value {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         return try lease.withSharedImportRelayDirectory(body)
     }
     func sharedImportRelayPlan(expected: SharedSetupImportIntent) throws -> SharedSetupImportRelayPlan? {
@@ -274,7 +274,7 @@ public final class PreparationIntentStore {
                              didStage: (SharedSetupImportPublication.Stage) throws -> Void) throws -> SharedSetupImportIntent {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
-        guard !active else { throw PreparationStoreError.transactionActive }
+        guard !active, retainedImportAuthorization == nil else { throw PreparationStoreError.transactionActive }
         guard let inventory = try self.inventory(), intent.scope.macID == macID,
               let account = try accountPreparation(ownerUID: intent.scope.ownerUID),
               intent.scope == (try SharedSetupImportIntent.Scope(account: account, inventory: inventory)) else {
@@ -644,7 +644,7 @@ public final class PreparationIntentStore {
         }
     }
     private func loadRuntimeActivation(accountID: Data) throws -> RuntimeActivationState {
-        observeInitialRuntimeRead?(.activation)
+        observeStoreRead?(.activation)
         return try statement("SELECT material,digest,registered,record FROM runtime_activation_v1 WHERE account=?") { row in
             try bind(accountID, column: 1, row: row)
             if try step(row) == SQLITE_DONE { return .init(plan: nil, jobsRegistered: false) }
@@ -4374,6 +4374,7 @@ public final class PreparationIntentStore {
         }
     }
     private func stableRuntimePreparationProtectedDigest(excluding accountID: Data?) throws -> Data {
+        observeStoreRead?(.protectedRows)
         guard accountID == nil || accountID?.count == 16 else { throw PreparationStoreError.corruptRecord }
         let tables: [String] = try statement("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name") { row in
             var names: [String] = []
@@ -4392,6 +4393,114 @@ public final class PreparationIntentStore {
                     max(MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes, MachineUpdateRetainedSetupPromotionReadyRecord.maximumBytes))))
         }
         return Data(hash.finalize())
+    }
+
+    private final class RetainedImportAuthorization {}
+    private var retainedImportAuthorization: RetainedImportAuthorization?
+    typealias RetainedImportFrame = (entry: MachineUpdateRetainedSetupInitialRuntimeEntry, inputs: MachineUpdateRetainedSetupRuntimeInputs)
+    enum RetainedImportStage { case beforeJournal, afterJournal }
+    struct RetainedImportScope: CustomStringConvertible, CustomDebugStringConvertible {
+        fileprivate let readValue: (Bool) throws -> RetainedImportFrame
+        fileprivate let leave: () -> Void
+        var description: String { "RetainedImportScope(redacted)" }
+        var debugDescription: String { description }
+        func read() throws -> RetainedImportFrame { try readValue(false) }
+        func requireActive() throws { _ = try read() }
+        func withActive<Value>(_ body: (RetainedImportFrame) throws -> Value) throws -> Value {
+            let frame = try readValue(true); defer { leave() }
+            let result = try body(frame); _ = try read(); return result
+        }
+    }
+    /// Advances only the held journal. Callbacks verify actual files and the pair without querying either store.
+    /// Recovery observes completion only. It invents no previous revision and issues no transition receipt.
+    func acknowledgeRetainedSetupImport(expected: MachineUpdateRetainedSetupInitialRuntimeEntry,
+        expectedInputs: MachineUpdateRetainedSetupRuntimeInputs, journal: SharedSetupImportJournal,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        fileCustodyAccepted: Bool, verifyScoped: (RetainedImportStage, RetainedImportScope) throws -> Void)
+        throws -> (frame: RetainedImportFrame, advanced: Bool) {
+        guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
+        guard !active else { throw PreparationStoreError.transactionActive }
+        guard opening == .mutable else { throw PreparationStoreError.invalidTransition }
+        try requireRetainedSetupPromotionWriterAvailable()
+        guard expected.runtime.state.configurationPublished, expected.intent?.phase == .recorded,
+              expectedInputs.journalPresent, let previous = expectedInputs.intent,
+              previous.phase == .retained || previous.phase == .runtimePublished,
+              let borrowed = sharedImportReadBorrow else { throw RuntimePreparationError.incomplete }
+        try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
+        guard let format = candidate.manifest.components.first(where: { $0.role == .setupController })?.formats
+                .first(where: { $0.name == SharedSetupImportJournal.formatName }),
+              SharedSetupImportJournal.supportedVersions.isSubset(of: format.readers),
+              previous.phase == .runtimePublished || SharedSetupImportJournal.supportedVersions.isSubset(of: format.writers) else {
+            throw PreparationStoreError.incompatibleStore
+        }
+        try expectedInputs.requireSource(expected.runtime); try borrowed.validate(in: self, journal: journal)
+        let token = RetainedImportAuthorization(), processID = getpid(), thread = pthread_self()
+        retainedImportAuthorization = token; defer { retainedImportAuthorization = nil }
+        weak var writer = self
+        var live = true
+        defer { live = false; writer = nil }
+        do { return try admission.withMachineAdmission { loan in
+            func validate() throws {
+                guard getpid() == processID, pthread_equal(pthread_self(), thread) != 0, live,
+                      let writer, writer.retainedImportAuthorization === token, !writer.unavailable, writer.db != nil else {
+                    throw JournalLeaseError.invalidated
+                }
+                try writer.lease.validate()
+                try loan.validateMachineBoundary(directory: directory, expected: expected.runtime.setup.source.actual.admission.machine)
+            }
+            func inputs() throws -> MachineUpdateRetainedSetupRuntimeInputs {
+                try validate(); observeStoreRead?(.importInputs)
+                return try .capture(expected: expected.runtime, journal: journal, verifyCurrent: validate,
+                    readRelay: { try .read($0, directory: borrowed.directory, owner: borrowed.owner) })
+            }
+            func compatibility() throws -> SharedSetupImportCompatibilitySnapshot {
+                try validate(); try borrowed.validate(in: self, journal: journal)
+                guard let value = try sharedImportCompatibilitySnapshot(installationID: previous.scope.installationID) else {
+                    throw SharedSetupImportError.wrongScope
+                }
+                return value
+            }
+            func observe(_ stage: RetainedImportStage, inputs: MachineUpdateRetainedSetupRuntimeInputs,
+                compatibility expectedCompatibility: SharedSetupImportCompatibilitySnapshot,
+                verify: (RetainedImportFrame, Data) throws -> Void) throws -> (RetainedImportFrame, Data) {
+                try withRetainedSetupInitialRuntimeEntry(owner: expected.runtime.setup.owner, candidate: candidate, retainedImport: token) { entry in
+                    try validate(); try inputs.requireSource(entry.runtime)
+                    let frame: RetainedImportFrame = (entry, inputs)
+                    let digest = try stableRuntimePreparationProtectedDigest(excluding: nil)
+                    try verify(frame, digest)
+                    var lent = true, operating = false
+                    defer { lent = false }
+                    let scope = RetainedImportScope(readValue: { enter in
+                        try validate(); guard lent else { throw JournalLeaseError.invalidated }
+                        guard !enter || !operating else { throw PreparationStoreError.transactionActive }
+                        if enter { operating = true }; return frame
+                    }, leave: { operating = false })
+                    _ = try scope.read(); try verifyScoped(stage, scope); _ = try scope.read()
+                    guard try compatibility() == expectedCompatibility else { throw PreparationStoreError.staleRevision }
+                    return (frame, digest)
+                }
+            }
+            let beforeCompatibility = try compatibility(), beforeInputs = try inputs()
+            let before = try observe(.beforeJournal, inputs: beforeInputs, compatibility: beforeCompatibility) { frame, _ in
+                try frame.entry.requireSame(as: expected); try frame.inputs.requireSame(as: expectedInputs)
+            }
+            try validate(); try borrowed.validate(in: self, journal: journal)
+            let advanced = previous.phase == .retained
+            let next: SharedSetupImportIntent
+            if advanced { next = try journal.advance(previous, to: .runtimePublished) } else { next = previous }
+            let afterCompatibility = try compatibility(), afterInputs = try inputs()
+            let after = try observe(.afterJournal, inputs: afterInputs, compatibility: afterCompatibility) { frame, digest in
+                guard digest == before.1, frame.inputs.intent == next else { throw PreparationStoreError.staleRevision }
+                if advanced {
+                    try frame.entry.requireAcknowledgement(inputs: frame.inputs, from: before.0.entry, previousInputs: before.0.inputs)
+                } else {
+                    try frame.entry.requireSame(as: before.0.entry); try frame.inputs.requireSame(as: before.0.inputs)
+                }
+            }
+            try validate(); return (after.0, advanced)
+        } } catch {
+            unavailable = true; shutdown(); try? journal.close(); throw error
+        }
     }
 
     /// Advances only the held import journal. Every machine row remains exact while the external source digest changes.
@@ -4840,7 +4949,7 @@ public final class PreparationIntentStore {
 
     private func loadStableRuntimePreparationSnapshot(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateStableRuntimePreparationSnapshot {
-        observeInitialRuntimeRead?(.runtime)
+        observeStoreRead?(.runtime)
         let setup = try MachineUpdateStableAccountSetupSnapshot(source: loadStableRuntimeSource(candidate: candidate), owner: owner)
         guard let preparation = setup.preparation else { throw AccountPreparationError.missing }
         let account = preparation.accountID
@@ -4882,13 +4991,17 @@ public final class PreparationIntentStore {
     /// Reads initial material and policy in one transaction. The entry grants no write or native authority.
     func retainedSetupInitialRuntimeEntry(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence)
         throws -> MachineUpdateRetainedSetupInitialRuntimeEntry {
-        try transaction(write: false) {
+        try withRetainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate) { $0 }
+    }
+    private func withRetainedSetupInitialRuntimeEntry<Value>(owner: LocalAccountIdentity, candidate: SignedReleaseEvidence,
+        retainedImport: RetainedImportAuthorization? = nil, _ body: (MachineUpdateRetainedSetupInitialRuntimeEntry) throws -> Value) throws -> Value {
+        try transaction(write: false, retainedImport: retainedImport) {
             let runtime = try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate)
             let state = try loadRuntimeActivation(accountID: runtime.preparation.accountID)
             let actual = runtime.setup.source.actual
             let intent: MachineUpdateRetainedSetupPolicyIntentRecord?
             if actual.schemaVersion >= MachineUpdateRetainedSetupPolicyStorage.schemaVersion {
-                observeInitialRuntimeRead?(.policyMarker)
+                observeStoreRead?(.policyMarker)
                 intent = try loadRetainedSetupPolicyIntents(installationID: actual.inventory.installationID)
                     .first { $0.accountID == runtime.preparation.accountID }
             } else { intent = nil }
@@ -4896,7 +5009,7 @@ public final class PreparationIntentStore {
                 intent: intent, candidate: candidate)
             try loadStableRuntimePreparationSnapshot(owner: owner, candidate: candidate).requireSame(as: runtime)
             try result.requireActivation(loadRuntimeActivation(accountID: runtime.preparation.accountID))
-            return result
+            return try body(result)
         }
     }
 
@@ -5104,7 +5217,7 @@ public final class PreparationIntentStore {
             directory: directory, admission: admission, native: native, retaining: false, observation: observation, verifyScoped: verifyScoped)
     }
     func requireRetainedSetupPromotionWriterAvailable() throws {
-        guard retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
+        guard retainedImportAuthorization == nil, retainedSetupPromotionAuthorization == nil, stableServiceAccountAuthorization == nil,
               stableRuntimePreparationAuthorization == nil, retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil,
               stableAccountReservationAuthorization == nil, stableAccountStorageAuthorization == nil else {
             throw PreparationStoreError.transactionActive
@@ -5360,7 +5473,7 @@ public final class PreparationIntentStore {
     }
 
     private func loadRetainedSetupPolicyIntents(installationID: Data) throws -> [MachineUpdateRetainedSetupPolicyIntentRecord] {
-        observeInitialRuntimeRead?(.policyScan)
+        observeStoreRead?(.policyScan)
         return try withRetainedSetupRecordLimit(maximumBytes: MachineUpdateRetainedSetupPolicyIntentRecord.maximumBytes) {
             try statement("SELECT account,id,revision,record FROM retained_setup_policy_intents_v1 ORDER BY account LIMIT 65") { row in
                 var records: [MachineUpdateRetainedSetupPolicyIntentRecord] = []
@@ -5537,7 +5650,7 @@ public final class PreparationIntentStore {
     private func loadStableMachineUpdateFrame(candidate release: SignedReleaseEvidence)
         throws -> (snapshot: MachineUpdateStableReleaseSnapshot, completionIntents: [MachineUpdateRetainedSetupCompletionIntentRecord],
             promotionIntents: [MachineUpdateRetainedSetupPromotionIntentRecord], readyRecords: [MachineUpdateRetainedSetupPromotionReadyRecord]) {
-        observeInitialRuntimeRead?(.frame)
+        observeStoreRead?(.frame)
         try identity(macID)
         let schema = try scalar("PRAGMA user_version")
         guard (24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion).contains(schema) else {
@@ -6667,11 +6780,13 @@ public final class PreparationIntentStore {
         retainedMaterial: RetainedMaterialAuthorization? = nil,
         retainedPublication: RetainedPublicationAuthorization? = nil,
         stableRuntimePreparation: StableRuntimePreparationAuthorization? = nil,
-        stableServiceAccount: StableServiceAccountAuthorization? = nil, willCommit: () -> Void = {},
+        stableServiceAccount: StableServiceAccountAuthorization? = nil, retainedImport: RetainedImportAuthorization? = nil,
+        willCommit: () -> Void = {},
         _ body: () throws -> T) throws -> T {
         guard !unavailable else { throw PreparationStoreError.unavailable }
         guard db != nil else { throw PreparationStoreError.closed }
         guard !active else { throw PreparationStoreError.transactionActive }
+        guard retainedImportAuthorization == nil || retainedImportAuthorization === retainedImport else { throw PreparationStoreError.transactionActive }
         guard !write || opening == .mutable else { throw PreparationStoreError.invalidTransition }
         guard !write || retainedPublicationAuthorization == nil || retainedPublicationAuthorization === retainedPublication else {
             throw PreparationStoreError.transactionActive
@@ -6683,7 +6798,7 @@ public final class PreparationIntentStore {
             throw error
         }
         active = true; defer { active = false }
-        observeInitialRuntimeRead?(write ? .writeTransaction : .readTransaction)
+        observeStoreRead?(write ? .writeTransaction : .readTransaction)
         do {
             // Stable startup and retained setup use separate owners. Ordinary callers cannot change the settled rows.
             if let retainedPublication {

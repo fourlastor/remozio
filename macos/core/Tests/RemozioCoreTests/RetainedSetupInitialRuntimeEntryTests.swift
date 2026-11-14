@@ -20,8 +20,8 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
     private func capture(_ machine: PreparationIntentStore, owner: LocalAccountIdentity,
         candidate: SignedReleaseEvidence, schema: Int64) throws -> Entry {
         var counts: [Read: Int] = [:]
-        machine.observeInitialRuntimeRead = { counts[$0, default: 0] += 1 }
-        defer { machine.observeInitialRuntimeRead = nil }
+        machine.observeStoreRead = { counts[$0, default: 0] += 1 }
+        defer { machine.observeStoreRead = nil }
         let result = try machine.retainedSetupInitialRuntimeEntry(owner: owner, candidate: candidate)
         var expected: [Read: Int] = [.readTransaction: 1, .runtime: 2, .frame: 6, .activation: 2, .sharedImport: 6]
         if schema >= 25 { expected[.policyMarker] = 1; expected[.policyScan] = 7 }
@@ -73,7 +73,7 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
             let wrongOwner = LocalAccountIdentity(uid: f.owner.uid, primaryGroupID: f.owner.primaryGroupID, directoryID: UUID())
             XCTAssertThrowsError(try machine.retainedSetupInitialRuntimeEntry(owner: wrongOwner, candidate: f.candidate))
             var attempts = 0
-            machine.observeInitialRuntimeRead = { event in
+            machine.observeStoreRead = { event in
                 if event == .readTransaction {
                     attempts += 1
                     do {
@@ -82,7 +82,7 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
                     } catch { XCTAssertEqual(error as? PreparationStoreError, .transactionActive) }
                 }
             }
-            defer { machine.observeInitialRuntimeRead = nil }
+            defer { machine.observeStoreRead = nil }
             try machine.retainedSetupInitialRuntimeEntry(owner: f.owner, candidate: f.candidate).requireSame(as: before)
             XCTAssertEqual(attempts, 1); XCTAssertEqual(commits, 0)
         }
@@ -96,8 +96,8 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
                 directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { _, _ in })
             let after = try capture(machine, owner: f.owner, candidate: f.candidate, schema: schema)
             XCTAssertNotNil(after.policy); XCTAssertNil(after.intent)
-            var reads = 0; machine.observeInitialRuntimeRead = { _ in reads += 1 }
-            defer { machine.observeInitialRuntimeRead = nil }
+            var reads = 0; machine.observeStoreRead = { _ in reads += 1 }
+            defer { machine.observeStoreRead = nil }
             try after.requireMaterial(f.material.reference, from: before)
             try after.requireMaterial(f.material.reference, from: after)
             XCTAssertThrowsError(try before.requireSame(as: after))
