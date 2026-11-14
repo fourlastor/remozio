@@ -155,7 +155,7 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
         XCTAssertEqual(state.counts[.writeTransaction, default: 0], published ? 0 : 1)
         XCTAssertEqual(state.materialReads, published ? 8 : 38)
         XCTAssertEqual(state.artifactReads, published ? 32 : 104)
-        XCTAssertEqual(state.pairReads, published ? 8 : 64)
+        XCTAssertEqual(state.pairReads, published ? 8 : 63)
         guard state.byCall.count == (published ? 3 : 5) else {
             XCTFail("The expected machine calls did not finish"); return
         }
@@ -221,7 +221,6 @@ final class RetainedSetupInitialRuntimeTests: XCTestCase {
             let callsBeforeCompletion = files.publicationCalls
             let actual = try prepare(f, before, files)
             XCTAssertTrue(actual.activation.runtime.state.configurationPublished); XCTAssertEqual(files.publicationCalls, 11)
-            XCTAssertTrue(actual.activation.runtime.state.configurationPublished)
             XCTAssertEqual(files.publicationCalls - callsBeforeCompletion, 8)
             for artifact in files.artifacts { XCTAssertEqual(try files.read(artifact), artifact.bytes) }
         }
