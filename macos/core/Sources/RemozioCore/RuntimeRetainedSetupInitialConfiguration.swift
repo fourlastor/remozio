@@ -11,7 +11,7 @@ struct RuntimeRetainedSetupInitialConfiguration: CustomStringConvertible, Custom
 
     init(snapshot: MachineUpdateRetainedSetupPolicySnapshot, current: AuthorityJournal.MachineUpdatePolicyBoundary,
         candidate: SignedReleaseEvidence, currentCodePolicy: AuthorityCodePolicy,
-        importIntent: SharedSetupImportIntent?, relayPlan: SharedSetupImportRelayPlan? = nil) throws {
+        importIntent: SharedSetupImportIntent?, relayPlan: SharedSetupImportRelayPlan?) throws {
         binding = try .init(snapshot: snapshot, current: current, candidate: candidate)
         try binding.requireStartupPolicy(currentCodePolicy)
         bundle = try .retainedSetupInitial(snapshot: snapshot, current: current, candidate: candidate,
@@ -36,7 +36,7 @@ struct RuntimeRetainedSetupInitialConfiguration: CustomStringConvertible, Custom
     func requireSourceForPublication(snapshot: MachineUpdateRetainedSetupPolicySnapshot,
         current: AuthorityJournal.MachineUpdatePolicyBoundary, candidate: SignedReleaseEvidence,
         currentCodePolicy: AuthorityCodePolicy, importIntent: SharedSetupImportIntent?,
-        relayPlan: SharedSetupImportRelayPlan? = nil) throws {
+        relayPlan: SharedSetupImportRelayPlan?) throws {
         try binding.requireSourceForPublication(snapshot, current: current, candidate: candidate)
         let actual = try Self(snapshot: snapshot, current: current, candidate: candidate, currentCodePolicy: currentCodePolicy,
             importIntent: importIntent, relayPlan: relayPlan)
