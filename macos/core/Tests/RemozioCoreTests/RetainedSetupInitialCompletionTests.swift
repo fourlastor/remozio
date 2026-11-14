@@ -274,6 +274,8 @@ final class RetainedSetupInitialCompletionTests: XCTestCase {
                 XCTAssertThrowsError(try scope.withActive {}) { XCTAssertEqual($0 as? PreparationStoreError, .transactionActive) }
             } }
             XCTAssertThrowsError(try complete(f, before, files, state: recursive)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+            XCTAssertThrowsError(try snapshot(f)) { XCTAssertEqual($0 as? PreparationStoreError, .unavailable) }
+            try f.reopen(nil)
             try snapshot(f).requireSame(as: before)
             let state = State(); state.onStage = { _, scope in
                 let shared = SharedScope(scope), rejected = Mutex(false), done = DispatchSemaphore(value: 0)
