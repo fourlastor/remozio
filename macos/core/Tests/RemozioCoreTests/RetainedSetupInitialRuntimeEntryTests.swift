@@ -76,9 +76,10 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
             machine.observeInitialRuntimeRead = { event in
                 if event == .readTransaction {
                     attempts += 1
-                    XCTAssertThrowsError(try machine.stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.candidate)) {
-                        XCTAssertEqual($0 as? PreparationStoreError, .transactionActive)
-                    }
+                    do {
+                        _ = try machine.stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.candidate)
+                        XCTFail("Nested public read succeeded")
+                    } catch { XCTAssertEqual(error as? PreparationStoreError, .transactionActive) }
                 }
             }
             defer { machine.observeInitialRuntimeRead = nil }
@@ -132,7 +133,8 @@ final class RetainedSetupInitialRuntimeEntryTests: XCTestCase {
             let recorded = try recorded(f), machine = f.machine(), owner = f.source.runtime.setup.owner
             let before = try capture(machine, owner: owner, candidate: f.candidate, schema: 25)
             try XCTUnwrap(before.policy).requireSame(as: recorded)
-            _ = try machine.completeRetainedSetupRuntimePublication(f.material.reference, expected: recorded, candidate: f.candidate,
+            _ = try machine.completeRetainedSetupRuntimePublication(f.material.reference, expected: recorded.activation.runtime,
+                policy: XCTUnwrap(recorded.intent), candidate: f.candidate,
                 directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { _, _ in })
             var commits = 0; try f.reopen { commits += 1 }
             let after = try capture(f.machine(), owner: owner, candidate: f.candidate, schema: 25)
