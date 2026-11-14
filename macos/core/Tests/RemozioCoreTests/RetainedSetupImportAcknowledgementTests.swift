@@ -229,13 +229,13 @@ final class RetainedSetupImportAcknowledgementTests: XCTestCase {
             s.onCommit = {
                 XCTAssertThrowsError(try XCTUnwrap(previous).read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             }
-            _ = try invoke(s) { _, scope in
+            _ = try invoke(s, verify: { _, scope in
                 previous = scope
                 let shared = SharedScope(scope), done = DispatchSemaphore(value: 0)
                 DispatchQueue.global().async { shared.invoke(); done.signal() }
                 XCTAssertEqual(done.wait(timeout: .now() + 2), .success)
-                XCTAssertEqual(shared.result(), .invalidated)
-            }
+                XCTAssertEqual(shared.result(), JournalLeaseError.invalidated)
+            })
             XCTAssertThrowsError(try XCTUnwrap(previous).read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         }
     }
