@@ -147,7 +147,7 @@ final class RuntimeMaintenanceReaderTests: XCTestCase {
             XCTAssertTrue(a.requiresLocalHold); XCTAssertFalse(a.needsOwnerRecovery)
             XCTAssertEqual(a.attemptID, value.id); XCTAssertEqual(a.revision, value.revision)
             let other = try Record.Account(accountID: data(94), ownerUID: 65002, directoryID: data(95))
-            let b = try f.machine().runtimeMaintenanceStartupProjection(account: other, candidate: f.candidate)
+            let b = f.machine().runtimeMaintenanceStartupProjection(account: other, candidate: f.candidate)
             XCTAssertFalse(b.requiresLocalHold); XCTAssertNil(b.attemptID)
             try f.reopen()
             XCTAssertEqual(try f.machine().runtimeMaintenanceStartupProjection(account: account(f), candidate: f.candidate), a)

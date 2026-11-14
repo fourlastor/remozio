@@ -5720,13 +5720,15 @@ public final class PreparationIntentStore {
 
     /// Reads startup restrictions only. The host must apply the local hold before it admits requests.
     func runtimeMaintenanceStartupProjection(account: RuntimeMaintenanceWindowRecord.Account,
-        candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceAdmissionProjection {
-        try transaction(write: false) {
-            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
-            return RuntimeMaintenanceAdmissionProjection.startup(record: frame.maintenanceWindows.first {
-                $0.scope.authority.accountID == account.accountID
-            }, macID: macID, installationID: current.inventory.installationID,
-                account: account, registration: current.admission)
+        candidate: SignedReleaseEvidence) -> RuntimeMaintenanceAdmissionProjection {
+        RuntimeMaintenanceAdmissionProjection.startup {
+            try transaction(write: false) {
+                let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+                return try .init(record: frame.maintenanceWindows.first {
+                    $0.scope.authority.accountID == account.accountID
+                }, macID: macID, installationID: current.inventory.installationID,
+                    account: account, registration: current.admission)
+            }
         }
     }
     private func loadRuntimeMaintenanceWindows() throws -> [RuntimeMaintenanceWindowRecord] {

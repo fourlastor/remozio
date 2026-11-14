@@ -14,9 +14,12 @@ struct RuntimeMaintenanceAdmissionProjection: Equatable, Sendable, CustomStringC
     /// A changed startup scope retains closure and exposes recovery without terminating the host.
     static func startup(record: RuntimeMaintenanceWindowRecord?, macID: Data, installationID: Data,
         account: RuntimeMaintenanceWindowRecord.Account, registration: UpdateAdmissionRegistrationRecord) -> Self {
-        do { return try .init(record: record, macID: macID, installationID: installationID,
+        startup { try .init(record: record, macID: macID, installationID: installationID,
             account: account, registration: registration) }
-        catch { return .init() }
+    }
+    /// Includes store opening and reads in the startup boundary. Uncertain metadata keeps admission closed.
+    static func startup(_ read: () throws -> Self) -> Self {
+        do { return try read() } catch { return .init() }
     }
     init(record: RuntimeMaintenanceWindowRecord?, macID: Data, installationID: Data,
          account: RuntimeMaintenanceWindowRecord.Account, registration: UpdateAdmissionRegistrationRecord) throws {
