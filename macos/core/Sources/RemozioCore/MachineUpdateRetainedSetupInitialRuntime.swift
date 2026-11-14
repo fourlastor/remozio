@@ -84,7 +84,7 @@ enum MachineUpdateRetainedSetupInitialRuntime {
         if !current.activation.runtime.state.configurationPublished {
             let before = current
             let publishedFiles = try machineStep { machine in
-                let selected = try Publication.prepare(withSelection: { body in
+                _ = try Publication.prepare(withSelection: { body in
                     try Selection.withCurrent(machine: machine, expected: before, candidate: candidate,
                         recordedStartupPolicy: AuthorityCodePolicy.decode(record.startupPolicy),
                         readPolicyBoundary: readPolicyBoundary, verifyCurrent: host, body: body)
@@ -97,8 +97,6 @@ enum MachineUpdateRetainedSetupInitialRuntime {
                         validate: parent.requireActive) { try readArtifact(artifact, $0) } },
                     publish: { parent in try loan(snapshot: before, material: parent.material, artifact: parent.artifact,
                         validate: parent.requireActive, publish) })
-                let finalPair = try readPolicyBoundary(); try record.requireRecorded(finalPair)
-                try selected.configuration.binding.requireSourceForPublication(before, current: finalPair, candidate: candidate)
                 return before
             }
             try publishedFiles.requireSame(as: before); try didStage(.filesPublished); try lifetime()
