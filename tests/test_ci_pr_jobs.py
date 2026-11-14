@@ -108,15 +108,15 @@ def working_directory(path):
 
 class JobSelectionTests(unittest.TestCase):
     def test_unclaimed_and_shared_build_paths_run_every_job(self):
-        for path in ('scripts/check.sh', '.github/workflows/checks.yml', '.github/macos-core-test-weights.json',
+        for path in ('scripts/check.sh', '.github/workflows/checks.yml', '.github/other.json',
                      'gradle/libs.versions.toml', 'build.gradle.kts', 'settings.gradle.kts', 'gradle.properties',
                      'gradlew', '.gitignore', 'third-party/cloudflared/pin.json', 'protocol/vectors/a.json',
                      'protocol/session-envelope.md', 'unknown/file.txt'):
             with self.subTest(path=path):
                 self.assertEqual(JOBS.jobs_for(path), JOBS.EVERY_JOB)
 
-    def test_documentation_runs_only_the_python_checks(self):
-        for path in ('docs/design-decisions.md', 'README.md', 'AGENTS.md', 'LICENSE'):
+    def test_documentation_and_test_weights_run_only_the_python_checks(self):
+        for path in ('docs/design-decisions.md', 'README.md', 'AGENTS.md', 'LICENSE', JOBS.WEIGHTS):
             with self.subTest(path=path):
                 self.assertEqual(JOBS.jobs_for(path), frozenset())
 
@@ -415,6 +415,33 @@ class CoreTestSelectionTests(unittest.TestCase):
                          {'M.HeavyTests/testTwo', 'M.LightTests'})
         self.assertEqual(asked, [])
         self.assertIsNone(select('private func helper', users=lambda name: None))
+
+    def test_the_weights_name_existing_core_test_classes_and_methods(self):
+        # A weights change runs no Mac job, so a stale or misspelled name must fail here instead.
+        document = json.loads((ROOT / JOBS.WEIGHTS).read_text())
+        self.assertEqual(set(document), {'source', 'weights', 'methods'})
+        self.assertIsInstance(document['source'], str)
+        methods = {}
+        for path in (ROOT / JOBS.CORE_TESTS).rglob('*.swift'):
+            text = path.read_text()
+            for test_class in JOBS.TEST_CLASS.findall(text):
+                methods.setdefault(test_class, set()).update(name for _, name in JOBS.TEST_METHOD.findall(text))
+        for test_class, seconds in document['weights'].items():
+            with self.subTest(test_class=test_class):
+                self.assertIn(test_class, methods)
+                self.assertIsInstance(seconds, (int, float))
+                self.assertGreaterEqual(seconds, 0)
+        for test_class, table in document['methods'].items():
+            with self.subTest(test_class=test_class):
+                self.assertIn(test_class, document['weights'])
+                for method, seconds in table.items():
+                    self.assertIn(method, methods[test_class])
+                    self.assertIsInstance(seconds, (int, float))
+                    self.assertGreaterEqual(seconds, 0)
+
+    def test_a_weights_change_alone_selects_no_core_tests_and_no_release_build(self):
+        self.assertEqual(JOBS.select([JOBS.WEIGHTS]), set())
+        self.assertIsNone(JOBS.release_reason([JOBS.WEIGHTS]))
 
     def test_the_smoke_classes_are_weighted_core_classes_that_need_no_app(self):
         weights = json.loads((ROOT / JOBS.WEIGHTS).read_text())['weights']

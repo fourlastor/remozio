@@ -4,7 +4,8 @@
 Jobs. Each job runs when the pull request changes a path that the job builds or tests. A path that no rule below
 claims runs every job: scripts/, .github/, gradle/, third-party/, protocol/ outside its Kotlin and Swift packages,
 and every top-level file except Markdown files and LICENSE. The Python checks job is not listed: it runs on every
-pull request.
+pull request. The macos/core test weights file (WEIGHTS) runs no job by itself: it changes only how the shards split
+the tests and which classes run at method level, never which tests exist, and the Python checks validate its names.
 
 macos/core tests. The Mac core tests job runs in one of two modes.
 - full: every class except the app-dependent ones, in six shards on two runners. A pull request gets this mode when it
@@ -78,6 +79,7 @@ CORE_TEST_INPUTS = ('macos/app/CommandMonitor/', 'experiments/command-frontend/'
 
 PREFIXES = (
     ('docs/', frozenset()),
+    ('.github/macos-core-test-weights.json', frozenset()),
     ('protocol/kotlin/', KOTLIN),
     ('phone/', KOTLIN),
     ('tools/', KOTLIN),
