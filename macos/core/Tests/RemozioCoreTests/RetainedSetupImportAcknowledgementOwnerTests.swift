@@ -117,7 +117,8 @@ final class RetainedSetupImportAcknowledgementOwnerTests: XCTestCase {
         func close() throws { try FileManager.default.removeItem(at: root) }
     }
     private final class Checks {
-        var pair = 0, material = 0, artifacts = 0, source = 0
+        var pair = 0, material = 0, artifacts = 0, source = 0, transaction = 0
+        var verifiedTransactions: Set<Int> = []
         var scopes: [Scope] = [], counts: [Read: Int] = [:]
         var onMaterial: ((Scope) throws -> RuntimePreparationMaterial?)?
         var onPair: ((Int, Boundary) throws -> Boundary)?
@@ -152,7 +153,10 @@ final class RetainedSetupImportAcknowledgementOwnerTests: XCTestCase {
     private func invoke(_ s: State, _ files: Files, checks: Checks = Checks(), custody: Bool = true)
         throws -> (frame: Frame, advanced: Bool) {
         let expected = try entry(s), machine = s.f.machine()
-        machine.observeStoreRead = { checks.counts[$0, default: 0] += 1 }
+        machine.observeStoreRead = {
+            checks.counts[$0, default: 0] += 1
+            if $0 == .readTransaction { checks.transaction += 1 }
+        }
         defer { machine.observeStoreRead = nil }
         let start = ContinuousClock.now
         defer {
@@ -166,7 +170,8 @@ final class RetainedSetupImportAcknowledgementOwnerTests: XCTestCase {
                 checks.pair += 1; let actual = try pair(s)
                 return try checks.onPair?(checks.pair, actual) ?? actual
             }, verifyCurrent: { scope in
-                checks.source += 1; let before = checks.counts
+                checks.source += 1; checks.verifiedTransactions.insert(checks.transaction)
+                let before = checks.counts
                 _ = try scope.read(); _ = try scope.read(); try scope.withActive { try scope.requireActive() }
                 XCTAssertEqual(before, checks.counts)
                 XCTAssertThrowsError(try machine.inventory()) { XCTAssertEqual($0 as? PreparationStoreError, .transactionActive) }
@@ -185,10 +190,46 @@ final class RetainedSetupImportAcknowledgementOwnerTests: XCTestCase {
     private func budget(_ checks: Checks) {
         XCTAssertEqual(checks.pair, 4); XCTAssertEqual(checks.material, 4)
         XCTAssertEqual(checks.artifacts, 16); XCTAssertEqual(checks.source, 4)
-        XCTAssertEqual(checks.pair / 2, 2); XCTAssertLessThanOrEqual(checks.pair / 2, 4)
+        // Each ACK transaction invokes the scoped verifier. Repeated host checks stay in the same transaction.
+        XCTAssertEqual(checks.verifiedTransactions.count, 2)
         XCTAssertEqual(checks.counts[.writeTransaction, default: 0], 0)
         XCTAssertEqual(checks.counts[.importInputs], 2)
         for scope in checks.scopes { XCTAssertThrowsError(try scope.read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) } }
+    }
+    func testAbsentAndEmptyImportJournalsRefuseWithoutCreationOrProviderReads() throws {
+        try fixture { s in
+            let machine = URL(fileURLWithPath: s.f.directory.path)
+            let directory = machine.appendingPathComponent("SharedSetupImport")
+            let database = directory.appendingPathComponent("setup-import.sqlite")
+            try? s.journal.close()
+            try FileManager.default.removeItem(at: directory)
+            let absent = Checks()
+            XCTAssertThrowsError(try invokeWithoutFiles(s, checks: absent)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .incomplete)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+            XCTAssertEqual(absent.pair + absent.material + absent.artifacts + absent.source, 0)
+            XCTAssertTrue(absent.verifiedTransactions.isEmpty)
+            try s.open(initialize: true); try s.journal.close()
+            XCTAssertNil(try s.current())
+            let before = try Data(contentsOf: database), empty = Checks()
+            XCTAssertThrowsError(try invokeWithoutFiles(s, checks: empty)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .incomplete)
+            }
+            XCTAssertEqual(empty.pair + empty.material + empty.artifacts + empty.source, 0)
+            XCTAssertTrue(empty.verifiedTransactions.isEmpty)
+            XCTAssertEqual(try Data(contentsOf: database), before); XCTAssertNil(try s.current())
+        }
+    }
+    private func invokeWithoutFiles(_ s: State, checks: Checks) throws -> (frame: Frame, advanced: Bool) {
+        try Owner.acknowledge(machine: s.f.machine(), expected: entry(s), candidate: s.f.candidate,
+            directory: s.f.directory, admission: s.f.admission, fileCustodyAccepted: true,
+            readPolicyBoundary: { checks.pair += 1; return try self.pair(s) },
+            verifyCurrent: { _ in checks.source += 1 }, verifyServices: { _ in XCTFail("Unexpected service read") },
+            readMaterial: { _ in checks.material += 1; return s.f.material },
+            verifyActivity: { _, _ in XCTFail("Unexpected activity read") },
+            readArtifact: { _, _ in checks.artifacts += 1; return nil })
     }
     func testRealFilesAdvanceOnceAndFreshRecoveryHasTwoObservationsWithoutRepair() throws {
         try withFiles { s, files in

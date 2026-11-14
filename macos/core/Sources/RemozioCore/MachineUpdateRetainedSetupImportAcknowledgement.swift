@@ -5,7 +5,6 @@ enum MachineUpdateRetainedSetupImportAcknowledgement {
     typealias Entry = MachineUpdateRetainedSetupInitialRuntimeEntry
     typealias Inputs = MachineUpdateRetainedSetupRuntimeInputs
     typealias Frame = PreparationIntentStore.RetainedImportFrame
-    typealias Stage = PreparationIntentStore.RetainedImportStage
     typealias Artifact = RuntimePublishedArtifactValidation.Artifact
     /// One callback loan. Repeated reads check the held transaction and admission without another query.
     struct Scope: CustomStringConvertible, CustomDebugStringConvertible {
