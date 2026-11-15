@@ -85,7 +85,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(settings.readers, GatewaySettingsControlInterface.supportedVersions)
                 XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
                 let channel = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })
-                XCTAssertEqual(channel.readers, [1]); XCTAssertEqual(channel.writers, [1]); XCTAssertTrue(channel.migrations.isEmpty)
+                XCTAssertEqual(channel.readers, [AuthorityMaintenanceChannelScope.protocolVersion]); XCTAssertEqual(channel.writers, [AuthorityMaintenanceChannelScope.protocolVersion]); XCTAssertTrue(channel.migrations.isEmpty)
                 let gate = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceGateRequest.formatName })
                 XCTAssertEqual(gate.readers, [1]); XCTAssertEqual(gate.writers, [1]); XCTAssertTrue(gate.migrations.isEmpty)
                 let close = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceCloseMarker.formatName })

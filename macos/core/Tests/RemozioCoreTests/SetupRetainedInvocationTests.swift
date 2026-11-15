@@ -365,9 +365,10 @@ final class SetupRetainedInvocationTests: XCTestCase {
         return unsafeBitCast(symbol, to: (@convention(c) () -> pid_t).self)
     }()
     private final class ContextExportedProbe: NSObject, AuthorityMaintenanceXPCProtocol {
-        func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(AuthorityMaintenanceChannelScope.protocolVersion) }
         func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
         func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+        func observeIncarnation(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     }
     func testContextGuardAndExportedObjectReleaseAfterTheInvalidationHandler() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in

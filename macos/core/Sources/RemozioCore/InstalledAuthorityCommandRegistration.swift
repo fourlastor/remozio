@@ -236,9 +236,9 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
               let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else { return nil }
         try validateRuntime()
         let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-        let name = AuthorityMaintenanceChannelScope.formatName
+        let name = AuthorityMaintenanceChannelScope.formatName, version = AuthorityMaintenanceChannelScope.protocolVersion
         guard [authority, setup].allSatisfy({ entry in release.manifest.components.first(where: { $0.role == entry.role })?
-            .formats.contains(where: { $0.name == name && $0.readers.contains(1) && $0.writers.contains(1) }) == true }) else { return nil }
+            .formats.contains(where: { $0.name == name && $0.readers.contains(version) && $0.writers.contains(version) }) == true }) else { return nil }
         try configuration.validateRelease(release, bundlePath: bundle.path)
         try AuthorityMaintenanceChannelScope.validate(release, authority: authority, setup: setup)
         let policy = try XPCPeerPolicy(teamID: setup.teamID, componentIdentifier: setup.identifier,

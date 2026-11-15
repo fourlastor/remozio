@@ -880,7 +880,8 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
         func hello() async throws {
             let result = Box<(Bool, Data?)>((false, nil))
             let failed: @Sendable (Error) -> Void = { _ in result.value = (true, nil) }
-            let reply: @Sendable (UInt64) -> Void = { result.value = (true, $0 == 1 ? Data([1]) : nil) }
+            let expected = rootWire ? AuthorityMaintenanceChannelScope.protocolVersion : 1
+            let reply: @Sendable (UInt64) -> Void = { result.value = (true, $0 == expected ? Data([1]) : nil) }
             if rootWire { (connection.remoteObjectProxyWithErrorHandler(failed) as? any AuthorityMaintenanceXPCProtocol)?.hello(reply: reply) }
             else { (connection.remoteObjectProxyWithErrorHandler(failed) as? any AuthorityPresenceXPCProtocol)?.hello(reply: reply) }
             _ = try await wait(result)

@@ -114,6 +114,28 @@ enum RuntimeJobRegistration {
             _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
         })
     }
+    /// Startup alone can register under its fresh drain. A live matching job is adopted by the startup owner.
+    static func ensureStartupRestoration(_ custody: RuntimeMaintenanceStartupRecovery.Custody,
+        window: RuntimeMaintenanceWindowRecord) throws {
+        guard getuid() == 0, geteuid() == 0, custody.native else { throw JournalLeaseError.rootRequired }
+        let job = custody.floor.cohort.job
+        func verify() throws {
+            try custody.requireRestoring(window)
+            let directory = try ProtectedSetupDirectory(anchor: "/",
+                relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
+                visibility: .sharedMetadata, createIfMissing: false)
+            defer { directory.close() }
+            _ = try MachineUpdateRetainedSetupPromotionSourceValidation.retainedJobBytes(job, directory: directory, owner: 0)
+            try custody.requireRestoring(window)
+        }
+        try custody.withRegistration(window) {
+            try verify()
+            guard try inspect(job) == .absent else { throw RuntimeActivationError.conflictingPlan }
+            try reconcile(verifyCurrent: verify, inspect: { try inspect(job) }, bootstrap: {
+                _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
+            })
+        }
+    }
     /// Same restoration order with ordinary-owner callbacks. Root cannot select them.
     static func reconcileOwnedRestoration(_ permit: RuntimeMaintenanceRestorationPermit,
         requireWindow: (RuntimeMaintenanceWindowRecord) throws -> Void, inspect: () throws -> Observation,

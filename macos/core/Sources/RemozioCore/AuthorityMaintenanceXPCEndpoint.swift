@@ -6,6 +6,8 @@ import Foundation
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
     func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
+    /// Read-only. Requires an accepted hello and replies with the live Authority epoch for the endpoint's account.
+    func observeIncarnation(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
 
 /// Process-bound access. Root construction uses the installed registration and actual runtime owners.
@@ -20,6 +22,7 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     private let healthyReopen: @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
+    private let requireLive: @Sendable () throws -> Void
     private init(admission: AuthorityMaintenancePairingAdmission, acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
@@ -27,8 +30,10 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
         reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() },
         readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope },
         healthyOpen: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? = { _ in nil },
-        healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope }) {
+        healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope },
+        requireLive: @escaping @Sendable () throws -> Void = {}) {
         self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen; self.readGate = readGate; self.healthyOpen = healthyOpen; self.healthyReopen = healthyReopen
+        self.requireLive = requireLive
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
@@ -77,7 +82,13 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try await requireReady()
             try registration.reopenHealthyMaintenance(q, restoring: restoring, account: account, incarnation: incarnation, releaseBinding: release)
             try service.validateNativeMaintenanceIdentity()
-        })
+        }, requireLive: { try service.validateNativeMaintenanceIdentity() })
+    }
+    /// Reads only the in-memory epoch that pairing admission puts in every binding. No store, reservation or hold is read or changed.
+    func observeIncarnation(accountID: Data) throws -> Data {
+        try validateIdentity(); try requireLive()
+        let incarnation = try admission.liveIncarnation(accountID: accountID)
+        try requireLive(); try validateIdentity(); return incarnation
     }
     func captureHealthyOpen(_ request: AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? {
         try validateIdentity(); let row = try await healthyOpen(request); try validateIdentity(); return row
@@ -190,6 +201,29 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                         let activity = try access.acquireActivity(); defer { activity?.close() }
                         try activity?.validate(); let encoded = try access.observeGate(request).encoded
                         try activity?.validate(); try Task.checkCancellation(); onHandshake(); bytes = encoded
+                    } catch { bytes = nil }
+                    lock.withLock { releaseBudget(id); if !closed { reply(bytes) } }
+                    if bytes == nil { close() }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+    func observeIncarnation(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            // Authenticate on the original exported invocation stack before any asynchronous or protected access.
+            try verify(); let request = try AuthorityMaintenanceIncarnationRequest.decode(payload)
+            try lock.withLock {
+                guard !closed, helloAccepted, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                let id = UUID(); active = id; budgetOwners.insert(id)
+                // This read-only probe does not count as the connection handshake. Only an accepted open or gate readback does.
+                tasks[id] = Task { [self] in
+                    defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
+                    let bytes: Data?
+                    do {
+                        try Task.checkCancellation()
+                        let incarnation = try access.observeIncarnation(accountID: request.accountID)
+                        try Task.checkCancellation()
+                        bytes = try AuthorityMaintenanceIncarnationResponse(request: request, incarnation: incarnation).encoded
                     } catch { bytes = nil }
                     lock.withLock { releaseBudget(id); if !closed { reply(bytes) } }
                     if bytes == nil { close() }

@@ -83,7 +83,7 @@ final class AuthorityMaintenanceHealthyRestorationTests: XCTestCase {
             return try .openOwned(access: access, budget: .init(maximum: 1))
         }
         func hello(_ endpoint: AuthorityMaintenanceXPCEndpoint) {
-            endpoint.hello { XCTAssertEqual($0, 1) }
+            endpoint.hello { XCTAssertEqual($0, AuthorityMaintenanceChannelScope.protocolVersion) }
         }
         func call(_ endpoint: AuthorityMaintenanceXPCEndpoint, _ q: Request) throws -> AuthorityMaintenanceChannelResponse? {
             let done = DispatchSemaphore(value: 0), result = Mutex<Data?>(nil)
@@ -266,6 +266,32 @@ final class AuthorityMaintenanceHealthyRestorationTests: XCTestCase {
             try f.persist(pending)
             XCTAssertEqual(try f.call(endpoint, f.request(.reopen, binding: opened.binding, revision: pending.revision))?.outcome, .refused)
             XCTAssertEqual(try f.hold.gateHold(attemptID: f.restoring.id), .held)
+        }
+    }
+    private func probe(_ endpoint: AuthorityMaintenanceXPCEndpoint, account: Data) throws -> Data? {
+        let done = DispatchSemaphore(value: 0), result = Mutex<Data?>(nil)
+        let q = try AuthorityMaintenanceIncarnationRequest(accountID: account, challenge: AccountPreparationIntent.randomID())
+        endpoint.observeIncarnation(try q.encoded) { b in result.withLock { $0 = b }; done.signal() }
+        guard done.wait(timeout: .now() + 3) == .success else { throw RuntimeActivationError.unavailable }
+        return try result.withLock { try $0.map { try AuthorityMaintenanceIncarnationResponse.decode($0, expected: q).incarnation } }
+    }
+    func testIncarnationProbeLeavesTheHoldCandidateAndRowsUnchangedAroundAHealthyOpen() throws {
+        try fixture { f in
+            let endpoint = try f.endpoint(); defer { endpoint.close() }; f.hello(endpoint)
+            let account = f.restoring.scope.authority.accountID, rows = try runtimeMaintenanceFixtureRows(f.files.databasePath)
+            XCTAssertEqual(try probe(endpoint, account: account), f.epoch); XCTAssertEqual(f.reads.withLock { $0 }, 0)
+            XCTAssertEqual(try f.hold.gateHold(attemptID: f.restoring.id), .held); XCTAssertEqual(try f.admission.connectionReservations(), 0)
+            let opened = try XCTUnwrap(f.call(endpoint, f.request()))
+            XCTAssertEqual(opened.outcome, .applied); XCTAssertEqual(opened.binding.incarnation, f.epoch)
+            let reads = f.reads.withLock { $0 }
+            XCTAssertEqual(try probe(endpoint, account: account), f.epoch); XCTAssertEqual(f.reads.withLock { $0 }, reads)
+            XCTAssertEqual(try f.hold.gateHold(attemptID: f.restoring.id), .held); XCTAssertFalse(f.admission.hasArmedShutdown)
+            XCTAssertEqual(try f.admission.connectionReservations(), 1)
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.files.databasePath), rows)
+            // The candidate survives the probe: its exact reopen still releases the startup hold.
+            let pending = try f.pending(); try f.persist(pending)
+            XCTAssertEqual(try f.call(endpoint, f.request(.reopen, binding: opened.binding, revision: pending.revision))?.outcome, .applied)
+            XCTAssertEqual(try f.hold.gateHold(attemptID: f.restoring.id), .released)
         }
     }
     func testHealthyOpenNeedsHelloAndExactProtectedRevision() throws {

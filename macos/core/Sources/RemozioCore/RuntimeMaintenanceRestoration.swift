@@ -128,6 +128,26 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
         }
     }
 
+    /// Startup consumes fresh custody. No stop owner or old process witness is reconstructed.
+    static func openStartup(_ prepared: RuntimeMaintenanceStartupRecovery.PreparedRestoration) throws -> RuntimeMaintenanceRestoration {
+        let custody = try prepared.consume(), restoring = prepared.window
+        guard let binding = restoring.shutdownBinding else { throw RuntimePreparationError.changedScope }
+        try custody.requireRestoring(restoring)
+        let held = try RuntimeMaintenanceRestorationHold.startup(custody, window: restoring)
+        let commit: Commit
+        if custody.native {
+            commit = .native { next, previous in try custody.persistNative(next, previous: previous) }
+        } else {
+            try RuntimeMaintenanceOwnedControl.require()
+            commit = .owned { next, previous in try custody.persistOwned(next, previous: previous) }
+        }
+        let owner = RuntimeMaintenanceRestoration(window: restoring, binding: binding, settled: prepared.previous,
+            held: held, commit: commit, requireReceipt: { try prepared.requireReceipt() },
+            floors: { window, _ in try custody.requireRestoring(window) },
+            inspect: { try custody.inspect($0) }, observe: { try custody.observe($0, $1, $2) })
+        try owner.validateBeforePending(); return owner
+    }
+
     /// Repeatable. Drain, machine activity, receipt, old exit and floors; plus the accepted witness when present. Writes nothing.
     func validateBeforePending() throws {
         try lock.withLock {
@@ -155,7 +175,8 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
             guard getpid() == processID, !witnessUsed, !pendingIssued, !recoveryUsed else { throw JournalLeaseError.invalidated }
             try held.validate()
             let pid = peer.processID
-            guard pid > 1, pid != held.stopped.processID, try !peer.hasExited(),
+            try held.requireNewProcess(pid)
+            guard pid > 1, try !peer.hasExited(),
                   try inspect(job) == .matching(pid) else { throw RuntimePreparationError.changedScope }
             let own = try observe(job, code, pid)
             guard own.processID == pid, try !own.hasExited(), try !peer.hasExited(),
@@ -163,11 +184,19 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
             try held.validate(); witness = (peer, own); witnessUsed = true
         }
     }
+    /// Discards only an uncommitted startup candidate. The stop-origin owner cannot select this path.
+    func discardStartupCandidate() throws {
+        try lock.withLock {
+            guard getpid() == processID, !pendingIssued, !recoveryUsed, !drainReleased else { throw JournalLeaseError.invalidated }
+            try held.requireStartupOrigin(); witness = nil; witnessUsed = false
+        }
+    }
     /// Cheap: no store or launchctl call.
     func requireWitnessLive() throws { try lock.withLock { try requireWitnessLiveLocked() } }
     private func requireWitnessLiveLocked() throws {
         guard getpid() == processID, let witness else { throw RuntimeActivationError.unavailable }
-        guard try held.stopped.hasExited(), try !witness.peer.hasExited(), try !witness.own.hasExited() else {
+        try held.requireOldExit()
+        guard try !witness.peer.hasExited(), try !witness.own.hasExited() else {
             throw RuntimeActivationError.unavailable
         }
     }

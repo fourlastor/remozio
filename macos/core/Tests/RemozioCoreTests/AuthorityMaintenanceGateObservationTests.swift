@@ -119,7 +119,7 @@ final class AuthorityMaintenanceGateObservationTests: XCTestCase {
                 })
             })
         let endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: .init(maximum: 1))
-        endpoint.hello { XCTAssertEqual($0, 1) }
+        endpoint.hello { XCTAssertEqual($0, AuthorityMaintenanceChannelScope.protocolVersion) }
         endpoint.readGate(try f.request.encoded) { _ in replies.withLock { $0 += 1 } }
         XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
         XCTAssertEqual(try pairing.connectionReservations(), 0)
@@ -162,6 +162,27 @@ final class AuthorityMaintenanceGateObservationTests: XCTestCase {
         XCTAssertEqual(result.authorityIncarnation, f.incarnation); XCTAssertEqual(result.hold, .released)
         XCTAssertEqual(result.admission, .available); XCTAssertGreaterThanOrEqual(verified.withLock { $0 }, 2)
         XCTAssertEqual(try pairing.connectionReservations(), 0); await endpoint.closeAndWait()
+    }
+    func testHelloThenIncarnationProbeLeavesTheHeldStartupAndTheKernelGatesUntouched() async throws {
+        let f = try Fixture()
+        let pairing = try AuthorityMaintenancePairingAdmission(accountID: f.request.accountID, incarnation: f.incarnation)
+        let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: pairing, acquireActivity: { XCTFail("No activity"); return nil },
+            check: { _ in XCTFail("No command") }, observe: { _ in throw RuntimePreparationError.changedScope },
+            readGate: { _ in XCTFail("No gate read"); throw RuntimePreparationError.changedScope })
+        let handshakes = Mutex(0), done = DispatchSemaphore(value: 0), response = Mutex<Data?>(nil)
+        let endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: .init(maximum: 1),
+            onHandshake: { handshakes.withLock { $0 += 1 } })
+        endpoint.hello { XCTAssertEqual($0, AuthorityMaintenanceChannelScope.protocolVersion) }
+        let q = try AuthorityMaintenanceIncarnationRequest(accountID: f.request.accountID, challenge: data(12))
+        endpoint.observeIncarnation(try q.encoded) { value in response.withLock { $0 = value }; done.signal() }
+        XCTAssertEqual(done.wait(timeout: .now() + 3), .success)
+        let result = try AuthorityMaintenanceIncarnationResponse.decode(XCTUnwrap(response.withLock { $0 }), expected: q)
+        XCTAssertEqual(result.incarnation, f.incarnation); XCTAssertEqual(handshakes.withLock { $0 }, 0)
+        XCTAssertThrowsError(try f.hold.requireOpen()); XCTAssertThrowsError(try f.boundary.acquireAdmission())
+        let held = try f.capture(); XCTAssertEqual(held.hold, .held); XCTAssertEqual(held.admission, .busy)
+        XCTAssertEqual(try pairing.connectionReservations(), 0); XCTAssertEqual(try pairing.stagedReservations(), 0)
+        await endpoint.closeAndWait(); XCTAssertEqual(endpoint.pendingOperations(), 0)
+        try f.releaseHold(); let fresh = try f.boundary.acquireAdmission(); try fresh.validate(); fresh.close()
     }
     private enum Fault: Error { case injected }
     func testReadbackFailureClosesOnlyThatConnectionAndANewHelloCanReopenTheSavedTarget() async throws {

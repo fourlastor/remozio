@@ -22,7 +22,7 @@ final class AuthorityMaintenanceClientRecoveryTests: XCTestCase, @unchecked Send
         func start(_ invalidated: @escaping @Sendable () -> Void) { state.withLock { $0.invalidated = invalidated } }
         func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             trace.values.withLock { $0.append(label + ".hello") }
-            reply(.hello(state.withLock { $0.mode == .badHello ? 2 : 1 }))
+            reply(.hello(state.withLock { $0.mode == .badHello ? 1 : AuthorityMaintenanceChannelScope.protocolVersion }))
         }
         func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             do {

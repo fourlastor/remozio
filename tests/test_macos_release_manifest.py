@@ -499,12 +499,26 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
-                self.assertEqual(declarations['authority.maintenance-channel'], {0: 'authority.maintenance-channel', 1: [1], 2: [1], 3: {}})
+                self.assertEqual(declarations['authority.maintenance-channel'], {0: 'authority.maintenance-channel', 1: [2], 2: [2], 3: {}})
                 self.assertEqual(declarations['authority.maintenance-gate'], {0: 'authority.maintenance-gate', 1: [1], 2: [1], 3: {}})
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
                 self.assertNotIn('authority.maintenance-channel', declarations)
                 self.assertNotIn('authority.maintenance-gate', declarations)
+
+    def test_maintenance_channel_declaration_matches_the_swift_protocol_version_and_methods(self):
+        sources = ROOT / 'macos/core/Sources/RemozioCore'
+        scope = (sources / 'AuthorityMaintenanceXPCListener.swift').read_text()
+        version = int(re.search(r'static let protocolVersion: UInt64 = (\d+)', scope).group(1))
+        self.assertEqual(version, 2)
+        endpoint = (sources / 'AuthorityMaintenanceXPCEndpoint.swift').read_text()
+        interface = re.search(r'@objc protocol AuthorityMaintenanceXPCProtocol \{(.*?)\n\}', endpoint, re.S).group(1)
+        self.assertEqual(re.findall(r'func (\w+)\(', interface), ['hello', 'exchange', 'readGate', 'observeIncarnation'])
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role in (2, 8):
+                self.assertEqual(declarations['authority.maintenance-channel'][1], [version])
+                self.assertEqual(declarations['authority.maintenance-channel'][2], [version])
 
     def test_close_marker_has_both_readers_and_only_the_authority_writer(self):
         for role, *_ in MANIFEST.COMPONENTS:

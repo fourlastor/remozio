@@ -80,7 +80,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 budget: .init(maximum: 1), verify: { verified.withLock { $0 += 1 } })
             defer { endpoint.close(); startup.recovery.close(); hold.close() }
             let hello = DispatchSemaphore(value: 0)
-            endpoint.hello { version in XCTAssertEqual(version, 1); hello.signal() }
+            endpoint.hello { version in XCTAssertEqual(version, AuthorityMaintenanceChannelScope.protocolVersion); hello.signal() }
             XCTAssertEqual(hello.wait(timeout: .now() + 3), .success)
             let q = try Request(action: .reopen, accountID: f.authority.accountID, attemptID: row.id, revision: row.revision,
                 installationID: scope.installationID, gate: gate, binding: binding, challenge: data(6, 32))
@@ -265,7 +265,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 budget: .init(maximum: 1), verify: { verified.withLock { $0 += 1 } })
             defer { endpoint.close(); startup.recovery.close(); hold.close() }
             let hello = DispatchSemaphore(value: 0)
-            endpoint.hello { version in XCTAssertEqual(version, 1); hello.signal() }
+            endpoint.hello { version in XCTAssertEqual(version, AuthorityMaintenanceChannelScope.protocolVersion); hello.signal() }
             XCTAssertEqual(hello.wait(timeout: .now() + 3), .success)
             let open = try Request(action: .open, accountID: f.authority.accountID, attemptID: row.id, revision: row.revision,
                 installationID: scope.installationID, gate: gate, binding: nil, challenge: data(6, 32))
