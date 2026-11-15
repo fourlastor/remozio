@@ -371,6 +371,21 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             }
         }
     }
+    /// Close each capture handle before the real admission probe. A second protected read binds the observation.
+    func observeMaintenanceGate(_ request: AuthorityMaintenanceGateRequest, account: RuntimeMaintenanceWindowRecord.Account,
+        incarnation: Data) throws -> AuthorityMaintenanceGateResponse {
+        guard incarnation.count == 16, account.accountID == configuration.command.accountID,
+              account.ownerUID == configuration.command.callerUID,
+              let startup = admissionStartup, let hold = startup.maintenanceHold else { throw RuntimePreparationError.changedScope }
+        func read() throws -> RuntimeMaintenanceWindowRecord {
+            try withGatewayRecoveryMachine { current, release in
+                try AuthorityMaintenanceGateRequest.requireFormats(release)
+                return try current.runtimeMaintenanceGateRecord(request, account: account, candidate: release)
+            }
+        }
+        return try AuthorityMaintenanceGateObservation.capture(request: request, incarnation: incarnation,
+            hold: hold, boundary: startup.boundary, read: read)
+    }
     /// Capture eligibility before check-in closes the startup machine writer.
     func captureUpdateSchedulingStartup() -> AuthorityUpdateSchedulingStartupSnapshot {
         lock.withLock {

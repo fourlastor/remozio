@@ -52,5 +52,17 @@ final class AuthorityMaintenanceAdmissionHold: @unchecked Sendable {
             }
         }
     }
+    /// An observation grants no release. The caller must bind the current protected row independently.
+    func gateHold(attemptID: Data) throws -> RuntimeMaintenanceWindowRecord.GateReadback.Hold {
+        try validate()
+        return try lock.withLock {
+            switch state {
+            case .held(let id): guard id == attemptID else { throw RuntimePreparationError.changedScope }; return .held
+            case .open(let id): guard id == attemptID else { throw RuntimePreparationError.changedScope }; return .released
+            case .unknown: return .unknown
+            case .closed: throw JournalLeaseError.invalidated
+            }
+        }
+    }
     func close() { lock.withLock { state = .closed } }
 }

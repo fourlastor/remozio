@@ -367,6 +367,7 @@ final class SetupRetainedInvocationTests: XCTestCase {
     private final class ContextExportedProbe: NSObject, AuthorityMaintenanceXPCProtocol {
         func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
         func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+        func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
     }
     func testContextGuardAndExportedObjectReleaseAfterTheInvalidationHandler() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in

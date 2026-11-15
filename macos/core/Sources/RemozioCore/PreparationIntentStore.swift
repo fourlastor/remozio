@@ -6008,6 +6008,27 @@ public final class PreparationIntentStore {
             return record
         }
     }
+    /// Exact protected observation scope only. No gate, release or restoration authority comes from this row.
+    func runtimeMaintenanceGateRecord(_ request: AuthorityMaintenanceGateRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceWindowRecord {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+            guard current.schemaVersion == RuntimeMaintenanceWindowStorage.schemaVersion,
+                  request.accountID == account.accountID, request.installationID == current.inventory.installationID,
+                  current.admission.accounts.first(where: { $0.accountID == account.accountID })?.identity == request.gate,
+                  current.inventory.accounts.contains(where: { $0.accountID == account.accountID && $0.ownerUID == account.ownerUID }),
+                  let installed = try loadAccountPreparation(ownerUID: account.ownerUID), installed.storagePrepared,
+                  installed.accountID == account.accountID, installed.installationID == request.installationID,
+                  let record = frame.maintenanceWindows.first(where: { $0.scope.authority.accountID == account.accountID }),
+                  record.scope.authority == account, record.scope.macID == macID,
+                  record.scope.installationID == request.installationID, record.scope.releaseDigest == current.inventory.releaseDigest,
+                  record.id == request.attemptID, record.revision == request.revision, record.phase == .reopenPending,
+                  record.shutdownBinding == request.target else { throw RuntimePreparationError.changedScope }
+            var directory = installed.directoryID.uuid
+            guard withUnsafeBytes(of: &directory, { Data($0) }) == account.directoryID else { throw RuntimePreparationError.changedScope }
+            return record
+        }
+    }
     private func loadRuntimeMaintenanceWindows() throws -> [RuntimeMaintenanceWindowRecord] {
         try statement("SELECT account,attempt,revision,phase,record FROM runtime_maintenance_windows_v1 ORDER BY account LIMIT 65") { row in
             var values: [RuntimeMaintenanceWindowRecord] = []

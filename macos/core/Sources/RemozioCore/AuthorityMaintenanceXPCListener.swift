@@ -4,6 +4,7 @@ import Foundation
 /// Fixed address and signed participant metadata. These checks do not declare a reachable product service.
 enum AuthorityMaintenanceChannelScope {
     static let formatName = "authority.maintenance-channel"
+    static let protocolVersion: UInt64 = 1
     static func serviceName(accountID: Data) throws -> String { try RuntimePreparationPaths(accountID: accountID).presenceService }
     static func validate(_ release: SignedReleaseEvidence, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry) throws {
         guard authority.role == .authority, setup.role == .setupController, authority.active, setup.active,

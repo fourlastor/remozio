@@ -36,7 +36,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.machine-update-completion-publication', 'authority.installed-release-state',
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
-                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel', 'authority.maintenance-close-marker',
+                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel', 'authority.maintenance-gate', 'authority.maintenance-close-marker',
                  'runtime.retained-setup-release', 'runtime.retained-setup-completion',
                  'runtime.retained-setup-completion-archive', 'runtime.retained-setup-completion-configuration',
                  'runtime.retained-setup-completion-publication',
@@ -500,9 +500,11 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             if role in (2, 8):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
                 self.assertEqual(declarations['authority.maintenance-channel'], {0: 'authority.maintenance-channel', 1: [1], 2: [1], 3: {}})
+                self.assertEqual(declarations['authority.maintenance-gate'], {0: 'authority.maintenance-gate', 1: [1], 2: [1], 3: {}})
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
                 self.assertNotIn('authority.maintenance-channel', declarations)
+                self.assertNotIn('authority.maintenance-gate', declarations)
 
     def test_close_marker_has_both_readers_and_only_the_authority_writer(self):
         for role, *_ in MANIFEST.COMPONENTS:
