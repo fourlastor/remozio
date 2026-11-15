@@ -7,8 +7,11 @@ import XCTest
 enum MaintenanceStopTestFault: Error { case expected, changedProcess }
 final class MaintenanceStopTestWitness: RuntimeJobExitWitness, Sendable {
     let processID: pid_t = 100
-    let exited = Mutex(false)
-    func hasExited() throws -> Bool { exited.withLock { $0 } }
+    let exited = Mutex(false), failNextPoll = Mutex(false)
+    func hasExited() throws -> Bool {
+        if failNextPoll.withLock({ value in let fail = value; value = false; return fail }) { throw MaintenanceStopTestFault.expected }
+        return exited.withLock { $0 }
+    }
 }
 final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendable {
     struct State {
@@ -58,7 +61,7 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
     let initialization: AuthorityInitializationIntent
     let driver = MaintenanceStopTestDriver(), witness = MaintenanceStopTestWitness()
     let ownerValid = Mutex(true)
-    init() throws {
+    init(purpose: RuntimeMaintenanceWindowRecord.Purpose = .retainedPolicy) throws {
         runtime = try .init(); files = try .init()
         initialization = try XCTUnwrap(runtime.machine.initialization(accountID: runtime.account.accountID))
         let (barrier, identity) = try files.provisionAccount(runtime.account.accountID)
@@ -81,7 +84,7 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
             mutationFootprintDigest: maintenanceCloseBytes(75, 32), authorityGrantDigest: maintenanceCloseBytes(76, 32),
             targetConsentDigest: maintenanceCloseBytes(77, 32), administratorIntentDigest: maintenanceCloseBytes(78, 32))
         window = try .init(id: maintenanceCloseBytes(80), revision: maintenanceCloseBytes(81),
-            purpose: .retainedPolicy, scope: scope, phase: .draining)
+            purpose: purpose, scope: scope, phase: .draining)
         cohort = try .init(plan: runtime.plan, inventory: inventory, registration: registration, targetAccountID: target.accountID)
     }
     deinit { drain.close(); ordinary.close(); directory.close() }

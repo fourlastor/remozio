@@ -19,13 +19,13 @@ private final class RestorationHarness: @unchecked Sendable {
     let capture: RuntimeMaintenanceStopCapture, file: MaintenanceCloseFileFixture, stores: MaintenanceBodyStores
     let process = RestorationTestWitness(200)
     var observation: RuntimeJobStopSession.Observation = .matching(100)
-    var pairOpens = 0, bodyCalls = 0, bootstraps = 0, inspections = 0, floorReads = 0, windowReads = 0, observed: [pid_t] = []
+    var bodyCalls = 0, bootstraps = 0, inspections = 0, floorReads = 0, windowReads = 0, observed: [pid_t] = []
     var failClose = false, failFloors = false, faultPhase: Record.Phase?
     var onBootstrap: () throws -> Void = {}
     var onRestorationCallback: () throws -> Void = {}
     var row: Record?, writes: [Record] = []
-    init() async throws {
-        let f = try MaintenanceStopTestFixture(), client = try f.client()
+    init(purpose: Record.Purpose = .retainedRuntime) async throws {
+        let f = try MaintenanceStopTestFixture(purpose: purpose), client = try f.client()
         self.f = f; self.client = client; capture = try await f.capture(client)
         file = try .init(); try file.publish(capture.marker)
         stores = try .init(mac: f.window.scope.macID, account: f.cohort.accountID, policy: f.runtime.plan.host.codePolicy)
@@ -49,13 +49,13 @@ private final class RestorationHarness: @unchecked Sendable {
         let permit = try RuntimeMaintenanceStopPermit.openOwned(capture: capture, until: .now.advanced(by: .seconds(5)),
             readMarker: { try self.file.readback(self.capture.marker) })
         return try f.ordinary.withMachineAdmission { scope in
-            let stop = try RuntimeMaintenanceAuthorityStop.openOwnedBound(permit: permit, purpose: .retainedPolicy, cohort: f.cohort,
+            let stop = try RuntimeMaintenanceAuthorityStop.openOwnedBound(permit: permit, purpose: f.window.purpose, cohort: f.cohort,
                 scope: scope, drain: f.drain, directory: f.directory, inspect: { self.observation }, remove: {
                     self.observation = .absent; self.f.witness.exited.withLock { $0 = true }
-                }, openPair: { _, policy in self.pairOpens += 1; return try self.pair(policy) })
+                }, openPair: { _, policy in try self.pair(policy) })
             XCTAssertEqual(try stop.poll(), .registrationRemoved); try stop.requireRemoved()
             do {
-                _ = try stop.withNativeBody(purpose: .retainedPolicy, initialization: f.initialization,
+                _ = try stop.withNativeBody(purpose: f.window.purpose, initialization: f.initialization,
                     policy: f.runtime.plan.host.codePolicy) { _ -> Int in
                     self.bodyCalls += 1; if throwing { throw MaintenanceStopTestFault.expected }; return 7
                 }
@@ -109,12 +109,12 @@ final class RuntimeMaintenanceRestorationTests: XCTestCase, @unchecked Sendable 
         XCTAssertThrowsError(try body()) { XCTAssertEqual($0 as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
     }
 
-    func testFullChainReachesTheHealthyPendingRowUnderTheHeldDrainWithoutReopeningTheAuthorityStores() async throws {
+    func testFullChainReachesTheHealthyPendingRowUnderTheHeldDrainAfterTheBodyPairCloses() async throws {
         let h = try await RestorationHarness(), stop = try h.stopAndRunBody(); defer { stop.close() }
         XCTAssertEqual(stop.bodyPairClose, .closed); XCTAssertTrue(stop.restorationReady)
         // Every restoration callback runs while Setup holds the account EX drain and nobody holds A's writer locks.
         h.onRestorationCallback = {
-            try h.f.drain.validate(); try h.stores.requireReleased(); XCTAssertEqual(h.pairOpens, 1)
+            try h.f.drain.validate(); try h.stores.requireReleased()
         }
         h.onBootstrap = {
             XCTAssertThrowsError(try h.probe.acquireAdmission()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
@@ -145,11 +145,77 @@ final class RuntimeMaintenanceRestorationTests: XCTestCase, @unchecked Sendable 
         try r.releaseOwnedDrain(after: pending)
         XCTAssertThrowsError(try h.f.drain.validate()); let admitted = try h.probe.acquireAdmission(); admitted.close()
         XCTAssertThrowsError(try r.releaseOwnedDrain(after: pending)); XCTAssertThrowsError(try r.validateBeforePending())
-        XCTAssertEqual(h.bodyCalls, 1); XCTAssertEqual(h.pairOpens, 1); XCTAssertEqual(h.bootstraps, 1)
+        XCTAssertEqual(h.bodyCalls, 1); XCTAssertEqual(h.bootstraps, 1)
         try r.requireWitnessLive(); h.process.exited.withLock { $0 = true }; XCTAssertThrowsError(try r.requireWitnessLive())
         await h.client.close()
     }
 
+    func testUnsupportedPurposeCannotSettleOrRegisterRestoration() async throws {
+        let h = try await RestorationHarness(purpose: .retainedPolicy), stop = try h.stopAndRunBody()
+        defer { stop.close() }
+        XCTAssertThrowsError(try h.restore(stop)) { XCTAssertEqual($0 as? RuntimePreparationError, .changedScope) }
+        XCTAssertTrue(h.writes.isEmpty); XCTAssertEqual(h.bootstraps, 0); XCTAssertEqual(h.bodyCalls, 1)
+        try h.f.drain.validate(); await h.client.close()
+    }
+    func testFailedDrainValidationDoesNotConsumeTheRelease() async throws {
+        let h = try await RestorationHarness(), stop = try h.stopAndRunBody(); defer { stop.close() }
+        let owner = try h.restore(stop); try owner.acceptWitness(h.process)
+        let pending = try owner.pendingRecord(binding: h.healthyBinding(owner))
+        h.f.witness.failNextPoll.withLock { $0 = true }
+        XCTAssertThrowsError(try owner.releaseOwnedDrain(after: pending)) {
+            XCTAssertEqual($0 as? MaintenanceStopTestFault, .expected)
+        }
+        try h.f.drain.validate()
+        try owner.releaseOwnedDrain(after: pending)
+        XCTAssertThrowsError(try h.f.drain.validate())
+        XCTAssertThrowsError(try owner.releaseOwnedDrain(after: pending))
+        await h.client.close()
+    }
+    func testExactOwnerContextMismatchWritesRecoveryBeforeAnyDriverIsCreated() async throws {
+        let h = try await RestorationHarness(), stop = try h.stopAndRunBody(); defer { stop.close() }
+        let owner = try h.restore(stop)
+        let context = try owner.openRequest(challenge: maintenanceCloseBytes(133, 32))
+        let wrong = try AuthorityMaintenanceChannelRequest(action: .open, accountID: context.accountID,
+            attemptID: context.attemptID, revision: context.revision, installationID: context.installationID,
+            gate: .init(device: context.gate.device, inode: context.gate.inode + 1), binding: nil, challenge: context.challenge)
+        let client = try AuthorityMaintenanceXPCClient.openOwned(context: wrong, driver: MaintenanceStopTestDriver())
+        do {
+            _ = try await client.restoreHealthyOwned(owner: owner, until: .now.advanced(by: .seconds(1)),
+                makeDriver: { XCTFail("No replacement driver before a context match"); throw MaintenanceStopTestFault.expected },
+                capturePeer: { _ in XCTFail("No peer before a context match"); return h.process },
+                persist: { next, previous in try h.persist(next, previous) })
+            XCTFail("Expected owner recovery")
+        } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+        XCTAssertEqual(h.phases, [.workSettled, .restoring, .needsOwnerRecovery])
+        XCTAssertEqual(h.writes.last?.failure, .changedScope)
+        XCTAssertThrowsError(try owner.commitOwnerRecovery(.healthFailed))
+        try h.f.drain.validate(); await h.client.close(); await client.close()
+    }
+    func testNativeUsageRefusalDoesNotWriteAnOwnerRecoveryRow() async throws {
+        let h = try await RestorationHarness(), stop = try h.stopAndRunBody(); defer { stop.close() }
+        let owner = try h.restore(stop), before = h.phases
+        do {
+            _ = try await h.client.restoreHealthyNative(owner: owner, until: .now.advanced(by: .seconds(1)),
+                persist: { _, _ in XCTFail("No native writer for an ordinary owner"); throw MaintenanceStopTestFault.expected })
+            XCTFail("Expected Root refusal")
+        } catch { XCTAssertEqual(error as? JournalLeaseError, .rootRequired) }
+        XCTAssertEqual(h.phases, before); try h.f.drain.validate(); await h.client.close()
+    }
+    func testOffThreadOwnerCloseInvalidatesThePermitAndKeepsTheDrain() async throws {
+        final class Box: @unchecked Sendable {
+            let stop: RuntimeMaintenanceAuthorityStop
+            init(_ stop: RuntimeMaintenanceAuthorityStop) { self.stop = stop }
+        }
+        let h = try await RestorationHarness(), stop = try h.stopAndRunBody(), box = Box(stop)
+        let rows = try h.rows(stop)
+        XCTAssertTrue(try stop.beginRestoration())
+        let permit = try stop.issueOwnedRestorationPermit(restoring: rows.restoring, replacing: rows.settled, admission: h.f.ordinary)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { box.stop.close(); finished.signal() }
+        XCTAssertEqual(finished.wait(timeout: .now() + 3), .success)
+        XCTAssertThrowsError(try permit.validate()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
+        try h.f.drain.validate(); await h.client.close()
+    }
     func testRecoveryBeforePendingRunsFromAnotherThreadAndExpiredDrainRefusesValidation() async throws {
         final class Box: @unchecked Sendable {
             let r: RuntimeMaintenanceRestoration, done = DispatchSemaphore(value: 0), result = Mutex<Error?>(nil)
@@ -179,11 +245,11 @@ final class RuntimeMaintenanceRestorationTests: XCTestCase, @unchecked Sendable 
             XCTAssertEqual(h.writes.first?.service, .stopped); XCTAssertEqual(h.bootstraps, 0); XCTAssertEqual(h.inspections, 0)
             let (settled, restoring) = try h.rows(stop)
             XCTAssertThrowsError(try stop.issueOwnedRestorationPermit(restoring: restoring, replacing: settled, admission: h.f.ordinary))
-            XCTAssertThrowsError(try stop.withNativeBody(purpose: .retainedPolicy, initialization: h.f.initialization,
+            XCTAssertThrowsError(try stop.withNativeBody(purpose: h.f.window.purpose, initialization: h.f.initialization,
                 policy: h.f.runtime.plan.host.codePolicy) { _ in XCTFail() })
             XCTAssertThrowsError(try h.restore(stop)) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
             XCTAssertEqual(h.writes.count, 1)
-            XCTAssertEqual(h.bodyCalls, 1); XCTAssertEqual(h.pairOpens, 1); await h.client.close()
+            XCTAssertEqual(h.bodyCalls, 1); await h.client.close()
         }
     }
 

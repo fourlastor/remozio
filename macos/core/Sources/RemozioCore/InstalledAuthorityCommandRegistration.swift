@@ -326,6 +326,19 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try AuthorityMaintenanceCloseMarker.readback(marker); try verify()
         }
     }
+    /// A fresh expectation for one healthy maintenance readiness check. It reads the protected gateway runtime with the
+    /// same loader and verification as the gateway extension monitor. No machine store or hold lock is held.
+    func healthyMaintenanceReadiness() throws -> AuthorityHealthyMaintenanceReadiness {
+        let activity = try releaseActivity.acquireShared(); defer { activity.close() }
+        let verify: () throws -> Void = { [self] in try validateRuntime(); try activity.validate() }
+        try verify()
+        let expected = try AuthorityHealthyMaintenanceReadiness.current(accountID: configuration.command.accountID,
+            configuredPhonePush: configuration.command.presence.wake.phonePush) {
+            try GatewayRuntimeLoader.load(authority: configuration, verifyCurrent: verify)
+        }
+        try verify()
+        return expected
+    }
     func captureMaintenanceAccount() throws -> RuntimeMaintenanceWindowRecord.Account {
         try withGatewayRecoveryMachine { current, _ in
             guard configuration.jobPlacement == .systemAccount,

@@ -370,10 +370,11 @@ actor AuthorityMaintenanceXPCClient {
     }
 
     /// The owner proves closed stores and one native registration. Only its receipt can release the existing drain.
+    /// Missing Root or native transport is a usage error. It writes no recovery row.
     func restoreHealthyNative(owner: RuntimeMaintenanceRestoration, until deadline: ContinuousClock.Instant,
         persist: @escaping CleanupCommit) async throws -> CleanupRecord {
         guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
-        guard try owner.openRequest(challenge: context.challenge) == context else { throw RuntimePreparationError.changedScope }
+        try requireRestorationContext(owner)
         let pendingReceipt = MaintenanceHealthyPendingReceipt()
         return try await restoreHealthy(window: owner.window, until: deadline,
             makeDriver: { try native.replacement(accountID: owner.window.scope.authority.accountID) },
@@ -387,6 +388,29 @@ actor AuthorityMaintenanceXPCClient {
                 if next.phase == .reopenPending { try pendingReceipt.store(receipt) }
                 return receipt.record
             })
+    }
+    /// Checks the exact owner request before selecting any connection or issuing any RPC.
+    private func requireRestorationContext(_ owner: RuntimeMaintenanceRestoration) throws {
+        do {
+            guard try owner.openRequest(challenge: context.challenge) == context else { throw RuntimePreparationError.changedScope }
+        } catch {
+            try? owner.commitOwnerRecovery(.changedScope); finish()
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+    }
+    /// Exercises the native owner's post-construction API with ordinary-owner process controls.
+    /// Root cannot use an injected driver, witness, or record-only writer.
+    func restoreHealthyOwned(owner: RuntimeMaintenanceRestoration, until deadline: ContinuousClock.Instant,
+        makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        capturePeer: @escaping @Sendable (any AuthorityMaintenanceClientDriver) throws -> any RuntimeJobExitWitness,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try RuntimeMaintenanceOwnedControl.require(); try requireRestorationContext(owner)
+        return try await restoreHealthy(window: owner.window, until: deadline, makeDriver: makeDriver,
+            verifyScope: { try owner.validateBeforePending() }, preparePeer: { driver in
+                try owner.acceptWitness(capturePeer(driver))
+            }, requirePeerLive: { try owner.requireWitnessLive() }, makePending: { try owner.pendingRecord(binding: $0) },
+            releaseDrain: { try owner.releaseOwnedDrain(after: $0) }, recoverRestoring: { try owner.commitOwnerRecovery($0) },
+            persist: persist)
     }
     /// Owned controls exercise the ordering. They cannot grant native restoration or select system-domain callbacks.
     func restoreHealthyOwned(window: CleanupRecord, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
@@ -423,12 +447,14 @@ actor AuthorityMaintenanceXPCClient {
         releaseDrain: @escaping @Sendable (CleanupRecord) throws -> Void,
         recoverRestoring: @escaping @Sendable (CleanupRecord.Failure) throws -> Void,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
-        guard state == .new, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        guard state == .new, !cleanupUsed, !busy else {
+            try? recoverRestoring(.changedScope); finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
         cleanupUsed = true; busy = true; defer { busy = false; finish() }
         guard window.purpose == .retainedRuntime, window.phase == .restoring, let stopped = window.shutdownBinding,
               context.accountID == window.scope.authority.accountID, context.attemptID == window.id,
               context.revision == window.revision, context.installationID == window.scope.installationID else {
-            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+            try? recoverRestoring(.changedScope); throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
         var current = window, attemptedCommit = false, pendingWriteOwned = false
         var connection: AuthorityMaintenanceXPCClient?
