@@ -81,6 +81,13 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
                         try current.close()
                         return state
                     } catch { try? current.close(); throw error }
+                }, readMaintenance: { current in
+                    guard let prepared = try current.accountPreparation(ownerUID: config.command.callerUID),
+                          prepared.accountID == config.command.accountID else { throw RuntimePreparationError.changedScope }
+                    var directory = prepared.directoryID.uuid
+                    let account = try RuntimeMaintenanceWindowRecord.Account(accountID: prepared.accountID, ownerUID: prepared.ownerUID,
+                        directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+                    return current.runtimeMaintenanceStartupProjection(account: account, candidate: release)
                 }, openBarrier: { scope, identity in
                     try UpdateAdmissionBarrier.open(machineDirectory: config.machineDirectory, expected: identity, scope: scope)
                 })
@@ -335,10 +342,33 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         guard account.accountID == configuration.command.accountID, account.ownerUID == configuration.command.callerUID else {
             throw RuntimePreparationError.changedScope
         }
-        let armed = try request.action == .reopen ? request.binding.map { try admission.shutdownBinding(matching: $0).binding } : nil
+        let armed = try request.action == .reopen ? request.binding.map { binding in
+            _ = try admission.reopenTarget(matching: binding); return binding
+        } : nil
         try withGatewayRecoveryMachine { current, release in
-            _ = try current.runtimeMaintenanceCommandRecord(request, account: account, incarnation: incarnation,
+            let row = try current.runtimeMaintenanceCommandRecord(request, account: account, incarnation: incarnation,
                 armedBinding: armed, candidate: release)
+            if request.action == .open {
+                guard let hold = admissionStartup?.maintenanceHold else { throw RuntimePreparationError.changedScope }
+                try hold.retain(row)
+            }
+        }
+    }
+    /// Called only by the accepted endpoint after its original binding check and before releasing that binding.
+    func reopenMaintenanceAdmission(_ request: AuthorityMaintenanceChannelRequest, account: RuntimeMaintenanceWindowRecord.Account,
+        incarnation: Data, admission: AuthorityMaintenancePairingAdmission, releaseBinding: () throws -> Void) throws {
+        guard request.action == .reopen, let binding = request.binding,
+              let hold = admissionStartup?.maintenanceHold else { throw RuntimePreparationError.changedScope }
+        _ = try admission.reopenTarget(matching: binding)
+        let armed = binding
+        try withGatewayRecoveryMachine { current, release in
+            let row = try current.runtimeMaintenanceCommandRecord(request, account: account, incarnation: incarnation,
+                armedBinding: armed, candidate: release)
+            try hold.reopen(row, binding: armed, incarnation: incarnation) {
+                try releaseBinding()
+                guard try current.runtimeMaintenanceCommandRecord(request, account: account, incarnation: incarnation,
+                    armedBinding: armed, candidate: release) == row else { throw RuntimePreparationError.changedScope }
+            }
         }
     }
     /// Capture eligibility before check-in closes the startup machine writer.
@@ -521,10 +551,10 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     func close() throws {
         try lock.withLock {
             guard !closed else { return }
-            try machine.close(); admissionStartup?.recovery.close(); placement.close(); startupActivity?.close(); startupActivity = nil; closed = true
+            try machine.close(); admissionStartup?.maintenanceHold?.close(); admissionStartup?.recovery.close(); placement.close(); startupActivity?.close(); startupActivity = nil; closed = true
         }
     }
-    deinit { try? machine.close(); admissionStartup?.recovery.close(); placement.close() }
+    deinit { try? machine.close(); admissionStartup?.maintenanceHold?.close(); admissionStartup?.recovery.close(); placement.close() }
 }
 
 extension AuthorityRuntimeRunner {

@@ -5949,6 +5949,15 @@ public final class PreparationIntentStore {
         candidate: SignedReleaseEvidence) -> RuntimeMaintenanceAdmissionProjection {
         RuntimeMaintenanceAdmissionProjection.startup {
             try transaction(write: false) {
+                try identity(macID)
+                if try scalar("PRAGMA user_version") < RuntimeMaintenanceWindowStorage.schemaVersion {
+                    guard let inventory = try loadInventoryRecord(), let registration = try loadUpdateAdmissionRegistration(),
+                          inventory.accounts.contains(where: { $0.accountID == account.accountID && $0.ownerUID == account.ownerUID }) else {
+                        throw RuntimePreparationError.changedScope
+                    }
+                    return try .init(record: nil, macID: macID, installationID: inventory.installationID,
+                        account: account, registration: registration)
+                }
                 let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
                 return try .init(record: frame.maintenanceWindows.first {
                     $0.scope.authority.accountID == account.accountID

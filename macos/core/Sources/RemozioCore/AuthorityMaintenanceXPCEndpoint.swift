@@ -13,20 +13,23 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
     private let processID = getpid(), owner = getuid()
     private let marker: @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker?
+    private let reopen: @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
     private init(admission: AuthorityMaintenancePairingAdmission, acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
-        marker: @escaping @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker? = { _, _ in nil }) {
-        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker
+        marker: @escaping @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker? = { _, _ in nil },
+        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() }) {
+        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
-        observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork) throws -> AuthorityMaintenanceChannelAccess {
+        observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
+        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() }) throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe)
+        return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen)
     }
     static func openNative(service: AuthorityWakeService, registration: InstalledAuthorityCommandRegistration) async throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -38,10 +41,18 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try service.validateNativeMaintenanceIdentity()
         }, observe: { _ in try await service.captureNativeMaintenanceWork() }, marker: { binding, q in
             try registration.makeCloseMarker(binding: binding, gate: q.gate, account: account)
+        }, reopen: { q, release in
+            try service.validateNativeMaintenanceIdentity()
+            try registration.reopenMaintenanceAdmission(q, account: account, incarnation: incarnation, admission: admission, releaseBinding: release)
+            try service.validateNativeMaintenanceIdentity()
         })
     }
     func retainCloseMarker(_ shutdown: AuthorityMaintenancePairingAdmission.Shutdown, request: AuthorityMaintenanceChannelRequest) throws {
         if let value = try marker(shutdown.binding, request) { try shutdown.retainCloseMarker(value) }
+    }
+    func reopenAdmission(_ request: AuthorityMaintenanceChannelRequest, releaseBinding: @Sendable () throws -> Void) throws {
+        guard request.action == .reopen else { throw RuntimePreparationError.changedScope }
+        try validate(request); try reopen(request, releaseBinding); try validateIdentity()
     }
     func validateIdentity() throws {
         guard getpid() == processID, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.invalidated }
@@ -151,13 +162,23 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
             try activity?.validate()
             let initialWork = q.action == .open ? try await access.capture(q) : nil
             try access.validate(q); try activity?.validate(); try Task.checkCancellation()
+            // A reconnect sends hello then the saved reopen target. It creates no new pairing reservation.
+            if q.action == .reopen, lock.withLock({ context == nil }) {
+                guard let target = q.binding else { throw RuntimePreparationError.changedScope }
+                let shutdown = try access.admission.reopenTarget(matching: target)
+                try access.reopenAdmission(q, releaseBinding: { try shutdown?.reopen(matching: target) })
+                return (try Response(request: q, binding: target, work: nil, outcome: .applied).encoded, false)
+            }
             let owner = try begin(q); opened = q.action == .open; binding = q.binding ?? owner.binding
             guard let binding else { throw RuntimePreparationError.changedScope }
             if q.action == .cancel || q.action == .reopen {
                 let bytes = try Response(request: q, binding: binding, work: nil, outcome: .applied).encoded
                 try access.validate(q); try activity?.validate(); try Task.checkCancellation()
-                if let shutdown = try? access.admission.shutdownBinding(matching: binding) {
-                    if q.action == .cancel { try shutdown.cancel(matching: binding) } else { try shutdown.reopen(matching: binding) }
+                if q.action == .reopen {
+                    let target = binding, shutdown = try access.admission.reopenTarget(matching: target)
+                    try access.reopenAdmission(q, releaseBinding: { try shutdown?.reopen(matching: target) })
+                } else if let shutdown = try? access.admission.shutdownBinding(matching: binding) {
+                    try shutdown.cancel(matching: binding)
                 } else { try owner.releaseUnarmed(matching: binding) }
                 // The client closes after receiving the applied release acknowledgement.
                 return (bytes, false)

@@ -7,9 +7,13 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
     let recovery: MachineUpdateAdmissionRecovery
     private let initial: MachineUpdateAdmissionState
     private let candidate: SignedReleaseEvidence?
+    let maintenanceHold: AuthorityMaintenanceAdmissionHold?
+    private let maintenanceProjection: RuntimeMaintenanceAdmissionProjection?
+    private let readMaintenance: (@Sendable (PreparationIntentStore) throws -> RuntimeMaintenanceAdmissionProjection)?
 
     static func capture(machine: PreparationIntentStore, macID: Data, installationID: Data, accountID: Data,
         activity: ReleaseActivityBarrier, candidate: SignedReleaseEvidence? = nil, readCurrent: @escaping @Sendable () throws -> MachineUpdateAdmissionState,
+        readMaintenance: (@Sendable (PreparationIntentStore) throws -> RuntimeMaintenanceAdmissionProjection)? = nil,
         openBarrier: (UpdateAdmissionScope, PreparationFileIdentity) throws -> UpdateAdmissionBarrier) throws -> Self? {
         guard macID.count == 16, installationID.count == 16, accountID.count == 16 else { throw RuntimePreparationError.changedScope }
         let initial = try candidate.map { try machine.updateAdmissionState(candidate: $0) } ?? machine.updateAdmissionState()
@@ -23,20 +27,29 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
         }
         let recovery = try MachineUpdateAdmissionRecovery(initial: initial, macID: macID, installationID: installationID,
             accountID: accountID, coordinator: .init(activity: activity, admission: global), readCurrent: readCurrent)
-        let boundary = try UpdateAdmissionBoundary(machine: global, account: account, verifyAdmission: { try recovery.prepareAdmission() })
+        let projection = readMaintenance.map { reader in RuntimeMaintenanceAdmissionProjection.startup { try reader(machine) } }
+        let hold = projection.map(AuthorityMaintenanceAdmissionHold.init)
+        let boundary = try UpdateAdmissionBoundary(machine: global, account: account, verifyAdmission: {
+            try hold?.requireOpen(); try recovery.prepareAdmission(); try hold?.requireOpen()
+        })
         guard account == nil || boundary.accountID == accountID else { throw RuntimePreparationError.changedScope }
-        let captured = Self(registration: registration, boundary: boundary, recovery: recovery, initial: initial, candidate: candidate)
+        let captured = Self(registration: registration, boundary: boundary, recovery: recovery, initial: initial, candidate: candidate, maintenanceHold: hold, maintenanceProjection: projection, readMaintenance: readMaintenance)
         try captured.requireCurrent(machine: machine)
         return captured
     }
     func requireCurrent(machine: PreparationIntentStore) throws {
         let current = try candidate.map { try machine.updateAdmissionState(candidate: $0) } ?? machine.updateAdmissionState()
         guard current == initial else { throw RuntimePreparationError.changedScope }
+        if let readMaintenance {
+            guard RuntimeMaintenanceAdmissionProjection.startup({ try readMaintenance(machine) }) == maintenanceProjection else {
+                throw RuntimePreparationError.changedScope
+            }
+        }
         try validate()
     }
 
     func validate() throws {
-        try boundary.validate()
+        try maintenanceHold?.validate(); try boundary.validate()
         try recovery.validate()
     }
 }

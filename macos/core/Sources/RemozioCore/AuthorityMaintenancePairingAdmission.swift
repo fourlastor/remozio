@@ -40,6 +40,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         var blocker: UUID?
         var marker: AuthorityMaintenanceCloseMarker?
         var closing = false
+        var released: AuthorityMaintenanceBinding?
         var armed: AuthorityMaintenanceBinding?
     }
     private let state = Mutex(State())
@@ -110,13 +111,22 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             return Shutdown(admission: self, binding: binding)
         }
     }
+    /// Exact same-incarnation history only. A duplicate reopen creates no connection or armed restriction.
+    func reopenTarget(matching binding: AuthorityMaintenanceBinding) throws -> Shutdown? {
+        try state.withLock {
+            guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+            if $0.armed == binding { return Shutdown(admission: self, binding: binding) }
+            guard $0.armed == nil, $0.blocker == nil, $0.released == binding else { throw RuntimePreparationError.changedScope }
+            return nil
+        }
+    }
     private func transfer(_ id: UUID, binding: AuthorityMaintenanceBinding) throws -> Shutdown {
         try state.withLock {
             guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == id else {
                 throw AuthorityPairingSetupError.unavailable
             }
             guard $0.stages.isEmpty else { throw TransferError.stagesPending($0.stages.count) }
-            $0.armed = binding; $0.blocker = nil; $0.connections.remove(id)
+            $0.armed = binding; $0.released = nil; $0.blocker = nil; $0.connections.remove(id)
             return Shutdown(admission: self, binding: binding)
         }
     }
@@ -144,20 +154,20 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     private func releaseShutdown(_ binding: AuthorityMaintenanceBinding) throws {
         try state.withLock {
             guard !$0.closed, !$0.closing, $0.armed == binding else { throw RuntimePreparationError.changedScope }
-            $0.armed = nil; $0.marker = nil
+            $0.armed = nil; $0.marker = nil; $0.released = binding
         }
     }
-    private func releaseUnarmed(_ id: UUID) throws {
+    private func releaseUnarmed(_ id: UUID, binding: AuthorityMaintenanceBinding) throws {
         try state.withLock {
             guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == nil || $0.blocker == id else {
                 throw RuntimePreparationError.changedScope
             }
-            $0.connections.remove(id); if $0.blocker == id { $0.blocker = nil }
+            $0.connections.remove(id); $0.released = binding; if $0.blocker == id { $0.blocker = nil }
         }
     }
-    private func releaseConnection(_ id: UUID) {
+    private func releaseConnection(_ id: UUID, binding: AuthorityMaintenanceBinding) {
         state.withLock {
-            $0.connections.remove(id)
+            if $0.connections.remove(id) != nil, $0.armed == nil { $0.released = binding }
             if $0.blocker == id { $0.blocker = nil }
         }
     }
@@ -192,9 +202,9 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             guard expected == binding else { throw RuntimePreparationError.changedScope }; close()
         }
         func releaseUnarmed(matching expected: AuthorityMaintenanceBinding) throws {
-            guard expected == binding else { throw RuntimePreparationError.changedScope }; try admission.releaseUnarmed(id)
+            guard expected == binding else { throw RuntimePreparationError.changedScope }; try admission.releaseUnarmed(id, binding: binding)
         }
-        func close() { admission.releaseConnection(id) }
+        func close() { admission.releaseConnection(id, binding: binding) }
         deinit { close() }
     }
     /// A process-owned target, independent of the XPC connection. Dropping a handle never releases its block.
