@@ -135,7 +135,8 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                 if let shutdown = try? access.admission.shutdownBinding(matching: binding) {
                     if q.action == .cancel { try shutdown.cancel(matching: binding) } else { try shutdown.reopen(matching: binding) }
                 } else { try owner.releaseUnarmed(matching: binding) }
-                return (bytes, true)
+                // The client closes after receiving the applied release acknowledgement.
+                return (bytes, false)
             }
             let outcome: Response.Outcome
             do {

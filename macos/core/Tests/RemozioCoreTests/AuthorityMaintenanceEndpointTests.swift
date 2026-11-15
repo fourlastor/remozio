@@ -381,4 +381,15 @@ extension AuthorityMaintenanceEndpointTests {
         XCTAssertEqual(firstReplies.withLock { $0 }, 0); XCTAssertEqual(try f.admission.stagedReservations(), 1)
         XCTAssertTrue(budget.acquire()); budget.release()
     }
+    func testAppliedReleaseLeavesTheServerConnectionUntilTheClientCloses() async throws {
+        for action in [Request.Action.cancel, .reopen] {
+            let f = try Fixture(), endpoint = try f.endpoint(), opened = try await call(endpoint, request(.open))
+            _ = try await call(endpoint, request(.arm, binding: opened.binding))
+            let released = try await call(endpoint, request(action, binding: opened.binding))
+            XCTAssertEqual(released.outcome, .applied); XCTAssertEqual(f.invalidations.withLock { $0 }, 0)
+            let stage = try f.admission.reserveStage(); stage.close()
+            await endpoint.closeAndWait(); XCTAssertEqual(f.invalidations.withLock { $0 }, 1)
+        }
+    }
+
 }
