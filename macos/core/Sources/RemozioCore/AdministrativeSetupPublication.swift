@@ -46,6 +46,7 @@ public enum AdministrativeSetupPublication {
 
     enum File {
         case startup, bootstrapIntent, bootstrapCompletion
+        case maintenanceCloseMarker
         case auditUpgradeStartupFence
         case auditUpgradeMaterial(intentID: Data)
         case auditUpgradeGraph(intentID: Data, contentDigest: Data)
@@ -74,6 +75,7 @@ public enum AdministrativeSetupPublication {
             case .bootstrapIntent: "bootstrap-intent.cbor"
             case .bootstrapCompletion: "bootstrap-complete.cbor"
             case .runtimeRecord: "runtime-material.cbor"
+            case .maintenanceCloseMarker: AuthorityMaintenanceCloseMarker.fileName
             case .auditUpgradeStartupFence: RuntimeAuditUpgradeStartupFence.fileName
             case .auditUpgradeGraph(let id, let digest): "runtime-audit-graph-" + LowercaseHexadecimal.encode(id) + "-" + LowercaseHexadecimal.encode(digest) + ".cbor"
             case .auditUpgradeMaterial(let id): "runtime-audit-upgrade-" + LowercaseHexadecimal.encode(id) + ".cbor"
@@ -375,6 +377,23 @@ public enum AdministrativeSetupPublication {
             owner: owner, verify: verify, didStage: didStage)
     }
 
+    static func replaceMaintenanceCloseMarker(_ bytes: Data, expected: Data?, directory: ProtectedSetupDirectory,
+        owner: uid_t, verify: () throws -> Void) throws {
+        _ = try AuthorityMaintenanceCloseMarker.decode(bytes)
+        _ = try replaceSettingsRecord(bytes, expected: expected, file: .maintenanceCloseMarker, directory: directory,
+            owner: owner, verify: verify, didStage: { _ in })
+    }
+    static func retainMaintenanceCloseMarker(_ bytes: Data, directory: ProtectedSetupDirectory, owner: uid_t) throws {
+        guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
+        _ = try AuthorityMaintenanceCloseMarker.decode(bytes); try directory.validate()
+        try directory.withDirectory { parent in
+            try match(bytes, file: .maintenanceCloseMarker, directory: directory, owner: owner)
+            try synchronizeRetained(parent: parent, name: AuthorityMaintenanceCloseMarker.fileName, bytes: bytes, owner: owner, mode: 0o600, group: nil)
+            guard fsync(parent) == 0 else { throw JournalLeaseError.system(errno) }
+            try match(bytes, file: .maintenanceCloseMarker, directory: directory, owner: owner); try directory.validate()
+        }
+    }
+
     private static func replaceSettingsRecord(_ bytes: Data, expected: Data?, file: File, directory: ProtectedSetupDirectory,
                                               owner: uid_t, verify: () throws -> Void,
                                               didStage: (Stage) throws -> Void,
@@ -384,7 +403,7 @@ public enum AdministrativeSetupPublication {
               bytes.count <= ProtectedServiceConfiguration.maximumBytes else { throw JournalLeaseError.unsafeMetadata }
         guard let expected else {
             switch file {
-            case .gatewaySettingsRevision, .gatewaySettingsFence, .importRelayProvisioning, .importAccessApplication, .importDNSRecord: break
+            case .gatewaySettingsRevision, .gatewaySettingsFence, .importRelayProvisioning, .importAccessApplication, .importDNSRecord, .maintenanceCloseMarker: break
             default: throw AdministrativeSetupPublicationError.invalidArtifact
             }
             let result = try publish(bytes, file: file, directory: directory, owner: owner, verify: verify, didStage: didStage)
