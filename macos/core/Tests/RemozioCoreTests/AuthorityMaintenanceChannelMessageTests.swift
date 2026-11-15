@@ -28,7 +28,7 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
     }
     private func encode(_ f: [UInt64: CBORValue]) throws -> Data { try DeterministicCBOR.encode(.map(f), limits: wide) }
     private func response(_ q: Request) throws -> Response {
-        try .init(request: q, binding: binding(), work: [Request.Action.cancel, .reopen].contains(q.action) ? nil : work())
+        try .init(request: q, binding: binding(), work: [Request.Action.cancel, .reopen].contains(q.action) ? nil : work(), outcome: .applied)
     }
     func testAllActionsHaveExactRequestAndResponseRoundTrips() throws {
         for action in Request.Action.allCases {
@@ -81,7 +81,7 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
         let q = try request(.arm)
         for flag in 0..<6 {
             var b = Array(repeating: false, count: 6); b[flag] = true
-            let observed = try work(Array(1...10), b), r = try Response(request: q, binding: binding(), work: observed)
+            let observed = try work(Array(1...10), b), r = try Response(request: q, binding: binding(), work: observed, outcome: .applied)
             XCTAssertEqual(try Response.decode(r.encoded, expected: q).work, observed)
         }
         XCTAssertNotNil(try response(q).work)
@@ -92,7 +92,7 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
                 var n = Array(1...10); n[index] = value; XCTAssertThrowsError(try work(n))
             }
             var n = Array(1...10); n[index] = Int(UInt32.max)
-            let q = try request(), r = try Response(request: q, binding: binding(), work: work(n))
+            let q = try request(), r = try Response(request: q, binding: binding(), work: work(n), outcome: .applied)
             XCTAssertEqual(try Response.decode(r.encoded, expected: q), r)
         }
     }
@@ -127,10 +127,10 @@ final class AuthorityMaintenanceChannelMessageTests: XCTestCase {
     }
     func testFirstReplyNeedsWorkAndLaterRepliesCannotReplaceAnyBindingField() throws {
         let open = try request(.open), q = try request()
-        XCTAssertThrowsError(try Response(request: open, binding: binding(), work: nil))
-        for field in 0..<5 { XCTAssertThrowsError(try Response(request: q, binding: binding(field), work: work())) }
+        XCTAssertThrowsError(try Response(request: open, binding: binding(), work: nil, outcome: .applied))
+        for field in 0..<5 { XCTAssertThrowsError(try Response(request: q, binding: binding(field), work: work(), outcome: .applied)) }
         for action in [Request.Action.cancel, .reopen] {
-            XCTAssertThrowsError(try Response(request: request(action), binding: binding(), work: work()))
+            XCTAssertThrowsError(try Response(request: request(action), binding: binding(), work: work(), outcome: .applied))
             XCTAssertNil(try response(request(action)).work)
         }
     }

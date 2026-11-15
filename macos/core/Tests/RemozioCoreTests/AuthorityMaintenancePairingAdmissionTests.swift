@@ -253,3 +253,56 @@ extension AuthorityMaintenancePairingAdmissionTests {
         try shutdown.cancel(matching: decoded)
     }
 }
+
+extension AuthorityMaintenancePairingAdmissionTests {
+    func testTransferReportsLiveStagesOnlyAfterValidatingBlockOwnership() throws {
+        let g = try gate(), stage = try g.reserveStage(), c = try connection(g), other = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 1)
+        XCTAssertThrowsError(try c.transferToShutdown(matching: c.binding)) {
+            XCTAssertEqual($0 as? AuthorityMaintenancePairingAdmission.TransferError, .stagesPending(1))
+        }
+        for selected in [other, c] {
+            if selected === c { c.close() }
+            XCTAssertThrowsError(try selected.transferToShutdown(matching: selected.binding)) {
+                XCTAssertNil($0 as? AuthorityMaintenancePairingAdmission.TransferError)
+                XCTAssertEqual($0 as? AuthorityPairingSetupError, .unavailable)
+            }
+        }
+        g.close()
+        XCTAssertThrowsError(try other.transferToShutdown(matching: other.binding)) {
+            XCTAssertNil($0 as? AuthorityMaintenancePairingAdmission.TransferError)
+        }
+        stage.close()
+    }
+    func testUnarmedReleaseRefusesForeignArmedAndUnarmedBlocksAtomically() throws {
+        for armed in [false, true] {
+            let g = try gate(), c = try connection(g), other = try connection(g)
+            XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+            let shutdown = armed ? try c.transferToShutdown(matching: c.binding) : nil
+            XCTAssertThrowsError(try other.releaseUnarmed(matching: other.binding))
+            XCTAssertThrowsError(try g.reserveStage())
+            if let shutdown { try shutdown.cancel(matching: c.binding) }
+            else { try c.releaseUnarmed(matching: c.binding) }
+            let stage = try g.reserveStage(); stage.close(); other.close()
+        }
+    }
+    func testRefusalMetadataDoesNotReserveConnectionOrCreateAnArmedTarget() throws {
+        let g = try gate(), b = try g.refusalBinding(accountID: bytes(1), attemptID: bytes(2), revision: bytes(3))
+        XCTAssertEqual(try g.connectionReservations(), 0)
+        XCTAssertThrowsError(try g.shutdownBinding(matching: b))
+        let stage = try g.reserveStage(); stage.close()
+        XCTAssertThrowsError(try g.openConnection(accountID: bytes(99), attemptID: bytes(2), revision: bytes(3)))
+        XCTAssertEqual(try g.connectionReservations(), 0)
+        let c = try g.openConnection(accountID: bytes(1), attemptID: bytes(2), revision: bytes(3))
+        XCTAssertEqual(try g.connectionReservations(), 1); c.close()
+    }
+    func testUnarmedReleaseRetiresOnlyTheExactLiveConnection() throws {
+        let g = try gate(), c = try connection(g), other = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+        try c.releaseUnarmed(matching: c.binding); XCTAssertEqual(try g.connectionReservations(), 1)
+        XCTAssertEqual(try other.blockNewStages(matching: other.binding), 0)
+        c.close(); XCTAssertThrowsError(try c.releaseUnarmed(matching: c.binding))
+        XCTAssertThrowsError(try g.reserveStage()); try other.releaseUnarmed(matching: other.binding)
+        XCTAssertEqual(try g.connectionReservations(), 0)
+    }
+}

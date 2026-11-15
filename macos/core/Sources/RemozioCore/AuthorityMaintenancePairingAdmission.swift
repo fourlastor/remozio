@@ -33,6 +33,7 @@ struct AuthorityMaintenanceBinding: Equatable, Sendable {
 /// Internal shared owner. Native connection authentication and protected record checks belong to its caller.
 /// Stage reservations and the maintenance block share one lock. Neither grants idle or shutdown authority.
 final class AuthorityMaintenancePairingAdmission: Sendable {
+    enum TransferError: Error, Equatable { case stagesPending(Int) }
     private struct State {
         var closed = false
         var connections = Set<UUID>(), stages = Set<UUID>()
@@ -56,6 +57,19 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             let owner = UUID(); $0.connections.insert(owner)
             return Connection(admission: self, id: owner, binding: binding)
         }
+    }
+    /// Refusal correlation only. This method never reserves a Connection or changes admission.
+    func refusalBinding(accountID: Data, attemptID: Data, revision: Data) throws -> AuthorityMaintenanceBinding {
+        var id = UUID().uuid
+        return try .init(accountID: accountID, attemptID: attemptID, revision: revision, incarnation: incarnation,
+            connectionID: withUnsafeBytes(of: &id) { Data($0) })
+    }
+    func openConnection(accountID: Data, attemptID: Data, revision: Data) throws -> Connection {
+        guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+        return try openConnection(attemptID: attemptID, revision: revision)
+    }
+    func connectionReservations() throws -> Int {
+        try state.withLock { guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }; return $0.connections.count }
     }
     /// Retain through stage creation and the staged attempt's ordinary commit, cancel or expiry cleanup.
     func reserveStage() throws -> Stage {
@@ -90,9 +104,10 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     }
     private func transfer(_ id: UUID, binding: AuthorityMaintenanceBinding) throws -> Shutdown {
         try state.withLock {
-            guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == id, $0.stages.isEmpty else {
+            guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == id else {
                 throw AuthorityPairingSetupError.unavailable
             }
+            guard $0.stages.isEmpty else { throw TransferError.stagesPending($0.stages.count) }
             $0.armed = binding; $0.blocker = nil; $0.connections.remove(id)
             return Shutdown(admission: self, binding: binding)
         }
@@ -101,6 +116,14 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         try state.withLock {
             guard !$0.closed, $0.armed == binding else { throw RuntimePreparationError.changedScope }
             $0.armed = nil
+        }
+    }
+    private func releaseUnarmed(_ id: UUID) throws {
+        try state.withLock {
+            guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == nil || $0.blocker == id else {
+                throw RuntimePreparationError.changedScope
+            }
+            $0.connections.remove(id); if $0.blocker == id { $0.blocker = nil }
         }
     }
     private func releaseConnection(_ id: UUID) {
@@ -130,6 +153,9 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         /// Before arming, cancel or reopen only this connection. It never releases an armed block or account drain.
         func release(matching expected: AuthorityMaintenanceBinding) throws {
             guard expected == binding else { throw RuntimePreparationError.changedScope }; close()
+        }
+        func releaseUnarmed(matching expected: AuthorityMaintenanceBinding) throws {
+            guard expected == binding else { throw RuntimePreparationError.changedScope }; try admission.releaseUnarmed(id)
         }
         func close() { admission.releaseConnection(id) }
         deinit { close() }
