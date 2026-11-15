@@ -35,6 +35,20 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     private func checked(_ value: AuthorityMaintenanceClientReply, _ reply: @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do { _ = try policy.verifyCredentials(connection); reply(value) } catch { reply(.bytes(nil)) }
     }
+    func captureProcess(job: InstalledAccountJobManifest, code: AuthorityCodeEntry) throws -> RuntimeJobProcessObservation {
+        let expected = try XPCPeerPolicy(teamID: code.teamID, componentIdentifier: code.identifier,
+            approvedCodeDirectoryHashes: [code.codeDirectoryHash], expectedUserID: 0)
+        guard expected.requirement == policy.requirement else { throw RuntimePreparationError.changedScope }
+        let peer = try policy.verifyCredentials(connection)
+        let witness = try RuntimeJobProcessObservation.open(job: job, code: code, processID: peer.processID)
+        guard try policy.verifyCredentials(connection) == peer, try !witness.hasExited() else { throw RuntimePreparationError.changedScope }
+        return witness
+    }
+    func requireProcess(_ witness: RuntimeJobProcessObservation) throws {
+        guard try policy.verifyCredentials(connection).processID == witness.processID, try !witness.hasExited() else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
     func close() { connection.invalidate() }
     deinit { close() }
 }
@@ -114,6 +128,86 @@ actor AuthorityMaintenanceXPCClient {
         // Cancellation is cleanup. Its bounded RPC can extend the original wait by up to five seconds.
         _ = try await send(.cancel, until: .now.advanced(by: timeout)); finish(.cancelled); throw AuthorityMaintenanceClientError.cancelled
     }
+    func captureNativeStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
+        admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
+        guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        let configuration = try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath)
+        guard let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else { throw RuntimePreparationError.changedScope }
+        return try await captureStop(window: window, cohort: cohort, admission: admission, drain: drain, directory: directory,
+            configuration: configuration, until: deadline, capture: { try native.captureProcess(job: cohort.job, code: code) },
+            requireProcess: { witness in
+                guard let nativeWitness = witness as? RuntimeJobProcessObservation else { throw RuntimePreparationError.changedScope }
+                try native.requireProcess(nativeWitness)
+            }, verifyConfiguration: {
+                guard try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath).canonicalBytes == configuration.canonicalBytes else {
+                    throw InstalledAuthorityCommandError.changedConfiguration
+                }
+            }, verifyOwner: verifyOwner)
+    }
+    /// Same capture sequence with ordinary-owner controls. Root cannot select its callbacks.
+    func captureOwnedStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
+        admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        configuration: InstalledAuthorityCommandConfiguration, until deadline: ContinuousClock.Instant,
+        capture: @Sendable () throws -> any RuntimeJobExitWitness, requireProcess: @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        verifyOwner: @escaping @Sendable () throws -> Void = {}) async throws -> RuntimeMaintenanceStopCapture {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try await captureStop(window: window, cohort: cohort, admission: admission, drain: drain, directory: directory,
+            configuration: configuration, until: deadline, capture: capture, requireProcess: requireProcess,
+            verifyConfiguration: {}, verifyOwner: verifyOwner)
+    }
+    /// The native driver captures the original process. Copied replies cannot construct this permit.
+    private func captureStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
+        admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        configuration: InstalledAuthorityCommandConfiguration, until deadline: ContinuousClock.Instant,
+        capture: @Sendable () throws -> any RuntimeJobExitWitness, requireProcess: @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        verifyConfiguration: @escaping @Sendable () throws -> Void,
+        verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
+        guard state == .open,
+              window.phase == .draining, window.operation == .notStarted, window.service == .notStopped,
+              context.attemptID == window.id, context.revision == window.revision,
+              context.accountID == window.scope.authority.accountID, cohort.accountID == context.accountID,
+              cohort.targetAccountID == window.scope.target.accountID, context.installationID == window.scope.installationID,
+              context.gate == cohort.accountIdentity, deadline > .now else {
+            throw RuntimePreparationError.changedScope
+        }
+        func check() throws {
+            try verifyOwner(); try admission.validateMachineBoundary(directory: directory, expected: cohort.machineIdentity)
+            try drain.validateAccountBoundary(directory: directory, accountID: cohort.accountID, expected: cohort.accountIdentity)
+        }
+        try check(); try verifyConfiguration()
+        guard configuration.jobPlacement == .systemAccount, configuration.label == cohort.job.declaration.label,
+              configuration.command.accountID == cohort.accountID, configuration.command.macID == window.scope.macID,
+              configuration.command.callerUID == window.scope.authority.ownerUID,
+              configuration.installationID == window.scope.installationID, configuration.releaseDigest == window.scope.releaseDigest,
+              let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        while true {
+            try check(); let response = try await observe(until: deadline); try check()
+            if response.work?.allowsMaintenanceStop == true { break }
+            guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
+            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+        }
+        let witness = try capture()
+        let response = try await arm(until: deadline)
+        do {
+            try check(); try verifyConfiguration(); try requireProcess(witness)
+            guard response.outcome == .applied, response.work?.allowsMaintenanceStop == true else {
+                throw AuthorityMaintenanceClientError.cancelled
+            }
+            let marker = try AuthorityMaintenanceCloseMarker(binding: response.binding, macID: window.scope.macID,
+                installationID: configuration.installationID, releaseDigest: configuration.releaseDigest,
+                codeHash: code.codeDirectoryHash, directoryID: window.scope.authority.directoryID,
+                ownerUID: window.scope.authority.ownerUID, gate: context.gate)
+            return .init(window: window, cohort: cohort, marker: marker, witness: witness, configuration: configuration,
+                verifyOwner: verifyOwner, verifyConfiguration: verifyConfiguration)
+        } catch {
+            do { try await release(until: .now.advanced(by: timeout)) }
+            catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            throw error
+        }
+    }
     func release(_ target: AuthorityMaintenanceBinding? = nil, reopen: Bool = false,
                  until deadline: ContinuousClock.Instant) async throws {
         guard state == .open || state == .armed else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
@@ -173,5 +267,42 @@ actor AuthorityMaintenanceXPCClient {
         state = .closed; if preservingReply { lifetime.invalidate() } else { lifetime.close() }; timer?.cancel(); timer = nil
         pending = nil; driver.close()
         if let value { p?.1.resume(returning: value) } else { p?.1.resume(throwing: error) }
+    }
+}
+
+extension AuthorityMaintenanceChannelWork {
+    // Pairing readiness is vacuous with no endpoints. An endpoint without hello blocks until its handshake timeout.
+    var allowsMaintenanceStop: Bool {
+        journal.requests.liveRequests == 0 && journal.requests.commandCaptures == 0 && journal.requests.activityOwners == 0
+            && journal.exchanges.active == 0 && !journal.exchanges.stopped && journal.nativeExecutions == 0
+            && journal.executionActivityOwners == 0 && execution.started && !execution.stopping && !execution.failed
+            && execution.queuedTurns == 0 && execution.rejectedTurns == 0 && pairing.ready && pairing.stagedAttempts == 0
+            && pairing.activityOwners == 0 && !pairing.operationActive
+    }
+}
+
+/// Captured arm evidence only. It grants no removal, body loan or journal custody.
+final class RuntimeMaintenanceStopCapture: @unchecked Sendable {
+    let window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort
+    let marker: AuthorityMaintenanceCloseMarker, witness: any RuntimeJobExitWitness
+    let configuration: InstalledAuthorityCommandConfiguration
+    private let processID = getpid(), ownerUID = getuid()
+    private let verifyOwner: @Sendable () throws -> Void, verifyConfiguration: @Sendable () throws -> Void
+    fileprivate init(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
+        marker: AuthorityMaintenanceCloseMarker, witness: any RuntimeJobExitWitness, configuration: InstalledAuthorityCommandConfiguration,
+        verifyOwner: @escaping @Sendable () throws -> Void, verifyConfiguration: @escaping @Sendable () throws -> Void) {
+        self.window = window; self.cohort = cohort; self.marker = marker; self.witness = witness; self.configuration = configuration
+        self.verifyOwner = verifyOwner; self.verifyConfiguration = verifyConfiguration
+    }
+    func validate() throws {
+        guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        try verifyOwner(); try verifyConfiguration()
+    }
+}
+
+enum RuntimeMaintenanceOwnedControl {
+    static func allows(realUID: uid_t, effectiveUID: uid_t) -> Bool { realUID > 0 && realUID == effectiveUID }
+    static func require() throws {
+        guard allows(realUID: getuid(), effectiveUID: geteuid()) else { throw JournalLeaseError.unsafeMetadata }
     }
 }

@@ -29,13 +29,47 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
                                 rootActivity: ReleaseActivityToken,
                                 verifyOwnerAndFence: @escaping () throws -> Void) throws -> AuthorityJournalCutoverInspection {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        func verify() throws { try rootActivity.validateExclusive(); try verifyOwnerAndFence() }
+        return try openExisting(initialization: initialization, policy: policy, verify: verify)
+    }
+    /// Maintenance retains machine SH and the exact account EX. This factory grants read-only pair custody only.
+    static func openForMaintenance(initialization: AuthorityInitializationIntent, policy: AuthorityCodePolicy,
+        scope: UpdateOrdinaryAdmissionLease.Scope, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        machineIdentity: PreparationFileIdentity, accountIdentity: PreparationFileIdentity,
+        verifyOwner: @escaping () throws -> Void) throws -> AuthorityJournalCutoverInspection {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        return try openExisting(initialization: initialization, policy: policy,
+            verify: maintenanceVerification(accountID: initialization.accountID, scope: scope, drain: drain,
+                directory: directory, machineIdentity: machineIdentity, accountIdentity: accountIdentity, verifyOwner: verifyOwner))
+    }
+    static func openOwnedForMaintenance(accountID: Data, policy: AuthorityCodePolicy, scope: UpdateOrdinaryAdmissionLease.Scope,
+        drain: UpdateDrainToken, directory: ReleaseDestinationLease, machineIdentity: PreparationFileIdentity,
+        accountIdentity: PreparationFileIdentity, verifyOwner: @escaping () throws -> Void,
+        openStorage: () throws -> AuthorityStorage) throws -> AuthorityJournalCutoverInspection {
+        try RuntimeMaintenanceOwnedControl.require()
+        let verify = maintenanceVerification(accountID: accountID, scope: scope, drain: drain, directory: directory,
+            machineIdentity: machineIdentity, accountIdentity: accountIdentity, verifyOwner: verifyOwner)
+        try verify(); return try .init(storage: openStorage(), expectedPolicy: policy, verifyCurrent: verify)
+    }
+    private static func maintenanceVerification(accountID: Data, scope: UpdateOrdinaryAdmissionLease.Scope,
+        drain: UpdateDrainToken, directory: ReleaseDestinationLease, machineIdentity: PreparationFileIdentity,
+        accountIdentity: PreparationFileIdentity, verifyOwner: @escaping () throws -> Void) -> () throws -> Void {
+        {
+            try scope.validateMachineBoundary(directory: directory, expected: machineIdentity)
+            try drain.validateAccountBoundary(directory: directory, accountID: accountID, expected: accountIdentity)
+            try verifyOwner()
+            try scope.validateMachineBoundary(directory: directory, expected: machineIdentity)
+            try drain.validateAccountBoundary(directory: directory, accountID: accountID, expected: accountIdentity)
+        }
+    }
+    private static func openExisting(initialization: AuthorityInitializationIntent, policy: AuthorityCodePolicy,
+        verify: @escaping () throws -> Void) throws -> AuthorityJournalCutoverInspection {
         let paths = try RuntimePreparationPaths(accountID: initialization.accountID)
         guard initialization.complete, initialization.checkpoint != nil,
               initialization.journalPath == paths.authorityDirectory + "/Journal/journal.sqlite",
               initialization.continuityPath == paths.authorityDirectory + "/Continuity/continuity.sqlite" else {
             throw AuthorityInitializationError.invalidBoundary
         }
-        func verify() throws { try rootActivity.validateExclusive(); try verifyOwnerAndFence() }
         try verify()
         let limits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
         let storage = try AuthorityStorage(openJournal: {
