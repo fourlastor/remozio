@@ -97,11 +97,16 @@ private final class MachineReplacementFixture {
             if completionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupCompletionStorage.readerRequirements }
             if promotionReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionStorage.readerRequirements }
             if readinessReaderFormats { requiredFormats += try MachineUpdateRetainedSetupPromotionReadyStorage.readerRequirements }
-            if maintenanceReaderFormats { requiredFormats += try RuntimeMaintenanceWindowStorage.readerRequirements }
+            if maintenanceReaderFormats {
+                requiredFormats += try RuntimeMaintenanceWindowStorage.readerRequirements
+                requiredFormats += try [AuthorityCodeRole.authority, .setupController].map {
+                    try RetainedReleaseFormat(role: $0, name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [2])
+                }
+            }
             if maintenanceWriterFormats {
                 requiredFormats += try [RetainedReleaseFormat(role: .setupController, name: "authority.installation-preparation",
                     readVersions: [28, 29], writeVersions: [29]), RetainedReleaseFormat(role: .setupController,
-                    name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [1], writeVersions: [1])]
+                    name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [1, 2], writeVersions: [1, 2])]
             }
             if promotionProposalFormats {
                 requiredFormats += try RuntimeRetainedSetupCompletionBinding.completedHostRequirements

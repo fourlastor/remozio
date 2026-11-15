@@ -108,12 +108,16 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
     let service: ServiceOutcome
     let failure: Failure?
     let gate: GateReadback?
+    let shutdownBinding: AuthorityMaintenanceBinding?
+    var formatVersion: UInt64 { shutdownBinding == nil ? 1 : 2 }
     var description: String { "RuntimeMaintenanceWindowRecord(redacted)" }
     var debugDescription: String { description }
     init(id: Data, revision: Data, purpose: Purpose, scope: Scope, phase: Phase = .authorized,
         operation: OperationOutcome = .notStarted, service: ServiceOutcome = .notStopped,
-        failure: Failure? = nil, gate: GateReadback? = nil) throws {
+        failure: Failure? = nil, gate: GateReadback? = nil, shutdownBinding: AuthorityMaintenanceBinding? = nil) throws {
         guard id.count == 16, revision.count == 16, gate == nil || gate?.attemptID == id,
+              shutdownBinding == nil || (phase != .authorized && phase != .restored && shutdownBinding?.accountID == scope.authority.accountID
+                && shutdownBinding?.attemptID == id),
               ![Phase.authorized, .draining, .stopping, .stopped].contains(phase) || operation == .notStarted,
               phase != .executing || operation == .unknown,
               phase != .needsOwnerRecovery || failure != nil,
@@ -123,7 +127,12 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
             throw RuntimePreparationError.invalidRecord
         }
         self.id = id; self.revision = revision; self.purpose = purpose; self.scope = scope; self.phase = phase
-        self.operation = operation; self.service = service; self.failure = failure; self.gate = gate
+        self.operation = operation; self.service = service; self.failure = failure; self.gate = gate; self.shutdownBinding = shutdownBinding
+    }
+    func retainingShutdownBinding(_ binding: AuthorityMaintenanceBinding, revision: Data = AccountPreparationIntent.randomID()) throws -> Self {
+        guard phase == .draining, shutdownBinding == nil, binding.revision == self.revision else { throw PreparationStoreError.invalidTransition }
+        return try .init(id: id, revision: revision, purpose: purpose, scope: scope, phase: phase, operation: operation,
+            service: service, failure: failure, gate: gate, shutdownBinding: binding)
     }
     func requireSameScope(as other: Self) throws {
         guard id == other.id, purpose == other.purpose, scope == other.scope else {
@@ -140,6 +149,13 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
             return
         }
         try requireSameScope(as: previous)
+        if previous.shutdownBinding == nil, let shutdownBinding {
+            guard self == (try previous.retainingShutdownBinding(shutdownBinding, revision: revision)) else {
+                throw PreparationStoreError.invalidTransition
+            }
+            return
+        }
+        guard shutdownBinding == previous.shutdownBinding || (phase == .restored && shutdownBinding == nil) else { throw RuntimePreparationError.changedScope }
         let edges: [Phase: Set<Phase>] = [
             .authorized: [.draining, .reopenPending, .needsOwnerRecovery], .draining: [.stopping, .reopenPending, .needsOwnerRecovery],
             .stopping: [.stopped, .needsOwnerRecovery], .stopped: [.executing, .restoring, .needsOwnerRecovery],
@@ -159,23 +175,31 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
               phase != .restored || gate?.requestRevision == previous.revision else { throw PreparationStoreError.invalidTransition }
     }
     var encoded: Data { get throws {
-        try DeterministicCBOR.encode(.map([0: .unsigned(1), 1: .text(Self.formatName),
+        var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .text(Self.formatName),
             2: .bytes(id), 3: .bytes(revision), 4: .unsigned(purpose.rawValue), 5: scope.value,
             6: .unsigned(phase.rawValue), 7: .unsigned(operation.rawValue), 8: .unsigned(service.rawValue),
-            9: failure.map { .unsigned($0.rawValue) } ?? .null, 10: gate?.value ?? .null]), limits: Self.limits)
+            9: failure.map { .unsigned($0.rawValue) } ?? .null, 10: gate?.value ?? .null]
+        if let shutdownBinding { fields[11] = .bytes(try shutdownBinding.encoded) }
+        return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
-        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), Set(f.keys) == Set(UInt64(0)...10),
-              f[0] == .unsigned(1), f[1] == .text(Self.formatName),
+        guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), case .unsigned(let version) = f[0],
+              [UInt64(1), 2].contains(version), Set(f.keys) == Set(UInt64(0)...(version == 1 ? 10 : 11)),
+              f[1] == .text(Self.formatName),
               let purpose = Purpose(rawValue: try maintenanceUInt(f[4]!)), let phase = Phase(rawValue: try maintenanceUInt(f[6]!)),
               let operation = OperationOutcome(rawValue: try maintenanceUInt(f[7]!)),
               let service = ServiceOutcome(rawValue: try maintenanceUInt(f[8]!)) else { throw RuntimePreparationError.invalidRecord }
         let failure: Failure?
         if f[9] == .null { failure = nil }
         else { guard let value = Failure(rawValue: try maintenanceUInt(f[9]!)) else { throw RuntimePreparationError.invalidRecord }; failure = value }
+        let binding: AuthorityMaintenanceBinding?
+        if version == 2 {
+            guard case .bytes(let value) = f[11] else { throw RuntimePreparationError.invalidRecord }
+            binding = try .decode(value)
+        } else { binding = nil }
         let result = try Self(id: maintenanceData(f[2]!, count: 16), revision: maintenanceData(f[3]!, count: 16), purpose: purpose,
             scope: Scope.decode(f[5]!), phase: phase, operation: operation, service: service, failure: failure,
-            gate: f[10] == .null ? nil : GateReadback.decode(f[10]!))
+            gate: f[10] == .null ? nil : GateReadback.decode(f[10]!), shutdownBinding: binding)
         guard try result.encoded == bytes else { throw RuntimePreparationError.invalidRecord }; return result
     }
     static let limits = try! CBORLimits(maxBytes: 4096, maxDepth: 4, maxItems: 128)

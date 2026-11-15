@@ -130,7 +130,7 @@ actor AuthorityMaintenanceXPCClient {
     }
     func captureNativeStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
         admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
-        until deadline: ContinuousClock.Instant, verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
+        until deadline: ContinuousClock.Instant, persistBinding: @escaping @Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord, verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
         guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
         let configuration = try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath)
         guard let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else { throw RuntimePreparationError.changedScope }
@@ -143,18 +143,18 @@ actor AuthorityMaintenanceXPCClient {
                 guard try InstalledAuthorityCommandConfiguration.load(path: cohort.job.configurationPath).canonicalBytes == configuration.canonicalBytes else {
                     throw InstalledAuthorityCommandError.changedConfiguration
                 }
-            }, verifyOwner: verifyOwner)
+            }, persistBinding: persistBinding, verifyOwner: verifyOwner)
     }
     /// Same capture sequence with ordinary-owner controls. Root cannot select its callbacks.
     func captureOwnedStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
         admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
         configuration: InstalledAuthorityCommandConfiguration, until deadline: ContinuousClock.Instant,
         capture: @Sendable () throws -> any RuntimeJobExitWitness, requireProcess: @Sendable (any RuntimeJobExitWitness) throws -> Void,
-        verifyOwner: @escaping @Sendable () throws -> Void = {}) async throws -> RuntimeMaintenanceStopCapture {
+        persistBinding: @escaping @Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord, verifyOwner: @escaping @Sendable () throws -> Void = {}) async throws -> RuntimeMaintenanceStopCapture {
         try RuntimeMaintenanceOwnedControl.require()
         return try await captureStop(window: window, cohort: cohort, admission: admission, drain: drain, directory: directory,
             configuration: configuration, until: deadline, capture: capture, requireProcess: requireProcess,
-            verifyConfiguration: {}, verifyOwner: verifyOwner)
+            verifyConfiguration: {}, persistBinding: persistBinding, verifyOwner: verifyOwner)
     }
     /// The native driver captures the original process. Copied replies cannot construct this permit.
     private func captureStop(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort,
@@ -162,6 +162,7 @@ actor AuthorityMaintenanceXPCClient {
         configuration: InstalledAuthorityCommandConfiguration, until deadline: ContinuousClock.Instant,
         capture: @Sendable () throws -> any RuntimeJobExitWitness, requireProcess: @Sendable (any RuntimeJobExitWitness) throws -> Void,
         verifyConfiguration: @escaping @Sendable () throws -> Void,
+        persistBinding: @escaping @Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord,
         verifyOwner: @escaping @Sendable () throws -> Void) async throws -> RuntimeMaintenanceStopCapture {
         guard state == .open,
               window.phase == .draining, window.operation == .notStarted, window.service == .notStopped,
@@ -183,13 +184,23 @@ actor AuthorityMaintenanceXPCClient {
               let code = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else {
             throw RuntimePreparationError.changedScope
         }
+        let witness = try capture()
+        let saved: RuntimeMaintenanceWindowRecord
+        do {
+            guard let binding else { throw RuntimePreparationError.changedScope }
+            saved = try persistBinding(binding)
+            try saved.requireReplacing(window)
+            guard saved.shutdownBinding == binding, saved == (try window.retainingShutdownBinding(binding, revision: saved.revision)) else {
+                throw RuntimePreparationError.changedScope
+            }
+            try check(); try verifyConfiguration(); try requireProcess(witness)
+        } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         while true {
             try check(); let response = try await observe(until: deadline); try check()
             if response.work?.allowsMaintenanceStop == true { break }
             guard ContinuousClock.now < deadline else { throw AuthorityMaintenanceClientError.cancelled }
             try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
         }
-        let witness = try capture()
         let response = try await arm(until: deadline)
         do {
             try check(); try verifyConfiguration(); try requireProcess(witness)
@@ -200,7 +211,7 @@ actor AuthorityMaintenanceXPCClient {
                 installationID: configuration.installationID, releaseDigest: configuration.releaseDigest,
                 codeHash: code.codeDirectoryHash, directoryID: window.scope.authority.directoryID,
                 ownerUID: window.scope.authority.ownerUID, gate: context.gate)
-            return .init(window: window, cohort: cohort, marker: marker, witness: witness, configuration: configuration,
+            return .init(window: saved, cohort: cohort, marker: marker, witness: witness, configuration: configuration,
                 verifyOwner: verifyOwner, verifyConfiguration: verifyConfiguration)
         } catch {
             do { try await release(until: .now.advanced(by: timeout)) }
@@ -271,12 +282,12 @@ actor AuthorityMaintenanceXPCClient {
 }
 
 extension AuthorityMaintenanceChannelWork {
-    // Pairing readiness is vacuous with no endpoints. An endpoint without hello blocks until its handshake timeout.
+    // Ready is diagnostic. Work counts and the actual arm outcome decide whether stopping can proceed.
     var allowsMaintenanceStop: Bool {
         journal.requests.liveRequests == 0 && journal.requests.commandCaptures == 0 && journal.requests.activityOwners == 0
             && journal.exchanges.active == 0 && !journal.exchanges.stopped && journal.nativeExecutions == 0
             && journal.executionActivityOwners == 0 && execution.started && !execution.stopping && !execution.failed
-            && execution.queuedTurns == 0 && execution.rejectedTurns == 0 && pairing.ready && pairing.stagedAttempts == 0
+            && execution.queuedTurns == 0 && execution.rejectedTurns == 0 && pairing.stagedAttempts == 0
             && pairing.activityOwners == 0 && !pairing.operationActive
     }
 }
@@ -304,5 +315,49 @@ enum RuntimeMaintenanceOwnedControl {
     static func allows(realUID: uid_t, effectiveUID: uid_t) -> Bool { realUID > 0 && realUID == effectiveUID }
     static func require() throws {
         guard allows(realUID: getuid(), effectiveUID: geteuid()) else { throw JournalLeaseError.unsafeMetadata }
+    }
+}
+
+/// One stop and one body entry for captured arm evidence. The clock does not reclassify a completed body.
+final class RuntimeMaintenanceStopPermit: @unchecked Sendable {
+    let capture: RuntimeMaintenanceStopCapture
+    private let deadline: ContinuousClock.Instant, readMarker: () throws -> Void
+    private let lock = NSLock()
+    private var consumed = false, ownerThread: pthread_t?
+    private init(capture: RuntimeMaintenanceStopCapture, deadline: ContinuousClock.Instant, readMarker: @escaping () throws -> Void) {
+        self.capture = capture; self.deadline = deadline; self.readMarker = readMarker
+    }
+    static func openNative(capture: RuntimeMaintenanceStopCapture, until deadline: ContinuousClock.Instant) throws -> RuntimeMaintenanceStopPermit {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }; try capture.validate()
+        return .init(capture: capture, deadline: deadline, readMarker: { try AuthorityMaintenanceCloseMarker.readback(capture.marker) })
+    }
+    static func openOwned(capture: RuntimeMaintenanceStopCapture, until deadline: ContinuousClock.Instant,
+        readMarker: @escaping () throws -> Void) throws -> RuntimeMaintenanceStopPermit {
+        try RuntimeMaintenanceOwnedControl.require(); try capture.validate()
+        return .init(capture: capture, deadline: deadline, readMarker: readMarker)
+    }
+    func consume(cohort: RuntimeMaintenanceAuthorityCohort, purpose: RuntimeMaintenanceWindowRecord.Purpose) throws -> any RuntimeJobExitWitness {
+        try lock.withLock {
+            guard !consumed else { throw JournalLeaseError.invalidated }; consumed = true; ownerThread = pthread_self()
+        }
+        try requireUnexpired()
+        guard capture.window.purpose == purpose, cohort.job.bytes == capture.cohort.job.bytes,
+              cohort.accountID == capture.cohort.accountID, cohort.targetAccountID == capture.cohort.targetAccountID,
+              cohort.machineIdentity == capture.cohort.machineIdentity, cohort.accountIdentity == capture.cohort.accountIdentity,
+              try !capture.witness.hasExited() else { throw RuntimePreparationError.changedScope }
+        return capture.witness
+    }
+    func validate() throws {
+        try capture.validate()
+        try lock.withLock {
+            guard consumed, let ownerThread, pthread_equal(pthread_self(), ownerThread) != 0 else { throw JournalLeaseError.invalidated }
+        }
+    }
+    func requireUnexpired() throws {
+        try validate(); guard ContinuousClock.now < deadline else { throw JournalLeaseError.invalidated }
+    }
+    func requireClosed() throws {
+        try validate(); guard try capture.witness.hasExited() else { throw RuntimeActivationError.unavailable }
+        try readMarker(); try validate()
     }
 }

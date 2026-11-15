@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -192,4 +193,206 @@ final class SetupRetainedInvocationTests: XCTestCase {
             XCTAssertEqual(replies, 1); try shutdown.close(); try owner.close()
         }
     }
+    private final class ContextProbe: @unchecked Sendable {
+        let live = Mutex(true), reads = Mutex(0)
+        func read(_ connection: NSXPCConnection, peer: XPCPeerCredentials) throws -> XPCPeerCredentials {
+            guard live.withLock({ $0 }) else { throw XPCPeerPolicyError.wrongConnection }
+            reads.withLock { $0 += 1 }; return peer
+        }
+    }
+    private func withContext(_ body: (Invocation, SetupAccountOwner, NSXPCConnection, ContextProbe) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName), probe = ContextProbe()
+            defer { connection.invalidate() }
+            let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            defer { try? invocation.close() }
+            try invocation.installOwnedContext(connection: connection, readPeer: { try probe.read($0, peer: binding.peer) })
+            try body(invocation, owner, connection, probe)
+        }
+    }
+    func testWorkerContextIsConfinedToOneActualOwnerRunAndExpiresWithItsLoan() throws {
+        try withContext { invocation, _, connection, _ in
+            XCTAssertThrowsError(try invocation.withWorkerContext { _ in XCTFail("Outside the owner worker") })
+            var escaped: SetupRetainedInvocationContext.Scope?
+            try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    escaped = scope; try scope.verify(); try scope.requireConnection(connection); return 17
+                }
+            }, reply: { result, _ in XCTAssertEqual(result, 17) })
+            XCTAssertThrowsError(try XCTUnwrap(escaped).verify())
+            XCTAssertThrowsError(try invocation.withWorkerContext { _ in XCTFail("Replay") })
+            try invocation.close()
+        }
+    }
+    func testFailedOwnedConnectionReadRetiresTheContextWithoutAutomaticRevalidation() throws {
+        try withContext { invocation, _, _, probe in
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    try scope.verify(); probe.live.withLock { $0 = false }
+                    XCTAssertThrowsError(try scope.verify())
+                    probe.live.withLock { $0 = true }; XCTAssertThrowsError(try scope.verify())
+                }
+            }, reply: { _, _ in XCTFail("An invalidated peer returned success") }))
+        }
+    }
+    func testAnotherConnectionWithTheSamePeerCannotUseTheContext() throws {
+        try withContext { invocation, _, connection, _ in
+            let other = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            defer { other.invalidate() }; XCTAssertFalse(connection === other)
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    try scope.requireConnection(connection); XCTAssertThrowsError(try scope.requireConnection(other))
+                }
+            }, reply: { _, _ in XCTFail("A foreign connection returned success") }))
+        }
+    }
+    func testOwnerClosureBeforeWorkPreventsContextEntry() throws {
+        try withContext { invocation, _, _, _ in
+            try invocation.close()
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { _ in XCTFail("Closed owner") }
+            }, reply: { _, _ in XCTFail() }))
+        }
+    }
+    func testClosingTheReservationOwnerRetiresTheWorkerContext() throws {
+        try withContext { invocation, owner, _, _ in
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    try scope.verify(); XCTAssertThrowsError(try owner.close())
+                    XCTAssertThrowsError(try scope.verify())
+                }
+            }, reply: { _, _ in XCTFail("Lost reservation") }))
+        }
+    }
+    private final class ContextTransfer: @unchecked Sendable {
+        let invocation: Invocation
+        let done = DispatchSemaphore(value: 0), refused = Mutex(false)
+        var scope: SetupRetainedInvocationContext.Scope?
+        init(_ invocation: Invocation) { self.invocation = invocation }
+    }
+    func testAnotherThreadCannotClaimTheFirstWorkerContextThread() throws {
+        try withContext { invocation, _, _, _ in
+            let transfer = ContextTransfer(invocation)
+            try invocation.run(work: {
+                DispatchQueue.global().async {
+                    do { try transfer.invocation.withWorkerContext { _ in } }
+                    catch { transfer.refused.withLock { $0 = true } }
+                    transfer.done.signal()
+                }
+                XCTAssertEqual(transfer.done.wait(timeout: .now() + 3), .success)
+                XCTAssertTrue(transfer.refused.withLock { $0 })
+                try invocation.withWorkerContext { try $0.verify() }
+            }, reply: { _, _ in })
+        }
+    }
+    func testAnotherThreadCannotUseAnAlreadyBorrowedContext() throws {
+        try withContext { invocation, _, _, probe in
+            let transfer = ContextTransfer(invocation)
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    transfer.scope = scope; let before = probe.reads.withLock { $0 }
+                    DispatchQueue.global().async {
+                        do { try transfer.scope?.verify() } catch { transfer.refused.withLock { $0 = true } }
+                        transfer.done.signal()
+                    }
+                    XCTAssertEqual(transfer.done.wait(timeout: .now() + 3), .success)
+                    XCTAssertTrue(transfer.refused.withLock { $0 }); XCTAssertEqual(probe.reads.withLock { $0 }, before)
+                }
+            }, reply: { _, _ in XCTFail("Foreign-thread use") }))
+        }
+    }
+    func testCaughtContextReentryPoisonsTheOuterLoan() throws {
+        try withContext { invocation, _, _, _ in
+            XCTAssertThrowsError(try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    XCTAssertThrowsError(try invocation.withWorkerContext { _ in XCTFail("Reentry") })
+                    XCTAssertThrowsError(try scope.verify())
+                }
+            }, reply: { _, _ in XCTFail("Caught reentry") }))
+        }
+    }
+    func testCaughtMintReentryCannotInstallAnOuterContext() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            defer { connection.invalidate() }
+            let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            defer { try? invocation.close() }
+            XCTAssertThrowsError(try invocation.installOwnedContext(connection: connection, readPeer: { _ in
+                XCTAssertThrowsError(try invocation.installOwnedContext(connection: connection, readPeer: { _ in binding.peer }))
+                return binding.peer
+            }))
+            try invocation.run(work: {
+                XCTAssertThrowsError(try invocation.withWorkerContext { _ in XCTFail("Reentrant mint") })
+            }, reply: { _, _ in })
+        }
+    }
+    func testOwnedContextCannotSelectTheNativeFactoryWithoutAnExportedInvocation() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            defer { connection.invalidate() }
+            let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            defer { try? invocation.close() }
+            let guardValue = XPCInvocationGuard(connection: connection, policy: policy)
+            XCTAssertThrowsError(try SetupRetainedInvocationContext.open(owner: invocation, invocation: guardValue)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+            XCTAssertThrowsError(try guardValue.withRetainedConnection { _, _, _ in XCTFail("Not an exported invocation") })
+        }
+    }
+    func testForkedContextRefusesBeforeAnyInheritedLockAndKeepsTheParentLoanValid() throws {
+        try withContext { invocation, _, _, _ in
+            try invocation.run(work: {
+                try invocation.withWorkerContext { scope in
+                    let child = Self.contextFork(); XCTAssertGreaterThanOrEqual(child, 0)
+                    if child == 0 { do { try scope.verify(); _exit(11) } catch { _exit(0) } }
+                    guard child > 0 else { throw Failure.work }
+                    let deadline = DispatchTime.now().uptimeNanoseconds + 2_000_000_000
+                    var reaped = false, status: Int32 = 0
+                    while DispatchTime.now().uptimeNanoseconds < deadline {
+                        if waitpid(child, &status, WNOHANG) == child { reaped = true; break }; usleep(10_000)
+                    }
+                    if !reaped { _ = kill(child, SIGKILL); while waitpid(child, &status, 0) < 0 && errno == EINTR {} }
+                    XCTAssertTrue(reaped); XCTAssertEqual(status, 0); try scope.verify()
+                }
+            }, reply: { _, _ in })
+        }
+    }
+    private static let contextFork: @convention(c) () -> pid_t = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fork") else { preconditionFailure("fork is unavailable") }
+        return unsafeBitCast(symbol, to: (@convention(c) () -> pid_t).self)
+    }()
+    private final class ContextExportedProbe: NSObject, AuthorityMaintenanceXPCProtocol {
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) { reply(1) }
+        func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) { reply(nil) }
+    }
+    func testContextGuardAndExportedObjectReleaseAfterTheInvalidationHandler() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            weak var weakContext: SetupRetainedInvocationContext?, weakGuard: XPCInvocationGuard?, weakObject: ContextExportedProbe?
+            let handled = expectation(description: "The invalidation handler completed")
+            try autoreleasepool {
+                let connection = NSXPCConnection(machServiceName: "dev.sebastiano.remozio.test-" + UUID().uuidString)
+                let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+                let guardValue = XPCInvocationGuard(connection: connection, policy: policy), object = ContextExportedProbe()
+                weakGuard = guardValue; weakObject = object
+                connection.exportedInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self)
+                connection.exportedObject = object
+                weakContext = try invocation.installOwnedContext(connection: connection, readPeer: { [guardValue] _ in
+                    _ = guardValue.incarnation; return binding.peer
+                })
+                connection.invalidationHandler = { [weak invocation] in
+                    try? invocation?.close(); handled.fulfill()
+                }
+                try guardValue.observeConnectionLifetime()
+                connection.resume(); connection.invalidate()
+                wait(for: [handled], timeout: 3); try invocation.close()
+            }
+            XCTAssertNil(weakContext); XCTAssertNil(weakGuard); XCTAssertNil(weakObject)
+            try owner.verifyCurrent()
+        }
+    }
+
 }

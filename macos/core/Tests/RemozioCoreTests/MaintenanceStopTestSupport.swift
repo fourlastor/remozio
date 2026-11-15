@@ -14,7 +14,8 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
     struct State {
         var invalidated: (@Sendable () -> Void)?
         var requests: [AuthorityMaintenanceChannelRequest] = []
-        var incarnation = maintenanceCloseBytes(61), busyObservations = 0
+        var incarnation = maintenanceCloseBytes(61), busyObservations = 0, pendingArms = 0
+        var ready = true
     }
     let state = Mutex(State())
     var requests: [AuthorityMaintenanceChannelRequest] { state.withLock { $0.requests } }
@@ -33,14 +34,16 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
                 s.requests.append(q)
                 let busy = q.action == .observe && s.busyObservations > 0
                 if busy { s.busyObservations -= 1 }
-                return (s.incarnation, busy)
+                let pending = q.action == .arm && s.pendingArms > 0
+                if pending { s.pendingArms -= 1 }
+                return (s.incarnation, busy, pending, s.ready)
             }
             let binding = try q.binding ?? .init(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision,
                 incarnation: observed.0, connectionID: maintenanceCloseBytes(62))
             let refused = q.binding != nil && q.binding?.incarnation != observed.0
             let observes = [.open, .observe, .arm].contains(q.action)
             let value = try AuthorityMaintenanceChannelResponse(request: q, binding: binding,
-                work: observes && !refused ? Self.work(busy: observed.1) : nil, outcome: refused ? .refused : .applied)
+                work: observes && !refused ? Self.work(busy: observed.1, ready: observed.3) : nil, outcome: refused ? .refused : observed.2 ? .stagesPending : .applied)
             reply(.bytes(try value.encoded))
         } catch { reply(.bytes(nil)) }
     }
@@ -89,7 +92,8 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
         return try .openOwned(context: q, driver: driver, timeoutMilliseconds: 100, intervalMilliseconds: 1)
     }
     func capture(_ client: AuthorityMaintenanceXPCClient,
-        requireProcess: (@Sendable (any RuntimeJobExitWitness) throws -> Void)? = nil) async throws -> RuntimeMaintenanceStopCapture {
+        requireProcess: (@Sendable (any RuntimeJobExitWitness) throws -> Void)? = nil,
+        persistBinding: (@Sendable (AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord)? = nil) async throws -> RuntimeMaintenanceStopCapture {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         _ = try await client.start(until: deadline)
         return try await client.captureOwnedStop(window: window, cohort: cohort, admission: ordinary, drain: drain,
@@ -97,6 +101,9 @@ final class MaintenanceStopTestFixture: @unchecked Sendable {
             requireProcess: { value in
                 if let requireProcess { try requireProcess(value) }
                 else { guard try !value.hasExited() else { throw MaintenanceStopTestFault.changedProcess } }
+            }, persistBinding: { value in
+                if let persistBinding { return try persistBinding(value) }
+                return try self.window.retainingShutdownBinding(value)
             }, verifyOwner: {
                 guard self.ownerValid.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
             })

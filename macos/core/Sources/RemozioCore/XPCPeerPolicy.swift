@@ -74,10 +74,43 @@ public struct XPCPeerCredentials: Sendable, Equatable {
 public final class XPCInvocationGuard {
     private weak var connection: NSXPCConnection?
     private let policy: XPCPeerPolicy
+    private let retainedProcess = getpid()
+    private let retainedLock = NSLock()
+    private var connectionRetired = false, retainedObserversInstalled = false
     public let incarnation = UUID()
     var acceptedPeerPolicy: XPCPeerPolicy { policy }
     public init(connection: NSXPCConnection, policy: XPCPeerPolicy) {
         self.connection = connection; self.policy = policy
+    }
+    func retireConnection() {
+        guard getpid() == retainedProcess else { return }; retainedLock.withLock { connectionRetired = true }
+    }
+    /// Install once before activation. Retire the peer proof before running either existing handler.
+    func observeConnectionLifetime(onClose: @escaping () -> Void = {}) throws {
+        guard getpid() == retainedProcess, let connection else { throw XPCPeerPolicyError.wrongConnection }
+        try retainedLock.withLock {
+            guard !connectionRetired, !retainedObserversInstalled else { throw XPCPeerPolicyError.wrongConnection }
+            retainedObserversInstalled = true
+        }
+        let interrupted = connection.interruptionHandler, invalidated = connection.invalidationHandler
+        connection.interruptionHandler = { [self] in retireConnection(); interrupted?(); onClose() }
+        connection.invalidationHandler = { [self] in retireConnection(); invalidated?(); onClose() }
+    }
+    func withRetainedConnection<Value>(_ body: (NSXPCConnection, XPCPeerPolicy, XPCPeerCredentials) throws -> Value) throws -> Value {
+        guard getpid() == retainedProcess else { throw XPCPeerPolicyError.wrongConnection }
+        let peer = try verifyInvocation()
+        guard let connection else { throw XPCPeerPolicyError.wrongConnection }
+        try requireRetainedConnection(connection, peer: peer, policy: policy)
+        let result = try body(connection, policy, peer)
+        try requireRetainedConnection(connection, peer: peer, policy: policy); return result
+    }
+    func requireRetainedConnection(_ actual: NSXPCConnection, peer: XPCPeerCredentials, policy expected: XPCPeerPolicy) throws {
+        guard getpid() == retainedProcess else { throw XPCPeerPolicyError.wrongConnection }
+        try retainedLock.withLock { guard !connectionRetired, retainedObserversInstalled else { throw XPCPeerPolicyError.wrongConnection } }
+        guard let connection, actual === connection, expected.requirement == policy.requirement,
+              expected.expectedUserID == policy.expectedUserID, expected.expectedAuditSessionID == policy.expectedAuditSessionID,
+              try policy.verifyCredentials(connection) == peer else { throw XPCPeerPolicyError.wrongPeer }
+        try retainedLock.withLock { guard !connectionRetired, retainedObserversInstalled else { throw XPCPeerPolicyError.wrongConnection } }
     }
     /// Invoke synchronously from every exported method, including hello. Never use a PID-based code lookup as a substitute.
     public func verifyInvocation() throws -> XPCPeerCredentials {
