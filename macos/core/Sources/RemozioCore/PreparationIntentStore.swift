@@ -5741,11 +5741,53 @@ public final class PreparationIntentStore {
         return (snapshot, completion, promotions, ready, windows)
     }
 
+    /// Issued only after the real window writer confirms its commit and every unrelated row.
+    struct RuntimeMaintenanceTransition {
+        private let receiptID = UUID()
+        let record: RuntimeMaintenanceWindowRecord
+        private let previous: RuntimeMaintenanceWindowRecord?
+        private let before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot
+        fileprivate init(record: RuntimeMaintenanceWindowRecord, previous: RuntimeMaintenanceWindowRecord?,
+            before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot) {
+            self.record = record; self.previous = previous; self.before = before; self.after = after
+        }
+        static func requireChain(_ values: [Self], from before: MachineUpdateStableReleaseSnapshot,
+            to after: MachineUpdateStableReleaseSnapshot, binding: Self? = nil) throws -> RuntimeMaintenanceWindowRecord {
+            if let binding {
+                guard binding.record.shutdownBinding != nil, values.contains(where: { $0.receiptID == binding.receiptID }) else {
+                    throw PreparationStoreError.invalidTransition
+                }
+            }
+            guard !values.isEmpty, values.count <= 16, let first = values.first,
+                  first.record.phase == .authorized, first.previous == nil || first.previous?.phase == .restored else {
+                throw PreparationStoreError.invalidTransition
+            }
+            var cursor = before, previous = first.previous
+            for value in values {
+                try value.before.requireSame(as: cursor)
+                guard value.previous == previous else { throw PreparationStoreError.staleRevision }
+                try value.record.requireReplacing(previous); try value.record.requireSameScope(as: first.record)
+                cursor = value.after; previous = value.record
+            }
+            try cursor.requireSame(as: after)
+            guard let last = values.last?.record, last.phase == .executing, last.operation == .unknown,
+                  last.service == .stopped, last.shutdownBinding != nil else { throw PreparationStoreError.invalidTransition }
+            return last
+        }
+    }
     /// Setup metadata only. Native grants, digest semantics and lifecycle proof remain M07/M15 obligations.
     func writeRuntimeMaintenanceWindow(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord?,
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken? = nil,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
+        try writeRuntimeMaintenanceTransition(next, replacing: previous, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped).record
+    }
+    /// The receipt records this exact write. It grants no native admission, capture or execution authority.
+    func writeRuntimeMaintenanceTransition(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord?,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken? = nil,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
         try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion, recordVersion: next.formatVersion)
         _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded); try next.requireReplacing(previous)
         try requireRetainedSetupPromotionWriterAvailable()
@@ -5814,7 +5856,9 @@ public final class PreparationIntentStore {
                 try verifyScoped(.afterMutation); try owner.capture(in: self)
             }
             return try transaction(write: false, runtimeMaintenance: owner) {
-                try verifyScoped(.afterCommit); try owner.capture(in: self); return next
+                try verifyScoped(.afterCommit); try owner.capture(in: self)
+                let actual = try loadStableMachineUpdate(candidate: candidate); try owner.capture(in: self)
+                return .init(record: next, previous: previous, before: expected, after: actual)
             }
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
@@ -5824,8 +5868,16 @@ public final class PreparationIntentStore {
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
+        try persistRuntimeMaintenanceBindingTransition(binding, window: window, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped).record
+    }
+    /// The capture retains this real binding commit as one link in the pre-body chain.
+    func persistRuntimeMaintenanceBindingTransition(_ binding: AuthorityMaintenanceBinding, window: RuntimeMaintenanceWindowRecord,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
         let next = try window.retainingShutdownBinding(binding)
-        return try writeRuntimeMaintenanceWindow(next, replacing: window, expected: expected, candidate: candidate,
+        return try writeRuntimeMaintenanceTransition(next, replacing: window, expected: expected, candidate: candidate,
             directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped)
     }
     /// A negative bootstrap guard only. No phase grants restoration or native custody.

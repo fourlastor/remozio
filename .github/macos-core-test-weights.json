@@ -1,5 +1,5 @@
 {
- "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests, RuntimeMaintenanceReaderTests, RuntimeMaintenanceStartupRecoveryTests, RuntimeMaintenanceWindowWriterTests, RuntimeMaintenanceRetainedWriterTests, AuthorityMaintenancePairingAdmissionTests, AuthorityMaintenanceChannelMessageTests, AuthorityMaintenanceEndpointTests, AuthorityMaintenanceListenerScopeTests, AuthorityMaintenanceListenerTests, AuthorityMaintenanceClientTests, AuthorityMaintenanceCommandReaderTests, RuntimeMaintenanceBootstrapTests, RuntimeMaintenanceBootstrapAdmissionTests, AuthorityMaintenanceCloseMarkerTests, AuthorityMaintenanceCloseOwnershipTests, AuthorityRuntimeCloseMarkerTests, AuthorityMaintenancePairCaptureTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAuthorityStopTests, AuthorityJournalCutoverInspectionTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh; AuthorityMaintenancePairCaptureTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAuthorityStopTests, AuthorityJournalCutoverInspectionTests and AuthorityMaintenanceClientTests were measured the same way on 2026-11-15; AuthorityMaintenanceCommandReaderTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAdmissionProjectionTests, RuntimeMaintenanceBindingRecordTests, RuntimeMaintenanceBindingWriterTests, RuntimeMaintenanceNativeStopTests, RuntimeMaintenanceWindowRecordTests, RuntimeMaintenanceWindowTransitionTests, SetupRetainedInvocationTests, XPCPeerPolicyTests were measured the same way on 2026-11-15 (M05d2, M07a and M07b0)",
+ "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests, RuntimeMaintenanceReaderTests, RuntimeMaintenanceStartupRecoveryTests, RuntimeMaintenanceWindowWriterTests, RuntimeMaintenanceRetainedWriterTests, AuthorityMaintenancePairingAdmissionTests, AuthorityMaintenanceChannelMessageTests, AuthorityMaintenanceEndpointTests, AuthorityMaintenanceListenerScopeTests, AuthorityMaintenanceListenerTests, AuthorityMaintenanceClientTests, AuthorityMaintenanceCommandReaderTests, RuntimeMaintenanceBootstrapTests, RuntimeMaintenanceBootstrapAdmissionTests, AuthorityMaintenanceCloseMarkerTests, AuthorityMaintenanceCloseOwnershipTests, AuthorityRuntimeCloseMarkerTests, AuthorityMaintenancePairCaptureTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAuthorityStopTests, AuthorityJournalCutoverInspectionTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh; AuthorityMaintenancePairCaptureTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAuthorityStopTests, AuthorityJournalCutoverInspectionTests and AuthorityMaintenanceClientTests were measured the same way on 2026-11-15; AuthorityMaintenanceCommandReaderTests, AuthorityMaintenanceStopCaptureTests, RuntimeMaintenanceAdmissionProjectionTests, RuntimeMaintenanceBindingRecordTests, RuntimeMaintenanceBindingWriterTests, RuntimeMaintenanceNativeStopTests, RuntimeMaintenanceWindowRecordTests, RuntimeMaintenanceWindowTransitionTests, SetupRetainedInvocationTests, XPCPeerPolicyTests were measured the same way on 2026-11-15 (M05d2, M07a and M07b0); RetainedSetupRuntimeSequenceTests, RuntimeMaintenanceCommitmentsTests, RuntimeMaintenanceNativeStopTests, RuntimeMaintenanceTransitionReceiptTests (and the methods of RuntimeMaintenanceCommitmentsTests and RetainedSetupRuntimeSequenceTests) were measured the same way on 2026-11-15 (M07b)",
  "weights": {
   "AcceptedInputMemoTests": 0.0,
   "AccountPreparationTests": 1.69,
@@ -388,7 +388,7 @@
   "RetainedSetupRuntimeNativeContextTests": 76.13,
   "RetainedSetupRuntimeNativeFilesTests": 49.56,
   "RetainedSetupRuntimeNativeMaterialTests": 36.94,
-  "RetainedSetupRuntimeSequenceTests": 706.5,
+  "RetainedSetupRuntimeSequenceTests": 745.17,
   "ReviewedSetupFileTests": 0.52,
   "RootUpdateSchedulingFrameTests": 2.83,
   "RootUpdateSchedulingOwnerTests": 8.97,
@@ -430,10 +430,12 @@
   "RuntimeMaintenanceBindingWriterTests": 40.36,
   "RuntimeMaintenanceBootstrapAdmissionTests": 0.01,
   "RuntimeMaintenanceBootstrapTests": 146.54,
-  "RuntimeMaintenanceNativeStopTests": 6.74,
+  "RuntimeMaintenanceCommitmentsTests": 62.82,
+  "RuntimeMaintenanceNativeStopTests": 7.27,
   "RuntimeMaintenanceReaderTests": 79.99,
   "RuntimeMaintenanceRetainedWriterTests": 116.06,
   "RuntimeMaintenanceStartupRecoveryTests": 37.9,
+  "RuntimeMaintenanceTransitionReceiptTests": 33.91,
   "RuntimeMaintenanceWindowRecordTests": 0.02,
   "RuntimeMaintenanceWindowTransitionTests": 0.0,
   "RuntimeMaintenanceWindowWriterTests": 125.24,
@@ -891,6 +893,7 @@
    "testOwnedPolicyPublicationAndAcknowledgementAdaptersKeepExactFramesAndNeverQueryTransactions": 43.15
   },
   "RetainedSetupRuntimeSequenceTests": {
+   "testActualRuntimeBodyPreservesAllRowsAndFilesOutsideItsDeclaredFootprint": 38.669,
    "testAssemblyCarriesActualImportChoicesThroughPublicationAndAcknowledgement": 77.43,
    "testAssemblyClosesP04StartupBeforeOpeningTheTargetReadOnlyPair": 47.49,
    "testAssemblyHostChangeAfterP04StopsBeforePublicationAndExpiresTheContext": 46.97,
@@ -936,6 +939,15 @@
    "testUncertainStoreOpeningNeverLooksLikeAnAbsentWindow": 8.8,
    "testWindowAppearingAfterBootstrapPreventsRegistrationConfirmation": 8.41,
    "testWindowAppearingAfterPreflightStopsBeforeBootstrap": 8.62
+  },
+  "RuntimeMaintenanceCommitmentsTests": {
+   "testAdministratorIntentHasItsOwnDomainAndExactAcyclicInputs": 8.927,
+   "testAuthorityGroupChangeChangesOnlyItsGrantCommitment": 8.927,
+   "testCandidateUsesTheSelectedReleaseEvidenceAndPublishedPolicyFloors": 8.89,
+   "testGrantAndConsentRemainStableAcrossAnotherInvocationAndProcess": 8.695,
+   "testOperationCommitsTheActualMaterialSelectionWithoutChangingRestorationOrFootprint": 9.568,
+   "testTargetGroupChangeChangesOnlyItsConsentCommitment": 9.243,
+   "testUnsupportedPurposesRefuseBeforeAnyWindowWrite": 8.574
   },
   "RuntimeMaintenanceReaderTests": {
    "testIndexedCorruptionAndNoncanonicalTableDeclarationsRefuse": 18.91,

@@ -18,6 +18,7 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
     private let expectedPolicy: AuthorityCodePolicy?
     private let verifyCurrent: () throws -> Void
     private let ownerPID = getpid()
+    private let maintenanceThread = pthread_self()
     private var active = false
     private var closed = false
     private var invalidated = false
@@ -142,6 +143,34 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
             }
             guard try storage.continuity.read().committed == snapshot.checkpoint else { throw CheckpointedJournal.Failure.boundaryMismatch }
             try verifyCurrent()
+        } catch { invalidated = true; throw error }
+    }
+    /// Reads the same held pair. It opens no second journal or continuity lease.
+    func maintenancePolicyBoundary(initialization: AuthorityInitializationIntent) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
+        guard !closed, !invalidated, !active, getpid() == ownerPID,
+              pthread_equal(maintenanceThread, pthread_self()) != 0 else { throw JournalDatabaseError.unavailable }
+        active = true; defer { active = false }
+        do {
+            try verifyCurrent()
+            guard initialization.complete else { throw AuthorityInitializationError.invalidBoundary }
+            try storage.journal.requireInitializationPath(initialization.journalPath)
+            try storage.continuity.requireInitializationScope(path: initialization.continuityPath,
+                mac: initialization.macID, account: initialization.accountID)
+            let before = try storage.continuity.read()
+            guard !before.recoveryRequired, before.pending == nil, before.committed == snapshot.checkpoint else {
+                throw CheckpointedJournal.Failure.boundaryMismatch
+            }
+            let value = try CheckpointedJournal(journal: storage.journal, continuity: storage.continuity).read { transaction in
+                try Self.requirePolicy(transaction, expected: expectedPolicy)
+                guard let policy = try transaction.codePolicy(), let epoch = try transaction.epoch(before.committed.journalEpoch),
+                      epoch.descriptor.macID == initialization.macID, epoch.descriptor.accountID == initialization.accountID else {
+                    throw AuthorityInitializationError.invalidBoundary
+                }
+                return AuthorityJournal.MachineUpdatePolicyBoundary(macID: epoch.descriptor.macID,
+                    accountID: epoch.descriptor.accountID, policy: policy, checkpoint: before.committed)
+            }
+            guard try storage.continuity.read() == before else { throw CheckpointedJournal.Failure.boundaryMismatch }
+            try verifyCurrent(); return value
         } catch { invalidated = true; throw error }
     }
     private static func requirePolicy(_ transaction: JournalTransaction, expected: AuthorityCodePolicy?) throws {

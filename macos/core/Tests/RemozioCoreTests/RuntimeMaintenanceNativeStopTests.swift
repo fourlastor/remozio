@@ -47,6 +47,15 @@ private final class MaintenanceBodyStores {
             openContinuity: { try self.openContinuity(excluding: $0, readOnly: true) })
         return try .init(storage: storage, expectedPolicy: policy, verifyCurrent: {})
     }
+    func maintenancePair(policy: AuthorityCodePolicy, scope: UpdateOrdinaryAdmissionLease.Scope,
+        fixture: MaintenanceStopTestFixture) throws -> AuthorityJournalCutoverInspection {
+        try AuthorityJournalCutoverInspection.openOwnedForMaintenance(accountID: account, policy: policy, scope: scope,
+            drain: fixture.drain, directory: fixture.directory, machineIdentity: fixture.cohort.machineIdentity,
+            accountIdentity: fixture.cohort.accountIdentity, verifyOwner: {}, openStorage: {
+                try AuthorityStorage(openJournal: { try self.openJournal(readOnly: true) },
+                    openContinuity: { try self.openContinuity(excluding: $0, readOnly: true) })
+            })
+    }
     func requireReleased() throws {
         let journal = try openJournal(); try journal.close()
         let continuity = try openContinuity(); continuity.close()
@@ -58,6 +67,7 @@ private final class MaintenanceNativeStopHarness: @unchecked Sendable {
     let capture: RuntimeMaintenanceStopCapture, file: MaintenanceCloseFileFixture, stores: MaintenanceBodyStores
     var observation: RuntimeJobStopSession.Observation = .matching(100)
     var removals = 0, inspections = 0, pairOpens = 0, bodyCalls = 0
+    var useMaintenancePair = false
     var onInspect: () throws -> Void = {}
     var onRemove: () throws -> Void = {}
     var onOpenPair: () -> Void = {}
@@ -79,7 +89,9 @@ private final class MaintenanceNativeStopHarness: @unchecked Sendable {
                 self.removals += 1; try self.onRemove()
             }, openPair: { initialization, policy in
                 XCTAssertEqual(initialization.accountID, self.f.cohort.accountID)
-                self.pairOpens += 1; self.onOpenPair(); return try self.stores.pair(policy: policy)
+                self.pairOpens += 1; self.onOpenPair()
+                if self.useMaintenancePair { return try self.stores.maintenancePair(policy: policy, scope: scope, fixture: self.f) }
+                return try self.stores.pair(policy: policy)
             })
     }
     func stopped(_ session: RuntimeMaintenanceAuthorityStop) throws {
@@ -93,7 +105,45 @@ private final class MaintenanceNativeStopHarness: @unchecked Sendable {
     }
 }
 
+private final class MaintenanceForeignPolicyRead: @unchecked Sendable {
+    let pair: AuthorityJournalCutoverInspection, initial: AuthorityInitializationIntent
+    let refused = Mutex(false)
+    init(pair: AuthorityJournalCutoverInspection, initial: AuthorityInitializationIntent) { self.pair = pair; self.initial = initial }
+    func invoke() {
+        do { _ = try pair.maintenancePolicyBoundary(initialization: initial) }
+        catch { refused.withLock { $0 = error as? JournalDatabaseError == .unavailable } }
+    }
+}
+
 final class RuntimeMaintenanceNativeStopTests: XCTestCase, @unchecked Sendable {
+    func testActualPermitOpensItsOnlyMaintenancePairOnTheBodyThreadAndKeepsTheLiveCheckpoint() async throws {
+        let h = try await MaintenanceNativeStopHarness(); h.useMaintenancePair = true
+        try h.f.ordinary.withMachineAdmission { scope in
+            let session = try h.open(scope, permit: h.permit()); defer { session.close() }
+            try h.stopped(session)
+            let initial = h.f.initialization
+            let declared = try AuthorityInitializationIntent(setupID: initial.setupID, revision: initial.revision,
+                installationID: initial.installationID, macID: initial.macID, accountID: initial.accountID,
+                releaseDigest: initial.releaseDigest, initializationDigest: initial.initializationDigest,
+                initializationBytes: initial.initializationBytes,
+                journalPath: h.stores.root.path + "/Journal/journal.sqlite",
+                continuityPath: h.stores.root.path + "/Continuity/continuity.sqlite", checkpoint: initial.checkpoint, complete: true)
+            try h.body(session) { pair in
+                let live = try pair.maintenancePolicyBoundary(initialization: declared)
+                XCTAssertEqual(live.checkpoint, pair.snapshot.checkpoint)
+                XCTAssertNotEqual(live.checkpoint, declared.checkpoint)
+                XCTAssertEqual(live.policy.policy, h.f.runtime.plan.host.codePolicy)
+                let foreign = MaintenanceForeignPolicyRead(pair: pair, initial: declared)
+                let done = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async { foreign.invoke(); done.signal() }
+                XCTAssertEqual(done.wait(timeout: .now() + 2), .success)
+                XCTAssertTrue(foreign.refused.withLock { $0 })
+                XCTAssertEqual(try pair.maintenancePolicyBoundary(initialization: declared), live)
+            }
+            XCTAssertEqual(h.pairOpens, 1); XCTAssertEqual(h.bodyCalls, 1)
+        }
+        try h.stores.requireReleased(); await h.client.close()
+    }
     func testBootoutIsIssuedOnlyOnceAcrossPendingPollsAndALostReply() async throws {
         let h = try await MaintenanceNativeStopHarness()
         try h.f.ordinary.withMachineAdmission { scope in
