@@ -5824,6 +5824,43 @@ public final class PreparationIntentStore {
             }
         }
     }
+    /// Reads and binds one authenticated command in one protected transaction. It grants no native hold or stop authority.
+    func runtimeMaintenanceCommandRecord(_ request: AuthorityMaintenanceChannelRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data,
+        armedBinding: AuthorityMaintenanceBinding? = nil, candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceWindowRecord {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+            guard current.schemaVersion == RuntimeMaintenanceWindowStorage.schemaVersion,
+                  incarnation.count == 16, request.accountID == account.accountID,
+                  current.inventory.installationID == request.installationID,
+                  current.admission.installationID == request.installationID,
+                  current.admission.accounts.first(where: { $0.accountID == account.accountID })?.identity == request.gate,
+                  current.inventory.accounts.contains(where: { $0.accountID == account.accountID && $0.ownerUID == account.ownerUID }),
+                  let installed = try loadAccountPreparation(ownerUID: account.ownerUID),
+                  installed.accountID == account.accountID, installed.storagePrepared, installed.installationID == request.installationID,
+                  installed.ownerUID == account.ownerUID,
+                  let record = frame.maintenanceWindows.first(where: { $0.scope.authority.accountID == account.accountID }),
+                  record.scope.authority == account, record.scope.macID == macID,
+                  record.scope.installationID == request.installationID,
+                  record.scope.releaseDigest == current.inventory.releaseDigest,
+                  record.id == request.attemptID, record.revision == request.revision,
+                  record.phase == (request.action == .reopen ? .reopenPending : .draining),
+                  request.binding == nil || request.binding?.incarnation == incarnation else { throw RuntimePreparationError.changedScope }
+            var directory = installed.directoryID.uuid
+            guard withUnsafeBytes(of: &directory, { Data($0) }) == account.directoryID else { throw RuntimePreparationError.changedScope }
+            if request.action == .reopen {
+                guard record.service == .notStopped, record.operation == .notStarted,
+                      let armedBinding, request.binding == armedBinding else { throw RuntimePreparationError.changedScope }
+            }
+            if let gate = record.gate {
+                guard gate.identity == request.gate, gate.authorityIncarnation == incarnation,
+                      gate.requestRevision == (request.action == .reopen ? armedBinding?.revision : request.revision) else {
+                    throw RuntimePreparationError.changedScope
+                }
+            }
+            return record
+        }
+    }
     private func loadRuntimeMaintenanceWindows() throws -> [RuntimeMaintenanceWindowRecord] {
         try statement("SELECT account,attempt,revision,phase,record FROM runtime_maintenance_windows_v1 ORDER BY account LIMIT 65") { row in
             var values: [RuntimeMaintenanceWindowRecord] = []

@@ -38,6 +38,7 @@ final class AuthorityPairingSetupAccess: Sendable {
     typealias Commit = @Sendable (PairingEnrollmentAttempt, Data, Data, () throws -> Void,
                                  @Sendable (JournalTransaction) throws -> Void) throws -> Data
     private let journal: AuthorityJournal
+    let maintenanceAdmission: AuthorityMaintenancePairingAdmission
     private let macID: Data
     private let accountID: Data
     private let authorityPublicKey: Data
@@ -91,6 +92,8 @@ final class AuthorityPairingSetupAccess: Sendable {
             guard current.requirement == appPolicy.requirement else { throw AuthorityPairingSetupError.policyChanged }
             return (entry, revision)
         }
+        var incarnation = try now().epoch.uuid
+        maintenanceAdmission = try .init(accountID: accountID, incarnation: withUnsafeBytes(of: &incarnation) { Data($0) })
         self.journal = journal; self.macID = macID; self.accountID = accountID; self.authorityPublicKey = authorityPublicKey
         self.configuration = configuration; self.minimumEnvelopeVersion = minimumEnvelopeVersion; self.auditVersions = auditVersions
         appEntry = retained.0; appRevision = retained.1

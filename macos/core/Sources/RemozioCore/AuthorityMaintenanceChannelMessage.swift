@@ -12,7 +12,7 @@ struct AuthorityMaintenanceChannelRequest: Equatable, Sendable {
          gate: PreparationFileIdentity, binding: AuthorityMaintenanceBinding?, challenge: Data) throws {
         guard [accountID, attemptID, revision, installationID].allSatisfy({ $0.count == 16 }),
               challenge.count == 32, gate.inode > 0, (action == .open) == (binding == nil),
-              binding == nil || (binding?.accountID == accountID && binding?.attemptID == attemptID && binding?.revision == revision) else {
+              binding == nil || (binding?.accountID == accountID && binding?.attemptID == attemptID && (action == .reopen || binding?.revision == revision)) else {
             throw RuntimePreparationError.invalidRecord
         }
         self.action = action; self.accountID = accountID; self.attemptID = attemptID; self.revision = revision
@@ -94,7 +94,7 @@ struct AuthorityMaintenanceChannelResponse: Equatable, Sendable {
         case .stagesPending: valid = request.action == .arm && work != nil
         case .refused: valid = work == nil
         }
-        guard request.accountID == binding.accountID, request.attemptID == binding.attemptID, request.revision == binding.revision,
+        guard request.accountID == binding.accountID, request.attemptID == binding.attemptID, (request.action == .reopen || request.revision == binding.revision),
               request.binding == nil || request.binding == binding, valid else {
             throw RuntimePreparationError.changedScope
         }

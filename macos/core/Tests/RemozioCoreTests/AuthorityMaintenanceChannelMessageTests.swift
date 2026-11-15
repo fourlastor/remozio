@@ -207,3 +207,33 @@ extension AuthorityMaintenanceChannelMessageTests {
         }
     }
 }
+
+extension AuthorityMaintenanceChannelMessageTests {
+    func testOnlyReopenCanRoundTripCurrentRevisionAndAnOlderArmedBinding() throws {
+        let old = try binding(), current = bytes(88)
+        let reopen = try Request(action: .reopen, accountID: old.accountID, attemptID: old.attemptID, revision: current,
+            installationID: bytes(7), gate: .init(device: 8, inode: 9), binding: old, challenge: bytes(6, 32))
+        XCTAssertEqual(try Request.decode(reopen.encoded), reopen)
+        let reply = try Response(request: reopen, binding: old, work: nil, outcome: .applied)
+        XCTAssertEqual(try Response.decode(reply.encoded, expected: reopen), reply)
+        XCTAssertEqual(reply.request.revision, current); XCTAssertEqual(reply.binding.revision, bytes(3))
+        for action in [Request.Action.open, .observe, .arm, .cancel] {
+            XCTAssertThrowsError(try Request(action: action, accountID: old.accountID, attemptID: old.attemptID, revision: current,
+                installationID: bytes(7), gate: .init(device: 8, inode: 9), binding: old, challenge: bytes(6, 32)))
+            if action != .open {
+                var fields = try self.fields(reopen.encoded); fields[2] = .unsigned(action.rawValue)
+                XCTAssertThrowsError(try Request.decode(encode(fields)))
+            }
+        }
+        var different = try fields(reply.encoded); different[3] = .bytes(try binding(4).encoded)
+        XCTAssertThrowsError(try Response.decode(encode(different), expected: reopen))
+    }
+    func testRepliesForOtherActionsStillRejectADifferentBindingRevision() throws {
+        let old = try binding(2)
+        for action in [Request.Action.open, .observe, .arm, .cancel] {
+            let q = try request(action)
+            XCTAssertThrowsError(try Response(request: q, binding: old,
+                work: action == .cancel ? nil : work(), outcome: .applied))
+        }
+    }
+}
