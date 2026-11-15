@@ -1,10 +1,11 @@
 # Linux protected services: activation proposal
 
-Status: **unapproved proposal**, 29 October 2026. On 13 November 2026 the Linux
-host owner chose decisions 5, 7 and 8 and put decisions 4 and 6 behind written
-gates (see [Decisions](#decisions)). On 15 November 2026 the owner adopted the
-measured protected-launch candidate for decision 5. Decisions 1, 2, 3, 4 and 6 stay
-open. Nothing else here is accepted policy.
+Status: **unapproved proposal**, 29 October 2026, except for the owner decisions
+recorded here. On 13 November 2026 the Linux host owner chose decisions 7 and 8,
+chose the direction for decision 5 (strict first) and put decisions 4 and 6 behind
+written gates (see [Decisions](#decisions)). On 15 November 2026 the owner adopted
+the measured protected-launch candidate for decision 5. Decisions 1, 2, 3, 4 and 6
+stay open. Nothing else here is accepted policy.
 It proposes concrete service identities, paths, ownership and modes, IPC peers,
 startup refusals, recovery behavior and operator gates for the
 [contributor guide's](https://gist.github.com/rock3r/ef069bbc6f931b83febf2e1c159cdbfa)
@@ -35,7 +36,7 @@ the least required access (line 155).
 | Authority | `remozio-authority.service`, system user `remozio-authority`, no login shell, no capabilities | Journal, continuity store, checkpoints and recovery marker; decision verification and atomic consumption; grants reading; authority TPM key; dispatch permits | Execute commands; open network sockets; read the transport key |
 | Transport | `remozio-transport.service`, system user `remozio-transport`, no capabilities | Network listener, pinned TLS with its own TPM key, framing to and from the authority | Sign arbitrary bytes with the authority key, consume decisions, reach authority state, execute, reach pairing administration |
 | Execution | `remozio-exec.service`; identity and privilege are an open decision (below) | Receiving one-use dispatch permits from the authority and starting the target command with the retained streams | Accept anything but an authority-issued permit; decide; retry an uncertain dispatch |
-| Caller monitor | Placement is an open decision (below); candidate: a dedicated system user that keeps only `CAP_SYS_PTRACE` (decisions 2 and 5) | Trace ownership of the frontend from protected launch, the kernel-checked submission carrier | Release a stop across the dispatch handoff without the acknowledged protocol |
+| Caller monitor | Placement is an open decision (below); candidate: a dedicated system user (decision 2) that keeps only `CAP_SYS_PTRACE`, the capability set of the adopted decision 5 design; its confinement is not measured | Trace ownership of the frontend from protected launch, the kernel-checked submission carrier | Release a stop across the dispatch handoff without the acknowledged protocol |
 | Frontend | `/usr/libexec/remozio/remozio` invoked by the user; launch path is the contract's largest open gate; adopted design: static, set-group-ID to `remozio-frontend` (decision 5) | Submitting one bounded request with its streams | Execute the target itself |
 | Session | `remozio-session.service` as a systemd user unit, the interactive user's identity | Presence observations and read-only status | Modify authority state (contract line 156) |
 
@@ -207,10 +208,10 @@ on the target machine:
 
 ## Decisions
 
-On 13 November 2026 the Linux host owner chose decisions 5, 7 and 8 and put
-decisions 4 and 6 behind written gates. On 15 November 2026 the owner adopted the
-measured candidate for decision 5. Decisions 1, 2, 3, 4 and 6 stay open, and this
-proposal still chooses none of them.
+On 13 November 2026 the Linux host owner chose decisions 7 and 8, chose the
+direction for decision 5 and put decisions 4 and 6 behind written gates. On 15
+November 2026 the owner adopted the measured candidate for decision 5. Decisions 1,
+2, 3, 4 and 6 stay open, and this proposal chooses none of those.
 
 1. **Line 67 handoff.** [Contract line 67](linux-host-contract.md#candidate-strict-admission-profile)
    requires the monitor to own and confirm the caller's stop while committing the
@@ -219,9 +220,8 @@ proposal still chooses none of them.
    candidate readings (A: detect and record, as in the fixture; B: a single owner
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
-   **Open.** It depends on the protected-launch design (decision 5); review it
-   again when that design has a candidate. Decision 5 now has an adopted design
-   with a recorded result, so this review is due.
+   **Open.** It depends on the protected-launch design (decision 5). That design is
+   now adopted with a recorded result, so this review is due.
 2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
    default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
    attach only to its descendants. Being the frontend's parent satisfies only that
