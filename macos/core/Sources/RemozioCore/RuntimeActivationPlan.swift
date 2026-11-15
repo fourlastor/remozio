@@ -2,6 +2,7 @@ import Foundation
 import RemozioProtocol
 
 public enum RuntimeActivationError: Error, Equatable {
+    case maintenancePending
     case incomplete, invalidPlan, conflictingPlan, changedScope, unavailable, exhausted
 }
 

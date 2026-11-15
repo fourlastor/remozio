@@ -89,7 +89,7 @@ enum RuntimeJobRegistration {
     enum Observation: Equatable { case absent, matching, conflicting }
     static func ensure(_ job: InstalledAccountJobManifest, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        try reconcile(verifyCurrent: verifyCurrent, inspect: { try inspect(job) }, bootstrap: {
+        try reconcile(job: job, verifyCurrent: verifyCurrent, requireMaintenanceOpen: RuntimeMaintenanceBootstrapGuard.requireNativeOpen, inspect: { try inspect(job) }, bootstrap: {
             _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
         })
     }
@@ -100,6 +100,12 @@ enum RuntimeJobRegistration {
         if RuntimeJobStopSession.isExactAbsence(result, label: job.declaration.label) { return .absent }
         guard result.exitCode == 0, result.errorOutput.isEmpty else { throw RuntimeActivationError.unavailable }
         return try LaunchdJobObservation.decode(result.output, target: target).matches(job) ? .matching : .conflicting
+    }
+    static func reconcile(job: InstalledAccountJobManifest, verifyCurrent: () throws -> Void,
+        requireMaintenanceOpen: (InstalledAccountJobManifest) throws -> Void,
+        inspect: () throws -> Observation, bootstrap: () throws -> Void) throws {
+        func verify() throws { try verifyCurrent(); try requireMaintenanceOpen(job); try verifyCurrent() }
+        try reconcile(verifyCurrent: verify, inspect: inspect, bootstrap: bootstrap)
     }
     // Sequencing fixtures do not prove system-domain admission or the loaded process's identity.
     static func reconcile(verifyCurrent: () throws -> Void, inspect: () throws -> Observation,
