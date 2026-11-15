@@ -86,7 +86,7 @@ struct AuthorityMaintenanceChannelResponse: Equatable, Sendable {
     let work: AuthorityMaintenanceChannelWork?
     let outcome: Outcome
     init(request: AuthorityMaintenanceChannelRequest, binding: AuthorityMaintenanceBinding, work: AuthorityMaintenanceChannelWork?,
-         outcome: Outcome = .applied) throws {
+         outcome: Outcome) throws {
         let observes = [AuthorityMaintenanceChannelRequest.Action.open, .observe, .arm].contains(request.action)
         let valid: Bool
         switch outcome {
