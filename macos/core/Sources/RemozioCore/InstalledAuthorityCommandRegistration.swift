@@ -232,6 +232,28 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             return result
         } catch { try? current.close(); throw error }
     }
+    func captureMaintenanceAccount() throws -> RuntimeMaintenanceWindowRecord.Account {
+        try withGatewayRecoveryMachine { current, _ in
+            guard configuration.jobPlacement == .systemAccount,
+                  let account = try current.accountPreparation(ownerUID: configuration.command.callerUID),
+                  account.accountID == configuration.command.accountID, account.storagePrepared,
+                  account.installationID == configuration.installationID else { throw RuntimePreparationError.changedScope }
+            var directory = account.directoryID.uuid
+            return try .init(accountID: account.accountID, ownerUID: account.ownerUID, directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+        }
+    }
+    /// One short protected command read. No machine store escapes or survives an await.
+    func validateMaintenanceCommand(_ request: AuthorityMaintenanceChannelRequest, account: RuntimeMaintenanceWindowRecord.Account,
+        incarnation: Data, admission: AuthorityMaintenancePairingAdmission) throws {
+        guard account.accountID == configuration.command.accountID, account.ownerUID == configuration.command.callerUID else {
+            throw RuntimePreparationError.changedScope
+        }
+        let armed = try request.action == .reopen ? request.binding.map { try admission.shutdownBinding(matching: $0).binding } : nil
+        try withGatewayRecoveryMachine { current, release in
+            _ = try current.runtimeMaintenanceCommandRecord(request, account: account, incarnation: incarnation,
+                armedBinding: armed, candidate: release)
+        }
+    }
     /// Capture eligibility before check-in closes the startup machine writer.
     func captureUpdateSchedulingStartup() -> AuthorityUpdateSchedulingStartupSnapshot {
         lock.withLock {

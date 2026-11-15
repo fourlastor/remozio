@@ -22,6 +22,12 @@ public actor AuthorityWakeService {
     public nonisolated let presence: AuthorityPresenceRuntime?
     nonisolated let gatewaySettingsBinding: GatewaySettingsControlBinding?
     public enum WakeStatus: Equatable, Sendable { case idle, connecting, running, waiting(retryMilliseconds: UInt64), quiescingForSettings, suspendedForSettings, quiescingForRecovery, suspendedForRecovery, closed }
+    private struct MaintenanceOwners: Sendable {
+        let journal: AuthorityJournal, execution: AuthorityCommandExecutionWorker
+        let pairing: AuthorityPresenceXPCListener, clock: AuthorityClock
+    }
+    private nonisolated let maintenanceOwners = Mutex<MaintenanceOwners?>(nil)
+    private nonisolated let maintenanceActive = Mutex(false)
     private let commandReceiver: AuthorityCommandReceiveWorker?
     private let commandExecutionWorker: AuthorityCommandExecutionWorker?
     private let makePublisher: @Sendable () throws -> AuthorityWakePublisher
@@ -87,6 +93,7 @@ public actor AuthorityWakeService {
         self.requestsRetired = { requestsRetired() || commandReceiver?.isRetired == true || commandExecutionWorker?.isRetired == true }
     }
     deinit {
+        maintenanceActive.withLock { $0 = false }
         recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
@@ -240,7 +247,7 @@ public actor AuthorityWakeService {
                     minimumEnvelopeVersion: configuration.request.service.minimumEnvelopeVersion, auditVersions: auditVersions)
             } else { presenceListener = nil }
             let commandReceiver = try commandReceiverFactory?(journal, clock)
-            return try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
+            let result = try AuthorityWakeService(makePublisher: makePublisher, hints: hints, interval: configuration.pollMilliseconds,
                 startRequests: { try service.start(); try presenceListener?.start() },
                 closeRequests: { presenceListener?.close(); try service.close() },
                 requestsRetired: { retired.value.withLock { $0 } }, presence: presence, commandReceiver: commandReceiver, commandExecutionWorker: executionWorker,
@@ -253,7 +260,31 @@ public actor AuthorityWakeService {
                         verifyCurrent: verifyCurrent, sign: signer.sign)
                     return try MachineUpdateConsumerHealthPacket(roleReply: reply, gatewayHead: nil).encoded
                 })
+            if let executionWorker, let presenceListener {
+                result.maintenanceOwners.withLock { $0 = .init(journal: journal, execution: executionWorker, pairing: presenceListener, clock: clock) }
+            }
+            return result
         } catch { presence?.close(); try? journal.close(); throw error }
+    }
+    nonisolated func validateNativeMaintenanceIdentity() throws {
+        guard getuid() == 0, geteuid() == 0, maintenanceActive.withLock({ $0 }),
+              maintenanceOwners.withLock({ $0 != nil }), !requestsRetired() else { throw AuthorityXPCEndpointError.unavailable }
+    }
+    private func currentMaintenanceOwners() throws -> MaintenanceOwners {
+        try validateNativeMaintenanceIdentity()
+        guard getuid() == 0, geteuid() == 0, started, !closed, !isRetired,
+              let owners = maintenanceOwners.withLock({ $0 }) else { throw AuthorityXPCEndpointError.unavailable }
+        return owners
+    }
+    func nativeMaintenanceScope() throws -> (AuthorityMaintenancePairingAdmission, Data) {
+        let owners = try currentMaintenanceOwners(), pairing = try owners.pairing.currentMaintenancePairingOwners()
+        var epoch = owners.clock.epoch.uuid
+        return (pairing.admission, withUnsafeBytes(of: &epoch) { Data($0) })
+    }
+    func captureNativeMaintenanceWork() throws -> AuthorityMaintenanceChannelWork {
+        let owners = try currentMaintenanceOwners()
+        return try .init(journal: owners.journal.maintenanceJournalWork(), execution: owners.execution.maintenanceExecutionWork,
+            pairing: owners.pairing.currentMaintenancePairingOwners().capture())
     }
     func answerInstalledReadiness(_ request: MachineUpdateConsumerHealthRequest,
         expected: MachineUpdateRestartHealthPlan.Requirement, gateway: MachineUpdateAuthorityReadinessGateway?,
@@ -466,7 +497,7 @@ public actor AuthorityWakeService {
             }
         }
         catch { try? await close(); throw error }
-        startPublisherLoop()
+        maintenanceActive.withLock { $0 = true }; startPublisherLoop()
     }
     private func startPublisherLoop() {
         guard !closed, !retired, !startupRestorePending, !recoveryStartupHold, recoveryTicket == nil, settingsChange == nil, task == nil else { return }
@@ -479,6 +510,7 @@ public actor AuthorityWakeService {
     }
     /// Failed request cleanup remains owned and can be retried. Concurrent callers share one cleanup attempt.
     public func close() async throws {
+        maintenanceActive.withLock { $0 = false }
         closed = true; wakeStatus = .closed; recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke(); phonePushCapability?.close()
         guard !cleanupComplete else { return }
         if let closing { try await closing.value; return }

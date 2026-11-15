@@ -34,6 +34,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
     private let presence: AuthorityPresenceRuntime
     private let access: AuthorityPresenceAccess
     private let pairingAccess: AuthorityPairingSetupAccess?
+    private let maintenancePairingOwners: AuthorityMaintenancePairingOwners?
     private let clock: AuthorityClock
     private var running = false
     private var closed = false
@@ -53,6 +54,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
             pairingAccess = try .init(journal: journal, signer: signer, appPolicy: configuration.appPolicy,
                 configuration: pairingConfiguration, minimumEnvelopeVersion: minimumEnvelopeVersion, auditVersions: auditVersions, now: { try clock.now() })
         } else { pairingAccess = nil }
+        maintenancePairingOwners = pairingAccess.map { .init(admission: $0.maintenanceAdmission) }
         listener = NSXPCListener(machServiceName: configuration.serviceName)
         super.init()
         policy.configure(listener); listener.delegate = self
@@ -62,6 +64,12 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
         try lock.withLock {
             guard getuid() == 0, geteuid() == 0, !running, !closed else { throw AuthorityPresenceIPCError.unavailable }
             try access.verifyCurrent(); try pairingAccess?.verifyCurrent(); try registry.start(); running = true; listener.activate()
+        }
+    }
+    func currentMaintenancePairingOwners() throws -> AuthorityMaintenancePairingOwners {
+        try lock.withLock {
+            guard running, !closed, let maintenancePairingOwners else { throw AuthorityPairingSetupError.unavailable }
+            try pairingAccess?.verifyCurrent(); return maintenancePairingOwners
         }
     }
     public func close() {
@@ -82,6 +90,7 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
                     let local = try AuthorityPairingXPCEndpoint(connection: connection, policy: policy, access: pairingAccess,
                         budget: budget, onHandshake: { [weak registry] in registry?.handshake(id) },
                         onClose: { [weak registry] in registry?.remove(id) })
+                    try maintenancePairingOwners?.retain(local, id: id)
                     pairing = local
                     connection.exportedInterface = NSXPCInterface(with: AuthorityAppXPCProtocol.self)
                     connection.exportedObject = AuthorityAppXPCEndpoint(presence: endpoint, pairing: local)

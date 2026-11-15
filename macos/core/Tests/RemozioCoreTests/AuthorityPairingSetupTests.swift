@@ -819,3 +819,59 @@ extension AuthorityPairingSetupTests {
     }
 
 }
+
+
+extension AuthorityPairingSetupTests {
+    func testMaintenanceOwnersCaptureBothActualEndpointsAndPruneOnlySettledClose() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open())
+        let first = try f.endpoint(), second = try f.endpoint(), owner = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        try owner.retain(first, id: UUID()); try owner.retain(second, id: UUID())
+        defer { first.close(); second.close() }
+        XCTAssertFalse(try owner.capture().ready); try hello(first); try hello(second)
+        _ = try staged(first, proposal: f.proposal()); _ = try staged(second, proposal: f.proposal())
+        let both = try owner.capture(); XCTAssertTrue(both.ready); XCTAssertEqual(both.stagedAttempts, 2); XCTAssertEqual(both.activityOwners, 2)
+        first.close(); let one = try owner.capture(); XCTAssertTrue(one.ready); XCTAssertEqual(one.stagedAttempts, 1); XCTAssertEqual(one.activityOwners, 1)
+        second.close(); let empty = try owner.capture(); XCTAssertEqual(empty.stagedAttempts, 0); XCTAssertEqual(empty.activityOwners, 0)
+        XCTAssertFalse(empty.operationActive); try f.assertCheckpoint()
+    }
+    func testMaintenanceOwnersKeepClosedStageReplyUntilItsActualActivityCloses() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open()), endpoint = try f.endpoint()
+        let owner = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        try owner.retain(endpoint, id: UUID()); try hello(endpoint); defer { endpoint.close() }
+        endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { bytes in
+            XCTAssertNotNil(bytes); endpoint.close()
+            let during = try? owner.capture(); XCTAssertEqual(during?.stagedAttempts, 1)
+            XCTAssertFalse(during?.ready ?? true); XCTAssertTrue(during?.operationActive ?? false)
+            XCTAssertGreaterThan(during?.activityOwners ?? 0, 0)
+        }
+        let after = try owner.capture(); XCTAssertEqual(after.stagedAttempts, 0); XCTAssertEqual(after.activityOwners, 0)
+        XCTAssertFalse(after.operationActive); XCTAssertNil(endpoint.retainedMaintenancePairingWork())
+    }
+    func testMaintenanceOwnersKeepCommitReplyAfterTheAttemptTransfers() throws {
+        let activity = try ReleaseActivityFixture(), f = try Fixture(activity: activity.open()), endpoint = try f.endpoint()
+        let owner = AuthorityMaintenancePairingOwners(admission: f.access.maintenanceAdmission)
+        try owner.retain(endpoint, id: UUID()); try hello(endpoint); defer { endpoint.close() }
+        let value = try staged(endpoint, proposal: f.proposal()), proof = try f.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        endpoint.commitPairing(value.setupID, confirmedDigest: try value.digest(), biometricProof: proof, authorization: authorization) { bytes in
+            XCTAssertNotNil(bytes); endpoint.close()
+            let during = try? owner.capture(); XCTAssertEqual(during?.stagedAttempts, 1); XCTAssertTrue(during?.operationActive ?? false)
+        }
+        XCTAssertEqual(try owner.capture().stagedAttempts, 0); XCTAssertEqual(try f.records(), 1); try f.assertCheckpoint()
+    }
+    func testMaintenanceOwnersRejectAnEndpointFromAnotherAdmissionWithoutAdoptingItsStage() throws {
+        let first = try Fixture(), second = try Fixture(), endpoint = try second.endpoint()
+        let owner = AuthorityMaintenancePairingOwners(admission: first.access.maintenanceAdmission)
+        defer { endpoint.close() }; try hello(endpoint); _ = try staged(endpoint, proposal: second.proposal())
+        XCTAssertThrowsError(try owner.retain(endpoint, id: UUID())); XCTAssertEqual(try owner.capture().stagedAttempts, 0)
+        XCTAssertEqual(try second.access.maintenanceAdmission.stagedReservations(), 1)
+        first.access.maintenanceAdmission.close(); XCTAssertThrowsError(try owner.capture())
+    }
+    func testMaintenanceBindingUsesTheActualAuthorityClockEpoch() throws {
+        let f = try Fixture(), admission = f.access.maintenanceAdmission
+        var epoch = f.environment.now().epoch.uuid
+        let expected = withUnsafeBytes(of: &epoch) { Data($0) }
+        let connection = try admission.openConnection(attemptID: Data(repeating: 70, count: 16), revision: Data(repeating: 71, count: 16))
+        defer { connection.close() }; XCTAssertEqual(connection.binding.incarnation, expected)
+        XCTAssertNotEqual(connection.binding.incarnation, Data(repeating: 0, count: 16))
+    }
+}
