@@ -3,6 +3,7 @@ import Foundation
 
 /// Setup serializes exchanges. A concurrent call closes the connection and releases its pre-arm block.
 @objc protocol AuthorityMaintenanceXPCProtocol {
+    func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
 
@@ -79,6 +80,12 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     }
     func closeAndWait() async { close(); let pending = lock.withLock { Array(tasks.values) }; for task in pending { await task.value } }
     func pendingOperations() -> Int { lock.withLock { tasks.count } }
+    func hello(reply: @escaping @Sendable (UInt64) -> Void) {
+        do {
+            try verify()
+            try lock.withLock { guard !closed else { throw AuthorityXPCEndpointError.unavailable }; reply(1) }
+        } catch { close(); reply(0) }
+    }
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
         do {
             // Authenticate on the original exported invocation stack before any asynchronous or protected access.
