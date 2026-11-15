@@ -61,6 +61,31 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     func close() { connection.invalidate() }
     deinit { close() }
 }
+/// Serializes ordinary-owner fixture access to its real drain and directory. Root cannot construct this boundary.
+private final class MaintenanceOwnedDrainBoundary: @unchecked Sendable {
+    private let lock = NSLock(), processID = getpid(), ownerUID = getuid()
+    private let drain: UpdateDrainToken, directory: ReleaseDestinationLease
+    private let accountID: Data, identity: PreparationFileIdentity
+    init(drain: UpdateDrainToken, directory: ReleaseDestinationLease, accountID: Data, identity: PreparationFileIdentity) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        self.drain = drain; self.directory = directory; self.accountID = accountID; self.identity = identity
+    }
+    func validate() throws {
+        guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        try lock.withLock { try drain.validateAccountBoundary(directory: directory, accountID: accountID, expected: identity) }
+    }
+    func release() throws { try validate(); lock.withLock { drain.close() } }
+}
+private final class MaintenanceHealthyPendingReceipt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var receipt: PreparationIntentStore.RuntimeMaintenanceTransition?
+    func store(_ value: PreparationIntentStore.RuntimeMaintenanceTransition) throws {
+        try lock.withLock { guard receipt == nil else { throw JournalLeaseError.invalidated }; receipt = value }
+    }
+    func require() throws -> PreparationIntentStore.RuntimeMaintenanceTransition {
+        try lock.withLock { guard let receipt else { throw JournalLeaseError.invalidated }; return receipt }
+    }
+}
 private final class MaintenanceClientLifetime: @unchecked Sendable {
     private let lock = NSRecursiveLock(); private var active = true, expected: UUID?
     private var delivered: AuthorityMaintenanceClientReply?
@@ -320,20 +345,165 @@ actor AuthorityMaintenanceXPCClient {
         }
         binding = target; state = .open
         _ = try await send(.reopen, target: target, until: deadline)
+        return try await readReleasedGate(target, revision: context.revision,
+            incarnation: target.incarnation, requirePeerLive: {}, until: deadline)
+    }
+    private func readReleasedGate(_ target: AuthorityMaintenanceBinding, revision: Data, incarnation: Data,
+        requirePeerLive: @escaping @Sendable () throws -> Void,
+        until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
         while ContinuousClock.now < deadline {
+            try requirePeerLive()
             let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
-                revision: context.revision, installationID: context.installationID, gate: context.gate,
+                revision: revision, installationID: context.installationID, gate: context.gate,
                 target: target, challenge: AccountPreparationIntent.randomID())
             guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
                 throw AuthorityMaintenanceClientError.needsOwnerRecovery
             }
-            let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: target.incarnation)
+            try requirePeerLive()
+            let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: incarnation)
             guard result.hold == .released else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
             if result.admission == .available { return result }
             guard result.admission == .busy else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
             try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
         }
         throw AuthorityMaintenanceClientError.needsOwnerRecovery
+    }
+
+    /// The owner proves closed stores and one native registration. Only its receipt can release the existing drain.
+    func restoreHealthyNative(owner: RuntimeMaintenanceRestoration, until deadline: ContinuousClock.Instant,
+        persist: @escaping CleanupCommit) async throws -> CleanupRecord {
+        guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        guard try owner.openRequest(challenge: context.challenge) == context else { throw RuntimePreparationError.changedScope }
+        let pendingReceipt = MaintenanceHealthyPendingReceipt()
+        return try await restoreHealthy(window: owner.window, until: deadline,
+            makeDriver: { try native.replacement(accountID: owner.window.scope.authority.accountID) },
+            verifyScope: { try owner.validateBeforePending() }, preparePeer: { candidate in
+                guard let candidate = candidate as? NativeMaintenanceClient else { throw RuntimePreparationError.changedScope }
+                try owner.acceptWitness(candidate.captureProcess(job: owner.job, code: owner.code))
+            }, requirePeerLive: { try owner.requireWitnessLive() }, makePending: { try owner.pendingRecord(binding: $0) },
+            releaseDrain: { _ in try owner.releaseDrain(after: pendingReceipt.require()) },
+            recoverRestoring: { try owner.commitOwnerRecovery($0) }, persist: { next, previous in
+                let receipt = try persist(next, previous); try receipt.requireReplacement(next, replacing: previous)
+                if next.phase == .reopenPending { try pendingReceipt.store(receipt) }
+                return receipt.record
+            })
+    }
+    /// Owned controls exercise the ordering. They cannot grant native restoration or select system-domain callbacks.
+    func restoreHealthyOwned(window: CleanupRecord, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        verifyScope: @escaping @Sendable () throws -> Void,
+        preparePeer: @escaping @Sendable (any AuthorityMaintenanceClientDriver) async throws -> Void,
+        requirePeerLive: @escaping @Sendable () throws -> Void,
+        makePending: (@Sendable (CleanupRecord, AuthorityMaintenanceBinding) throws -> CleanupRecord)? = nil,
+        recoverRestoring: (@Sendable (CleanupRecord.Failure) throws -> Void)? = nil,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try RuntimeMaintenanceOwnedControl.require()
+        let ownedDrain = try MaintenanceOwnedDrainBoundary(drain: drain, directory: directory,
+            accountID: window.scope.authority.accountID, identity: context.gate)
+        return try await restoreHealthy(window: window, until: deadline, makeDriver: makeDriver, verifyScope: {
+            try verifyScope(); try ownedDrain.validate()
+        }, preparePeer: preparePeer, requirePeerLive: requirePeerLive, makePending: { binding in
+            if let makePending { return try makePending(window, binding) }
+            return try CleanupRecord(id: window.id, revision: AccountPreparationIntent.randomID(), purpose: window.purpose,
+                scope: window.scope, phase: .reopenPending, operation: window.operation, service: .healthy, shutdownBinding: window.shutdownBinding)
+        }, releaseDrain: { _ in try ownedDrain.release() }, recoverRestoring: { failure in
+            if let recoverRestoring { try recoverRestoring(failure); return }
+            let failed = try CleanupRecord(id: window.id, revision: AccountPreparationIntent.randomID(), purpose: window.purpose,
+                scope: window.scope, phase: .needsOwnerRecovery, operation: window.operation, service: window.service,
+                failure: failure, shutdownBinding: window.shutdownBinding)
+            guard try persist(failed, window) == failed else { throw RuntimePreparationError.changedScope }
+        }, persist: persist)
+    }
+    private func restoreHealthy(window: CleanupRecord,
+        until deadline: ContinuousClock.Instant, makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        verifyScope: @escaping @Sendable () throws -> Void,
+        preparePeer: @escaping @Sendable (any AuthorityMaintenanceClientDriver) async throws -> Void,
+        requirePeerLive: @escaping @Sendable () throws -> Void,
+        makePending: @escaping @Sendable (AuthorityMaintenanceBinding) throws -> CleanupRecord,
+        releaseDrain: @escaping @Sendable (CleanupRecord) throws -> Void,
+        recoverRestoring: @escaping @Sendable (CleanupRecord.Failure) throws -> Void,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        guard state == .new, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        cleanupUsed = true; busy = true; defer { busy = false; finish() }
+        guard window.purpose == .retainedRuntime, window.phase == .restoring, let stopped = window.shutdownBinding,
+              context.accountID == window.scope.authority.accountID, context.attemptID == window.id,
+              context.revision == window.revision, context.installationID == window.scope.installationID else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        var current = window, attemptedCommit = false, pendingWriteOwned = false
+        var connection: AuthorityMaintenanceXPCClient?
+        do {
+            func beforePending() throws {
+                try verify(); try verifyScope()
+            }
+            try beforePending()
+            var opened: Response?
+            while ContinuousClock.now < deadline {
+                try beforePending()
+                let candidateDriver = try makeDriver()
+                let candidate = AuthorityMaintenanceXPCClient(context: context, driver: candidateDriver,
+                    timeout: timeout, interval: interval, verify: verify)
+                let response: Response
+                do { response = try await candidate.start(until: deadline) }
+                catch {
+                    await candidate.close(); try beforePending()
+                    try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+                    continue
+                }
+                guard response.outcome == .applied, response.binding.incarnation != stopped.incarnation else {
+                    await candidate.close(); throw RuntimePreparationError.changedScope
+                }
+                do { try beforePending(); try await preparePeer(candidateDriver); try requirePeerLive(); try beforePending() }
+                catch { await candidate.close(); throw error }
+                connection = candidate; opened = response; break
+            }
+            guard let connection, let opened else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            try requirePeerLive(); try beforePending()
+            let pending = try makePending(opened.binding)
+            pendingWriteOwned = true
+            try pending.requireReplacing(window)
+            guard pending.phase == .reopenPending, pending.service == .healthy,
+                  pending.operation == window.operation, pending.shutdownBinding == stopped else { throw RuntimePreparationError.changedScope }
+            attemptedCommit = true
+            guard try persist(pending, window) == pending else { throw RuntimePreparationError.changedScope }
+            current = pending; attemptedCommit = false
+            try requirePeerLive(); try releaseDrain(pending)
+            let readback = try await connection.reopenHealthyCandidate(opened.binding, pending: pending,
+                stopped: stopped, requirePeerLive: requirePeerLive, until: deadline)
+            try requirePeerLive()
+            let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
+                scope: pending.scope, phase: .restored, operation: pending.operation, service: .healthy, gate: readback)
+            try restored.requireReplacing(pending)
+            attemptedCommit = true
+            guard try persist(restored, pending) == restored else { throw RuntimePreparationError.changedScope }
+            await connection.close(); return restored
+        } catch {
+            if let connection { await connection.close() }
+            if !attemptedCommit {
+                let failure: CleanupRecord.Failure = current.phase == .reopenPending ? .admissionUnconfirmed : .healthFailed
+                if current.phase == .restoring && !pendingWriteOwned { try? recoverRestoring(failure) }
+                else if let failed = try? CleanupRecord(id: current.id, revision: AccountPreparationIntent.randomID(), purpose: current.purpose,
+                    scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation, service: current.service,
+                    failure: failure, shutdownBinding: stopped) { _ = try? persist(failed, current) }
+            }
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+    }
+    private func reopenHealthyCandidate(_ candidate: AuthorityMaintenanceBinding, pending: CleanupRecord,
+        stopped: AuthorityMaintenanceBinding, requirePeerLive: @escaping @Sendable () throws -> Void,
+        until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
+        guard state == .open, binding == candidate, pending.phase == .reopenPending,
+              candidate.incarnation != stopped.incarnation else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        defer { finish() }
+        try requirePeerLive()
+        let q = try Request(action: .reopen, accountID: context.accountID, attemptID: context.attemptID,
+            revision: pending.revision, installationID: context.installationID, gate: context.gate,
+            binding: candidate, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
+        guard case .bytes(let bytes) = try await invoke(q, until: deadline), let bytes,
+              try Response.decode(bytes, expected: q).outcome == .applied else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        try requirePeerLive()
+        return try await readReleasedGate(stopped, revision: pending.revision,
+            incarnation: candidate.incarnation, requirePeerLive: requirePeerLive, until: deadline)
     }
 
     func close() { finish() }

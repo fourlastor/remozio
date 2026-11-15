@@ -292,13 +292,22 @@ public actor AuthorityWakeService {
         return try .init(journal: owners.journal.maintenanceJournalWork(), execution: owners.execution.maintenanceExecutionWork,
             pairing: owners.pairing.currentMaintenancePairingOwners().capture())
     }
+    private func requireReadinessState() throws {
+        guard started, !closed, !isRetired, !startupRestorePending, !recoveryStartupHold,
+              settingsChange == nil, recoveryTicket == nil else { throw MachineUpdateRoleChallengeError.unavailable }
+    }
+    func requireHealthyMaintenanceReadiness() throws {
+        let owners = try currentMaintenanceOwners()
+        try requireReadinessState()
+        _ = try owners.journal.captureMachineUpdateInstalledReadinessBoundary()
+        try requireReadinessState()
+    }
     func answerInstalledReadiness(_ request: MachineUpdateConsumerHealthRequest,
         expected: MachineUpdateRestartHealthPlan.Requirement, gateway: MachineUpdateAuthorityReadinessGateway?,
         phonePushCommitDigest: Data?, verifyCurrent: @Sendable () throws -> Void) throws -> Data {
         func requireCurrent() throws {
-            guard started, !closed, !isRetired, !startupRestorePending, !recoveryStartupHold,
-                  settingsChange == nil, recoveryTicket == nil,
-                  gatewaySettingsBinding?.accountID == expected.binding.accountID, request.requirement == expected,
+            try requireReadinessState()
+            guard gatewaySettingsBinding?.accountID == expected.binding.accountID, request.requirement == expected,
                   (gateway != nil) == (phonePushCommitDigest != nil),
                   phonePushCapability?.installedCommitDigest == phonePushCommitDigest,
                   phonePushCapability?.retainedCommitDigest == phonePushCommitDigest else {

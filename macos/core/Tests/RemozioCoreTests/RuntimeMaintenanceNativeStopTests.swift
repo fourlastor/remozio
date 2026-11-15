@@ -5,7 +5,7 @@ import Synchronization
 import XCTest
 @testable import RemozioCore
 
-private final class MaintenanceBodyStores {
+final class MaintenanceBodyStores {
     let root: URL, mac: Data, account: Data, epoch = maintenanceCloseBytes(12)
     let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
     init(mac: Data, account: Data, policy: AuthorityCodePolicy) throws {

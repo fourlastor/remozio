@@ -354,6 +354,34 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             }
         }
     }
+    func captureHealthyMaintenanceOpen(_ request: AuthorityMaintenanceChannelRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data) throws -> RuntimeMaintenanceWindowRecord? {
+        guard request.action == .open, account.accountID == configuration.command.accountID,
+              account.ownerUID == configuration.command.callerUID else { throw RuntimePreparationError.changedScope }
+        return try withGatewayRecoveryMachine { current, release in
+            let row = try current.runtimeMaintenanceHealthyRecord(request, account: account, incarnation: incarnation, candidate: release)
+            if let row {
+                guard let hold = admissionStartup?.maintenanceHold else { throw RuntimePreparationError.changedScope }
+                try hold.requireHealthyStartup(row)
+            }
+            return row
+        }
+    }
+    func reopenHealthyMaintenance(_ request: AuthorityMaintenanceChannelRequest, restoring: RuntimeMaintenanceWindowRecord,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data, releaseBinding: () throws -> Void) throws {
+        guard request.action == .reopen, let binding = request.binding,
+              account.accountID == configuration.command.accountID, account.ownerUID == configuration.command.callerUID,
+              let hold = admissionStartup?.maintenanceHold else { throw RuntimePreparationError.changedScope }
+        try withGatewayRecoveryMachine { current, release in
+            guard let row = try current.runtimeMaintenanceHealthyRecord(request, account: account, incarnation: incarnation,
+                restoring: restoring, candidate: release) else { throw RuntimePreparationError.changedScope }
+            try hold.reopenHealthy(row, restoring: restoring, binding: binding, incarnation: incarnation) {
+                try releaseBinding()
+                guard try current.runtimeMaintenanceHealthyRecord(request, account: account, incarnation: incarnation,
+                    restoring: restoring, candidate: release) == row else { throw RuntimePreparationError.changedScope }
+            }
+        }
+    }
     /// Called only by the accepted endpoint after its original binding check and before releasing that binding.
     func reopenMaintenanceAdmission(_ request: AuthorityMaintenanceChannelRequest, account: RuntimeMaintenanceWindowRecord.Account,
         incarnation: Data, admission: AuthorityMaintenancePairingAdmission, releaseBinding: () throws -> Void) throws {
