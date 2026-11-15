@@ -37,6 +37,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         var closed = false
         var connections = Set<UUID>(), stages = Set<UUID>()
         var blocker: UUID?
+        var armed: AuthorityMaintenanceBinding?
     }
     private let state = Mutex(State())
     private let accountID: Data, incarnation: Data
@@ -59,7 +60,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     /// Retain through stage creation and the staged attempt's ordinary commit, cancel or expiry cleanup.
     func reserveStage() throws -> Stage {
         try state.withLock {
-            guard !$0.closed, $0.blocker == nil else { throw AuthorityPairingSetupError.unavailable }
+            guard !$0.closed, $0.blocker == nil, $0.armed == nil else { throw AuthorityPairingSetupError.unavailable }
             let id = UUID(); $0.stages.insert(id); return Stage(admission: self, id: id)
         }
     }
@@ -73,10 +74,33 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     }
     private func block(_ id: UUID) throws -> Int {
         try state.withLock {
-            guard !$0.closed, $0.connections.contains(id), $0.blocker == nil || $0.blocker == id else {
+            guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == nil || $0.blocker == id else {
                 throw AuthorityPairingSetupError.unavailable
             }
             $0.blocker = id; return $0.stages.count
+        }
+    }
+    /// Reattach only to the existing armed target after native authentication and protected scope checks.
+    /// The lookup never creates a new block or grants shutdown authority from metadata.
+    func shutdownBinding(matching binding: AuthorityMaintenanceBinding) throws -> Shutdown {
+        try state.withLock {
+            guard !$0.closed, $0.armed == binding else { throw RuntimePreparationError.changedScope }
+            return Shutdown(admission: self, binding: binding)
+        }
+    }
+    private func transfer(_ id: UUID, binding: AuthorityMaintenanceBinding) throws -> Shutdown {
+        try state.withLock {
+            guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == id, $0.stages.isEmpty else {
+                throw AuthorityPairingSetupError.unavailable
+            }
+            $0.armed = binding; $0.blocker = nil; $0.connections.remove(id)
+            return Shutdown(admission: self, binding: binding)
+        }
+    }
+    private func releaseShutdown(_ binding: AuthorityMaintenanceBinding) throws {
+        try state.withLock {
+            guard !$0.closed, $0.armed == binding else { throw RuntimePreparationError.changedScope }
+            $0.armed = nil
         }
     }
     private func releaseConnection(_ id: UUID) {
@@ -98,12 +122,31 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             guard expected == binding else { throw RuntimePreparationError.changedScope }
             return try admission.block(id)
         }
-        /// Cancel or reopen only this binding. It never releases an account drain or another connection's block.
+        /// The block must exist and all stage reservations must have settled. Other work needs separate checks.
+        func transferToShutdown(matching expected: AuthorityMaintenanceBinding) throws -> Shutdown {
+            guard expected == binding else { throw RuntimePreparationError.changedScope }
+            return try admission.transfer(id, binding: binding)
+        }
+        /// Before arming, cancel or reopen only this connection. It never releases an armed block or account drain.
         func release(matching expected: AuthorityMaintenanceBinding) throws {
             guard expected == binding else { throw RuntimePreparationError.changedScope }; close()
         }
         func close() { admission.releaseConnection(id) }
         deinit { close() }
+    }
+    /// A process-owned target, independent of the XPC connection. Dropping a handle never releases its block.
+    final class Shutdown: Sendable {
+        let binding: AuthorityMaintenanceBinding
+        private let admission: AuthorityMaintenancePairingAdmission
+        fileprivate init(admission: AuthorityMaintenancePairingAdmission, binding: AuthorityMaintenanceBinding) {
+            self.admission = admission; self.binding = binding
+        }
+        func cancel(matching expected: AuthorityMaintenanceBinding) throws { try release(expected) }
+        func reopen(matching expected: AuthorityMaintenanceBinding) throws { try release(expected) }
+        private func release(_ expected: AuthorityMaintenanceBinding) throws {
+            guard expected == binding else { throw RuntimePreparationError.changedScope }
+            try admission.releaseShutdown(binding)
+        }
     }
     final class Stage: Sendable {
         private let admission: AuthorityMaintenancePairingAdmission

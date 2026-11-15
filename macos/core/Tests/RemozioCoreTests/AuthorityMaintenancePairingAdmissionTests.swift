@@ -138,3 +138,118 @@ final class AuthorityMaintenancePairingAdmissionTests: XCTestCase {
         }
     }
 }
+
+extension AuthorityMaintenancePairingAdmissionTests {
+    func testArmedBlockSurvivesConnectionCloseUntilExactReopen() throws {
+        let g = try gate(), c = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+        let shutdown = try c.transferToShutdown(matching: c.binding)
+        c.close(); try c.release(matching: c.binding)
+        XCTAssertThrowsError(try g.reserveStage())
+        XCTAssertEqual(try g.shutdownBinding(matching: c.binding).binding, shutdown.binding)
+        try shutdown.reopen(matching: c.binding)
+        let stage = try g.reserveStage(); stage.close()
+    }
+    func testArmedBlockSurvivesConnectionDestructionUntilExactCancel() throws {
+        let g = try gate()
+        var c: AuthorityMaintenancePairingAdmission.Connection? = try connection(g)
+        weak var observed = c
+        let binding = try XCTUnwrap(c).binding
+        XCTAssertEqual(try c?.blockNewStages(matching: binding), 0)
+        let shutdown = try XCTUnwrap(c).transferToShutdown(matching: binding)
+        c = nil; XCTAssertNil(observed); XCTAssertThrowsError(try g.reserveStage())
+        try shutdown.cancel(matching: binding)
+        let stage = try g.reserveStage(); stage.close()
+    }
+    func testEveryForeignArmedBindingRefusesWithoutReleasingTheBlock() throws {
+        let g = try gate(), c = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+        for field in 0..<5 { XCTAssertThrowsError(try c.transferToShutdown(matching: changed(c.binding, field: field))) }
+        let shutdown = try c.transferToShutdown(matching: c.binding); c.close()
+        for field in 0..<5 {
+            let other = try changed(c.binding, field: field)
+            XCTAssertThrowsError(try shutdown.reopen(matching: other))
+            XCTAssertThrowsError(try shutdown.cancel(matching: other))
+            XCTAssertThrowsError(try g.shutdownBinding(matching: other))
+            XCTAssertThrowsError(try g.reserveStage())
+        }
+        try shutdown.cancel(matching: c.binding)
+    }
+    func testDroppingShutdownHandleDoesNotReleaseItsProcessOwnedBlock() throws {
+        let g = try gate(), c = try connection(g), binding = c.binding
+        XCTAssertEqual(try c.blockNewStages(matching: binding), 0)
+        do { let shutdown = try c.transferToShutdown(matching: binding); withExtendedLifetime(shutdown) {} }
+        c.close(); XCTAssertThrowsError(try g.reserveStage())
+        let retained = try g.shutdownBinding(matching: binding)
+        try retained.reopen(matching: binding)
+        let stage = try g.reserveStage(); stage.close()
+    }
+    func testUnarmedDisconnectStillReleasesAndCannotArmAfterClose() throws {
+        let g = try gate(), c = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0); c.close()
+        XCTAssertThrowsError(try c.transferToShutdown(matching: c.binding))
+        XCTAssertThrowsError(try g.shutdownBinding(matching: c.binding))
+        let stage = try g.reserveStage(); stage.close()
+    }
+    func testTransferWaitsForExistingStageWithoutCancelingOrRetiringIt() throws {
+        let g = try gate(), stage = try g.reserveStage(), c = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 1)
+        XCTAssertThrowsError(try c.transferToShutdown(matching: c.binding))
+        XCTAssertEqual(try g.stagedReservations(), 1); XCTAssertThrowsError(try g.reserveStage())
+        stage.close(); let shutdown = try c.transferToShutdown(matching: c.binding)
+        c.close(); XCTAssertThrowsError(try g.reserveStage())
+        try shutdown.cancel(matching: c.binding)
+    }
+    func testStaleShutdownHandleCannotReleaseANewerArmedTarget() throws {
+        let g = try gate(), old = try connection(g)
+        XCTAssertEqual(try old.blockNewStages(matching: old.binding), 0)
+        let previous = try old.transferToShutdown(matching: old.binding)
+        try previous.cancel(matching: old.binding)
+        let next = try connection(g); XCTAssertEqual(try next.blockNewStages(matching: next.binding), 0)
+        let current = try next.transferToShutdown(matching: next.binding)
+        old.close(); next.close()
+        XCTAssertThrowsError(try previous.cancel(matching: old.binding))
+        XCTAssertThrowsError(try previous.reopen(matching: old.binding))
+        XCTAssertThrowsError(try g.shutdownBinding(matching: old.binding))
+        XCTAssertThrowsError(try g.reserveStage())
+        try current.reopen(matching: next.binding)
+        let stage = try g.reserveStage(); stage.close()
+    }
+    func testClosedAdmissionCannotReopenThroughAnArmedHandle() throws {
+        let g = try gate(), c = try connection(g)
+        XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+        let shutdown = try c.transferToShutdown(matching: c.binding)
+        g.close(); c.close()
+        XCTAssertThrowsError(try shutdown.reopen(matching: c.binding))
+        XCTAssertThrowsError(try shutdown.cancel(matching: c.binding))
+        XCTAssertThrowsError(try g.shutdownBinding(matching: c.binding))
+        XCTAssertThrowsError(try g.reserveStage()); XCTAssertThrowsError(try g.stagedReservations())
+    }
+    func testConcurrentTransferAndDisconnectEitherRetainArmedBlockOrRefuseTransfer() throws {
+        for _ in 0..<40 {
+            let g = try gate(), c = try connection(g), start = DispatchSemaphore(value: 0), done = DispatchGroup()
+            XCTAssertEqual(try c.blockNewStages(matching: c.binding), 0)
+            let result = Box<AuthorityMaintenancePairingAdmission.Shutdown?>(nil)
+            done.enter(); DispatchQueue.global().async {
+                start.wait(); result.value = try? c.transferToShutdown(matching: c.binding); done.leave()
+            }
+            done.enter(); DispatchQueue.global().async { start.wait(); c.close(); done.leave() }
+            start.signal(); start.signal(); XCTAssertEqual(done.wait(timeout: .now() + 3), .success)
+            if let shutdown = result.value {
+                XCTAssertThrowsError(try g.reserveStage()); try shutdown.reopen(matching: c.binding)
+            }
+            let stage = try g.reserveStage(); stage.close()
+        }
+    }
+    func testMetadataLookupCannotCreateOrTransferAnUnarmedBlock() throws {
+        let g = try gate(), c = try connection(g)
+        let decoded = try AuthorityMaintenanceBinding.decode(c.binding.encoded)
+        XCTAssertThrowsError(try g.shutdownBinding(matching: decoded))
+        XCTAssertThrowsError(try c.transferToShutdown(matching: decoded))
+        XCTAssertEqual(try c.blockNewStages(matching: decoded), 0)
+        XCTAssertThrowsError(try g.shutdownBinding(matching: decoded))
+        let shutdown = try c.transferToShutdown(matching: decoded)
+        XCTAssertThrowsError(try c.transferToShutdown(matching: decoded))
+        try shutdown.cancel(matching: decoded)
+    }
+}
