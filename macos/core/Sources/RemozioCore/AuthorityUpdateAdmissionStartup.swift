@@ -6,12 +6,13 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
     let boundary: UpdateAdmissionBoundary
     let recovery: MachineUpdateAdmissionRecovery
     private let initial: MachineUpdateAdmissionState
+    private let candidate: SignedReleaseEvidence?
 
     static func capture(machine: PreparationIntentStore, macID: Data, installationID: Data, accountID: Data,
-        activity: ReleaseActivityBarrier, readCurrent: @escaping @Sendable () throws -> MachineUpdateAdmissionState,
+        activity: ReleaseActivityBarrier, candidate: SignedReleaseEvidence? = nil, readCurrent: @escaping @Sendable () throws -> MachineUpdateAdmissionState,
         openBarrier: (UpdateAdmissionScope, PreparationFileIdentity) throws -> UpdateAdmissionBarrier) throws -> Self? {
         guard macID.count == 16, installationID.count == 16, accountID.count == 16 else { throw RuntimePreparationError.changedScope }
-        let initial = try machine.updateAdmissionState()
+        let initial = try candidate.map { try machine.updateAdmissionState(candidate: $0) } ?? machine.updateAdmissionState()
         guard let registration = initial.registration else { return nil }
         guard let inventory = initial.inventory, inventory.macID == macID, inventory.installationID == installationID,
               registration.macID == macID, registration.installationID == installationID,
@@ -24,12 +25,13 @@ struct AuthorityUpdateAdmissionStartup: Sendable {
             accountID: accountID, coordinator: .init(activity: activity, admission: global), readCurrent: readCurrent)
         let boundary = try UpdateAdmissionBoundary(machine: global, account: account, verifyAdmission: { try recovery.prepareAdmission() })
         guard account == nil || boundary.accountID == accountID else { throw RuntimePreparationError.changedScope }
-        let captured = Self(registration: registration, boundary: boundary, recovery: recovery, initial: initial)
+        let captured = Self(registration: registration, boundary: boundary, recovery: recovery, initial: initial, candidate: candidate)
         try captured.requireCurrent(machine: machine)
         return captured
     }
     func requireCurrent(machine: PreparationIntentStore) throws {
-        guard try machine.updateAdmissionState() == initial else { throw RuntimePreparationError.changedScope }
+        let current = try candidate.map { try machine.updateAdmissionState(candidate: $0) } ?? machine.updateAdmissionState()
+        guard current == initial else { throw RuntimePreparationError.changedScope }
         try validate()
     }
 

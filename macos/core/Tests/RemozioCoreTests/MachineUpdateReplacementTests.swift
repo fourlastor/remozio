@@ -6074,7 +6074,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
     /// Links owned machine rows to decoded archive operands. It proves no live publication or startup.
     private func withPromotionReaderFixture(readinessReaderFormats: Bool = false, maintenanceReaderFormats: Bool = false, maintenanceWriterFormats: Bool = false, published: Bool = false,
-        didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
+        releasingRestartAdmission: Bool = false, didPrepareMaterial: (RuntimePreparationMaterial) -> Void = { _ in },
         _ body: (CompletionFixture, AccountPreparationIntent,
         MachineUpdateRetainedSetupCompletionIntentRecord, MachineUpdateRetainedSetupPromotionIntentRecord) throws -> Void) throws {
         var retained: AccountPreparationIntent?
@@ -6091,7 +6091,8 @@ final class MachineUpdateReplacementTests: XCTestCase {
             }
             _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: candidate,
                 directory: fixture.directory, loan: loan) { _, _ in }
-            if maintenanceWriterFormats { loan.close() }
+            if maintenanceWriterFormats || releasingRestartAdmission { loan.close() }
+            if releasingRestartAdmission { fixture.restart.close() }
             XCTAssertNil(try fixture.machine.retainedSetupCompletionIntent(accountID: account.accountID, ownerUID: owner.uid, candidate: candidate))
             let reader = try fixture.openPolicyPair(readOnly: true, accountID: account.accountID)
             defer { try? reader.close() }
@@ -6300,12 +6301,12 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     /// Uses owned fixture keys and a historical exchange. It proves no native peer or fresh readiness.
-    private func withReadinessReaderFixture(readerFormats: Bool = true, maintenanceReaderFormats: Bool = false, maintenanceWriterFormats: Bool = false, differentOwnerUID: Bool = false,
+    private func withReadinessReaderFixture(readerFormats: Bool = true, maintenanceReaderFormats: Bool = false, maintenanceWriterFormats: Bool = false, differentOwnerUID: Bool = false, releasingRestartAdmission: Bool = false,
         _ body: (CompletionFixture, AccountPreparationIntent, MachineUpdateRetainedSetupCompletionIntentRecord,
             MachineUpdateRetainedSetupPromotionIntentRecord, MachineUpdateRetainedSetupPromotionReadyRecord) throws -> Void) throws {
         var material: RuntimePreparationMaterial?
         try withPromotionReaderFixture(readinessReaderFormats: readerFormats, maintenanceReaderFormats: maintenanceReaderFormats, maintenanceWriterFormats: maintenanceWriterFormats, published: true,
-            didPrepareMaterial: { material = $0 }) { fixture, account, completion, promotion in
+            releasingRestartAdmission: releasingRestartAdmission, didPrepareMaterial: { material = $0 }) { fixture, account, completion, promotion in
             let material = try XCTUnwrap(material)
             guard case .map(let identity) = try DeterministicCBOR.decode(material.transportIdentity,
                 limits: CBORLimits(maxBytes: 16384, maxDepth: 1, maxItems: 9)),
@@ -6377,10 +6378,10 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
-    static func withMaintenanceReaderFixture(_ body: (RuntimeMaintenanceReaderFixture) throws -> Void) throws {
+    static func withMaintenanceReaderFixture(releasingRestartAdmission: Bool = false, _ body: (RuntimeMaintenanceReaderFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupReadinessReadsSchema28AndRejectsOrdinaryWrites"))
-        try suite.withReadinessReaderFixture(maintenanceReaderFormats: true) { f, account, _, _, _ in
+        try suite.withReadinessReaderFixture(maintenanceReaderFormats: true, releasingRestartAdmission: releasingRestartAdmission) { f, account, _, _, _ in
             let source = try f.machine.stableRuntimeSource(candidate: f.candidate)
             let authority = try XCTUnwrap(source.preparations.first { preparation in
                 source.actual.admission.accounts.contains { $0.accountID == preparation.accountID }

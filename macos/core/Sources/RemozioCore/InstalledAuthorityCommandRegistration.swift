@@ -67,16 +67,17 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         do {
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let app = config.codePolicy.entries.first(where: { $0.role == .app })!
-            try config.validateRelease(SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier), bundlePath: bundle.path)
+            let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+            try config.validateRelease(release, bundlePath: bundle.path)
             let machine = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
             store = machine
             let activity = try ReleaseActivityBarrier.open(machineDirectory: config.machineDirectory)
             let startup = try activity.acquireShared()
             let admission = try AuthorityUpdateAdmissionStartup.capture(machine: machine, macID: config.command.macID,
-                installationID: config.installationID, accountID: config.command.accountID, activity: activity, readCurrent: {
+                installationID: config.installationID, accountID: config.command.accountID, activity: activity, candidate: release, readCurrent: {
                     let current = try PreparationIntentStore.open(directoryPath: config.machineDirectory, macID: config.command.macID)
                     do {
-                        let state = try current.updateAdmissionState()
+                        let state = try current.updateAdmissionState(candidate: release)
                         try current.close()
                         return state
                     } catch { try? current.close(); throw error }

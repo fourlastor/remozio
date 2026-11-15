@@ -2380,6 +2380,21 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Stable admission uses the exact installed release and its verified terminal frame. Legacy writers keep their original reader.
+    func updateAdmissionState(candidate: SignedReleaseEvidence) throws -> MachineUpdateAdmissionState {
+        try transaction(write: false) {
+            try identity(macID)
+            let schema = try scalar("PRAGMA user_version")
+            if schema >= 24, try loadMachineUpdateActivationRecord()?.phase == .completed {
+                let current = try loadStableMachineUpdateFrame(candidate: candidate).snapshot
+                return .init(inventory: current.inventory, registration: current.admission, activation: current.activation)
+            }
+            return try .init(inventory: schema >= 2 ? loadInventoryRecord() : nil,
+                registration: schema >= 16 ? loadUpdateAdmissionRegistration() : nil,
+                activation: schema >= 17 ? loadMachineUpdateActivation() : nil)
+        }
+    }
+
     func machineUpdateActivation() throws -> MachineUpdateActivationRecord? {
         try transaction(write: false) {
             try identity(macID)
