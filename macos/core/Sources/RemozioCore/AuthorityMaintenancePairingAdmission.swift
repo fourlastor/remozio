@@ -36,7 +36,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     enum TransferError: Error, Equatable { case stagesPending(Int) }
     private struct State {
         var closed = false
-        var connections = Set<UUID>(), stages = Set<UUID>()
+        var connections = Set<UUID>(), stages: [UUID: Int] = [:]
         var blocker: UUID?
         var armed: AuthorityMaintenanceBinding?
     }
@@ -81,7 +81,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     func reserveStage() throws -> Stage {
         try state.withLock {
             guard !$0.closed, $0.blocker == nil, $0.armed == nil else { throw AuthorityPairingSetupError.unavailable }
-            let id = UUID(); $0.stages.insert(id); return Stage(admission: self, id: id)
+            let id = UUID(); $0.stages[id] = 1; return Stage(admission: self, id: id)
         }
     }
     func stagedReservations() throws -> Int {
@@ -138,7 +138,15 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             if $0.blocker == id { $0.blocker = nil }
         }
     }
-    private func releaseStage(_ id: UUID) { _ = state.withLock { $0.stages.remove(id) } }
+    private func retainStage(_ id: UUID) throws -> Stage {
+        try state.withLock {
+            guard !$0.closed, let count = $0.stages[id] else { throw AuthorityPairingSetupError.unavailable }
+            $0.stages[id] = count + 1; return Stage(admission: self, id: id)
+        }
+    }
+    private func releaseStage(_ id: UUID) {
+        state.withLock { if let count = $0.stages[id] { $0.stages[id] = count > 1 ? count - 1 : nil } }
+    }
     final class Connection: Sendable {
         let binding: AuthorityMaintenanceBinding
         private let admission: AuthorityMaintenancePairingAdmission
@@ -181,10 +189,14 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         }
     }
     final class Stage: Sendable {
+        private let closed = Mutex(false)
         private let admission: AuthorityMaintenancePairingAdmission
         private let id: UUID
         fileprivate init(admission: AuthorityMaintenancePairingAdmission, id: UUID) { self.admission = admission; self.id = id }
-        func close() { admission.releaseStage(id) }
+        func retained() throws -> Stage {
+            try closed.withLock { guard !$0 else { throw JournalLeaseError.invalidated }; return try admission.retainStage(id) }
+        }
+        func close() { if closed.withLock({ if $0 { return false }; $0 = true; return true }) { admission.releaseStage(id) } }
         deinit { close() }
     }
 }

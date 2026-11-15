@@ -306,3 +306,15 @@ extension AuthorityMaintenancePairingAdmissionTests {
         XCTAssertEqual(try g.connectionReservations(), 0)
     }
 }
+
+extension AuthorityMaintenancePairingAdmissionTests {
+    func testRetainedStageHandlesCountOneAttemptUntilEveryActualOwnerSettles() throws {
+        let admission = try AuthorityMaintenancePairingAdmission(accountID: Data(repeating: 1, count: 16), incarnation: Data(repeating: 4, count: 16))
+        let stage = try admission.reserveStage(), reply = try stage.retained(), work = try reply.retained()
+        XCTAssertEqual(try admission.stagedReservations(), 1)
+        stage.close(); stage.close(); XCTAssertThrowsError(try stage.retained()); XCTAssertEqual(try admission.stagedReservations(), 1)
+        reply.close(); XCTAssertEqual(try admission.stagedReservations(), 1)
+        work.close(); work.close(); XCTAssertEqual(try admission.stagedReservations(), 0)
+        let next = try admission.reserveStage(); admission.close(); XCTAssertThrowsError(try next.retained()); next.close()
+    }
+}

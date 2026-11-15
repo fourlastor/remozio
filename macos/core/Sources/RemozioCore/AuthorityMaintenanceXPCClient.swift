@@ -78,13 +78,13 @@ actor AuthorityMaintenanceXPCClient {
             try DynamicCodeValidation.validateSelf(requirement: selfPolicy.requirement + " and info[\"RemozioSecurityGeneration\"] = \"\(setup.installedGeneration)\"")
         }
         try verify(); guard context.action == .open else { throw RuntimePreparationError.invalidRecord }
-        self.context = context; self.verify = verify; timeout = .seconds(5); interval = .milliseconds(50)
+        self.context = context; self.verify = verify; timeout = .seconds(5); interval = .milliseconds(250)
         driver = try NativeMaintenanceClient(accountID: context.accountID, policy: policy)
     }
     private init(context: Request, driver: any AuthorityMaintenanceClientDriver, timeout: Duration, interval: Duration,
                  verify: @escaping @Sendable () throws -> Void) { self.context = context; self.driver = driver; self.timeout = timeout; self.interval = interval; self.verify = verify }
     static func openOwned(context: AuthorityMaintenanceChannelRequest, driver: any AuthorityMaintenanceClientDriver,
-        timeoutMilliseconds: UInt64 = 5000, intervalMilliseconds: UInt64 = 50,
+        timeoutMilliseconds: UInt64 = 5000, intervalMilliseconds: UInt64 = 250,
         verify: @escaping @Sendable () throws -> Void = {}) throws -> AuthorityMaintenanceXPCClient {
         guard getuid() > 0, getuid() == geteuid(), context.action == .open,
               (1...60_000).contains(timeoutMilliseconds), (1...1000).contains(intervalMilliseconds) else { throw JournalLeaseError.unsafeMetadata }
@@ -111,6 +111,7 @@ actor AuthorityMaintenanceXPCClient {
             do { try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval))) }
             catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         }
+        // Cancellation is cleanup. Its bounded RPC can extend the original wait by up to five seconds.
         _ = try await send(.cancel, until: .now.advanced(by: timeout)); finish(.cancelled); throw AuthorityMaintenanceClientError.cancelled
     }
     func release(_ target: AuthorityMaintenanceBinding? = nil, reopen: Bool = false,

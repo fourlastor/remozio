@@ -735,4 +735,87 @@ extension AuthorityPairingSetupTests {
         XCTAssertEqual(try endpoint.maintenancePairingWork().activityOwners, 0)
         let update = try activity.open().acquireExclusive(); update.close()
     }
+    func testMaintenanceStageReservationBlocksNewStagesAcrossAllPairingConnections() throws {
+        let f = try Fixture(), one = try f.endpoint(), two = try f.endpoint(), admission = f.access.maintenanceAdmission
+        defer { one.close(); two.close() }; try hello(one); try hello(two)
+        _ = try staged(one, proposal: f.proposal()); XCTAssertEqual(try admission.stagedReservations(), 1)
+        let owner = try admission.openConnection(attemptID: Data(repeating: 6, count: 16), revision: Data(repeating: 7, count: 16))
+        XCTAssertEqual(try owner.blockNewStages(matching: owner.binding), 1)
+        XCTAssertThrowsError(try owner.transferToShutdown(matching: owner.binding)) { XCTAssertEqual($0 as? AuthorityMaintenancePairingAdmission.TransferError, .stagesPending(1)) }
+        let reply = Box<Data?>(nil); two.stagePairing(try f.proposal().encode(), authorization: authorization) { reply.value = $0 }
+        XCTAssertNil(reply.value); XCTAssertEqual(try admission.stagedReservations(), 1)
+        one.cancelPairing { XCTAssertTrue($0); XCTAssertEqual(try? admission.stagedReservations(), 1) }
+        XCTAssertEqual(try admission.stagedReservations(), 0)
+        let armed = try owner.transferToShutdown(matching: owner.binding); owner.close()
+        XCTAssertThrowsError(try admission.reserveStage()); try armed.reopen(matching: owner.binding)
+        let stage = try admission.reserveStage(); stage.close()
+    }
+    func testMaintenanceStageReservationSurvivesCommitUntilTheReceiptReplyReturns() throws {
+        let f = try Fixture(), endpoint = try f.endpoint(), admission = f.access.maintenanceAdmission
+        defer { endpoint.close() }; try hello(endpoint); let value = try staged(endpoint, proposal: f.proposal())
+        let proof = try f.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        let result = Box<Data?>(nil)
+        endpoint.commitPairing(value.setupID, confirmedDigest: try value.digest(), biometricProof: proof, authorization: authorization) {
+            result.value = $0; XCTAssertEqual(try? admission.stagedReservations(), 1)
+            XCTAssertEqual(try? endpoint.maintenancePairingWork().stagedAttempts, 0)
+        }
+        XCTAssertNotNil(result.value); XCTAssertEqual(try admission.stagedReservations(), 0); try f.assertCheckpoint()
+    }
+    func testMaintenanceStageReservationSurvivesACommitAfterTheAttemptClearsOnAnotherThread() throws {
+        let f = try Fixture(), admission = f.access.maintenanceAdmission
+        let hold = Box(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {}, authorize: { _ in
+            if hold.value { entered.signal(); XCTAssertEqual(resume.wait(timeout: .now() + 3), .success) }
+        }, invalidate: {})
+        defer { resume.signal(); endpoint.close() }; try hello(endpoint); let value = try staged(endpoint, proposal: f.proposal())
+        let digest = try value.digest(), proof = try f.biometric.signature(for: value.signingInput(purpose: .phoneBiometric)).rawRepresentation, authorization = authorization
+        hold.value = true
+        DispatchQueue.global().async {
+            endpoint.commitPairing(value.setupID, confirmedDigest: digest, biometricProof: proof, authorization: authorization) { XCTAssertNotNil($0) }; done.signal()
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(try endpoint.maintenancePairingWork().stagedAttempts, 0); XCTAssertEqual(try admission.stagedReservations(), 1)
+        let owner = try admission.openConnection(attemptID: Data(repeating: 6, count: 16), revision: Data(repeating: 7, count: 16))
+        _ = try owner.blockNewStages(matching: owner.binding); XCTAssertThrowsError(try owner.transferToShutdown(matching: owner.binding))
+        resume.signal(); XCTAssertEqual(done.wait(timeout: .now() + 3), .success); XCTAssertEqual(try admission.stagedReservations(), 0); owner.close()
+    }
+    func testMaintenanceStageReservationExpiryAndDisconnectReleaseOnlyTheirOwnStage() throws {
+        for expire in [false, true] {
+            let f = try Fixture(), one = try f.endpoint(), two = try f.endpoint(), admission = f.access.maintenanceAdmission
+            try hello(one); try hello(two); _ = try staged(one, proposal: f.proposal()); _ = try staged(two, proposal: f.proposal())
+            XCTAssertEqual(try admission.stagedReservations(), 2)
+            if expire { f.environment.time.value = 1100; one.expireStagedIfNeeded() } else { one.close() }
+            XCTAssertEqual(try admission.stagedReservations(), 1); two.close(); one.close(); XCTAssertEqual(try admission.stagedReservations(), 0)
+        }
+    }
+    func testMaintenanceStageFailureAndEndpointDestructionCannotLeakReservations() throws {
+        let f = try Fixture(), admission = f.access.maintenanceAdmission
+        var endpoint: AuthorityPairingXPCEndpoint? = try f.endpoint(); try hello(XCTUnwrap(endpoint))
+        f.environment.selfDenied.value = true
+        endpoint?.stagePairing(try f.proposal().encode(), authorization: authorization) { XCTAssertNil($0) }
+        XCTAssertEqual(try admission.stagedReservations(), 0); endpoint = nil
+        f.environment.selfDenied.value = false; endpoint = try f.endpoint(); try hello(XCTUnwrap(endpoint)); _ = try staged(XCTUnwrap(endpoint), proposal: f.proposal())
+        XCTAssertEqual(try admission.stagedReservations(), 1); endpoint = nil; XCTAssertEqual(try admission.stagedReservations(), 0)
+    }
+
+    func testMaintenanceStageReservationSurvivesEndpointCloseInsideItsStageReply() throws {
+        let f = try Fixture(), endpoint = try f.endpoint(), admission = f.access.maintenanceAdmission
+        try hello(endpoint)
+        endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { reply in
+            XCTAssertNotNil(reply); endpoint.close(); XCTAssertEqual(try? admission.stagedReservations(), 1)
+        }
+        XCTAssertEqual(try admission.stagedReservations(), 0)
+    }
+
+    func testMaintenanceStageCannotTransferAReservationAfterReentrantAuthorizationClose() throws {
+        let f = try Fixture(), holder = Box<AuthorityPairingXPCEndpoint?>(nil), admission = f.access.maintenanceAdmission
+        let endpoint = try AuthorityPairingXPCEndpoint(access: f.access, budget: .init(maximum: 1), verify: {},
+            authorize: { _ in holder.value?.close() }, invalidate: {})
+        holder.value = endpoint; defer { holder.value = nil; endpoint.close() }; try hello(endpoint)
+        endpoint.stagePairing(try f.proposal().encode(), authorization: authorization) { XCTAssertNil($0) }
+        XCTAssertEqual(try admission.stagedReservations(), 0); XCTAssertEqual(try f.records(), 0)
+        XCTAssertEqual(f.environment.signed.value, 0); XCTAssertThrowsError(try endpoint.maintenancePairingWork())
+        try f.assertCheckpoint()
+    }
+
 }
