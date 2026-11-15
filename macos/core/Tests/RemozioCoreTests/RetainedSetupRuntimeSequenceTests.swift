@@ -33,12 +33,14 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         let artifacts: [Artifact]
         let names: [String: AdministrativeSetupPublication.File]
         var publicationCalls = 0
-        init(_ artifacts: [Artifact], owner: UInt32, seed: Bool = true) throws {
+        let mapped: Bool
+        init(_ artifacts: [Artifact], owner: UInt32, seed: Bool = true, mappedRoot: URL? = nil) throws {
             self.artifacts = artifacts
-            root = URL(fileURLWithPath: "/private/tmp/remozio-initial-completion-" + UUID().uuidString)
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+            mapped = mappedRoot != nil
+            root = mappedRoot ?? URL(fileURLWithPath: "/private/tmp/remozio-initial-completion-" + UUID().uuidString)
+            if !mapped { try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false) }
             guard chmod(root.path, 0o755) == 0 else { throw JournalLeaseError.system(errno) }
-            directory = try .init(anchor: root.path, relativePath: "Files", owner: getuid(), visibility: .sharedMetadata)
+            directory = try .init(anchor: root.path, relativePath: mapped ? "Services" : "Files", owner: getuid(), visibility: .sharedMetadata)
             let fixed: [AdministrativeSetupPublication.File] = [.elevationPolicy, .commandConfiguration,
                 .transportIdentity(ownerUID: getuid(), groupID: getgid()), .transportConfiguration, .gatewaySettingsHost,
                 .presenceClient(ownerUID: owner), .pairingClient(ownerUID: owner), .frontendClient(ownerUID: owner)]
@@ -50,7 +52,8 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             try XCTUnwrap(names[URL(fileURLWithPath: artifact.path).lastPathComponent])
         }
         func url(_ artifact: Artifact) -> URL {
-            URL(fileURLWithPath: directory.path).appendingPathComponent(URL(fileURLWithPath: artifact.path).lastPathComponent)
+            if mapped { return root.appendingPathComponent(try! RuntimeMaintenanceCommitments.MutationFootprint.relative(artifact.path)) }
+            return URL(fileURLWithPath: directory.path).appendingPathComponent(URL(fileURLWithPath: artifact.path).lastPathComponent)
         }
         func put(_ artifact: Artifact, bytes: Data) throws {
             try bytes.write(to: url(artifact))
@@ -61,13 +64,22 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             guard chmod(url(artifact).path, metadata.mode) == 0 else { throw JournalLeaseError.system(errno) }
         }
         func read(_ artifact: Artifact) throws -> Data? {
-            try ProtectedServiceConfiguration.readOptional(anchor: directory.path,
-                relativePath: url(artifact).lastPathComponent, owner: getuid())
+            try ProtectedServiceConfiguration.readOptional(anchor: mapped ? root.path : directory.path,
+                relativePath: mapped ? RuntimeMaintenanceCommitments.MutationFootprint.relative(artifact.path) : url(artifact).lastPathComponent, owner: getuid())
         }
         func publish(_ artifact: Artifact, verify: () throws -> Void) throws {
             publicationCalls += 1
+            let target: ProtectedSetupDirectory
+            if mapped {
+                let relative = try RuntimeMaintenanceCommitments.MutationFootprint.relative(artifact.path)
+                let parent = (relative as NSString).deletingLastPathComponent
+                target = try .init(anchor: parent.isEmpty ? root.deletingLastPathComponent().path : root.path,
+                    relativePath: parent.isEmpty ? root.lastPathComponent : parent,
+                    owner: getuid(), visibility: .sharedMetadata)
+            } else { target = directory }
+            defer { if mapped { target.close() } }
             _ = try AdministrativeSetupPublication.publish(artifact.bytes, file: file(artifact),
-                directory: directory, owner: getuid(), verify: verify)
+                directory: target, owner: getuid(), verify: verify)
         }
         func stamps() throws -> [[UInt64]] {
             try artifacts.map { artifact in
@@ -85,6 +97,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         let initialRuntime: MachineUpdateStableRuntimePreparationSnapshot
         let openPolicy: ((MachineUpdateRetainedSetupPolicyOwner.JournalAccess) throws -> AuthorityJournal)?
         var files: Files?, intent: SharedSetupImportIntent?
+        var observationRoot: URL?
         var machines: [PreparationIntentStore] = [], startupWriters: [AuthorityJournal] = []
         var assemblyPairOpens = 0, assemblyPairReads = 0
         var failAfterPolicy = false, refuseAssemblyHost = false, stopAtAssemblyPair = false
@@ -153,7 +166,7 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
                 XCTAssertEqual(bundle.transport.relayPort, 45678)
             }
             files = try Files(RuntimePublishedArtifactValidation.artifacts(bundle: bundle, material: material),
-                owner: owner.uid, seed: false)
+                owner: owner.uid, seed: false, mappedRoot: observationRoot)
         }
         func currentIntent() throws -> SharedSetupImportIntent? {
             try withMachine { machine in try machine.withSharedImportJournal { journal in
@@ -387,6 +400,221 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             XCTAssertEqual(counts[.writeTransaction, default: 0], 0)
         }
     }
+    private typealias Observation = RuntimeMaintenanceRuntimeObservation
+    private typealias Window = RuntimeMaintenanceWindowRecord
+    private func inventory(_ root: URL) throws -> [String: Data] {
+        let items = try XCTUnwrap(FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: [.isRegularFileKey], options: []))
+        var result: [String: Data] = [:]
+        for case let url as URL in items {
+            if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
+                var metadata = stat()
+                guard lstat(url.path, &metadata) == 0 else { throw JournalLeaseError.system(errno) }
+                var value = MachineUpdateActivationRecord.digest(try Data(contentsOf: url))
+                for field in [UInt64(metadata.st_ino), UInt64(metadata.st_mode), UInt64(metadata.st_uid), UInt64(metadata.st_gid),
+                    UInt64(metadata.st_mtimespec.tv_sec), UInt64(metadata.st_mtimespec.tv_nsec),
+                    UInt64(metadata.st_ctimespec.tv_sec), UInt64(metadata.st_ctimespec.tv_nsec)] {
+                    var big = field.bigEndian; withUnsafeBytes(of: &big) { value.append(contentsOf: $0) }
+                }
+                result[url.path] = value
+            }
+        }
+        return result
+    }
+    private func prepareObservationFiles(_ s: State, frame: Frame) throws {
+        let root = URL(fileURLWithPath: s.directory.path).deletingLastPathComponent().appendingPathComponent("ObservedPublications")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path)
+        s.observationRoot = root
+        let declaration = try RuntimeMaintenanceCommitments.MutationFootprint(runtime: frame.entry.runtime, inputs: frame.inputs).declaration
+        for directory in Set(declaration.files.map { ($0 as NSString).deletingLastPathComponent }) {
+            try FileManager.default.createDirectory(at: root.appendingPathComponent(directory), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o755])
+        }
+        // This fixture already owns retained material. Put its actual bytes at the declared leaf before the body.
+        if frame.entry.runtime.state.reference != nil {
+            let paths = try RuntimePreparationPaths(accountID: s.initialRuntime.preparation.accountID)
+            let relative = try RuntimeMaintenanceCommitments.MutationFootprint.relative(paths.privateDirectory + "/" + AdministrativeSetupPublication.File.runtimeRecord.name)
+            let file = root.appendingPathComponent(relative)
+            try s.material.encoded.write(to: file); XCTAssertEqual(chmod(file.path, 0o600), 0)
+        }
+    }
+    private func owners(_ frame: Frame, authorityID: Data) throws -> (LocalAccountIdentity, LocalAccountIdentity) {
+        let a = try XCTUnwrap(frame.entry.runtime.setup.source.preparations.first { $0.accountID == authorityID })
+        return (.init(uid: a.ownerUID, primaryGroupID: getgid(), directoryID: a.directoryID), frame.entry.runtime.setup.owner)
+    }
+    private func commitments(_ s: State, frame: Frame, authorityID: Data) throws -> RuntimeMaintenanceCommitments {
+        let (a, b) = try owners(frame, authorityID: authorityID)
+        return try .observing(entry: frame.entry, inputs: frame.inputs, authorityAccountID: authorityID,
+            authorityOwner: a, targetOwner: b, candidate: s.candidate, purpose: .retainedRuntime)
+    }
+    private func window(_ scope: Window.Scope, phase: Window.Phase = .executing) throws -> Window {
+        try .init(id: AccountPreparationIntent.randomID(), revision: AccountPreparationIntent.randomID(), purpose: .retainedRuntime,
+            scope: scope, phase: phase, operation: phase == .executing ? .unknown : .notStarted, service: .stopped)
+    }
+    private func observe(_ s: State, window: Window, frame: Frame? = nil, refuseRead: Bool = false,
+        readPolicy: (() throws -> AuthorityJournal.MachineUpdatePolicyBoundary)? = nil) throws -> Observation.State {
+        let actual = try frame ?? assemblyFrame(s), (a, b) = try owners(actual, authorityID: window.scope.authority.accountID)
+        let root = try XCTUnwrap(s.observationRoot)
+        return Observation.observeOwned(window: window, candidate: s.candidate, readFrame: {
+            if refuseRead { throw Fault.unexpected }; return try frame ?? self.assemblyFrame(s)
+        }, readPolicy: readPolicy ?? s.pair, readMaterial: { runtime in
+            let paths = try RuntimePreparationPaths(accountID: runtime.preparation.accountID)
+            let relative = try RuntimeMaintenanceCommitments.MutationFootprint.relative(paths.privateDirectory + "/" + AdministrativeSetupPublication.File.runtimeRecord.name)
+            return try ProtectedServiceConfiguration.readOptional(anchor: root.path, relativePath: relative, owner: getuid())
+                .map { try RuntimePreparationMaterial.decode($0) }
+        }, readFile: { path, _ in
+            try ProtectedServiceConfiguration.readOptional(anchor: root.path,
+                relativePath: RuntimeMaintenanceCommitments.MutationFootprint.relative(path), owner: getuid())
+        }, lookup: { uid in if uid == a.uid { return a }; guard uid == b.uid else { throw Fault.unexpected }; return b }, verifyCurrent: {})
+    }
+    private func initialPair(_ s: State) throws -> AuthorityJournal.MachineUpdatePolicyBoundary {
+        let initial = try XCTUnwrap(s.initialRuntime.setup.account?.initialization)
+        let anchor = URL(fileURLWithPath: s.directory.path).deletingLastPathComponent().path
+        let journal = (initial.journalPath as NSString).deletingLastPathComponent
+        let continuity = (initial.continuityPath as NSString).deletingLastPathComponent
+        let storage = try MachineUpdateRetainedSetupPromotionNativeSupport.openExistingStorage(initial: initial,
+            openJournalLease: { try .init(anchor: anchor, relativeDirectory: String(journal.dropFirst(anchor.count + 1)), owner: getuid()) },
+            openContinuityLease: { try .init(anchor: anchor, relativeDirectory: String(continuity.dropFirst(anchor.count + 1)),
+                owner: getuid(), excludingDirectory: $0) })
+        let pair = try AuthorityJournal(updateHealthStorage: storage, validateSelf: { _ in })
+        defer { try? pair.close() }
+        return try pair.captureRetainedSetupPolicyBoundary(expected: initial)
+    }
+    private func stableOperation(_ frame: Frame, preparation: Data? = nil, plan: Data? = nil) throws -> Data {
+        let inputs = frame.inputs, runtime = frame.entry.runtime
+        let intent: CBORValue
+        if let value = inputs.intent {
+            let scope = value.scope
+            intent = .array([.bytes(scope.macID), .bytes(scope.installationID), .bytes(scope.releaseDigest),
+                .bytes(scope.accountID), .unsigned(UInt64(scope.ownerUID)), .bytes(scope.accountBinding),
+                .bytes(value.operationID), .bytes(value.proposalDigest), .bytes(try value.recipe.bytes), .unsigned(value.originalPortableVersion)])
+        } else { intent = .null }
+        let choices = CBORValue.array([.unsigned(inputs.journalPresent ? 1 : 0), intent,
+            inputs.relay?.plan.map { .bytes($0.bytes) } ?? .null,
+            inputs.relay?.snapshot.map { .bytes($0.digest) } ?? .null])
+        return try maintenanceDigest("operation.v2", .array([.unsigned(Window.Purpose.retainedRuntime.rawValue),
+            .bytes(try preparation ?? runtime.preparation.bytes), .bytes(try XCTUnwrap(runtime.setup.account?.initialization).bytes),
+            .bytes(try plan ?? runtime.plan.encoded), choices]))
+    }
+    private func maintenanceDigest(_ domain: String, _ value: CBORValue) throws -> Data {
+        MachineUpdateActivationRecord.digest(try DeterministicCBOR.encode(.array([.text("remozio.maintenance." + domain), value]),
+            limits: .init(maxBytes: 2 * 1024 * 1024, maxDepth: 8, maxItems: 4096)))
+    }
+    private func changedOperation(_ scope: Window.Scope, operation: Data) throws -> Window.Scope {
+        let intent = try maintenanceDigest("administratorIntent.v1", .array([.unsigned(Window.Purpose.retainedRuntime.rawValue),
+            .bytes(scope.authority.accountID), .bytes(scope.target.accountID), .bytes(scope.releaseDigest),
+            .bytes(scope.candidateDigest), .bytes(operation)]))
+        return try .init(macID: scope.macID, installationID: scope.installationID, authority: scope.authority, target: scope.target,
+            releaseDigest: scope.releaseDigest, candidateDigest: scope.candidateDigest, authorityPolicyDigest: scope.authorityPolicyDigest,
+            operationDigest: operation, restorationDigest: scope.restorationDigest, mutationFootprintDigest: scope.mutationFootprintDigest,
+            authorityGrantDigest: scope.authorityGrantDigest, targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: intent)
+    }
+    func testActualEmptyRuntimeIsOldInEveryPermittedObservationPhase() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture(schema29: true) { f in
+            let runtime = try f.machine().stableRuntimePreparationSnapshot(owner: f.owner, candidate: f.candidate)
+            let s = State(f, runtime: runtime); defer { try? f.machine().close() }
+            let frame = try assemblyFrame(s); try prepareObservationFiles(s, frame: frame)
+            XCTAssertNil(frame.entry.runtime.state.reference); XCTAssertNil(frame.entry.intent)
+            let a = try XCTUnwrap(frame.entry.runtime.setup.source.actual.inventory.accounts.first).accountID
+            let selected = try commitments(s, frame: frame, authorityID: a)
+            let rows = try runtimeMaintenanceFixtureRows(f.databasePath)
+            for phase in [Window.Phase.stopping, .stopped, .executing] {
+                XCTAssertEqual(try observe(s, window: window(selected.scope, phase: phase), readPolicy: { try self.initialPair(s) }), .old)
+            }
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), rows)
+            XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0)
+        }
+    }
+    private func observeStoppedPolicyStage(_ stop: MachineUpdateRetainedSetupPolicyOwner.Stage) throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(schema29: true) { f in
+            let s = State(f); defer { try? f.machine().close() }
+            let before = try assemblyFrame(s); try prepareObservationFiles(s, frame: before)
+            let record = try window(commitments(s, frame: before, authorityID: f.currentAuthorityAccountID).scope)
+            let expected = try XCTUnwrap(before.entry.policy)
+            XCTAssertThrowsError(try MachineUpdateRetainedSetupPolicyOwner.resume(expected: expected, candidate: f.candidate,
+                directory: f.directory, admission: f.admission, useMachine: { try s.withMachine($0) },
+                openJournal: { try f.openPolicyJournal($0 == .readOnly ? .readOnly : .startup) }, verifySnapshot: { _ in },
+                didStage: { if $0 == stop { throw Fault.policy } })) { XCTAssertEqual($0 as? Fault, .policy) }
+            let actual = try assemblyFrame(s), encoded = try XCTUnwrap(actual.entry.intent).encoded
+            let rows = try runtimeMaintenanceFixtureRows(f.databasePath), pair = try s.pair()
+            s.reset()
+            XCTAssertEqual(try observe(s, window: record), .partial)
+            XCTAssertEqual(try assemblyFrame(s).entry.intent?.encoded, encoded)
+            XCTAssertEqual(try s.pair(), pair); XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), rows)
+            XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0)
+        }
+    }
+    func testPreparedPolicyObservationIsPartialAndDoesNotGenerateARevision() throws { try observeStoppedPolicyStage(.intentRetained) }
+    func testWritingPolicyObservationIsPartialAndDoesNotGenerateAReceipt() throws { try observeStoppedPolicyStage(.writingRetained) }
+    func testRecordedPolicyObservationIsPartialUntilPublicationCompletes() throws { try observeStoppedPolicyStage(.recorded) }
+    func testRealBodyAndAcknowledgementKeepStableBytesAndObserveNewWithoutWrites() throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true, schema29: true) { f in
+            let s = State(f); defer { if let files = s.files { try? files.close() }; try? f.machine().close() }
+            try s.seedImport(); let before = try assemblyFrame(s)
+            try prepareObservationFiles(s, frame: before)
+            let selected = try commitments(s, frame: before, authorityID: f.currentAuthorityAccountID)
+            let actual = try run(s)
+            XCTAssertEqual(s.advanced, [true]); XCTAssertEqual(actual.inputs.intent?.phase, .runtimePublished)
+            XCTAssertEqual(try actual.entry.runtime.preparation.bytes, try before.entry.runtime.preparation.bytes)
+            XCTAssertEqual(try actual.entry.runtime.setup.account?.initialization?.bytes, try before.entry.runtime.setup.account?.initialization?.bytes)
+            XCTAssertEqual(try actual.entry.runtime.plan.encoded, try before.entry.runtime.plan.encoded)
+            let after = try commitments(s, frame: actual, authorityID: f.currentAuthorityAccountID)
+            XCTAssertEqual(after.scope.operationDigest, selected.scope.operationDigest)
+            XCTAssertEqual(after.scope.targetConsentDigest, selected.scope.targetConsentDigest)
+            XCTAssertNotEqual(actual.inputs.intent?.revision, before.inputs.intent?.revision)
+            let record = try window(selected.scope), bytes = try record.encoded
+            let rows = try runtimeMaintenanceFixtureRows(f.databasePath), disk = try inventory(URL(fileURLWithPath: f.databasePath).deletingLastPathComponent().deletingLastPathComponent())
+            s.reset()
+            XCTAssertEqual(try observe(s, window: record), .new)
+            XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0); XCTAssertEqual(s.events, [])
+            XCTAssertEqual(try record.encoded, bytes)
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), rows)
+            XCTAssertEqual(try inventory(URL(fileURLWithPath: f.databasePath).deletingLastPathComponent().deletingLastPathComponent()), disk)
+            // Change stable inputs in the original commitment only. The actual ACK and all observed operands stay valid.
+            XCTAssertEqual(try stableOperation(before), selected.scope.operationDigest)
+            let prep = before.entry.runtime.preparation
+            let changedPreparation = try AccountPreparationIntent(setupID: prep.setupID, revision: AccountPreparationIntent.randomID(),
+                macID: prep.macID, installationID: prep.installationID, releaseDigest: prep.releaseDigest, accountID: prep.accountID,
+                ownerUID: prep.ownerUID, directoryID: prep.directoryID, policyBytes: prep.policyBytes, initializationBytes: prep.initializationBytes,
+                authorityPublicKey: prep.authorityPublicKey, storagePrepared: prep.storagePrepared)
+            let changedPlan = try ServiceAccountPlan(account: prep, planID: AccountPreparationIntent.randomID(), claims: before.entry.runtime.plan.claims)
+            for operation in [try stableOperation(before, preparation: changedPreparation.bytes), try stableOperation(before, plan: changedPlan.encoded)] {
+                XCTAssertNotEqual(operation, selected.scope.operationDigest)
+                let wrong = try changedOperation(selected.scope, operation: operation)
+                XCTAssertThrowsError(try after.requireImmutableScope(wrong, purpose: .retainedRuntime))
+                XCTAssertEqual(try observe(s, window: window(wrong)), .unknown)
+            }
+        }
+    }
+    func testRecordedPolicyWithActualPartialFilesIsPartialAndTamperedFilesAreUnknown() throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true, schema29: true) { f in
+            let s = State(f); defer { if let files = s.files { try? files.close() }; try? f.machine().close() }
+            let before = try assemblyFrame(s); try prepareObservationFiles(s, frame: before)
+            let record = try window(commitments(s, frame: before, authorityID: f.currentAuthorityAccountID).scope)
+            let completed = try run(s), files = try XCTUnwrap(s.files), artifact = try XCTUnwrap(files.artifacts.last)
+            XCTAssertEqual(completed.entry.intent?.phase, .recorded)
+            try FileManager.default.removeItem(at: files.url(artifact)); s.reset()
+            XCTAssertEqual(try observe(s, window: record), .partial)
+            try files.put(artifact, bytes: Data([0]))
+            XCTAssertEqual(try observe(s, window: record), .unknown)
+            XCTAssertEqual(s.commits, 0); XCTAssertEqual(s.startupOpens, 0)
+        }
+    }
+    func testUnrecordedFilesAndUnprovableReadsNeverObserveNew() throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(schema29: true) { f in
+            let s = State(f); defer { try? f.machine().close() }
+            let before = try assemblyFrame(s); try prepareObservationFiles(s, frame: before)
+            XCTAssertNil(before.entry.intent)
+            let record = try window(commitments(s, frame: before, authorityID: f.currentAuthorityAccountID).scope)
+            XCTAssertEqual(try observe(s, window: record), .partial)
+            let path = try RuntimePreparationPaths(accountID: before.entry.runtime.preparation.accountID).policy
+            let leaf = try XCTUnwrap(s.observationRoot).appendingPathComponent(RuntimeMaintenanceCommitments.MutationFootprint.relative(path))
+            try Data([0]).write(to: leaf); XCTAssertEqual(chmod(leaf.path, 0o600), 0)
+            XCTAssertEqual(try observe(s, window: record), .unknown)
+            XCTAssertEqual(try observe(s, window: record, refuseRead: true), .unknown)
+        }
+    }
     func testCaptureBudgetRefusesSeventhCaptureAndStaysExhausted() throws {
         var budget = Sequence.CaptureBudget()
         for _ in 0..<6 { XCTAssertNoThrow(try budget.claim()) }
@@ -404,31 +632,42 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
             let root = URL(fileURLWithPath: s.directory.path).deletingLastPathComponent()
             let sentinel = root.appendingPathComponent("outside-maintenance-profile.cbor")
             try Data([1, 3, 5, 7]).write(to: sentinel)
+            let frame = try assemblyFrame(s)
+            let declaration = try RuntimeMaintenanceCommitments.MutationFootprint(runtime: frame.entry.runtime, inputs: frame.inputs).declaration
+            try prepareObservationFiles(s, frame: frame)
             let target = s.initialRuntime.preparation.accountID
             let initial = try XCTUnwrap(s.initialRuntime.setup.account?.initialization)
             let database = s.directory.path + "/installation.sqlite"
-            let mutable = Set([database, initial.journalPath, initial.continuityPath].flatMap { [$0, $0 + "-journal"] })
-            func outsideFiles() throws -> [String: Data] {
-                let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root,
-                    includingPropertiesForKeys: [.isRegularFileKey], options: []))
-                var result: [String: Data] = [:]
-                for case let url as URL in enumerator {
-                    if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true,
-                       !mutable.contains(url.path) {
-                        result[String(url.path.dropFirst(root.path.count + 1))] = MachineUpdateActivationRecord.digest(try Data(contentsOf: url))
+            let publicationRoot = try XCTUnwrap(s.observationRoot)
+            func logical(_ path: String) throws -> String {
+                if path.hasPrefix(publicationRoot.path + "/") { return String(path.dropFirst(publicationRoot.path.count + 1)) }
+                for (actual, declared) in [(database, MachineBootstrap.machineDirectory + "/installation.sqlite"),
+                    (initial.journalPath, try RuntimePreparationPaths(accountID: target).authorityDirectory + "/Journal/journal.sqlite"),
+                    (initial.continuityPath, try RuntimePreparationPaths(accountID: target).authorityDirectory + "/Continuity/continuity.sqlite")] {
+                    if path == actual || path == actual + "-journal" {
+                        return try RuntimeMaintenanceCommitments.MutationFootprint.relative(declared) + (path == actual ? "" : "-journal")
                     }
                 }
-                return result
+                return "outside/" + String(path.dropFirst(root.path.count + 1))
             }
             let excluded = ["runtime_preparation_v1": target, MachineUpdateRetainedSetupPolicyStorage.tableName: target]
             let rows = try runtimeMaintenanceFixtureRows(database, excludingRowsForAccounts: excluded)
-            let files = try outsideFiles()
-            XCTAssertFalse(rows.isEmpty); XCTAssertFalse(files.isEmpty)
+            let before = try inventory(root)
+            XCTAssertFalse(rows.isEmpty); XCTAssertFalse(before.isEmpty)
             let actual = try run(s)
             XCTAssertTrue(actual.entry.runtime.state.configurationPublished)
-            XCTAssertEqual(try XCTUnwrap(s.files).publicationCalls, 8)
+            let files = try XCTUnwrap(s.files)
+            XCTAssertEqual(files.publicationCalls, 8)
+            XCTAssertTrue(files.artifacts.allSatisfy { files.url($0).path.hasPrefix(root.path + "/") })
+            let after = try inventory(root), changed = Set(before.keys).union(after.keys).filter { before[$0] != after[$0] }
+            XCTAssertFalse(changed.isEmpty)
+            for path in changed { XCTAssertTrue(try declaration.containsFile(logical(path)), "Undeclared mutation: \(path)") }
             XCTAssertEqual(try runtimeMaintenanceFixtureRows(database, excludingRowsForAccounts: excluded), rows)
-            XCTAssertEqual(try outsideFiles(), files)
+            let outside = try before.filter { try !declaration.containsFile(logical($0.key)) }
+            XCTAssertEqual(try after.filter { try !declaration.containsFile(logical($0.key)) }, outside)
+            try Data([2, 4, 6]).write(to: sentinel)
+            XCTAssertNotEqual(try inventory(root)[sentinel.path], after[sentinel.path])
+            XCTAssertFalse(try declaration.containsFile(logical(sentinel.path)))
             XCTAssertNil(actual.entry.activation.plan); XCTAssertFalse(actual.entry.activation.jobsRegistered)
         }
     }

@@ -945,7 +945,7 @@
    "testAuthorityGroupChangeChangesOnlyItsGrantCommitment": 8.927,
    "testCandidateUsesTheSelectedReleaseEvidenceAndPublishedPolicyFloors": 8.89,
    "testGrantAndConsentRemainStableAcrossAnotherInvocationAndProcess": 8.695,
-   "testOperationCommitsTheActualMaterialSelectionWithoutChangingRestorationOrFootprint": 9.568,
+   "testStableOperationAndIntentIgnoreMaterialProgressWithoutChangingRestorationOrFootprint": 9.568,
    "testTargetGroupChangeChangesOnlyItsConsentCommitment": 9.243,
    "testUnsupportedPurposesRefuseBeforeAnyWindowWrite": 8.574
   },

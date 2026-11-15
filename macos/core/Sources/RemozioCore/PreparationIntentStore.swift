@@ -5919,6 +5919,16 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Exact readback only. A decoded window grants no recovery ownership or native permission.
+    func requireRuntimeMaintenanceObservationWindow(_ expected: RuntimeMaintenanceWindowRecord, candidate: SignedReleaseEvidence) throws {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+            guard frame.snapshot.schemaVersion == 29,
+                  frame.maintenanceWindows.first(where: { $0.scope.authority.accountID == expected.scope.authority.accountID }) == expected else {
+                throw RuntimePreparationError.changedScope
+            }
+        }
+    }
     /// Reads startup restrictions only. The host must apply the local hold before it admits requests.
     func runtimeMaintenanceStartupProjection(account: RuntimeMaintenanceWindowRecord.Account,
         candidate: SignedReleaseEvidence) -> RuntimeMaintenanceAdmissionProjection {
