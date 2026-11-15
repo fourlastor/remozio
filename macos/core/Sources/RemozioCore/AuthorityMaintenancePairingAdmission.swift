@@ -64,8 +64,14 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         return try .init(accountID: accountID, attemptID: attemptID, revision: revision, incarnation: incarnation,
             connectionID: withUnsafeBytes(of: &id) { Data($0) })
     }
+    func requireAccount(_ accountID: Data) throws {
+        try state.withLock {
+            guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+            guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+        }
+    }
     func openConnection(accountID: Data, attemptID: Data, revision: Data) throws -> Connection {
-        guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+        try requireAccount(accountID)
         return try openConnection(attemptID: attemptID, revision: revision)
     }
     func connectionReservations() throws -> Int {
