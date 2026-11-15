@@ -223,7 +223,8 @@ attacker now keeps 0 in that case, and the recorded evidence is the second run.
 On this host the candidate meets every property that the experiment measures. That
 does not make production execution available (see
 [What this experiment does not establish](#what-this-experiment-does-not-establish)),
-and adopting the candidate for decision 5 is the Linux host owner's decision.
+and the Linux host owner adopted the candidate for decision 5 on 15 November 2026
+(see the [activation proposal](../linux-activation-proposal.md#decisions)).
 
 ## Implementation notes
 
