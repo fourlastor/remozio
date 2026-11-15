@@ -624,24 +624,28 @@ actor AuthorityMaintenanceXPCClient {
     func restoreStartupHealthyOwned(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        afterProbe: @escaping @Sendable () -> Void = {},
         until deadline: ContinuousClock.Instant,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
         try RuntimeMaintenanceOwnedControl.require()
-        return try await restoreStartupHealthy(proof, owner: owner, until: deadline, capturePeer: capturePeer,
+        return try await restoreStartupHealthy(proof, owner: owner, afterProbe: afterProbe, until: deadline, capturePeer: capturePeer,
             requirePeerLive: requirePeerLive, releaseDrain: { try owner.releaseOwnedDrain(after: $0) }, persist: persist)
     }
     private func restoreStartupHealthy(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
+        afterProbe: @escaping @Sendable () -> Void = {},
         until deadline: ContinuousClock.Instant,
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
         releaseDrain: @escaping @Sendable (CleanupRecord) throws -> Void,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        afterProbe()
+        try Task.checkCancellation()
         try requireRestorationContext(owner)
         guard !cleanupUsed, !busy else {
             try? owner.commitOwnerRecovery(.changedScope); finish()
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
-        guard state == .greeted else { finish(); throw RuntimeMaintenanceStartupAttemptError.beforePending }
+        guard state == .greeted, lifetime.ifActive() else { finish(); throw RuntimeMaintenanceStartupAttemptError.beforePending }
         cleanupUsed = true; defer { finish() }
         let window = owner.window, stopped = owner.stoppedBinding
         guard window.purpose == .retainedRuntime, window.phase == .restoring,
@@ -651,7 +655,9 @@ actor AuthorityMaintenanceXPCClient {
         }
         var current = window, attemptedCommit = false, pendingWriteOwned = false
         do {
-            try proof.requireObserved(by: self); try verify()
+            do { try proof.requireObserved(by: self) }
+            catch { throw RuntimeMaintenanceStartupAttemptError.beforePending }
+            try verify()
             let opened = try await startObserved(proof, stopped: stopped, until: deadline)
             guard opened.outcome == .applied else { throw RuntimeMaintenanceStartupAttemptError.beforePending }
             try owner.requireHealthyBinding(opened.binding); try proof.requireObserved(by: self)
@@ -681,6 +687,7 @@ actor AuthorityMaintenanceXPCClient {
             guard try persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
             return restored
         } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
             if !attemptedCommit {
                 if current.phase == .restoring && !pendingWriteOwned {
                     if error is AuthorityMaintenanceClientError || error is RuntimeMaintenanceStartupAttemptError {
@@ -720,6 +727,7 @@ actor AuthorityMaintenanceXPCClient {
         custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant,
         releaseDrain: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> Void,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try Task.checkCancellation()
         guard state == .greeted, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         cleanupUsed = true; defer { finish() }
         let window = custody.current
@@ -746,6 +754,7 @@ actor AuthorityMaintenanceXPCClient {
             guard try persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
             return restored
         } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
             if !attemptedCommit, let failed = try? CleanupRecord(id: current.id, revision: AccountPreparationIntent.randomID(),
                 purpose: current.purpose, scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation,
                 service: current.service, failure: .admissionUnconfirmed, shutdownBinding: target) { _ = try? persist(failed, current) }

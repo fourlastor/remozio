@@ -75,6 +75,14 @@ final class RuntimeMaintenanceStartupPolicyTests: XCTestCase {
         XCTAssertEqual(try Policy.initial(row(.reopenPending)), .ownerRecovery(.admissionUnconfirmed))
         XCTAssertThrowsError(try Policy.afterProbe(row(.reopenPending), sameIncarnation: false))
     }
+    func testRealPolicyRefusesProbeDecisionsOutsideTheEarlyPhases() throws {
+        for phase in [Row.Phase.stopped, .executing, .workSettled, .restoring, .reopenPending, .needsOwnerRecovery] {
+            let value = try row(phase)
+            XCTAssertThrowsError(try Policy.afterProbe(value, sameIncarnation: false)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+        }
+    }
     func testMissingBindingNeverRestoresOrProbes() throws {
         for phase in [Row.Phase.draining, .stopping, .stopped, .executing, .workSettled, .restoring] {
             XCTAssertEqual(try Policy.initial(row(phase, bound: false)), .ownerRecovery(.cleanupPending))

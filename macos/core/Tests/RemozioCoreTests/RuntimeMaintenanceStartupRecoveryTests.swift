@@ -3,6 +3,7 @@ import Dispatch
 import Synchronization
 import Foundation
 import XCTest
+import RemozioProtocol
 @testable import RemozioCore
 
 private enum StartupTestError: Error, Equatable { case expected }
@@ -17,7 +18,7 @@ private final class StartupHarness: @unchecked Sendable {
     var registrations = 0, observations = 0, classifications = 0, writes: [Row.Phase] = []
     var classification = RuntimeMaintenanceRuntimeObservation.State.new
     var failScopeAfterPhase: Row.Phase?, driftFloorAfterPhase: Row.Phase?
-    var beforeRegistration: (@Sendable () -> Void)?
+    var beforeRegistration: (@Sendable () -> Void)?, afterObservation: (@Sendable () -> Void)?
     var inspectOverride: (@Sendable () throws -> RuntimeJobStopSession.Observation)?
     var failPhase: Row.Phase?, commitBeforeFailure = false, rejectCode = false, postCommitScopeFailure = false
     init(_ fixture: RuntimeMaintenanceWriterFixture) throws {
@@ -103,7 +104,7 @@ private final class StartupHarness: @unchecked Sendable {
             }, inspect: { _ in try self.inspectOverride?() ?? self.inspected }, observe: { _, _, pid in
                 self.observations += 1
                 guard !self.rejectCode, pid == self.witness.processID else { throw StartupTestError.expected }
-                return self.witness
+                self.afterObservation?(); return self.witness
             }, observeOperation: { _ in self.classifications += 1; return self.classification }, register: {
                 self.beforeRegistration?(); self.registrations += 1; self.inspected = .matching(self.witness.processID)
             }, afterProbePolicy: afterProbePolicy)
@@ -121,11 +122,14 @@ private final class StartupDriver: AuthorityMaintenanceClientDriver, Sendable {
     let epoch: Data, barrier: UpdateAdmissionBarrier
     let metrics: StartupMetrics
     let closed = Mutex(false), onProbe = Mutex<(@Sendable () -> Void)?>(nil)
+    let invalidated = Mutex<(@Sendable () -> Void)?>(nil)
+    let onExchange = Mutex<(@Sendable (Request.Action) -> Void)?>(nil)
     let refuseProbe: Bool, failGate: Bool, notReadyOpen: Bool
     init(epoch: Data, barrier: UpdateAdmissionBarrier, refuseProbe: Bool = false, failGate: Bool = false, notReadyOpen: Bool = false, metrics: StartupMetrics? = nil) {
         self.metrics = metrics ?? StartupMetrics(); self.epoch = epoch; self.barrier = barrier; self.refuseProbe = refuseProbe; self.failGate = failGate; self.notReadyOpen = notReadyOpen
     }
-    func start(_ invalidated: @escaping @Sendable () -> Void) {}
+    func start(_ invalidated: @escaping @Sendable () -> Void) { self.invalidated.withLock { $0 = invalidated } }
+    func invalidate() { invalidated.withLock { $0 }?() }
     func close() { closed.withLock { $0 = true } }
     func fresh() -> StartupDriver {
         .init(epoch: epoch, barrier: barrier, refuseProbe: refuseProbe, failGate: failGate, notReadyOpen: notReadyOpen, metrics: metrics)
@@ -150,6 +154,7 @@ private final class StartupDriver: AuthorityMaintenanceClientDriver, Sendable {
             let work = try q.action == .open && !refused ? MaintenanceStopTestDriver.work() : nil
             reply(.bytes(try AuthorityMaintenanceChannelResponse(request: q, binding: binding, work: work,
                 outcome: refused ? .refused : .applied).encoded))
+            onExchange.withLock { $0 }?(q.action)
         } catch { reply(.bytes(nil)) }
     }
     func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
@@ -197,6 +202,186 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
         startup: RuntimeMaintenanceStartupRecovery? = nil, timeoutSeconds: Int = 5) async -> Error? {
         do { _ = try await complete(h, driver, timeoutSeconds: timeoutSeconds, startup: startup); XCTFail("Expected refusal"); return nil }
         catch { return error }
+    }
+    func testDriverInvalidationAfterDecisionProofRetriesWithFreshClients() throws {
+        try withAsyncStartup(.draining) { h, _ in
+            let startup = try h.open(), drivers = Mutex<[StartupDriver]>([]), probes = Mutex(0)
+            let row = try await startup.runOwned(makeDriver: {
+                let d = StartupDriver(epoch: Data(repeating: 81, count: 16), barrier: h.barrier)
+                drivers.withLock { $0.append(d) }; return d
+            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, afterProbe: {
+                if probes.withLock({ $0 += 1; return $0 == 1 }) {
+                    XCTAssertTrue(h.writes.isEmpty)
+                    drivers.withLock { $0.last }?.invalidate()
+                }
+            }, until: .now.advanced(by: .seconds(35)))
+            let all = drivers.withLock { $0 }
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 3)
+            XCTAssertTrue(all.allSatisfy { $0.closed.withLock { $0 } })
+            XCTAssertTrue(all.prefix(2).allSatisfy { $0.metrics.actions.withLock { $0 }.isEmpty })
+            XCTAssertEqual(all.map { $0.metrics.probes.withLock { $0 } }, [1, 1, 1])
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery, .restoring, .reopenPending, .restored])
+            XCTAssertEqual(h.registrations, 1)
+        }
+    }
+    func testDriverInvalidationAfterHealthyProofRetriesBeforeActorFinish() throws {
+        try withAsyncStartup(.stopped) { h, _ in
+            let startup = try h.open(), drivers = Mutex<[StartupDriver]>([]), probes = Mutex(0)
+            let row = try await startup.runOwned(makeDriver: {
+                let d = StartupDriver(epoch: Data(repeating: 81, count: 16), barrier: h.barrier)
+                drivers.withLock { $0.append(d) }; return d
+            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, afterProbe: {
+                // This synchronous hook runs on the client actor before its greeted guard.
+                // The callback invalidates the lifetime while finish remains queued on that actor.
+                if probes.withLock({ $0 += 1; return $0 == 1 }) { drivers.withLock { $0.last }?.invalidate() }
+            }, until: .now.advanced(by: .seconds(35)))
+            let all = drivers.withLock { $0 }
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 2)
+            XCTAssertTrue(all[0].closed.withLock { $0 }); XCTAssertTrue(all[0].metrics.actions.withLock { $0 }.isEmpty)
+            XCTAssertEqual(all[1].metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(h.writes, [.restoring, .reopenPending, .restored]); XCTAssertEqual(h.registrations, 1)
+        }
+    }
+    func testClosedSameEpochCancelRecordsHealthFailure() throws {
+        try withAsyncStartup(.draining, epoch: 71) { h, driver in
+            let startup = try h.open()
+            do {
+                _ = try await startup.runOwned(makeDriver: { driver }, capturePeer: { h.witness }, requirePeerLive: { _ in },
+                    beforeCancel: { await $0.close() }, until: .now.advanced(by: .seconds(20)))
+                XCTFail("Expected a closed client refusal")
+            } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery]); XCTAssertEqual(try h.frame().window?.failure, .healthFailed)
+            XCTAssertTrue(driver.metrics.actions.withLock { $0 }.isEmpty)
+        }
+    }
+    func testCancelledBeforeRunDoesNotPrepareOrWrite() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let startup = try h.open()
+            let task = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return await Self.failed(h, driver, startup: startup)
+            }
+            let error = await task.value
+            XCTAssertTrue(error is CancellationError)
+            XCTAssertTrue(h.writes.isEmpty); XCTAssertEqual(h.registrations, 0)
+            XCTAssertEqual(try h.frame().window?.phase, .stopped)
+        }
+    }
+    func testCancellationAfterDecisionProofLeavesDrainingForNextStartup() throws {
+        try withAsyncStartup(.draining) { h, driver in
+            let startup = try h.open()
+            let task = Task { () -> Error? in
+                do {
+                    _ = try await startup.runOwned(makeDriver: { driver }, capturePeer: { h.witness }, requirePeerLive: { _ in },
+                        afterProbe: { withUnsafeCurrentTask { $0?.cancel() } }, until: .now.advanced(by: .seconds(20)))
+                    XCTFail("Expected cancellation"); return nil
+                } catch { return error }
+            }
+            let error = await task.value
+            XCTAssertTrue(error is CancellationError)
+            XCTAssertTrue(h.writes.isEmpty); XCTAssertEqual(h.registrations, 0)
+            XCTAssertEqual(try h.frame().window?.phase, .draining)
+            XCTAssertTrue(driver.metrics.actions.withLock { $0 }.isEmpty)
+        }
+    }
+    func testCancellationInsideHealthyOpenLeavesRestoringWithoutFallback() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            driver.onExchange.withLock { $0 = { action in
+                if action == .open { withUnsafeCurrentTask { $0?.cancel() } }
+            } }
+            let task = Task { await Self.failed(h, driver, timeoutSeconds: 30) }
+            let error = await task.value
+            XCTAssertTrue(error is CancellationError)
+            XCTAssertEqual(h.writes, [.restoring]); XCTAssertEqual(try h.frame().window?.phase, .restoring)
+            XCTAssertEqual(driver.metrics.actions.withLock { $0 }, [.open]); XCTAssertEqual(driver.metrics.gates.withLock { $0 }, 0)
+        }
+    }
+    func testCancellationInsideSavedReopenLeavesPendingWithoutFallback() throws {
+        try withAsyncStartup(.draining, epoch: 71) { h, driver in
+            driver.onExchange.withLock { $0 = { action in
+                if action == .reopen { withUnsafeCurrentTask { $0?.cancel() } }
+            } }
+            let task = Task { await Self.failed(h, driver, timeoutSeconds: 30) }
+            let error = await task.value
+            XCTAssertTrue(error is CancellationError)
+            XCTAssertEqual(h.writes, [.reopenPending]); XCTAssertEqual(try h.frame().window?.phase, .reopenPending)
+            XCTAssertEqual(driver.metrics.actions.withLock { $0 }, [.reopen]); XCTAssertEqual(driver.metrics.gates.withLock { $0 }, 0)
+        }
+    }
+    func testConflictingLaunchdJobRecordsOneServiceFailure() throws {
+        try withAsyncStartup(.restoring) { h, driver in
+            h.inspected = .conflicting
+            _ = await Self.failed(h, driver, timeoutSeconds: 20)
+            XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.observations, 0)
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery]); XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable)
+            XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
+        }
+    }
+    func testUnsafeLaunchdPidsRecordOneServiceFailure() throws {
+        for pid in [pid_t(0), pid_t(1)] {
+            try withAsyncStartup(.restoring) { h, driver in
+                h.inspected = .matching(pid)
+                _ = await Self.failed(h, driver, timeoutSeconds: 20)
+                XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.observations, 0)
+                XCTAssertEqual(h.writes, [.needsOwnerRecovery]); XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable)
+                XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
+            }
+        }
+    }
+    func testProcessExitAfterObservationRecordsOneServiceFailure() throws {
+        try withAsyncStartup(.restoring) { h, driver in
+            h.inspected = .matching(h.witness.processID)
+            h.afterObservation = { h.witness.exited.withLock { $0 = true } }
+            _ = await Self.failed(h, driver, timeoutSeconds: 20)
+            XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.observations, 1)
+            XCTAssertEqual(h.writes, [.needsOwnerRecovery]); XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable)
+            XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
+        }
+    }
+    func testAbsentRegisteredJobWaitsUntilDeadlineAndRecordsOneServiceFailure() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let inspections = Mutex(0)
+            h.inspectOverride = { inspections.withLock { $0 += 1 }; return .absent }
+            _ = await Self.failed(h, driver, timeoutSeconds: 15)
+            XCTAssertEqual(h.registrations, 1); XCTAssertEqual(h.observations, 0)
+            XCTAssertGreaterThan(inspections.withLock { $0 }, 2)
+            XCTAssertEqual(h.writes, [.restoring, .needsOwnerRecovery]); XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable)
+            XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
+        }
+    }
+    func testOtherAccountPreparationAndInitializationDriftDoesNotChangeTheStartupFloor() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { f in
+            let h = try StartupHarness(f); try h.seed(.restoring)
+            let frame = try h.frame(), row = try XCTUnwrap(frame.window), source = frame.source
+            let template = try XCTUnwrap(source.preparations.first), initial = try template.initialAuthority
+            let account = AccountPreparationIntent.randomID(), uid = try XCTUnwrap(source.preparations.map(\.ownerUID).max()) + 1
+            let policy = try CommandElevationPolicy(macID: template.macID, accountID: account, callerUID: uid,
+                allowedTargetUIDs: [0], independentPolicyDisclosureAccepted: true)
+            let limits = try CBORLimits(maxBytes: 16384, maxDepth: 8, maxItems: 512)
+            let descriptor = try AuditEpochDescriptor.decode(DeterministicCBOR.encode(.map([
+                0: .unsigned(1), 1: .bytes(template.macID), 2: .bytes(account), 3: .bytes(AccountPreparationIntent.randomID()),
+                4: .unsigned(1), 5: .unsigned(AuditEpochCause.initial.rawValue), 6: .null, 7: .null, 8: .null]), limits: limits), limits: limits)
+            let declaration = AuthorityJournalInitialization(descriptor: descriptor, codePolicy: initial.codePolicy,
+                capabilities: initial.capabilities, allowedContracts: initial.allowedContracts)
+            let bytes = try declaration.initializationBytes, digest = try declaration.initializationDigest
+            let setup = AccountPreparationIntent.randomID(), directory = UUID()
+            func changed(_ marker: UInt8) throws -> RuntimeMaintenanceStartupFrame {
+                let preparation = try AccountPreparationIntent(setupID: setup, revision: Data(repeating: marker, count: 16),
+                    macID: template.macID, installationID: template.installationID, releaseDigest: source.actual.inventory.releaseDigest,
+                    accountID: account, ownerUID: uid, directoryID: directory, policyBytes: policy.canonicalBytes, initializationBytes: bytes)
+                let initialization = try AuthorityInitializationIntent(setupID: setup, revision: Data(repeating: marker, count: 16),
+                    installationID: template.installationID, macID: template.macID, accountID: account,
+                    releaseDigest: source.actual.inventory.releaseDigest, initializationDigest: digest, initializationBytes: bytes,
+                    journalPath: "/owned/other/journal/journal.sqlite", continuityPath: "/owned/other/continuity/continuity.sqlite")
+                return .init(source: try MachineUpdateStableRuntimeSource(actual: source.actual,
+                    preparations: source.preparations + [preparation], initializations: source.initializations + [initialization], candidate: f.candidate), window: row)
+            }
+            let before = try changed(41), after = try changed(42)
+            XCTAssertNotEqual(before.source.preparations, after.source.preparations)
+            XCTAssertNotEqual(before.source.initializations, after.source.initializations)
+            let floor = try RuntimeMaintenanceStartupFloor(frame: before, release: f.candidate)
+            XCTAssertNoThrow(try floor.requireCurrent(after, window: row, release: f.candidate))
+        }
     }
     func testClosedAfterHealthyProbeRetriesOnAFreshClientWithoutRecovery() throws {
         try withAsyncStartup(.stopped) { h, _ in
@@ -295,7 +480,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             XCTAssertEqual(try h.frame().window?.failure, .healthFailed); XCTAssertEqual(driver.metrics.gates.withLock { $0 }, 0)
         }
     }
-    func testLostDecisionProbeRetriesUntilDeadlineWithoutMutation() throws {
+    func testLostDecisionProbeRetriesUntilDeadlineAndRecordsOneServiceFailure() throws {
         try withAsyncStartup(.draining, refuseProbe: true) { h, driver in
             _ = await Self.failed(h, driver)
             XCTAssertEqual(h.writes, [.needsOwnerRecovery]); XCTAssertTrue(driver.metrics.actions.withLock { $0 }.isEmpty)

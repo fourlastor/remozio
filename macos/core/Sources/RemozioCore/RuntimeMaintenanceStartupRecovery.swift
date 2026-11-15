@@ -68,7 +68,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         func withRegistration(_ expected: Record, body: () throws -> Void) throws {
             try lock.withLock {
                 guard !registrationUsed else { throw JournalLeaseError.invalidated }; registrationUsed = true
-                try requireRestoring(expected); try body(); try requireRestoring(expected)
+                try requireRestoring(expected); try Task.checkCancellation(); try body(); try requireRestoring(expected)
             }
         }
         fileprivate func requireCurrent(_ expected: Record) throws -> Frame {
@@ -94,6 +94,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             try lock.withLock {
                 guard native, let writeNative else { throw JournalLeaseError.rootRequired }
                 let frame = try requireCurrent(previous); try next.requireReplacing(previous)
+                try Task.checkCancellation()
                 // Every error after entering the writer is uncertain. No recovery write or RPC follows it.
                 let receipt: Transition
                 do {
@@ -120,6 +121,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             return try lock.withLock {
                 guard !native, let writeOwned else { throw JournalLeaseError.unsafeMetadata }
                 _ = try requireCurrent(previous); try next.requireReplacing(previous)
+                try Task.checkCancellation()
                 do {
                     guard try writeOwned(next, previous) == next else { throw PreparationStoreError.staleRevision }
                 } catch { invalidated = true; throw AuthorityMaintenanceClientError.needsOwnerRecovery }
@@ -135,6 +137,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         /// A confirmed row can record one failure under fresh caller and lock checks.
         /// Host or job drift must not prevent the failure record. An uncertain write still forbids it.
         private func failureFrame(_ next: Record, previous: Record) throws -> Frame {
+            try Task.checkCancellation()
             guard !invalidated, !recoveryUsed, row == previous, previous.phase != .needsOwnerRecovery,
                   previous.phase != .restored, next.phase == .needsOwnerRecovery else { throw JournalLeaseError.invalidated }
             recoveryUsed = true; try next.requireReplacing(previous)
@@ -148,6 +151,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             try lock.withLock {
                 guard native, let writeNative else { throw JournalLeaseError.rootRequired }
                 let frame = try failureFrame(next, previous: previous)
+                try Task.checkCancellation()
                 do {
                     let receipt = try writeNative(next, previous, frame)
                     try receipt.requireReplacement(next, replacing: previous); row = next; return receipt
@@ -159,6 +163,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             return try lock.withLock {
                 guard !native, let writeOwned else { throw JournalLeaseError.unsafeMetadata }
                 _ = try failureFrame(next, previous: previous)
+                try Task.checkCancellation()
                 do {
                     guard try writeOwned(next, previous) == next else { throw PreparationStoreError.staleRevision }
                     row = next; return next
@@ -447,7 +452,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         try lock.withLock {
             guard prepared, probePending else { throw JournalLeaseError.invalidated }
             let row = custody.current
-            try proof.requireObserved(by: client)
+            do { try proof.requireObserved(by: client) }
+            catch { throw RuntimeMaintenanceStartupAttemptError.beforePending }
             guard let target = row.shutdownBinding, proof.accountID == row.scope.authority.accountID else {
                 throw RuntimePreparationError.changedScope
             }
@@ -455,13 +461,15 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             return try afterProbePolicy(row, proof.incarnation == target.incarnation)
         }
     }
-    private enum ClientMode {
-        case native
-        case owned(@Sendable () throws -> any AuthorityMaintenanceClientDriver,
-            @Sendable () throws -> any RuntimeJobExitWitness,
-            @Sendable (any RuntimeJobExitWitness) throws -> Void,
-            @Sendable (AuthorityMaintenanceXPCClient) async -> Void)
+    private struct OwnedClients: Sendable {
+        let makeDriver: @Sendable () throws -> any AuthorityMaintenanceClientDriver
+        let capturePeer: @Sendable () throws -> any RuntimeJobExitWitness
+        let requirePeerLive: @Sendable (any RuntimeJobExitWitness) throws -> Void
+        let beforeHealthyOpen: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
+        let afterProbe: @Sendable () -> Void
+        let beforeCancel: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
     }
+    private enum ClientMode { case native, owned(OwnedClients) }
     func runNative(until deadline: ContinuousClock.Instant) async throws -> Record {
         guard getuid() == 0, geteuid() == 0, custody.native else { throw JournalLeaseError.rootRequired }
         return try await run(mode: .native, until: deadline)
@@ -470,10 +478,14 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
         beforeHealthyOpen: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
+        afterProbe: @escaping @Sendable () -> Void = {},
+        beforeCancel: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
         until deadline: ContinuousClock.Instant) async throws -> Record {
         try RuntimeMaintenanceOwnedControl.require()
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
-        return try await run(mode: .owned(makeDriver, capturePeer, requirePeerLive, beforeHealthyOpen), until: deadline)
+        return try await run(mode: .owned(.init(makeDriver: makeDriver, capturePeer: capturePeer,
+            requirePeerLive: requirePeerLive, beforeHealthyOpen: beforeHealthyOpen,
+            afterProbe: afterProbe, beforeCancel: beforeCancel)), until: deadline)
     }
     private func makeClient(_ mode: ClientMode, context: AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceXPCClient {
         switch mode {
@@ -482,8 +494,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 throw RuntimePreparationError.changedScope
             }
             return try .init(context: context, authority: custody.floor.code, setup: setup, release: custody.release)
-        case .owned(let makeDriver, _, _, _):
-            return try .openOwned(context: context, driver: makeDriver())
+        case .owned(let owned):
+            return try .openOwned(context: context, driver: owned.makeDriver())
         }
     }
     private func observe(_ client: AuthorityMaintenanceXPCClient, mode: ClientMode,
@@ -500,6 +512,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             runUsed = true
         }
         do {
+            try Task.checkCancellation()
             let owner: RuntimeMaintenanceRestoration
             switch try prepare() {
             case .nothing: return window
@@ -511,16 +524,15 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     accountID: row.scope.authority.accountID, attemptID: row.id, revision: continuationRevision,
                     installationID: row.scope.installationID, gate: custody.floor.cohort.accountIdentity,
                     binding: nil, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
-                let (client, proof) = try await decisionProbe(mode, context: context, until: deadline)
-                let decision: RuntimeMaintenanceStartupPolicy.Action
+                let (client, proof, decision) = try await decisionProbe(mode, context: context, until: deadline)
                 do {
-                    decision = try afterAuthenticatedProbe(proof, client: client)
                     if decision == .cancelAndReopen {
                         let restored: Record
                         switch mode {
                         case .native:
                             restored = try await client.cancelAndReopenStartupNative(proof, custody: custody, until: deadline)
-                        case .owned:
+                        case .owned(let owned):
+                            await owned.beforeCancel(client)
                             restored = try await client.cancelAndReopenStartupOwned(proof, custody: custody, until: deadline)
                         }
                         await client.close()
@@ -546,21 +558,28 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             }
             return try await restoreHealthy(owner, mode: mode, until: deadline)
         } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
             let row = window
-            _ = try? custody.persistRecovery(row, failure: Self.failure(error, fallback: .changedScope))
+            _ = try? custody.persistRecovery(row, failure: Self.failure(error, fallback: .healthFailed))
             if let failure = error as? RuntimeMaintenanceStartupFailure { throw failure.underlying }
             throw error
         }
     }
     private func decisionProbe(_ mode: ClientMode, context: AuthorityMaintenanceChannelRequest,
-        until deadline: ContinuousClock.Instant) async throws -> (AuthorityMaintenanceXPCClient, AuthorityMaintenanceIncarnationProof) {
+        until deadline: ContinuousClock.Instant) async throws -> (AuthorityMaintenanceXPCClient, AuthorityMaintenanceIncarnationProof, RuntimeMaintenanceStartupPolicy.Action) {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             _ = try custody.requireCurrent(window)
             let client = try makeClient(mode, context: context)
-            do { return (client, try await observe(client, mode: mode, until: deadline)) }
-            catch {
+            do {
+                let proof = try await observe(client, mode: mode, until: deadline)
+                if case .owned(let owned) = mode { owned.afterProbe() }
+                try Task.checkCancellation()
+                let decision = try afterAuthenticatedProbe(proof, client: client)
+                return (client, proof, decision)
+            } catch {
                 await client.close(); try Task.checkCancellation()
+                guard error is AuthorityMaintenanceClientError || error is RuntimeMaintenanceStartupAttemptError else { throw error }
                 _ = try custody.requireCurrent(window)
                 try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))
             }
@@ -590,10 +609,10 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 case .native:
                     restored = try await client.restoreStartupHealthyNative(proof, owner: owner, until: deadline,
                         persist: { try self.custody.persistNative($0, previous: $1) })
-                case .owned(_, let capture, let requireLive, let beforeOpen):
-                    await beforeOpen(client)
+                case .owned(let owned):
+                    await owned.beforeHealthyOpen(client)
                     restored = try await client.restoreStartupHealthyOwned(proof, owner: owner,
-                        capturePeer: capture, requirePeerLive: requireLive, until: deadline,
+                        capturePeer: owned.capturePeer, requirePeerLive: owned.requirePeerLive, afterProbe: owned.afterProbe, until: deadline,
                         persist: { try self.custody.persistOwned($0, previous: $1) })
                 }
                 await client.close()
@@ -612,6 +631,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
     }
     static func failure(_ error: Error, fallback: Record.Failure) -> Record.Failure {
         if let failure = error as? RuntimeMaintenanceStartupFailure { return failure.failure }
+        if error is AuthorityMaintenanceClientError { return .healthFailed }
         if error is RuntimePreparationError || error is PreparationStoreError || error is JournalLeaseError { return .changedScope }
         if error is RuntimeActivationError { return .serviceUnavailable }
         return fallback
