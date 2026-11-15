@@ -56,12 +56,12 @@ final class RuntimeActivationOwnerTests: XCTestCase {
                 try verify()
             }, didStage: { if $0 == self.stoppedAt { throw Interrupted() } })
         }
-        func owner(open: (() throws -> PreparationIntentStore)? = nil, activity: ReleaseActivityBarrier? = nil) throws -> SetupAccountOwner {
+        func owner(open: (() throws -> PreparationIntentStore)? = nil, activity: ReleaseActivityBarrier? = nil, activation: RuntimeActivationOperations? = nil) throws -> SetupAccountOwner {
             try .init(openMachine: open ?? { try self.f.f.open() }, expectedReleaseDigest: f.f.release,
                 resume: { _, _ in throw Interrupted() }, accountCodePolicy: f.f.policy,
                 lookupAccount: { uid in
                     guard uid == self.f.f.identity.uid else { throw AdministrativeSetupError.wrongAccount }; return self.f.f.identity
-                }, activationOperations: operations, releaseActivity: activity)
+                }, activationOperations: activation ?? operations, releaseActivity: activity)
         }
     }
     private func harness() throws -> Harness {
@@ -232,4 +232,51 @@ final class RuntimeActivationOwnerTests: XCTestCase {
         XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.prepares, 0)
     }
 
+
+    func testRetainedOwnerRefusesActivationBeforeAnyPreparationOrRegistrationCallback() throws {
+        let h = try harness(), machine = try h.f.f.open(); var callbacks = 0
+        let forbidden = RuntimeActivationOperations(prepare: { _, _, _, _, _ in callbacks += 1; XCTFail() },
+            validate: { _, _, _, _, _ in callbacks += 1; XCTFail() }, register: { _, _ in callbacks += 1; XCTFail() },
+            didStage: { _ in callbacks += 1; XCTFail() })
+        let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: h.f.f.release,
+            resume: { _, _ in throw Interrupted() }, accountCodePolicy: h.f.f.policy,
+            lookupAccount: { _ in h.f.f.identity }, activationOperations: forbidden)
+        defer { try? owner.close() }
+        let before = try XCTUnwrap(owner.activationProgress(callerUID: getuid()))
+        XCTAssertThrowsError(try h.f.f.open()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+        XCTAssertThrowsError(try owner.resumeActivation(callerUID: getuid(), expected: before)) {
+            XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable)
+        }
+        XCTAssertEqual(callbacks, 0); XCTAssertEqual(try owner.activationProgress(callerUID: getuid()), before)
+        XCTAssertNotNil(try machine.inventory()); XCTAssertFalse(before.jobsRegistered)
+        try owner.close(); try h.withMachine { _ in () }
+    }
+    func testScopedOwnerRunsTheMaintenanceGuardAndLeavesAWriterAvailableForEveryRegistrationCallback() throws {
+        let h = try harness(), underlying = h.operations
+        var registered = Set<String>(), nativeCallbacks = 0, guardReads = 0
+        func otherWriter(_ job: InstalledAccountJobManifest) throws {
+            try h.withMachine { machine in
+                XCTAssertTrue(try XCTUnwrap(machine.inventory()).services.contains(job.declaration))
+            }
+            nativeCallbacks += 1
+        }
+        let operations = RuntimeActivationOperations(prepare: underlying.prepare, validate: underlying.validate,
+            register: { job, verifyCurrent in
+                try RuntimeJobRegistration.reconcile(job: job, verifyCurrent: verifyCurrent, requireMaintenanceOpen: { selected in
+                    try RuntimeMaintenanceBootstrapGuard.requireOpen(selected, installationID: h.f.account.installationID,
+                        openMachine: { guardReads += 1; return try h.f.f.open() }, verifyConfiguration: {})
+                }, inspect: {
+                    try otherWriter(job); return registered.contains(job.declaration.label) ? .matching : .absent
+                }, bootstrap: {
+                    try otherWriter(job); try underlying.register(job, verifyCurrent); registered.insert(job.declaration.label)
+                })
+            }, didStage: underlying.didStage)
+        let owner = try h.owner(activation: operations); defer { try? owner.close() }
+        let before = try XCTUnwrap(owner.activationProgress(callerUID: getuid()))
+        let completed = try owner.resumeActivation(callerUID: getuid(), expected: before)
+        XCTAssertTrue(completed.jobsRegistered); XCTAssertEqual(h.registrations, 2)
+        XCTAssertEqual(registered.count, 2); XCTAssertEqual(nativeCallbacks, 6); XCTAssertGreaterThan(guardReads, 0)
+        XCTAssertEqual(try owner.activationProgress(callerUID: getuid()), completed)
+        try h.withMachine { _ in () }
+    }
 }

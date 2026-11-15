@@ -5811,6 +5811,32 @@ public final class PreparationIntentStore {
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
 
+    /// A negative bootstrap guard only. No phase grants restoration or native custody.
+    func requireRuntimeMaintenanceBootstrap(_ job: InstalledAccountJobManifest, installationID: Data) throws {
+        guard job.declaration.role == .authority else { return }
+        try transaction(write: false) {
+            try identity(macID)
+            guard let accountID = job.declaration.accountID, let inventory = try loadInventoryRecord(),
+                  inventory.macID == macID, inventory.installationID == installationID,
+                  inventory.bundlePath == job.bundlePath, inventory.services.contains(job.declaration) else {
+                throw RuntimePreparationError.changedScope
+            }
+            guard try scalar("PRAGMA user_version") >= RuntimeMaintenanceWindowStorage.schemaVersion else { return }
+            guard let record = try loadRuntimeMaintenanceWindows().first(where: { $0.scope.authority.accountID == accountID }) else { return }
+            guard record.scope.macID == macID, record.scope.installationID == installationID,
+                  record.scope.releaseDigest == inventory.releaseDigest,
+                  let account = try loadAccountPreparation(ownerUID: record.scope.authority.ownerUID),
+                  account.accountID == accountID, account.storagePrepared, account.installationID == installationID,
+                  let registration = try loadUpdateAdmissionRegistration() else { throw RuntimePreparationError.changedScope }
+            var directory = account.directoryID.uuid
+            let current = try RuntimeMaintenanceWindowRecord.Account(accountID: accountID, ownerUID: account.ownerUID,
+                directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+            let projection = try RuntimeMaintenanceAdmissionProjection(record: record, macID: macID,
+                installationID: installationID, account: current, registration: registration)
+            guard !projection.requiresLocalHold else { throw RuntimeActivationError.maintenancePending }
+        }
+    }
+
     /// Reads startup restrictions only. The host must apply the local hold before it admits requests.
     func runtimeMaintenanceStartupProjection(account: RuntimeMaintenanceWindowRecord.Account,
         candidate: SignedReleaseEvidence) -> RuntimeMaintenanceAdmissionProjection {
