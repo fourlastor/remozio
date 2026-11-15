@@ -137,6 +137,20 @@ struct MachineUpdateRetainedSetupPolicyIntentRecord: Codable, Equatable, Sendabl
         try requirePlan(MachineUpdatePolicyPlan(source: sourcePolicy.snapshot(), candidate: candidate))
     }
 
+    /// Read-only phase observation. It creates no revision, receipt or recorded successor.
+    func observeBoundary(_ current: AuthorityJournal.MachineUpdatePolicyBoundary) throws -> Observation {
+        try validate()
+        guard current.macID == macID, current.accountID == accountID else { throw PreparationStoreError.staleRevision }
+        switch phase {
+        case .prepared:
+            guard try current.policy == sourcePolicy.snapshot(), try current.checkpoint.bytes == sourceCheckpoint else {
+                throw PreparationStoreError.staleRevision
+            }
+            return .sourceUnchanged
+        case .writing: return try observeWriting(current)
+        case .recorded: try requireRecorded(current); return .startupBoundary
+        }
+    }
     /// Compares a decoded record with the actual machine and the original paired stores.
     func observe(owner: LocalAccountIdentity, machine: PreparationIntentStore, journal: AuthorityJournal,
         candidate: SignedReleaseEvidence) throws -> Observation {

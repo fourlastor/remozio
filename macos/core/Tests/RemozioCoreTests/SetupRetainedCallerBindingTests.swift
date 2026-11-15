@@ -3,7 +3,7 @@ import Foundation
 import XCTest
 @testable import RemozioCore
 
-final class SetupRetainedCallerBindingTests: XCTestCase {
+final class SetupRetainedCallerBindingTests: XCTestCase, @unchecked Sendable {
     private typealias Binding = SetupRetainedCallerBinding
     private typealias Fixture = RetainedMaterialWriterFixture
 
@@ -147,4 +147,19 @@ final class SetupRetainedCallerBindingTests: XCTestCase {
             XCTAssertEqual(reads, 0)
         }
     }
+    func testActualRecordOnlyStopCaptureCannotRecaptureWithoutItsBindingReceipt() async throws {
+        let stop = try MaintenanceStopTestFixture(), client = try stop.client()
+        let capture = try await stop.capture(client)
+        XCTAssertNil(capture.bindingTransition)
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let (state, entry, peer, accepted) = try values(f)
+            let binding = try resolve(state, entry, peer, accepted, incarnation: UUID())
+            XCTAssertThrowsError(try binding.recapturing(state: state, entry: entry, transitions: [], candidate: f.candidate,
+                capture: capture, lookup: { _ in XCTFail("A record-only capture reached lookup"); throw RuntimePreparationError.changedScope })) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+        }
+        await client.close()
+    }
+
 }

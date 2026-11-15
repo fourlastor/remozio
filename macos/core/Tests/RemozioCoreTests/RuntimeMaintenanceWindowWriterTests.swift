@@ -413,4 +413,19 @@ final class RuntimeMaintenanceWindowWriterTests: XCTestCase {
             }
         }
     }
+    func testObservationWindowReadbackRequiresTheExactRowAndNeverWrites() throws {
+        try fixture { f in
+            let row = try initial(f); try write(row, f)
+            let before = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            var commits = 0; try f.reopen { commits += 1 }
+            try f.machine().requireRuntimeMaintenanceObservationWindow(row, candidate: f.candidate)
+            let changed = try Window(id: row.id, revision: AccountPreparationIntent.randomID(), purpose: row.purpose, scope: row.scope)
+            XCTAssertThrowsError(try f.machine().requireRuntimeMaintenanceObservationWindow(changed, candidate: f.candidate)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+            try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: before)
+            XCTAssertEqual(commits, 0)
+        }
+    }
+
 }

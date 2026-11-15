@@ -88,15 +88,15 @@ final class RuntimeMaintenanceCommitmentsTests: XCTestCase {
             try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate).requireSame(as: before)
         }
     }
-    func testOperationCommitsTheActualMaterialSelectionWithoutChangingRestorationOrFootprint() throws {
+    func testStableOperationAndIntentIgnoreMaterialProgressWithoutChangingRestorationOrFootprint() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let original = try binding(f), before = try capture(f, original)
             let expected = try f.machine().retainedSetupMaterialSnapshot(owner: f.owner, candidate: f.candidate)
             _ = try f.machine().retainRetainedSetupRuntimeMaterial(f.material.reference, expected: expected, candidate: f.candidate,
                 directory: f.directory, admission: f.admission, fileCustodyAccepted: true, verifyScoped: { _, _ in })
             let after = try capture(f, binding(f))
-            XCTAssertNotEqual(before.scope.operationDigest, after.scope.operationDigest)
-            XCTAssertNotEqual(before.scope.administratorIntentDigest, after.scope.administratorIntentDigest)
+            XCTAssertEqual(before.scope.operationDigest, after.scope.operationDigest)
+            XCTAssertEqual(before.scope.administratorIntentDigest, after.scope.administratorIntentDigest)
             XCTAssertEqual(before.scope.authorityGrantDigest, after.scope.authorityGrantDigest)
             XCTAssertEqual(before.scope.targetConsentDigest, after.scope.targetConsentDigest)
             XCTAssertEqual(before.scope.restorationDigest, after.scope.restorationDigest)
@@ -114,4 +114,63 @@ final class RuntimeMaintenanceCommitmentsTests: XCTestCase {
             XCTAssertNotEqual(value.administratorIntentDigest, value.operationDigest)
         }
     }
+    func testOperationUsesV2AndConsentCannotMatchItsHistoricalV1Domain() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let binding = try binding(f), actual = try capture(f, binding), runtime = binding.entry.runtime
+            let initial = try XCTUnwrap(runtime.setup.account?.initialization)
+            let choices = CBORValue.array([.unsigned(0), .null, .null, .null])
+            let fields = CBORValue.array([.unsigned(RuntimeMaintenanceWindowRecord.Purpose.retainedRuntime.rawValue),
+                .bytes(try runtime.preparation.bytes), .bytes(try initial.bytes), .bytes(try runtime.plan.encoded), choices])
+            let expected = Data(SHA256.hash(data: try DeterministicCBOR.encode(
+                .array([.text("remozio.maintenance.operation.v2"), fields]),
+                limits: .init(maxBytes: 2 * 1024 * 1024, maxDepth: 8, maxItems: 4096))))
+            XCTAssertEqual(actual.scope.operationDigest, expected)
+            XCTAssertNotEqual(actual.scope.operationDigest, try digest("operation", fields))
+            var uuid = binding.targetOwner.directoryID.uuid
+            let owner = CBORValue.array([.unsigned(UInt64(binding.targetOwner.uid)),
+                .unsigned(UInt64(binding.targetOwner.primaryGroupID)), .bytes(withUnsafeBytes(of: &uuid) { Data($0) })])
+            XCTAssertNotEqual(actual.scope.targetConsentDigest,
+                try digest("targetConsent", .array([.bytes(runtime.preparation.accountID), owner, choices])))
+        }
+    }
+    func testUnsupportedObservationPhasesRefuseBeforeAnyRead() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let binding = try binding(f), scope = try capture(f, binding).scope
+            for phase in [RuntimeMaintenanceWindowRecord.Phase.authorized, .draining, .workSettled, .restoring, .needsOwnerRecovery] {
+                let early = phase == .authorized || phase == .draining
+                let row = try RuntimeMaintenanceWindowRecord(id: AccountPreparationIntent.randomID(),
+                    revision: AccountPreparationIntent.randomID(), purpose: .retainedRuntime, scope: scope, phase: phase,
+                    operation: early ? .notStarted : .unknown, service: early ? .notStopped : .unknown,
+                    failure: phase == .needsOwnerRecovery ? .repairRequired : nil)
+                var reads = 0
+                let result = RuntimeMaintenanceRuntimeObservation.observeOwned(window: row, candidate: f.candidate,
+                    readFrame: { reads += 1; throw RuntimePreparationError.changedScope },
+                    readPolicy: { reads += 1; throw RuntimePreparationError.changedScope },
+                    readMaterial: { _ in reads += 1; throw RuntimePreparationError.changedScope },
+                    readFile: { _, _ in reads += 1; throw RuntimePreparationError.changedScope },
+                    lookup: { _ in reads += 1; throw RuntimePreparationError.changedScope }, verifyCurrent: { reads += 1 })
+                XCTAssertEqual(result, .unknown); XCTAssertEqual(reads, 0)
+            }
+        }
+    }
+    func testDeclaredFootprintUsesItsAnchorAndAcceptsOnlyFixedOrExactStagingLeaves() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let binding = try binding(f), inputs = try inputs(binding)
+            let declared = try Commitments.MutationFootprint(runtime: binding.entry.runtime, inputs: inputs).declaration
+            XCTAssertEqual(declared.files.count, Set(declared.files).count)
+            XCTAssertTrue(declared.directories.contains("."))
+            XCTAssertTrue(declared.files.allSatisfy { !$0.hasPrefix("/") && !$0.contains("..") })
+            for path in declared.files { XCTAssertTrue(declared.containsFile(path)) }
+            for pattern in declared.staging {
+                let prefix = String(pattern.dropLast("{UUID}".count))
+                XCTAssertTrue(declared.containsFile(prefix + UUID().uuidString))
+                XCTAssertFalse(declared.containsFile(prefix + "not-a-uuid"))
+                XCTAssertFalse(declared.containsFile(prefix + UUID().uuidString + "/other"))
+            }
+            XCTAssertFalse(declared.containsFile("outside.cbor"))
+            XCTAssertThrowsError(try Commitments.MutationFootprint.relative("/Users/501/Library/outside.cbor"))
+            XCTAssertThrowsError(try Commitments.MutationFootprint.relative(RuntimePreparationPaths.sharedDirectory + "/../outside.cbor"))
+        }
+    }
+
 }

@@ -17,6 +17,25 @@ enum MachineUpdateRetainedSetupRuntimeNativeFiles {
         let material = try Material.decode(ProtectedServiceConfiguration.read(path: path))
         try requireMaterial(material, runtime: runtime); try verifyCurrent(); return material
     }
+    /// Reads a possible unrecorded material file without creating or retaining it.
+    static func readOptionalMaterial(runtime: Runtime, verifyCurrent: Verify) throws -> Material? {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        try verifyCurrent()
+        let path = try RuntimePreparationPaths(accountID: runtime.preparation.accountID).privateDirectory
+            + "/" + AdministrativeSetupPublication.File.runtimeRecord.name
+        guard let bytes = try ProtectedServiceConfiguration.readOptionalPrivate(path: path, kind: .root) else {
+            try verifyCurrent(); return nil
+        }
+        let material = try Material.decode(bytes)
+        try material.services.validate(account: runtime.preparation)
+        guard try material.services.encoded == runtime.plan.encoded else { throw RuntimePreparationError.conflictingMaterial }
+        try material.reference.validate(account: runtime.preparation, services: runtime.plan)
+        if let reference = runtime.state.reference, try material.reference != reference { throw RuntimePreparationError.conflictingMaterial }
+        if let activity = material.serviceActivity {
+            try RuntimeMaterialPreparation.validateServiceActivity(account: runtime.preparation, activity: activity, verifyCurrent: verifyCurrent)
+        }
+        try verifyCurrent(); return material
+    }
     /// Checks values only. It does not establish native placement, file identity or service activity.
     static func requireMaterial(_ material: Material, runtime: Runtime) throws {
         guard let reference = runtime.state.reference, reference.serviceActivity != nil else { throw RuntimePreparationError.incomplete }
