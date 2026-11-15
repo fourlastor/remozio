@@ -297,3 +297,13 @@ final class AuthorityJournalTests: XCTestCase {
         func lease() throws -> ProtectedJournalLease { try ProtectedJournalLease(anchor: root.path, relativeDirectory: "store", owner: getuid()) }
     }
 }
+
+extension AuthorityJournalTests {
+    func testMaintenanceJournalObservationCannotTreatAMissingCoordinatorAsZeroWork() throws {
+        let fixture = try Fixture(), journal = try owner(fixture)
+        defer { try? journal.close() }
+        XCTAssertThrowsError(try journal.maintenanceJournalWork()) {
+            XCTAssertEqual($0 as? ApprovalCoordinatorError, .unavailable)
+        }
+    }
+}

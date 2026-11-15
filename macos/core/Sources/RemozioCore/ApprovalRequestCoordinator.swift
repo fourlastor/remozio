@@ -146,6 +146,15 @@ public final class ApprovalRequestCoordinator {
         self.signingLimits = signingLimits; self.auditLimits = auditLimits
     }
 
+    /// The journal serializes this observation. It changes no request deadline, decision or resource lifetime.
+    func maintenanceRequestWork() throws -> AuthorityMaintenanceRequestWork {
+        guard !retired else { throw ApprovalCoordinatorError.unavailable }
+        try releaseActivity?.validate()
+        return .init(liveRequests: entries.values.filter { !$0.state.phase.isTerminal }.count,
+            commandCaptures: entries.values.filter { $0.command != nil }.count,
+            activityOwners: entries.values.filter { $0.activity != nil }.count)
+    }
+
     /// The host retains both store leases and completes startup recovery before supplying the writer.
     convenience init(database: JournalDatabase, continuity: ContinuityStore, writer: AuditEpochWriter, clockEpoch: UUID,
                      maximumRequests: Int, maximumRetainedBytes: Int, requestLimits: CBORLimits, captureLimits: CBORLimits,
