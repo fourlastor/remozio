@@ -182,6 +182,9 @@ final class UpdateAdmissionToken: Sendable {
     private let id: UUID
     fileprivate init(barrier: UpdateAdmissionBarrier, id: UUID) { self.barrier = barrier; self.id = id }
     func validate() throws { try barrier.validateAdmission(id) }
+    func validateAccountScope(_ account: UpdateAdmissionRegistrationRecord.Account) throws {
+        try barrier.requireRegisteredIdentity(account.identity, scope: .account(account.accountID)); try validate()
+    }
     func validateMachineBoundary(directory: ReleaseDestinationLease, expected: PreparationFileIdentity) throws {
         try barrier.validateMachineAdmission(id, directory: directory, expected: expected)
     }

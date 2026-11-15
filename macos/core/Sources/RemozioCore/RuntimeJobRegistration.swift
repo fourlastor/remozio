@@ -89,9 +89,12 @@ enum RuntimeJobRegistration {
     enum Observation: Equatable { case absent, matching, conflicting }
     static func ensure(_ job: InstalledAccountJobManifest, verifyCurrent: () throws -> Void) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        try reconcile(job: job, verifyCurrent: verifyCurrent, requireMaintenanceOpen: RuntimeMaintenanceBootstrapGuard.requireNativeOpen, inspect: { try inspect(job) }, bootstrap: {
-            _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
-        })
+        try RuntimeMaintenanceBootstrapGuard.withNativeRegistration(job) { verifyAdmission in
+            try reconcile(job: job, verifyCurrent: verifyCurrent, requireMaintenanceOpen: { _ in try verifyAdmission() },
+                inspect: { try inspect(job) }, bootstrap: {
+                    _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
+                })
+        }
     }
     static func inspect(_ job: InstalledAccountJobManifest) throws -> Observation {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }

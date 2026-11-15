@@ -181,9 +181,85 @@ final class RuntimeMaintenanceWindowWriterTests: XCTestCase {
     @discardableResult private func write(_ value: Window, _ f: RuntimeMaintenanceWriterFixture, previous: Window? = nil,
         expected: MachineUpdateStableReleaseSnapshot? = nil,
         verify: (PreparationIntentStore.CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> Window {
-        try f.machine().writeRuntimeMaintenanceWindow(value, replacing: previous,
-            expected: expected ?? f.machine().stableMachineUpdateSnapshot(candidate: f.candidate),
-            candidate: f.candidate, directory: f.directory, admission: f.admission, verifyScoped: verify)
+        let snapshot = try expected ?? f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+        let drain = try value.phase == .draining ? accountBarrier(f, expected: snapshot).beginDrain() : nil
+        defer { drain?.close() }
+        return try f.machine().writeRuntimeMaintenanceWindow(value, replacing: previous, expected: snapshot,
+            candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: drain, verifyScoped: verify)
+    }
+    private func accountBarrier(_ f: RuntimeMaintenanceWriterFixture, expected: MachineUpdateStableReleaseSnapshot) throws -> UpdateAdmissionBarrier {
+        let account = try XCTUnwrap(expected.admission.accounts.first { $0.accountID == f.authority.accountID })
+        let anchor = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent().deletingLastPathComponent().path
+        return try .init(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid(),
+            expected: account.identity, scope: .account(account.accountID))
+    }
+    func testDrainingRequiresTheActualLiveAccountDrainAndPreservesRowsOnRefusal() throws {
+        try fixture { f in
+            let current = try initial(f); try write(current, f)
+            let next = try maintenanceValue(.draining, previous: current)
+            let expected = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+            let foreign = try UpdateAdmissionTestFixture(), machine = try foreign.open().beginDrain()
+            let (other, _) = try foreign.provisionAccount(maintenanceData(99)), wrongAccount = try other.beginDrain()
+            let closed = try accountBarrier(f, expected: expected).beginDrain(); closed.close()
+            defer { machine.close(); wrongAccount.close() }
+            for token in [nil, machine, wrongAccount, closed] as [UpdateDrainToken?] {
+                var callbacks = 0
+                XCTAssertThrowsError(try f.machine().writeRuntimeMaintenanceWindow(next, replacing: current, expected: expected,
+                    candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: token,
+                    verifyScoped: { _ in callbacks += 1 }))
+                XCTAssertEqual(callbacks, 0); XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+            }
+            let drain = try accountBarrier(f, expected: expected).beginDrain(); defer { drain.close() }
+            XCTAssertEqual(try f.machine().writeRuntimeMaintenanceWindow(next, replacing: current, expected: expected,
+                candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: drain), next)
+        }
+    }
+    func testClosingTheAccountDrainDuringMutationRollsBackTheDrainingRow() throws {
+        try fixture { f in
+            let current = try initial(f); try write(current, f)
+            let expected = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+            let drain = try accountBarrier(f, expected: expected).beginDrain()
+            XCTAssertThrowsError(try f.machine().writeRuntimeMaintenanceWindow(maintenanceValue(.draining, previous: current),
+                replacing: current, expected: expected, candidate: f.candidate, directory: f.directory, admission: f.admission,
+                accountDrain: drain, verifyScoped: { if $0 == .afterMutation { drain.close() } }))
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+            let next = try accountBarrier(f, expected: expected).beginDrain(); next.close()
+        }
+    }
+    func testClosingTheAccountDrainBeforeMutationRefusesTheDrainingRow() throws {
+        try fixture { f in
+            let current = try initial(f); try write(current, f)
+            let expected = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+            for boundary in [PreparationIntentStore.CompletionIntentStorageStage.beforeTransaction, .inTransaction] {
+                let drain = try accountBarrier(f, expected: expected).beginDrain()
+                XCTAssertThrowsError(try f.machine().writeRuntimeMaintenanceWindow(maintenanceValue(.draining, previous: current),
+                    replacing: current, expected: expected, candidate: f.candidate, directory: f.directory, admission: f.admission,
+                    accountDrain: drain, verifyScoped: { if $0 == boundary { drain.close() } }))
+                XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+            }
+        }
+    }
+    func testClosingTheAccountDrainAfterCommitRetiresTheWriterWithoutReplaying() throws {
+        try fixture { f in
+            let current = try initial(f); try write(current, f)
+            let expected = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+            let next = try maintenanceValue(.draining, previous: current)
+            let drain = try accountBarrier(f, expected: expected).beginDrain(); var mutations = 0
+            XCTAssertThrowsError(try f.machine().writeRuntimeMaintenanceWindow(next, replacing: current, expected: expected,
+                candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: drain, verifyScoped: {
+                    if $0 == .afterMutation { mutations += 1 }; if $0 == .afterCommit { drain.close() }
+                }))
+            XCTAssertEqual(mutations, 1)
+            XCTAssertThrowsError(try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)) {
+                XCTAssertEqual($0 as? PreparationStoreError, .unavailable)
+            }
+            try f.reopen(nil)
+            let projection = f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate)
+            XCTAssertEqual(projection.revision, next.revision); XCTAssertTrue(projection.requiresLocalHold)
+        }
     }
     func testFirstWindowMigratesAtomicallyAndPreservesAllOtherRows() throws {
         try fixture { f in

@@ -5743,7 +5743,7 @@ public final class PreparationIntentStore {
     /// Setup metadata only. Native grants, digest semantics and lifecycle proof remain M07/M15 obligations.
     func writeRuntimeMaintenanceWindow(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord?,
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
-        admission: UpdateOrdinaryAdmissionLease,
+        admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken? = nil,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
         try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion)
         _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded); try next.requireReplacing(previous)
@@ -5753,6 +5753,13 @@ public final class PreparationIntentStore {
             func boundary() throws {
                 try requireUpdateAdmissionDirectory(directory)
                 try scope.validateMachineBoundary(directory: directory, expected: expected.admission.machine)
+                if next.phase == .draining {
+                    guard let accountDrain, let gate = expected.admission.accounts.first(where: {
+                        $0.accountID == next.scope.authority.accountID
+                    }) else { throw MachineUpdateActivationError.wrongBoundary }
+                    try accountDrain.validateAccountBoundary(directory: directory,
+                        accountID: gate.accountID, expected: gate.identity)
+                }
             }
             func footprint() throws -> Data {
                 try withRetainedSetupRecordLimit(maximumBytes: max(RuntimeReleaseBackendPlan.maximumBytes, MachineUpdateRetainedSetupPromotionIntentRecord.maximumBytes)) {
@@ -5813,27 +5820,40 @@ public final class PreparationIntentStore {
 
     /// A negative bootstrap guard only. No phase grants restoration or native custody.
     func requireRuntimeMaintenanceBootstrap(_ job: InstalledAccountJobManifest, installationID: Data) throws {
-        guard job.declaration.role == .authority else { return }
-        try transaction(write: false) {
+        _ = try runtimeMaintenanceBootstrapAccount(job, installationID: installationID)
+    }
+    func runtimeMaintenanceBootstrapAccount(_ job: InstalledAccountJobManifest,
+        installationID: Data) throws -> UpdateAdmissionRegistrationRecord.Account? {
+        guard job.declaration.role == .authority else { return nil }
+        return try transaction(write: false) {
             try identity(macID)
             guard let accountID = job.declaration.accountID, let inventory = try loadInventoryRecord(),
                   inventory.macID == macID, inventory.installationID == installationID,
                   inventory.bundlePath == job.bundlePath, inventory.services.contains(job.declaration) else {
                 throw RuntimePreparationError.changedScope
             }
-            guard try scalar("PRAGMA user_version") >= RuntimeMaintenanceWindowStorage.schemaVersion else { return }
-            guard let record = try loadRuntimeMaintenanceWindows().first(where: { $0.scope.authority.accountID == accountID }) else { return }
+            let schema = try scalar("PRAGMA user_version")
+            let registration = schema >= 16 ? try loadUpdateAdmissionRegistration() : nil
+            if let registration {
+                guard registration.macID == macID, registration.installationID == installationID else {
+                    throw RuntimePreparationError.changedScope
+                }
+            }
+            let gate = registration?.accounts.first { $0.accountID == accountID }
+            guard schema >= RuntimeMaintenanceWindowStorage.schemaVersion else { return gate }
+            guard let record = try loadRuntimeMaintenanceWindows().first(where: { $0.scope.authority.accountID == accountID }) else { return gate }
             guard record.scope.macID == macID, record.scope.installationID == installationID,
                   record.scope.releaseDigest == inventory.releaseDigest,
                   let account = try loadAccountPreparation(ownerUID: record.scope.authority.ownerUID),
                   account.accountID == accountID, account.storagePrepared, account.installationID == installationID,
-                  let registration = try loadUpdateAdmissionRegistration() else { throw RuntimePreparationError.changedScope }
+                  let registration else { throw RuntimePreparationError.changedScope }
             var directory = account.directoryID.uuid
             let current = try RuntimeMaintenanceWindowRecord.Account(accountID: accountID, ownerUID: account.ownerUID,
                 directoryID: withUnsafeBytes(of: &directory) { Data($0) })
             let projection = try RuntimeMaintenanceAdmissionProjection(record: record, macID: macID,
                 installationID: installationID, account: current, registration: registration)
             guard !projection.requiresLocalHold else { throw RuntimeActivationError.maintenancePending }
+            return gate
         }
     }
 
