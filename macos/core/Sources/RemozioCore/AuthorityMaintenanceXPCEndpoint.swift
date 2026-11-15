@@ -5,6 +5,7 @@ import Foundation
 @objc protocol AuthorityMaintenanceXPCProtocol {
     func hello(reply: @escaping @Sendable (UInt64) -> Void)
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
+    func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
 
 /// Process-bound access. Root construction uses the installed registration and actual runtime owners.
@@ -14,22 +15,25 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     private let processID = getpid(), owner = getuid()
     private let marker: @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker?
     private let reopen: @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void
+    private let readGate: @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
     private init(admission: AuthorityMaintenancePairingAdmission, acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
         marker: @escaping @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker? = { _, _ in nil },
-        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() }) {
-        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen
+        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() },
+        readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope }) {
+        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen; self.readGate = readGate
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
-        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() }) throws -> AuthorityMaintenanceChannelAccess {
+        reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() },
+        readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope }) throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen)
+        return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen, readGate: readGate)
     }
     static func openNative(service: AuthorityWakeService, registration: InstalledAuthorityCommandRegistration) async throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -45,7 +49,14 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try service.validateNativeMaintenanceIdentity()
             try registration.reopenMaintenanceAdmission(q, account: account, incarnation: incarnation, admission: admission, releaseBinding: release)
             try service.validateNativeMaintenanceIdentity()
+        }, readGate: { request in
+            try service.validateNativeMaintenanceIdentity()
+            let result = try registration.observeMaintenanceGate(request, account: account, incarnation: incarnation)
+            try service.validateNativeMaintenanceIdentity(); return result
         })
+    }
+    func observeGate(_ request: AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse {
+        try validateIdentity(); let result = try readGate(request); try validateIdentity(); return result
     }
     func retainCloseMarker(_ shutdown: AuthorityMaintenancePairingAdmission.Shutdown, request: AuthorityMaintenanceChannelRequest) throws {
         if let value = try marker(shutdown.binding, request) { try shutdown.retainCloseMarker(value) }
@@ -74,7 +85,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     private var context: (Request, AuthorityMaintenancePairingAdmission.Connection)?
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var active: UUID?, budgetOwners = Set<UUID>()
-    private var closed = false
+    private var closed = false, helloAccepted = false
     private init(access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget,
         verify: @escaping () throws -> Void, invalidate: @escaping () -> Void, onHandshake: @escaping @Sendable () -> Void) {
         self.access = access; self.budget = budget; self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake
@@ -111,7 +122,8 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     func hello(reply: @escaping @Sendable (UInt64) -> Void) {
         do {
             try verify()
-            try lock.withLock { guard !closed else { throw AuthorityXPCEndpointError.unavailable }; reply(1) }
+            try lock.withLock { guard !closed else { throw AuthorityXPCEndpointError.unavailable }
+                helloAccepted = true; reply(AuthorityMaintenanceChannelScope.protocolVersion) }
         } catch { close(); reply(0) }
     }
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
@@ -126,6 +138,27 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                     let result = await response(q)
                     lock.withLock { releaseBudget(id); if !closed { reply(result.0) } }
                     if result.1 { close() }
+                }
+            }
+        } catch { close(); reply(nil) }
+    }
+    func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        do {
+            try verify(); let request = try AuthorityMaintenanceGateRequest.decode(payload)
+            try lock.withLock {
+                guard !closed, helloAccepted, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                let id = UUID(); active = id; budgetOwners.insert(id)
+                tasks[id] = Task { [self] in
+                    defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
+                    let bytes: Data?
+                    do {
+                        try Task.checkCancellation()
+                        let activity = try access.acquireActivity(); defer { activity?.close() }
+                        try activity?.validate(); let encoded = try access.observeGate(request).encoded
+                        try activity?.validate(); try Task.checkCancellation(); onHandshake(); bytes = encoded
+                    } catch { bytes = nil }
+                    lock.withLock { releaseBudget(id); if !closed { reply(bytes) } }
+                    if bytes == nil { close() }
                 }
             }
         } catch { close(); reply(nil) }

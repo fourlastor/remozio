@@ -8,7 +8,11 @@ protocol AuthorityMaintenanceClientDriver: Sendable {
     func start(_ invalidated: @escaping @Sendable () -> Void)
     func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
     func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
+    func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
     func close()
+}
+extension AuthorityMaintenanceClientDriver {
+    func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { reply(.bytes(nil)) }
 }
 private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @unchecked Sendable {
     private let connection: NSXPCConnection, policy: XPCPeerPolicy
@@ -25,6 +29,10 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     }
     func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do { _ = try policy.verifyCredentials(connection); proxy(reply)?.exchange(bytes) { [self] in checked(.bytes($0), reply) } }
+        catch { reply(.bytes(nil)) }
+    }
+    func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+        do { _ = try policy.verifyCredentials(connection); proxy(reply)?.readGate(bytes) { [self] in checked(.bytes($0), reply) } }
         catch { reply(.bytes(nil)) }
     }
     private func proxy(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) -> (any AuthorityMaintenanceXPCProtocol)? {
@@ -110,7 +118,7 @@ actor AuthorityMaintenanceXPCClient {
     deinit { lifetime.close(); timer?.cancel(); driver.close() }
     func start(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .new else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
-        guard case .hello(1) = try await invoke(nil, until: deadline) else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         let response = try await send(.open, until: deadline); binding = response.binding; if state != .closed { state = .open }; return response
     }
     func observe(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {

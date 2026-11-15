@@ -16,6 +16,18 @@ struct RuntimeMaintenanceReaderFixture {
     func mutate(_ sql: String) throws { try edit([sql]) }
 }
 
+func runtimeMaintenanceFixtureSchemaVersion(_ path: String) throws -> Int64 {
+    var connection: OpaquePointer?, statement: OpaquePointer?
+    guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK,
+          let db = connection else { throw PreparationStoreError.invalidConfiguration }
+    defer { sqlite3_close(db) }
+    guard sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &statement, nil) == SQLITE_OK, let row = statement else { throw PreparationStoreError.corruptRecord }
+    defer { sqlite3_finalize(row) }
+    guard sqlite3_step(row) == SQLITE_ROW else { throw PreparationStoreError.corruptRecord }
+    let version = sqlite3_column_int64(row, 0)
+    guard sqlite3_step(row) == SQLITE_DONE else { throw PreparationStoreError.corruptRecord }; return version
+}
+
 func runtimeMaintenanceFixtureRows(_ databasePath: String, omitMaintenance: Bool = false, excludingAccount: Data? = nil, excludingRowsForAccounts: [String: Data] = [:]) throws -> [String: [Data]] {
     var connection: OpaquePointer?
     guard sqlite3_open_v2(databasePath, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nil) == SQLITE_OK,

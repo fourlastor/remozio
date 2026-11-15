@@ -86,6 +86,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
                 let channel = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })
                 XCTAssertEqual(channel.readers, [1]); XCTAssertEqual(channel.writers, [1]); XCTAssertTrue(channel.migrations.isEmpty)
+                let gate = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceGateRequest.formatName })
+                XCTAssertEqual(gate.readers, [1]); XCTAssertEqual(gate.writers, [1]); XCTAssertTrue(gate.migrations.isEmpty)
                 let close = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceCloseMarker.formatName })
                 XCTAssertEqual(close.readers, [1]); XCTAssertEqual(close.writers, role == .authority ? [1] : []); XCTAssertTrue(close.migrations.isEmpty)
                 let host = try XCTUnwrap(component.formats.first { $0.name == "authority.command-host-config" })
@@ -101,6 +103,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
                 XCTAssertNil(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })
                 XCTAssertNil(component.formats.first { $0.name == AuthorityMaintenanceCloseMarker.formatName })
+                XCTAssertNil(component.formats.first { $0.name == AuthorityMaintenanceGateRequest.formatName })
             }
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })

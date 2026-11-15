@@ -313,6 +313,7 @@ final class AuthorityMaintenanceAdmissionHoldTests: XCTestCase {
                 17: "machine_update_activation_v1"]
             XCTAssertEqual(Set(tables.keys).union([16]), Set(16...28))
             for version in stride(from: 28, through: 16, by: -1) {
+                XCTAssertEqual(try runtimeMaintenanceFixtureSchemaVersion(f.databasePath), Int64(version))
                 let before = try runtimeMaintenanceFixtureRows(f.databasePath)
                 let projection = f.machine().runtimeMaintenanceStartupProjection(account: f.authority, candidate: f.candidate)
                 guard !projection.requiresLocalHold else { XCTFail("Valid legacy schema \(version) retained a hold"); return }
