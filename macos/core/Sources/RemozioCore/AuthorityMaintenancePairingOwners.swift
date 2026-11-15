@@ -18,6 +18,7 @@ final class AuthorityMaintenancePairingOwners: Sendable {
             state = state.filter { if let value = $0.value.retainedMaintenancePairingWork() { values.append(value); return true }; return false }
             return values
         }
+        // With no endpoints, ready is vacuously true. Idle decisions require the counts and actual arm outcome.
         return try .init(ready: values.allSatisfy { $0.ready }, stagedAttempts: admission.stagedReservations(),
             activityOwners: values.reduce(0) { $0 + $1.activityOwners }, operationActive: values.contains { $0.operationActive })
     }

@@ -97,7 +97,7 @@ public actor AuthorityWakeService {
         recoveryTicket?.revoke(); acceptedRecoveryTicket?.revoke()
         phonePushCapability?.close()
         task?.cancel(); receiverObserver?.cancel(); executionObserver?.cancel(); commandReceiver?.requestStop(); commandExecutionWorker?.requestStop(); presence?.close(); hints.close()
-        let offers = updateScheduling?.offers
+        let offers = updateScheduling?.offers, maintenance = maintenanceOwners.withLock { $0?.pairing }
         let worker = task, drain = settingsDrain, recovery = recoveryDrain, observer = receiverObserver, executionObserver = executionObserver, publisher = publisher, pending = closing, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
         if !cleanupComplete {
             Task {
@@ -108,9 +108,9 @@ public actor AuthorityWakeService {
                 await observer?.value
                 await executionObserver?.value
                 if let pending {
-                    do { try await pending.value } catch { try? closeRequests() }
+                    do { try await pending.value } catch { await maintenance?.closeMaintenanceAndWait(); try? closeRequests() }
                 } else {
-                    await publisher?.close(); await worker?.value; await drain?.value; await recovery?.value; try? closeRequests()
+                    await publisher?.close(); await worker?.value; await drain?.value; await recovery?.value; await maintenance?.closeMaintenanceAndWait(); try? closeRequests()
                 }
             }
         }
@@ -265,6 +265,9 @@ public actor AuthorityWakeService {
             }
             return result
         } catch { presence?.close(); try? journal.close(); throw error }
+    }
+    nonisolated func maintenancePresence() -> AuthorityPresenceXPCListener? {
+        maintenanceOwners.withLock { owners in owners?.pairing.supportsMaintenance == true ? owners?.pairing : nil }
     }
     nonisolated func validateNativeMaintenanceIdentity() throws {
         guard getuid() == 0, geteuid() == 0, maintenanceActive.withLock({ $0 }),
@@ -520,6 +523,7 @@ public actor AuthorityWakeService {
         hints.close(); presence?.close()
         let offers = updateScheduling?.offers
         let publisher = publisher, drain = settingsDrain, recovery = recoveryDrain, closeRequests = closeRequests, stopRequestProducers = stopRequestProducers, commandReceiver = commandReceiver, commandExecutionWorker = commandExecutionWorker
+        let maintenance = maintenancePresence()
         let work = Task {
             await commandReceiver?.close()
             await offers?.close()
@@ -531,6 +535,7 @@ public actor AuthorityWakeService {
             await recovery?.value
             await observer?.value
             await executionObserver?.value
+            await maintenance?.closeMaintenanceAndWait()
             try closeRequests()
         }
         closing = work

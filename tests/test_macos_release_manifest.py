@@ -36,7 +36,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.machine-update-completion-publication', 'authority.installed-release-state',
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
-                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record',
+                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel',
                  'runtime.retained-setup-release', 'runtime.retained-setup-completion',
                  'runtime.retained-setup-completion-archive', 'runtime.retained-setup-completion-configuration',
                  'runtime.retained-setup-completion-publication',
@@ -492,8 +492,10 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (2, 8):
                 self.assertEqual(declarations['authority.command-host-config'], expected)
+                self.assertEqual(declarations['authority.maintenance-channel'], {0: 'authority.maintenance-channel', 1: [1], 2: [1], 3: {}})
             else:
                 self.assertNotIn('authority.command-host-config', declarations)
+                self.assertNotIn('authority.maintenance-channel', declarations)
 
     def test_no_component_declares_the_installed_readiness_service_yet(self):
         # Host version 4 can name the readiness service only when the Authority also declares this format.

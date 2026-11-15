@@ -89,7 +89,7 @@ final class AuthorityMaintenanceListenerTests: XCTestCase, @unchecked Sendable {
         while !body() { guard ContinuousClock.now < deadline else { throw Fault.timedOut }; try await Task.sleep(for: .milliseconds(2)) }
     }
     private func makeOwner(_ f: Fixture, _ native: NSXPCListener, _ builder: Builder, maximum: Int = 2,
-                       timeout: UInt64 = 5000) throws -> AuthorityMaintenanceXPCListener {
+                       timeout: UInt64 = 5000) throws -> OwnedMaintenanceListener {
         try .openOwned(listener: native, builder: builder, maximumConnections: maximum, maximumOperations: 1,
             handshakeTimeoutMilliseconds: timeout, verifyCurrent: {
                 guard f.listenerValid.withLock({ $0 }) else { throw Fault.rejected }

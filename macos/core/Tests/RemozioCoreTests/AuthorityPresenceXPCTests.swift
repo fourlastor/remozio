@@ -3,6 +3,7 @@ import CryptoKit
 import CoreGraphics
 import Security
 import Foundation
+import Dispatch
 import RemozioProtocol
 import XCTest
 @testable import RemozioCore
@@ -741,5 +742,316 @@ final class AuthorityPresenceXPCTests: XCTestCase, @unchecked Sendable {
             }
         }
         XCTAssertEqual(try f.current(endpoint).state.mode, .present); XCTAssertEqual(f.environment.invalidated.value, 0)
+    }
+    // The anonymous transport and credential controls prove routing/lifetime, not installed Root code admission.
+    private struct MuxIdentity: Sendable {
+        enum Role: Sendable { case app, setup, foreign }
+        let role: Role, uid: uid_t, fresh: Bool
+        let routedUID: uid_t?
+        init(_ role: Role, _ uid: uid_t, fresh: Bool = true, routedUID: uid_t? = nil) {
+            self.role = role; self.uid = uid; self.fresh = fresh; self.routedUID = routedUID
+        }
+    }
+    private final class MuxState: @unchecked Sendable {
+        let lock = NSRecursiveLock(), appRelease = DispatchSemaphore(value: 0)
+        var queue: [MuxIdentity] = [], peers: [ObjectIdentifier: MuxIdentity] = [:]
+        var policies: [String] = [], events: [String] = []
+        var appMade = 0, rootMade = 0, captures = 0, holdApp = false, appBusy = false, holdRoot = false, rootBusy = false
+        var rootContinuation: CheckedContinuation<Void, Never>?, rootReleased = false
+        var onRootHello: (@Sendable () -> Void)?
+        func enqueue(_ identity: MuxIdentity) { lock.withLock { queue.append(identity) } }
+        func route(_ connection: NSXPCConnection) -> uid_t {
+            lock.withLock {
+                guard !queue.isEmpty else { return UInt32.max }
+                let identity = queue.removeFirst(); peers[ObjectIdentifier(connection)] = identity
+                return identity.routedUID ?? identity.uid
+            }
+        }
+        func verify(_ connection: NSXPCConnection, root: Bool) throws {
+            try lock.withLock {
+                guard let peer = peers[ObjectIdentifier(connection)], peer.fresh,
+                      peer.role == (root ? .setup : .app), peer.uid == (root ? 0 : getuid()) else { throw Failure.denied }
+            }
+        }
+        func waitRoot() async {
+            await withCheckedContinuation { continuation in
+                let release = lock.withLock { rootBusy = true; if rootReleased { return true }; rootContinuation = continuation; return false }
+                if release { continuation.resume() }
+            }
+        }
+        func releaseRoot() { let continuation = lock.withLock { rootReleased = true; let c = rootContinuation; rootContinuation = nil; return c }; continuation?.resume() }
+    }
+    private final class MuxConnection: OwnedAuthorityConnection, @unchecked Sendable {
+        let connection: NSXPCConnection, endpoint: AuthorityPresenceXPCEndpoint, state: MuxState
+        init(_ connection: NSXPCConnection, _ endpoint: AuthorityPresenceXPCEndpoint, _ state: MuxState) { self.connection = connection; self.endpoint = endpoint; self.state = state }
+        func activate() { state.lock.withLock { state.events.append("activateApp") }; connection.activate() }
+        func close() { endpoint.close(); connection.invalidate() }
+    }
+    private final class MuxAppBuilder: AuthorityPresenceOwnedEndpointBuilding, @unchecked Sendable {
+        let f: Fixture, state: MuxState, requirement: String
+        init(_ f: Fixture, _ state: MuxState, _ requirement: String) { self.f = f; self.state = state; self.requirement = requirement }
+        func make(connection: NSXPCConnection, budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
+            onClose: @escaping @Sendable () -> Void) throws -> any OwnedAuthorityConnection {
+            try state.verify(connection, root: false)
+            let invocation = XPCInvocationGuard(connection: connection, policy: f.policy), access = f.access, binding = f.binding, state = state
+            let endpoint = AuthorityPresenceXPCEndpoint(binding: binding, budget: budget, verify: {
+                _ = try invocation.verifyInvocation(); try state.verify(connection, root: false)
+            }, acquireActivity: { try access.acquireReleaseActivity() }, verifyCurrent: { try access.verifyCurrent() },
+                invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
+                withdraw: { access.withdraw(observer: binding.connectionID) }, status: {
+                    if state.lock.withLock({ state.holdApp }) {
+                        state.lock.withLock { state.appBusy = true }
+                        guard state.appRelease.wait(timeout: .now() + 3) == .success else { throw Failure.denied }
+                    }
+                    return try access.status(binding: binding)
+                }, publish: { try access.publish($0) }, setMode: { try access.setMode($0) })
+            // Pin the real test binary, while the typed role/hash controls remain explicitly synthetic.
+            connection.setCodeSigningRequirement(requirement)
+            state.lock.withLock { state.events.append("exactApp"); state.appMade += 1 }
+            connection.exportedInterface = NSXPCInterface(with: AuthorityPresenceXPCProtocol.self); connection.exportedObject = endpoint
+            connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }; connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
+            return MuxConnection(connection, endpoint, state)
+        }
+    }
+    private final class MuxRootBuilder: AuthorityMaintenanceEndpointBuilding, @unchecked Sendable {
+        let access: AuthorityMaintenanceChannelAccess, state: MuxState, invocationPolicy: XPCPeerPolicy, requirement: String
+        init(_ access: AuthorityMaintenanceChannelAccess, _ state: MuxState, _ invocationPolicy: XPCPeerPolicy, _ requirement: String) {
+            self.access = access; self.state = state; self.invocationPolicy = invocationPolicy; self.requirement = requirement
+        }
+        func make(connection: NSXPCConnection, budget: AuthorityXPCWorkBudget, onHandshake: @escaping @Sendable () -> Void,
+            onClose: @escaping @Sendable () -> Void) throws -> AuthorityMaintenanceXPCEndpoint {
+            try state.verify(connection, root: true)
+            let invocation = XPCInvocationGuard(connection: connection, policy: invocationPolicy), state = state
+            let endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: budget, verify: {
+                _ = try invocation.verifyInvocation(); try state.verify(connection, root: true)
+            }, invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: {
+                onHandshake(); state.lock.withLock { state.onRootHello }?()
+            })
+            connection.setCodeSigningRequirement(requirement)
+            state.lock.withLock { state.events.append("exactSetup"); state.rootMade += 1 }
+            connection.exportedInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self); connection.exportedObject = endpoint
+            connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }; connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
+            return endpoint
+        }
+    }
+    private final class MuxFixture: @unchecked Sendable {
+        let f: Fixture, state = MuxState(), native = NSXPCListener.anonymous()
+        let admission: AuthorityMaintenancePairingAdmission, root: AuthorityMaintenanceConnections, server: AuthorityPresenceXPCListener
+        init(requirement: String, attach: Bool = true, prepare: Bool = true, start: Bool = true, admission: AuthorityMaintenancePairingAdmission? = nil, rootMaximum: Int = 1) throws {
+            let f = try Fixture(ownerUID: getuid()); self.f = f
+            let state = self.state
+            let admission = try admission ?? AuthorityMaintenancePairingAdmission(accountID: f.account, incarnation: Data(repeating: 4, count: 16)); self.admission = admission
+            let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission, check: { _ in }, observe: { q in
+                state.lock.withLock { state.captures += 1 }
+                if q.action == .observe, state.lock.withLock({ state.holdRoot }) { await state.waitRoot() }
+                return try .init(journal: .init(requests: .init(liveRequests: 0, commandCaptures: 0, activityOwners: 0),
+                    exchanges: .init(active: 0, stopped: false), nativeExecutions: 0, executionActivityOwners: 0),
+                    execution: .init(started: true, stopping: false, failed: false, queuedTurns: 0, rejectedTurns: 0),
+                    pairing: .init(ready: true, stagedAttempts: admission.stagedReservations(), activityOwners: 0, operationActive: false))
+            })
+            let setup = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.setup", approvedCodeDirectoryHashes: [Data(repeating: 9, count: 20)], expectedUserID: 0)
+            root = try .openOwned(builder: MuxRootBuilder(access, state, f.policy, requirement), setupPolicy: setup, maximumConnections: rootMaximum)
+            let controls = AuthorityPresenceXPCListener.OwnedControls(listener: native, builder: MuxAppBuilder(f, state, requirement),
+                peerUID: { state.route($0) }, configure: { value in state.lock.withLock { state.policies.append(value) } },
+                supportsMaintenance: true, validateSelf: { _ in })
+            server = try .openOwned(configuration: .init(serviceName: RuntimePreparationPaths(accountID: f.account).presenceService,
+                appPolicy: f.policy), journal: f.journal, presence: f.presence, clock: AuthorityClock(), controls: controls)
+            if prepare { try server.prepareMaintenance(policy: setup) }; if start { try server.start() }
+            if attach { try server.installMaintenance(root) }
+        }
+        func peer(_ identity: MuxIdentity, rootWire: Bool = true) -> MuxPeer { state.enqueue(identity); return MuxPeer(native, rootWire: rootWire) }
+        func close() async { state.appRelease.signal(); state.releaseRoot(); server.close(); await server.closeMaintenanceAndWait(); root.close(); await root.closeAndWait() }
+        deinit { state.appRelease.signal(); state.releaseRoot(); server.close(); root.close() }
+    }
+    private final class MuxPeer: @unchecked Sendable {
+        let connection: NSXPCConnection
+        let rootWire: Bool
+        init(_ listener: NSXPCListener, rootWire: Bool) {
+            self.rootWire = rootWire; connection = NSXPCConnection(listenerEndpoint: listener.endpoint)
+            connection.remoteObjectInterface = rootWire ? NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self) : NSXPCInterface(with: AuthorityPresenceXPCProtocol.self); connection.activate()
+        }
+        func close() { connection.invalidate() }
+        deinit { close() }
+        private func wait(_ result: Box<(Bool, Data?)>) async throws -> Data {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while !result.value.0 { guard ContinuousClock.now < deadline else { throw Failure.denied }; try await Task.sleep(for: .milliseconds(2)) }
+            guard let bytes = result.value.1 else { throw Failure.denied }; return bytes
+        }
+        func hello() async throws {
+            let result = Box<(Bool, Data?)>((false, nil))
+            let failed: @Sendable (Error) -> Void = { _ in result.value = (true, nil) }
+            let reply: @Sendable (UInt64) -> Void = { result.value = (true, $0 == 1 ? Data([1]) : nil) }
+            if rootWire { (connection.remoteObjectProxyWithErrorHandler(failed) as? any AuthorityMaintenanceXPCProtocol)?.hello(reply: reply) }
+            else { (connection.remoteObjectProxyWithErrorHandler(failed) as? any AuthorityPresenceXPCProtocol)?.hello(reply: reply) }
+            _ = try await wait(result)
+        }
+        func current() async throws -> Data {
+            let result = Box<(Bool, Data?)>((false, nil))
+            (connection.remoteObjectProxyWithErrorHandler({ _ in result.value = (true, nil) }) as? any AuthorityPresenceXPCProtocol)?.current { result.value = (true, $0) }
+            return try await wait(result)
+        }
+        func call(_ action: AuthorityMaintenanceChannelRequest.Action, binding: AuthorityMaintenanceBinding? = nil) async throws -> AuthorityMaintenanceChannelResponse {
+            let request = try AuthorityMaintenanceChannelRequest(action: action, accountID: Data(repeating: 2, count: 16),
+                attemptID: Data(repeating: 5, count: 16), revision: Data(repeating: 6, count: 16), installationID: Data(repeating: 7, count: 16),
+                gate: .init(device: 8, inode: 9), binding: binding, challenge: Data(repeating: 6, count: 32))
+            let result = Box<(Bool, Data?)>((false, nil))
+            (connection.remoteObjectProxyWithErrorHandler({ _ in result.value = (true, nil) }) as? any AuthorityMaintenanceXPCProtocol)?.exchange(try request.encoded) { result.value = (true, $0) }
+            return try AuthorityMaintenanceChannelResponse.decode(await wait(result), expected: request)
+        }
+    }
+    private func muxWait(_ predicate: () -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !predicate() { guard ContinuousClock.now < deadline else { throw Failure.denied }; try await Task.sleep(for: .milliseconds(2)) }
+    }
+    func testMuxPreAttachmentRootRefusesWithoutReservingAppCapacity() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement(), attach: false)
+        let root = f.peer(.init(.setup, 0)); do { try await root.hello(); XCTFail() } catch {}
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello()
+        XCTAssertEqual(f.state.lock.withLock { f.state.appMade }, 1); XCTAssertEqual(f.state.lock.withLock { f.state.rootMade }, 0)
+        try f.server.installMaintenance(f.root)
+        let next = f.peer(.init(.setup, 0)); try await next.hello(); let opened = try await next.call(.open); XCTAssertEqual(opened.outcome, .applied)
+        await f.close()
+    }
+    func testMuxAppSaturationDoesNotBlockMaintenanceAndOwnerCannotCloseSharedListener() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement())
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello()
+        let blocked = f.peer(.init(.app, getuid()), rootWire: false); do { try await blocked.hello(); XCTFail() } catch {}
+        let root = f.peer(.init(.setup, 0)); try await root.hello(); let opened = try await root.call(.open); XCTAssertEqual(opened.outcome, .applied)
+        await f.root.closeAndWait(); _ = try await app.current()
+        XCTAssertTrue(f.native.delegate === f.server); XCTAssertEqual(f.root.retainedEndpoints(), 0)
+        await f.close()
+    }
+    func testMuxMaintenanceSaturationDoesNotBlockApp() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement())
+        let root = f.peer(.init(.setup, 0)); try await root.hello()
+        let blocked = f.peer(.init(.setup, 0)); do { try await blocked.hello(); XCTFail() } catch {}
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello(); _ = try await app.current()
+        XCTAssertEqual(f.state.lock.withLock { f.state.rootMade }, 1); await f.close()
+    }
+    func testMuxBusyAppBudgetDoesNotBlockMaintenance() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement())
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello(); f.state.lock.withLock { f.state.holdApp = true }
+        let current = Task { try await app.current() }; try await muxWait { f.state.lock.withLock { f.state.appBusy } }
+        let root = f.peer(.init(.setup, 0)); try await root.hello(); _ = try await root.call(.open)
+        f.state.appRelease.signal(); _ = try await current.value; await f.close()
+    }
+    func testMuxBusyMaintenanceBudgetDoesNotBlockApp() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement())
+        let root = f.peer(.init(.setup, 0)); try await root.hello(); let opened = try await root.call(.open)
+        let binding = try XCTUnwrap(opened.binding); f.state.lock.withLock { f.state.holdRoot = true }
+        let observing = Task { try await root.call(.observe, binding: binding) }; try await muxWait { f.state.lock.withLock { f.state.rootBusy } }
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello(); _ = try await app.current()
+        f.state.releaseRoot(); _ = try await observing.value; await f.close()
+    }
+    func testMuxRejectsForeignRootStaleSetupAndAppWithRootUIDBeforeAnyWork() async throws {
+        for identity in [MuxIdentity(.foreign, 0), .init(.setup, 0, fresh: false), .init(.app, 0)] {
+            let f = try MuxFixture(requirement: runningTestRequirement()), peer = f.peer(identity)
+            do { try await peer.hello(); XCTFail() } catch {}
+            XCTAssertEqual(f.state.lock.withLock { f.state.captures }, 0); XCTAssertEqual(f.state.lock.withLock { f.state.appMade }, 0)
+            XCTAssertEqual(f.state.lock.withLock { f.state.rootMade }, 0); await f.close()
+        }
+    }
+    func testMuxSetupWithNonzeroUIDIsRejectedByBothExactBranches() async throws {
+        for route in [getuid(), uid_t(0)] {
+            let f = try MuxFixture(requirement: runningTestRequirement()), peer = f.peer(.init(.setup, getuid(), routedUID: route))
+            do { try await peer.hello(); XCTFail() } catch {}
+            XCTAssertEqual(f.state.lock.withLock { f.state.captures }, 0); XCTAssertEqual(f.state.lock.withLock { f.state.appMade + f.state.rootMade }, 0)
+            await f.close()
+        }
+    }
+    func testMuxSharedPresenceClosePreservesArmedBlockUntilExactRecovery() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement()), root = f.peer(.init(.setup, 0))
+        try await root.hello(); let opened = try await root.call(.open), binding = try XCTUnwrap(opened.binding)
+        let armed = try await root.call(.arm, binding: binding); XCTAssertEqual(armed.outcome, .applied)
+        f.server.close(); await f.server.closeMaintenanceAndWait(); XCTAssertThrowsError(try f.admission.reserveStage())
+        let next = try MuxFixture(requirement: runningTestRequirement(), admission: f.admission), recovery = next.peer(.init(.setup, 0))
+        try await recovery.hello(); let recovered = try await recovery.call(.open)
+        XCTAssertEqual(recovered.outcome, .applied); let fresh = try XCTUnwrap(recovered.binding)
+        XCTAssertNotEqual(fresh, binding); XCTAssertThrowsError(try f.admission.shutdownBinding(matching: fresh))
+        XCTAssertThrowsError(try f.admission.reserveStage())
+        _ = try f.admission.shutdownBinding(matching: binding)
+        let reopened = try await recovery.call(.reopen, binding: binding); XCTAssertEqual(reopened.outcome, .applied)
+        let stage = try f.admission.reserveStage(); stage.close(); await next.close(); await f.close()
+    }
+    func testMuxReentrantHelloCanClosePresenceAndJoinWithoutOpeningWork() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement()), server = f.server
+        f.state.lock.withLock { f.state.onRootHello = { [weak server] in server?.close() } }
+        let peer = f.peer(.init(.setup, 0)); do { try await peer.hello() } catch {}
+        await f.server.closeMaintenanceAndWait(); XCTAssertEqual(f.root.retainedEndpoints(), 0)
+        XCTAssertEqual(f.state.lock.withLock { f.state.captures }, 0); let stage = try f.admission.reserveStage(); stage.close(); await f.close()
+    }
+    func testMuxPoliciesAreSelectedBeforeActivationAndRootOwnerIsImpossible() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement()), app = f.peer(.init(.app, getuid()), rootWire: false)
+        try await app.hello(); let root = f.peer(.init(.setup, 0)); try await root.hello()
+        let policies = f.state.lock.withLock { f.state.policies }; XCTAssertEqual(policies.count, 2)
+        XCTAssertTrue(policies[1].contains(" or ")); XCTAssertTrue(policies[1].contains(f.f.policy.requirement))
+        let events = f.state.lock.withLock { f.state.events }; XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "exactApp")), try XCTUnwrap(events.firstIndex(of: "activateApp")))
+        XCTAssertLessThan(try XCTUnwrap(events.firstIndex(of: "exactApp")), try XCTUnwrap(events.firstIndex(of: "exactSetup")))
+        XCTAssertThrowsError(try AuthorityAccountPresenceConfiguration(macID: f.f.mac, accountID: f.f.account, ownerUID: 0,
+            policy: .init(observationLifetimeMilliseconds: 1000, unavailableGraceMilliseconds: 0)))
+        let rootPolicy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.app", approvedCodeDirectoryHashes: [Data(repeating: 1, count: 20)], expectedUserID: 0)
+        XCTAssertThrowsError(try AuthorityPresenceEndpointConfiguration(serviceName: RuntimePreparationPaths(accountID: f.f.account).presenceService, appPolicy: rootPolicy))
+        await f.close()
+    }
+    func testMuxUnpairedEligibilityRejectsBeforeUnionOrRootOwner() throws {
+        let f = try Fixture(ownerUID: getuid())
+        let controls = AuthorityPresenceXPCListener.OwnedControls(listener: .anonymous(),
+            builder: MuxAppBuilder(f, MuxState(), try runningTestRequirement()), peerUID: { $0.effectiveUserIdentifier },
+            configure: { _ in }, supportsMaintenance: false, validateSelf: { _ in })
+        let listener = try AuthorityPresenceXPCListener.openOwned(configuration: .init(serviceName: RuntimePreparationPaths(accountID: f.account).presenceService,
+            appPolicy: f.policy), journal: f.journal, presence: f.presence, clock: AuthorityClock(), controls: controls)
+        defer { listener.close() }
+        XCTAssertFalse(listener.supportsMaintenance)
+        let setup = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.setup", approvedCodeDirectoryHashes: [Data(repeating: 9, count: 20)], expectedUserID: 0)
+        XCTAssertThrowsError(try listener.prepareMaintenance(policy: setup))
+        XCTAssertThrowsError(try listener.currentMaintenancePairingOwners())
+    }
+
+    private func startOrdinaryMux(_ f: MuxFixture, maintenance: (@Sendable () async -> Void)?,
+        settings: Box<Bool>) async throws -> AuthorityRuntimeRunner {
+        let runner = try AuthorityRuntimeRunner(open: {
+            AuthorityRuntimeInstance(start: {
+                try await AuthorityMaintenanceStartup.start(service: { try f.server.start() }, maintenance: maintenance,
+                    after: { settings.value = true })
+            }, close: { await f.close() }, retired: { false })
+        }, report: { _ in })
+        try await runner.start(); try await muxWait { runner.status == .running }; return runner
+    }
+    private func requireMuxAppWithoutMaintenance(_ f: MuxFixture) async throws {
+        let root = f.peer(.init(.setup, 0)); do { try await root.hello(); XCTFail() } catch {}
+        let app = f.peer(.init(.app, getuid()), rootWire: false); try await app.hello(); _ = try await app.current()
+        XCTAssertEqual(f.state.lock.withLock { f.state.rootMade }, 0)
+    }
+    func testMuxMaintenancePrepareFailurePreservesOrdinaryStartupBeforeAndAfterUnion() async throws {
+        for union in [false, true] {
+            let f = try MuxFixture(requirement: runningTestRequirement(), attach: false, prepare: union, start: false)
+            let events = Box<[AuthorityMaintenanceStartup.Failure]>([]), settings = Box(false)
+            let maintenance = AuthorityMaintenanceStartup.prepare({ throw Failure.denied }, report: { events.value = [$0] })
+            let runner = try await startOrdinaryMux(f, maintenance: maintenance, settings: settings)
+            XCTAssertEqual(events.value, [.prepare]); XCTAssertTrue(settings.value)
+            XCTAssertEqual(f.state.lock.withLock { f.state.policies.count }, union ? 2 : 1)
+            if union { XCTAssertTrue(f.state.lock.withLock { f.state.policies.last!.contains(" or ") }) }
+            try await requireMuxAppWithoutMaintenance(f); XCTAssertEqual(runner.status, .running); try await runner.close()
+        }
+    }
+    func testMuxMaintenanceInstallFailurePreservesRunningAppAndStartsSettings() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement(), attach: false, start: false)
+        let events = Box<[AuthorityMaintenanceStartup.Failure]>([]), settings = Box(false)
+        let maintenance = AuthorityMaintenanceStartup.prepare({
+            { f.root.close(); do { try f.server.installMaintenance(f.root) }
+                catch { await f.root.closeAndWait(); throw error } }
+        }, report: { events.value = [$0] })
+        let runner = try await startOrdinaryMux(f, maintenance: maintenance, settings: settings)
+        XCTAssertEqual(events.value, [.install]); XCTAssertTrue(settings.value)
+        XCTAssertTrue(f.state.lock.withLock { f.state.policies.last!.contains(" or ") })
+        try await requireMuxAppWithoutMaintenance(f); XCTAssertEqual(runner.status, .running); try await runner.close()
+    }
+    func testMuxMaintenancePostStartFactoryFailureDoesNotStopAuthority() async throws {
+        let f = try MuxFixture(requirement: runningTestRequirement(), attach: false, start: false)
+        let events = Box<[AuthorityMaintenanceStartup.Failure]>([]), settings = Box(false)
+        let maintenance = AuthorityMaintenanceStartup.prepare({ { throw Failure.denied } }, report: { events.value = [$0] })
+        let runner = try await startOrdinaryMux(f, maintenance: maintenance, settings: settings)
+        XCTAssertEqual(events.value, [.install]); XCTAssertTrue(settings.value)
+        try await requireMuxAppWithoutMaintenance(f); XCTAssertEqual(runner.status, .running); try await runner.close()
     }
 }

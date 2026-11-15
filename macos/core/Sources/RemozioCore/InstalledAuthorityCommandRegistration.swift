@@ -1,7 +1,25 @@
 import Darwin
 import Foundation
+import OSLog
 import RemozioMach
 import RemozioProtocol
+
+enum AuthorityMaintenanceStartup {
+    enum Failure: String, Sendable { case prepare, install }
+    static func prepare(_ body: () throws -> (@Sendable () async throws -> Void)?,
+        report: @escaping @Sendable (Failure) -> Void = { failure in
+            Logger(subsystem: "dev.sebastiano.remozio", category: "maintenance").error("Maintenance unavailable: \(failure.rawValue, privacy: .public)")
+        }) -> (@Sendable () async -> Void)? {
+        do {
+            guard let install = try body() else { return nil }
+            return { do { try await install() } catch { report(.install) } }
+        } catch { report(.prepare); return nil }
+    }
+    static func start(service: @Sendable () async throws -> Void, maintenance: (@Sendable () async -> Void)?,
+        after: @Sendable () async throws -> Void) async throws {
+        try await service(); await maintenance?(); try await after()
+    }
+}
 
 /// Resource transfer only. The registration owner must validate the installation before calling this helper.
 enum InstalledCommandMachineHandoff {
@@ -196,6 +214,29 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         return listener
     }
 
+    func prepareMaintenance(service: AuthorityWakeService) throws -> (@Sendable () async throws -> Void)? {
+        guard configuration.jobPlacement == .systemAccount, let listener = service.maintenancePresence(),
+              let authority = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }),
+              let setup = configuration.codePolicy.entries.first(where: { $0.role == .setupController && $0.active }),
+              let app = configuration.codePolicy.entries.first(where: { $0.role == .app && $0.active }) else { return nil }
+        try validateRuntime()
+        let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+        let name = AuthorityMaintenanceChannelScope.formatName
+        guard [authority, setup].allSatisfy({ entry in release.manifest.components.first(where: { $0.role == entry.role })?
+            .formats.contains(where: { $0.name == name && $0.readers.contains(1) && $0.writers.contains(1) }) == true }) else { return nil }
+        try configuration.validateRelease(release, bundlePath: bundle.path)
+        try AuthorityMaintenanceChannelScope.validate(release, authority: authority, setup: setup)
+        let policy = try XPCPeerPolicy(teamID: setup.teamID, componentIdentifier: setup.identifier,
+            approvedCodeDirectoryHashes: [setup.codeDirectoryHash], expectedUserID: 0)
+        try listener.prepareMaintenance(policy: policy)
+        return { [self] in
+            let access = try await AuthorityMaintenanceChannelAccess.openNative(service: service, registration: self)
+            let owner = try AuthorityMaintenanceConnections(accountID: configuration.command.accountID,
+                authorityCode: authority, setupCode: setup, release: release, access: access)
+            do { try listener.installMaintenance(owner) }
+            catch { await owner.closeAndWait(); throw error }
+        }
+    }
     /// The installed restart owner supplies its retained completion selection and starts this only after ordinary Authority startup.
     func startInstalledReadinessListener(service: AuthorityWakeService, requirement: MachineUpdateRestartHealthPlan.Requirement,
         gateway: MachineUpdateAuthorityReadinessGateway?, phonePushCommitDigest: Data?,
@@ -507,6 +548,7 @@ extension AuthorityRuntimeRunner {
                             try registration.makeGatewaySettingsListener(service: service)
                         }
                     }
+                    let maintenance = AuthorityMaintenanceStartup.prepare { try registration.prepareMaintenance(service: service) }
                     return AuthorityRuntimeInstance(start: {
                         let activity = try registration.releaseActivity.acquireShared()
                         do {
@@ -515,7 +557,8 @@ extension AuthorityRuntimeRunner {
                             })
                             try activity.validate(); activity.close()
                         } catch { activity.close(); throw error }
-                        try await service.start(); try await settings.start(); try await monitor?.start()
+                        try await AuthorityMaintenanceStartup.start(service: { try await service.start() }, maintenance: maintenance,
+                            after: { try await settings.start(); try await monitor?.start() })
                     }, close: {
                         await monitor?.close(); await consumerRecovery.close(); await settings.close()
                         try await service.close(); try registration.close()
