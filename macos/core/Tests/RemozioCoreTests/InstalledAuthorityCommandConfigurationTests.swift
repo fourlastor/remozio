@@ -57,6 +57,12 @@ final class InstalledAuthorityCommandConfigurationTests: XCTestCase {
         try .init(machineDirectory: "/Library/Remozio/machine", installationID: id(26), releaseDigest: InstallationInventory.digest(release()),
             codePolicy: policy ?? self.policy(), command: command ?? self.command(), label: "dev.sebastiano.remozio.macos.authority", plistName: "dev.sebastiano.remozio.macos.authority.plist")
     }
+    static func makeOwnedCloseRegistration(activity: ReleaseActivityBarrier, placement: ReleaseDestinationLease,
+        machine: PreparationIntentStore, admission: AuthorityUpdateAdmissionStartup?) throws -> InstalledAuthorityCommandRegistration {
+        let suite = InstalledAuthorityCommandConfigurationTests(selector: NSSelectorFromString("testCanonicalHostKeepsTheConfiguredExecutionAndAccountScope"))
+        return try .openOwnedForClose(configuration: suite.config(), activity: activity, placement: placement,
+            machine: machine, admission: admission)
+    }
     private func inventory(owner: UInt32 = 501, account: Data? = nil, installation: Data? = nil, path: String? = nil,
                            label: String = "dev.sebastiano.remozio.macos.authority") throws -> InstallationInventory {
         let account = account ?? id(22)

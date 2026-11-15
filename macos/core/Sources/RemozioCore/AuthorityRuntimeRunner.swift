@@ -9,6 +9,7 @@ struct AuthorityRuntimeInstance: Sendable {
     let start: @Sendable () async throws -> Void
     let close: @Sendable () async throws -> Void
     let retired: @Sendable () async -> Bool
+    var prepareCloseMarker: (@Sendable () async throws -> (@Sendable () throws -> Void)?)? = nil
 }
 
 private final class AuthorityRuntimeOwnership: Sendable {
@@ -117,6 +118,28 @@ public actor AuthorityRuntimeRunner {
             try await cleanup.value
             cleanupComplete = true; closing = nil; ownership.update(.closed)
         } catch { closing = nil; ownership.update(.shutdownFailed); throw error }
+    }
+    /// The installed main loop uses this path. Cancellation remains a thrown CancellationError.
+    public func runUntilExit() async throws -> Status {
+        try start()
+        while true {
+            try Task.checkCancellation()
+            let current = ownership.status
+            switch current {
+            case .failed, .retired, .shutdownFailed, .closed: return current
+            default: try await Task.sleep(for: .milliseconds(250))
+            }
+        }
+    }
+    /// Only signal termination of the current running instance can publish its already bound close marker.
+    // Armed marker errors report shutdown failure; unarmed termination keeps ordinary cleanup.
+    public func closeForTermination() async throws {
+        let current = ownership.instance
+        var publish: (@Sendable () throws -> Void)?
+        do { if !ownership.stopping, ownership.status == .running { publish = try await current?.prepareCloseMarker?() } }
+        catch { try await close(); throw error }
+        guard !ownership.stopping, ownership.instance?.id == current?.id, ownership.status == .running else { try await close(); return }
+        try await close(); try publish?()
     }
     /// Command expiry already closes original resources under the request lock. External adapters need their own registered cleanup.
     static func reconcileCoordinatorExpiration(_ states: [ApprovalRequestState]) throws {

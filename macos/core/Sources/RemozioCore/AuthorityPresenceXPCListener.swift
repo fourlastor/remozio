@@ -122,6 +122,10 @@ public final class AuthorityPresenceXPCListener: NSObject, NSXPCListenerDelegate
             try registry.start(); running = true; listener.activate()
         }
     }
+    var armedMaintenanceCloseAdmission: AuthorityMaintenancePairingAdmission? {
+        guard let admission = maintenancePairingOwners?.admission, admission.hasArmedShutdown else { return nil }
+        return admission
+    }
     func currentMaintenancePairingOwners() throws -> AuthorityMaintenancePairingOwners {
         try lock.withLock {
             guard running, !closed, let maintenancePairingOwners else { throw AuthorityPairingSetupError.unavailable }
