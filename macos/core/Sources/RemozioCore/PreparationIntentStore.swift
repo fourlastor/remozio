@@ -5766,6 +5766,10 @@ public final class PreparationIntentStore {
             before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot) {
             self.record = record; self.previous = previous; self.before = before; self.after = after
         }
+        func requireReplacement(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord) throws {
+            guard record == next, self.previous == previous else { throw PreparationStoreError.staleRevision }
+            try record.requireReplacing(previous)
+        }
         static func requireChain(_ values: [Self], from before: MachineUpdateStableReleaseSnapshot,
             to after: MachineUpdateStableReleaseSnapshot, binding: Self? = nil) throws -> RuntimeMaintenanceWindowRecord {
             if let binding {

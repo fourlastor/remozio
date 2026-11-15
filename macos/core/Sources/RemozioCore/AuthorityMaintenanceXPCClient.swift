@@ -43,6 +43,7 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     private func checked(_ value: AuthorityMaintenanceClientReply, _ reply: @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do { _ = try policy.verifyCredentials(connection); reply(value) } catch { reply(.bytes(nil)) }
     }
+    func replacement(accountID: Data) throws -> NativeMaintenanceClient { try .init(accountID: accountID, policy: policy) }
     func captureProcess(job: InstalledAccountJobManifest, code: AuthorityCodeEntry) throws -> RuntimeJobProcessObservation {
         let expected = try XPCPeerPolicy(teamID: code.teamID, componentIdentifier: code.identifier,
             approvedCodeDirectoryHashes: [code.codeDirectoryHash], expectedUserID: 0)
@@ -81,7 +82,7 @@ actor AuthorityMaintenanceXPCClient {
     private let driver: any AuthorityMaintenanceClientDriver, context: Request
     private let verify: @Sendable () throws -> Void, timeout: Duration, interval: Duration
     private let lifetime = MaintenanceClientLifetime()
-    private var state = State.new, busy = false, binding: AuthorityMaintenanceBinding?
+    private var state = State.new, busy = false, cleanupUsed = false, binding: AuthorityMaintenanceBinding?
     private var pending: (UUID, CheckedContinuation<AuthorityMaintenanceClientReply, Error>)?, timer: Task<Void, Never>?
     init(context: AuthorityMaintenanceChannelRequest, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry,
          release: SignedReleaseEvidence) throws {
@@ -244,6 +245,97 @@ actor AuthorityMaintenanceXPCClient {
         guard target == nil || target?.incarnation == binding?.incarnation else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         _ = try await send(reopen ? .reopen : .cancel, target: target, until: deadline); finish(.cancelled)
     }
+    typealias CleanupRecord = RuntimeMaintenanceWindowRecord
+    typealias CleanupCommit = @Sendable (CleanupRecord, CleanupRecord) throws -> PreparationIntentStore.RuntimeMaintenanceTransition
+    /// One pre-stop cleanup. The real writer must confirm each exact commit before another native action.
+    func cancelAndReopenNative(window: CleanupRecord, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, persist: @escaping CleanupCommit) async throws -> CleanupRecord {
+        guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        return try await cancelAndReopen(window: window, drain: drain, directory: directory, until: deadline,
+            makeDriver: { try native.replacement(accountID: window.scope.authority.accountID) }, persist: { next, previous in
+                let receipt = try persist(next, previous)
+                try receipt.requireReplacement(next, replacing: previous); return receipt.record
+            })
+    }
+    /// Ordinary-owner tests use the same ordering. Root cannot select callback drivers or record-only persistence.
+    func cancelAndReopenOwned(window: CleanupRecord, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try await cancelAndReopen(window: window, drain: drain, directory: directory, until: deadline,
+            makeDriver: makeDriver, persist: persist)
+    }
+    private func cancelAndReopen(window: CleanupRecord, drain: UpdateDrainToken, directory: ReleaseDestinationLease,
+        until deadline: ContinuousClock.Instant, makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        guard !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        cleanupUsed = true
+        guard window.purpose == .retainedRuntime, window.phase == .draining, window.operation == .notStarted,
+              window.service == .notStopped, let target = window.shutdownBinding, target == binding,
+              target.accountID == context.accountID, window.id == context.attemptID,
+              window.scope.installationID == context.installationID else {
+            finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        if state == .open || state == .armed { try? await release(until: min(deadline, .now.advanced(by: timeout))) }
+        finish()
+        let pending: CleanupRecord
+        do {
+            try verify(); try drain.validateAccountBoundary(directory: directory, accountID: context.accountID, expected: context.gate)
+            pending = try .init(id: window.id, revision: AccountPreparationIntent.randomID(), purpose: window.purpose,
+                scope: window.scope, phase: .reopenPending, shutdownBinding: target)
+            try pending.requireReplacing(window)
+            guard try persist(pending, window) == pending else { throw RuntimePreparationError.changedScope }
+        } catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        drain.close()
+        var restorationCommitAttempted = false
+        do {
+            let q = try Request(action: .open, accountID: context.accountID, attemptID: context.attemptID,
+                revision: pending.revision, installationID: context.installationID, gate: context.gate,
+                binding: nil, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
+            let recovery = AuthorityMaintenanceXPCClient(context: q, driver: try makeDriver(), timeout: timeout, interval: interval, verify: verify)
+            // This joined task is independent of the cancelled operation. All three RPCs keep the caller's cleanup deadline.
+            let readback = try await Task { try await recovery.reopenSaved(target, until: deadline) }.value
+            guard readback.hold == .released, readback.admission == .available else { throw RuntimePreparationError.changedScope }
+            let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
+                scope: pending.scope, phase: .restored, gate: readback)
+            try restored.requireReplacing(pending)
+            restorationCommitAttempted = true
+            guard try persist(restored, pending) == restored else { throw RuntimePreparationError.changedScope }
+            return restored
+        } catch {
+            if !restorationCommitAttempted {
+                if let failed = try? CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
+                    scope: pending.scope, phase: .needsOwnerRecovery, failure: .admissionUnconfirmed, shutdownBinding: target) {
+                    _ = try? persist(failed, pending)
+                }
+            }
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+    }
+    private func reopenSaved(_ target: AuthorityMaintenanceBinding, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
+        guard state == .new else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        defer { finish() }
+        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        binding = target; state = .open
+        _ = try await send(.reopen, target: target, until: deadline)
+        while ContinuousClock.now < deadline {
+            let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
+                revision: context.revision, installationID: context.installationID, gate: context.gate,
+                target: target, challenge: AccountPreparationIntent.randomID())
+            guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
+                throw AuthorityMaintenanceClientError.needsOwnerRecovery
+            }
+            let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: target.incarnation)
+            guard result.hold == .released else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            if result.admission == .available { return result }
+            guard result.admission == .busy else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: interval)))
+        }
+        throw AuthorityMaintenanceClientError.needsOwnerRecovery
+    }
+
     func close() { finish() }
     private func enter() throws {
         guard !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }; busy = true
@@ -264,10 +356,10 @@ actor AuthorityMaintenanceXPCClient {
             return response
         } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
-    private func invoke(_ q: Request?, until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceClientReply {
+    private func invoke(_ q: Request?, gate: AuthorityMaintenanceGateRequest? = nil, until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceClientReply {
         do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         guard state != .closed, lifetime.ifActive(), ContinuousClock.now < deadline else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        let id = UUID(), end = min(deadline, .now.advanced(by: timeout)), payload = try q?.encoded
+        let id = UUID(), end = min(deadline, .now.advanced(by: timeout)), payload = try q?.encoded ?? gate?.encoded
         let value: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = (id, continuation)
@@ -278,8 +370,8 @@ actor AuthorityMaintenanceXPCClient {
                 let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self, lifetime] value in
                     guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }
                 }
-                if q == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }
-                guard lifetime.ifActive({ if let payload { driver.exchange(payload, reply) } else { driver.hello(reply) } }) else { finish(); return }
+                if q == nil && gate == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }
+                guard lifetime.ifActive({ if let payload { if gate != nil { driver.readGate(payload, reply) } else { driver.exchange(payload, reply) } } else { driver.hello(reply) } }) else { finish(); return }
             }
         } onCancel: { [weak self, lifetime, driver] in lifetime.close(); driver.close(); Task { await self?.close() } }
         do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }

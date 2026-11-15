@@ -1,6 +1,7 @@
 import Foundation
 
-/// Observes existing owners and returns data only. The native caller supplies exact protected reads after closing each capture handle.
+/// The probe has the effects of ordinary admission. It does not release the local hold.
+/// The native caller supplies exact protected reads after closing each capture handle.
 enum AuthorityMaintenanceGateObservation {
     static func capture(request: AuthorityMaintenanceGateRequest, incarnation: Data, hold: AuthorityMaintenanceAdmissionHold,
         boundary: UpdateAdmissionBoundary, read: () throws -> RuntimeMaintenanceWindowRecord) throws -> AuthorityMaintenanceGateResponse {
