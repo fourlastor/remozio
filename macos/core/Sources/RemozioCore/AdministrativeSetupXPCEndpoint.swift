@@ -100,13 +100,13 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         try owner.verifyCurrent()
         self.init(owner: owner, verify: { try invocation.verifyInvocation().userID },
             authorize: { try SetupAdministratorAuthorization.validate(externalForm: $0, invocation: invocation) },
-            invalidate: { [weak connection] in connection?.invalidate(); onClose() }, onHandshake: onHandshake,
+            invalidate: { [weak connection] in invocation.retireConnection(); connection?.invalidate(); onClose() }, onHandshake: onHandshake,
             auditUpgradeOperations: try .native(owner: owner, invocation: invocation))
         peerPolicy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupMaintenanceXPCProtocol.self)
         connection.exportedObject = self
-        connection.interruptionHandler = { [weak self] in self?.close() }
-        connection.invalidationHandler = { [weak self] in self?.close() }
+        // Handler execution retires the context before the prior handler and endpoint close.
+        try invocation.observeConnectionLifetime(onClose: { [weak self] in self?.close() })
     }
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,

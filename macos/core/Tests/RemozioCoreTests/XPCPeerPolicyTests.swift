@@ -85,4 +85,37 @@ final class XPCPeerPolicyTests: XCTestCase {
         let guardObject = XPCInvocationGuard(connection: connection, policy: try policy())
         XCTAssertThrowsError(try guardObject.verifyInvocation())
     }
+    func testBothPreviousConnectionHandlersRunAfterRetirementAndArePreserved() throws {
+        for interruption in [false, true] {
+            let p = try policy(), connection = NSXPCConnection(machServiceName: "dev.sebastiano.remozio.test")
+            defer { connection.invalidate() }
+            let guardValue = XPCInvocationGuard(connection: connection, policy: p)
+            let peer = XPCPeerCredentials(processID: 1, userID: 501, auditSessionID: 1)
+            var interrupted = 0, invalidated = 0, closes = 0
+            var order: [String] = []
+            func requireRetired() {
+                XCTAssertThrowsError(try guardValue.requireRetainedConnection(connection, peer: peer, policy: p)) {
+                    guard case XPCPeerPolicyError.wrongConnection = $0 else { return XCTFail("The prior handler ran before retirement") }
+                }
+            }
+            connection.interruptionHandler = { requireRetired(); interrupted += 1; order.append("prior") }
+            connection.invalidationHandler = { requireRetired(); invalidated += 1; order.append("prior") }
+            try guardValue.observeConnectionLifetime(onClose: {
+                requireRetired(); closes += 1; order.append("close")
+            })
+            if interruption { connection.interruptionHandler?() } else { connection.invalidationHandler?() }
+            XCTAssertEqual(interrupted, interruption ? 1 : 0); XCTAssertEqual(invalidated, interruption ? 0 : 1)
+            XCTAssertEqual(closes, 1); XCTAssertEqual(order, ["prior", "close"])
+            requireRetired(); XCTAssertThrowsError(try guardValue.observeConnectionLifetime())
+        }
+    }
+    func testMissingLifecycleObserverCannotProduceARetainedConnectionProof() throws {
+        let p = try policy(), connection = NSXPCConnection(machServiceName: "dev.sebastiano.remozio.test")
+        defer { connection.invalidate() }; let guardValue = XPCInvocationGuard(connection: connection, policy: p)
+        let peer = XPCPeerCredentials(processID: 1, userID: 501, auditSessionID: 1)
+        XCTAssertThrowsError(try guardValue.requireRetainedConnection(connection, peer: peer, policy: p)) {
+            guard case XPCPeerPolicyError.wrongConnection = $0 else { return XCTFail("Missing observer") }
+        }
+    }
+
 }
