@@ -77,6 +77,18 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
                 operationActive: $0.busy || !$0.operations.isEmpty)
         }
     }
+    func requireMaintenanceAdmission(_ admission: AuthorityMaintenancePairingAdmission) throws {
+        guard access.maintenanceAdmission === admission else { throw RuntimePreparationError.changedScope }
+    }
+    /// A closed endpoint remains work until its real reply and activity owners settle.
+    func retainedMaintenancePairingWork() -> AuthorityMaintenancePairingWork? {
+        state.withLock {
+            if $0.closed && $0.operations.isEmpty && $0.stage == nil && $0.activity == nil { return nil }
+            return .init(ready: $0.ready && !$0.closed, stagedAttempts: $0.attempt == nil ? 0 : 1,
+                activityOwners: ($0.activity == nil ? 0 : 1) + $0.operations.values.filter { $0 }.count,
+                operationActive: $0.busy || !$0.operations.isEmpty)
+        }
+    }
     func close() {
         let notify = lock.withLock {
             guard !closed else { return false }
@@ -108,8 +120,10 @@ final class AuthorityPairingXPCEndpoint: NSObject, AuthorityPairingXPCProtocol, 
             state.withLock { s in if let id = s.currentOperation { s.retiringStages[id, default: []].append(replyStage) } }
             let staged = try access.stage(proposal)
             let bytes = try staged.transcript.encode()
-            guard !closed else { throw AuthorityPairingSetupError.unavailable }
-            state.withLock { $0.attempt = staged; $0.activity = activity; $0.stage = stage }; transferred = true
+            try state.withLock {
+                guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+                $0.attempt = staged; $0.activity = activity; $0.stage = stage
+            }; transferred = true
             startExpiryTimer()
             return bytes
         }

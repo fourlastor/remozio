@@ -7,7 +7,7 @@ import Foundation
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void)
 }
 
-/// Process-bound access. Root cannot construct a fixture; the protected native producer belongs to b4.
+/// Process-bound access. Root construction uses the installed registration and actual runtime owners.
 final class AuthorityMaintenanceChannelAccess: Sendable {
     let admission: AuthorityMaintenancePairingAdmission
     let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
@@ -25,6 +25,16 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork) throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
         return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe)
+    }
+    static func openNative(service: AuthorityWakeService, registration: InstalledAuthorityCommandRegistration) async throws -> AuthorityMaintenanceChannelAccess {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let (admission, incarnation) = try await service.nativeMaintenanceScope()
+        let account = try registration.captureMaintenanceAccount(); try admission.requireAccount(account.accountID)
+        return .init(admission: admission, acquireActivity: { try registration.releaseActivity.acquireShared() }, check: {
+            try service.validateNativeMaintenanceIdentity()
+            try registration.validateMaintenanceCommand($0, account: account, incarnation: incarnation, admission: admission)
+            try service.validateNativeMaintenanceIdentity()
+        }, observe: { _ in try await service.captureNativeMaintenanceWork() })
     }
     func validateIdentity() throws {
         guard getpid() == processID, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.invalidated }

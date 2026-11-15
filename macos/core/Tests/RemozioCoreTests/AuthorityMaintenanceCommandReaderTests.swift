@@ -129,4 +129,15 @@ final class AuthorityMaintenanceCommandReaderTests: XCTestCase {
             try f.machine().close(); XCTAssertThrowsError(try read(f, q))
         }
     }
+    func testGateReadbackMustUseTheActualAuthorityClockEpochNotAnotherStartupUUID() throws {
+        let clock = try AuthorityClock(), other = try AuthorityClock()
+        var epoch = clock.epoch.uuid, foreign = other.epoch.uuid
+        let actual = withUnsafeBytes(of: &epoch) { Data($0) }, wrong = withUnsafeBytes(of: &foreign) { Data($0) }
+        XCTAssertNotEqual(actual, wrong)
+        try fixture(gateIncarnation: actual) { f, record, gate in
+            XCTAssertEqual(try read(f, request(record, gate: gate), incarnation: actual), record)
+            XCTAssertThrowsError(try read(f, request(record, gate: gate), incarnation: wrong))
+        }
+    }
+
 }
