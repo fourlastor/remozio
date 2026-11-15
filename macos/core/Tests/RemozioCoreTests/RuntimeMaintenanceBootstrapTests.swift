@@ -186,6 +186,68 @@ final class RuntimeMaintenanceBootstrapTests: XCTestCase {
             }
         }
     }
+    func testCapturedAccountAdmissionAllowsAnotherWriterDuringEveryNativeCallback() throws {
+        try fixture { f in
+            let job = try job(f), inventory = try XCTUnwrap(f.machine().inventory())
+            let registration = try XCTUnwrap(f.machine().updateAdmissionRegistration())
+            let gate = try XCTUnwrap(registration.accounts.first { $0.accountID == f.authority.accountID })
+            let anchor = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent().deletingLastPathComponent().path
+            try f.machine().close()
+            func fresh() throws -> PreparationIntentStore {
+                try .init(lease: InstallationStorageLease(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
+                    macID: inventory.macID, maximumRecords: 64, initialize: false)
+            }
+            func barrier() throws -> UpdateAdmissionBarrier {
+                try .init(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid(),
+                    expected: gate.identity, scope: .account(gate.accountID))
+            }
+            var callbacks = 0, inspections = 0
+            func callback() throws {
+                let writer = try fresh(); defer { try? writer.close() }
+                XCTAssertEqual(try writer.inventory()?.installationID, inventory.installationID)
+                XCTAssertThrowsError(try barrier().beginDrain()) { XCTAssertEqual($0 as? UpdateAdmissionBarrierError, .busy) }
+                callbacks += 1
+            }
+            try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: {
+                let machine = try fresh(); defer { try? machine.close() }
+                return try machine.runtimeMaintenanceBootstrapAccount(job, installationID: inventory.installationID)
+            }, acquire: { account in
+                XCTAssertEqual(account, gate); return try barrier().acquireAdmission()
+            }) { verify in
+                try RuntimeJobRegistration.reconcile(job: job, verifyCurrent: {}, requireMaintenanceOpen: { _ in try verify() },
+                    inspect: { try callback(); inspections += 1; return inspections == 1 ? .absent : .matching }, bootstrap: callback)
+            }
+            XCTAssertEqual(callbacks, 3); let drain = try barrier().beginDrain(); drain.close()
+        }
+    }
+    func testARealWindowAppearingBetweenCaptureAndAcquireRefusesTheBody() throws {
+        try fixture { f in
+            let job = try job(f), installation = try XCTUnwrap(f.machine().inventory()).installationID
+            let account = try XCTUnwrap(f.machine().runtimeMaintenanceBootstrapAccount(job, installationID: installation))
+            let window = try record(f)
+            let anchor = URL(fileURLWithPath: f.databasePath).deletingLastPathComponent().deletingLastPathComponent().path
+            func barrier() throws -> UpdateAdmissionBarrier {
+                try .init(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid(),
+                    expected: account.identity, scope: .account(account.accountID))
+            }
+            XCTAssertThrowsError(try RuntimeMaintenanceBootstrapGuard.withOwnedRegistration(capture: {
+                try f.machine().runtimeMaintenanceBootstrapAccount(job, installationID: installation)
+            }, acquire: { _ in
+                try self.retain(window, f); return try barrier().acquireAdmission()
+            }, body: { _ in XCTFail() })) { XCTAssertEqual($0 as? RuntimeActivationError, .maintenancePending) }
+            let drain = try barrier().beginDrain(); drain.close()
+        }
+    }
+    func testMissingRegistrationIsLegacyButCorruptRegistrationRefuses() throws {
+        try fixture { f in
+            let job = try job(f), installation = try XCTUnwrap(f.machine().inventory()).installationID
+            XCTAssertNotNil(try f.machine().runtimeMaintenanceBootstrapAccount(job, installationID: installation))
+            try f.edit(["UPDATE update_admission_registration_v1 SET revision=randomblob(16)"])
+            XCTAssertThrowsError(try f.machine().runtimeMaintenanceBootstrapAccount(job, installationID: installation))
+            try f.edit(["DELETE FROM update_admission_registration_v1"])
+            XCTAssertNil(try f.machine().runtimeMaintenanceBootstrapAccount(job, installationID: installation))
+        }
+    }
     func testOtherRolesDoNotReadTheMachineStore() throws {
         try fixture { f in
             for role in [AuthorityCodeRole.transport, .notificationGateway] {
