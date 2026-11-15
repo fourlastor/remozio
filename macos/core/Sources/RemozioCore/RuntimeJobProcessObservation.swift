@@ -10,13 +10,14 @@ protocol RuntimeJobExitWitness: AnyObject {
 }
 
 /// A serialized stop session retains this witness until the original process has an exit event.
-final class RuntimeJobProcessObservation: RuntimeJobExitWitness {
+final class RuntimeJobProcessObservation: RuntimeJobExitWitness, @unchecked Sendable {
     let processID: pid_t
     private let token: audit_token_t
     private let expectedUID: uid_t
     private let expectedParent: pid_t
     private let expectedPath: Data
     private var observer: OpaquePointer?
+    private let observerLock = NSLock()
     private let ownerPID = getpid()
 
     static func open(job: InstalledAccountJobManifest, code: AuthorityCodeEntry, processID: pid_t) throws -> RuntimeJobProcessObservation {
@@ -60,16 +61,27 @@ final class RuntimeJobProcessObservation: RuntimeJobExitWitness {
               sample.parentPID == expectedParent, sample.path == expectedPath else { throw RuntimeActivationError.changedScope }
     }
     func hasExited() throws -> Bool {
-        guard getpid() == ownerPID, let observer else { throw RuntimeActivationError.unavailable }
-        var state = REMOZIO_CALLER_UNCHANGED
-        guard remozio_command_caller_observer_poll(observer, &state) == 0 else { throw RuntimeActivationError.unavailable }
-        switch state {
-        case REMOZIO_CALLER_EXITED: return true
-        case REMOZIO_CALLER_UNCHANGED:
-            // Failure to read a live binding is unknown, never proof of exit.
-            try requireBinding(CommandAncestryObservation.sample(processID)); return false
-        default: throw RuntimeActivationError.unavailable
+        guard getpid() == ownerPID else { throw RuntimeActivationError.unavailable }
+        return try observerLock.withLock {
+            guard let observer else { throw RuntimeActivationError.unavailable }
+            var state = REMOZIO_CALLER_UNCHANGED
+            guard remozio_command_caller_observer_poll(observer, &state) == 0 else { throw RuntimeActivationError.unavailable }
+            switch state {
+            case REMOZIO_CALLER_EXITED: return true
+            case REMOZIO_CALLER_UNCHANGED:
+                // A failed live binding read never proves exit.
+                try requireBinding(CommandAncestryObservation.sample(processID)); return false
+            default: throw RuntimeActivationError.unavailable
+            }
         }
     }
-    deinit { remozio_command_caller_observer_close(observer) }
+
+    deinit {
+        if getpid() == ownerPID {
+            observerLock.withLock { remozio_command_caller_observer_close(observer); observer = nil }
+        } else {
+            // A fork must not take the parent's inherited lock.
+            remozio_command_caller_observer_close(observer)
+        }
+    }
 }

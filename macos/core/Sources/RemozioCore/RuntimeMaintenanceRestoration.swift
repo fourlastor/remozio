@@ -87,7 +87,8 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
         commit: Commit, issue: (Record, Record, Transition?) throws -> RuntimeMaintenanceRestorationPermit,
         register: (RuntimeMaintenanceRestorationPermit) throws -> Void, floors: @escaping Floors, inspect: @escaping Inspect,
         observe: @escaping Observe) throws -> RuntimeMaintenanceRestoration {
-        guard let captured = stop.restorationWindow, let binding = captured.shutdownBinding, executing.phase == .executing,
+        guard let captured = stop.restorationWindow, captured.purpose == .retainedRuntime,
+              executing.purpose == .retainedRuntime, let binding = captured.shutdownBinding, executing.phase == .executing,
               executing.id == captured.id, executing.purpose == captured.purpose, executing.scope == captured.scope,
               executing.shutdownBinding == binding, operation != .notStarted else { throw RuntimePreparationError.changedScope }
         func row(_ phase: Record.Phase, _ service: Record.ServiceOutcome, _ failure: Record.Failure? = nil) throws -> Record {
@@ -185,7 +186,7 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
         try lock.withLock {
             guard getpid() == processID, case .native = commit, let pending, !drainReleased else { throw JournalLeaseError.invalidated }
             try receipt.requireReplacement(pending, replacing: window)
-            drainReleased = true; try held.releaseDrain()
+            try held.releaseDrain(); drainReleased = true
         }
     }
     /// Record-only release for ordinary-owner tests. Root cannot select it.
@@ -195,7 +196,7 @@ final class RuntimeMaintenanceRestoration: @unchecked Sendable {
             guard getpid() == processID, case .owned = commit, let pending, !drainReleased, record == pending else {
                 throw JournalLeaseError.invalidated
             }
-            drainReleased = true; try held.releaseDrain()
+            try held.releaseDrain(); drainReleased = true
         }
     }
     /// Once, from the restoring row, before any pending row was issued. A failed commit is uncertain and is not repeated.

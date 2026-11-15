@@ -296,11 +296,31 @@ public actor AuthorityWakeService {
         guard started, !closed, !isRetired, !startupRestorePending, !recoveryStartupHold,
               settingsChange == nil, recoveryTicket == nil else { throw MachineUpdateRoleChallengeError.unavailable }
     }
-    func requireHealthyMaintenanceReadiness() throws {
+    func requireHealthyMaintenanceReadiness(_ expected: AuthorityHealthyMaintenanceReadiness) throws {
         let owners = try currentMaintenanceOwners()
+        try requireHealthyReadiness(expected) { _ = try owners.journal.captureMachineUpdateInstalledReadinessBoundary() }
+    }
+    /// The one readiness check of the healthy maintenance open and reopen. The update readiness answer keeps its own checks.
+    func requireHealthyReadiness(_ expected: AuthorityHealthyMaintenanceReadiness, boundary: @Sendable () throws -> Void) throws {
+        try requireHealthyReadinessScope(expected)
+        try boundary()
+        try requireHealthyReadinessScope(expected)
+    }
+    private func requireHealthyReadinessScope(_ expected: AuthorityHealthyMaintenanceReadiness) throws {
         try requireReadinessState()
-        _ = try owners.journal.captureMachineUpdateInstalledReadinessBoundary()
-        try requireReadinessState()
+        guard let binding = gatewaySettingsBinding, binding.accountID == expected.accountID else {
+            throw MachineUpdateRoleChallengeError.unavailable
+        }
+        switch expected.phonePush {
+        case .absent:
+            guard phonePushCapability?.installedCommitDigest == nil, phonePushCapability?.retainedCommitDigest == nil else {
+                throw MachineUpdateRoleChallengeError.unavailable
+            }
+        case .installed(let digest):
+            guard digest.count == 32, let capability = phonePushCapability,
+                  let installed = capability.installedCommitDigest, let retained = capability.retainedCommitDigest,
+                  installed == digest, retained == digest else { throw MachineUpdateRoleChallengeError.unavailable }
+        }
     }
     func answerInstalledReadiness(_ request: MachineUpdateConsumerHealthRequest,
         expected: MachineUpdateRestartHealthPlan.Requirement, gateway: MachineUpdateAuthorityReadinessGateway?,

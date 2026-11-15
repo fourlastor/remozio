@@ -80,7 +80,13 @@ final class RuntimeMaintenanceAuthorityStop {
     private let boundary: Boundary
     private let session: RuntimeJobStopSession
     private var permit: RuntimeMaintenanceStopPermit?
-    private var bodyUsed = false, bodySettled = false, restorationStarted = false, restorationIssued = false, restorationClosed = false
+    private var bodyUsed = false, bodySettled = false, restorationStarted = false, restorationIssued = false
+    private let restorationLock = NSLock()
+    private var restorationClosed = false
+    private var isRestorationClosed: Bool {
+        guard getpid() == boundary.processID else { return true }
+        return restorationLock.withLock { restorationClosed }
+    }
     /// nil until a body pair opens. Only closed proves that storage.close returned for that pair.
     private(set) var bodyPairClose: AuthorityJournalCutoverInspection.CloseOutcome?
     private var openPair: ((AuthorityInitializationIntent, AuthorityCodePolicy) throws -> AuthorityJournalCutoverInspection)?
@@ -190,10 +196,10 @@ final class RuntimeMaintenanceAuthorityStop {
     }
     /// The captured window and whether restoration may start. Ready needs a settled body and a proved pair close.
     var restorationWindow: RuntimeMaintenanceWindowRecord? { permit?.capture.window }
-    var restorationReady: Bool { bodyUsed && bodySettled && bodyPairClose == .closed && !restorationIssued && !restorationClosed }
+    var restorationReady: Bool { bodyUsed && bodySettled && bodyPairClose == .closed && !restorationIssued && !isRestorationClosed }
     /// Once per stop owner, on its thread. True only for a settled body whose pair close was proved; a repeat never writes.
     func beginRestoration() throws -> Bool {
-        guard getpid() == boundary.processID, pthread_equal(pthread_self(), boundary.thread) != 0, !restorationStarted, !restorationClosed else {
+        guard getpid() == boundary.processID, pthread_equal(pthread_self(), boundary.thread) != 0, !restorationStarted, !isRestorationClosed else {
             throw JournalLeaseError.invalidated
         }
         restorationStarted = true; return restorationReady
@@ -230,13 +236,14 @@ final class RuntimeMaintenanceAuthorityStop {
     private func issueRestorationPermit(restoring: RuntimeMaintenanceWindowRecord, settled: RuntimeMaintenanceWindowRecord,
         admission: UpdateOrdinaryAdmissionLease, requireReceipt: () throws -> Void,
         verifyConfiguration: @escaping @Sendable () throws -> Void) throws -> RuntimeMaintenanceRestorationPermit {
-        guard getpid() == boundary.processID, pthread_equal(pthread_self(), boundary.thread) != 0, !restorationIssued, !restorationClosed else {
+        guard getpid() == boundary.processID, pthread_equal(pthread_self(), boundary.thread) != 0, !restorationIssued, !isRestorationClosed else {
             throw JournalLeaseError.invalidated
         }
         restorationIssued = true
         guard bodyUsed, bodySettled, bodyPairClose == .closed, let permit else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         let window = permit.capture.window, cohort = boundary.cohort
-        guard let binding = window.shutdownBinding, settled.phase == .workSettled, restoring.phase == .restoring,
+        guard window.purpose == .retainedRuntime, let binding = window.shutdownBinding,
+              settled.phase == .workSettled, restoring.phase == .restoring,
               restoring.id == window.id, restoring.purpose == window.purpose, restoring.scope == window.scope,
               restoring.shutdownBinding == binding, settled.shutdownBinding == binding, binding.attemptID == window.id,
               restoring.scope.authority.accountID == cohort.accountID, binding.accountID == cohort.accountID,
@@ -252,10 +259,13 @@ final class RuntimeMaintenanceAuthorityStop {
         try value.validate(); return value
     }
     fileprivate func requireRestorationOpen() throws {
-        guard getpid() == boundary.processID, !restorationClosed else { throw JournalLeaseError.invalidated }
+        guard getpid() == boundary.processID, !isRestorationClosed else { throw JournalLeaseError.invalidated }
     }
     /// Retires the session and any restoration permit without releasing the caller's admission or drain ownership.
-    func close() { boundary.close(); if getpid() == boundary.processID { restorationClosed = true } }
+    func close() {
+        guard getpid() == boundary.processID else { return }
+        restorationLock.withLock { restorationClosed = true }; boundary.close()
+    }
     deinit { close() }
 }
 

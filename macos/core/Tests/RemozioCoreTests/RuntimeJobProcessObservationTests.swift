@@ -1,4 +1,6 @@
 import Darwin
+import Dispatch
+import Synchronization
 import Foundation
 import XCTest
 @testable import RemozioCore
@@ -24,6 +26,32 @@ final class RuntimeJobProcessObservationTests: XCTestCase {
                 if !exited { usleep(1000) }
             } while !exited && Date() < deadline
             XCTAssertTrue(exited); XCTAssertTrue(try observer.hasExited())
+        }
+    }
+    func testConcurrentOwnedPollsSerializeTheSameLiveAndExitedObserver() throws {
+        try withChild { child, sample in
+            let observer = try RuntimeJobProcessObservation(processID: child.processIdentifier, expectedUID: getuid(),
+                expectedParent: getpid(), expectedPath: XCTUnwrap(sample.path), validateCode: { _ in })
+            let failures = Mutex(0), unexpectedExit = Mutex(0)
+            DispatchQueue.concurrentPerform(iterations: 64) { _ in
+                do { if try observer.hasExited() { unexpectedExit.withLock { $0 += 1 } } }
+                catch { failures.withLock { $0 += 1 } }
+            }
+            XCTAssertEqual(failures.withLock { $0 }, 0); XCTAssertEqual(unexpectedExit.withLock { $0 }, 0)
+            child.terminate(); child.waitUntilExit()
+            let deadline = Date().addingTimeInterval(3)
+            var exited = false
+            repeat {
+                do { exited = try observer.hasExited() } catch {}
+                if !exited { usleep(1000) }
+            } while !exited && Date() < deadline
+            XCTAssertTrue(exited)
+            let missingExit = Mutex(0)
+            DispatchQueue.concurrentPerform(iterations: 64) { _ in
+                do { if try !observer.hasExited() { missingExit.withLock { $0 += 1 } } }
+                catch { failures.withLock { $0 += 1 } }
+            }
+            XCTAssertEqual(failures.withLock { $0 }, 0); XCTAssertEqual(missingExit.withLock { $0 }, 0)
         }
     }
     func testWrongUIDParentPathAndRejectedCodeCannotCreateAnObserver() throws {
