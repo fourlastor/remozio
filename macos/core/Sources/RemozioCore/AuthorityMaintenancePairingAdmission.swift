@@ -38,6 +38,8 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         var closed = false
         var connections = Set<UUID>(), stages: [UUID: Int] = [:]
         var blocker: UUID?
+        var marker: AuthorityMaintenanceCloseMarker?
+        var closing = false
         var armed: AuthorityMaintenanceBinding?
     }
     private let state = Mutex(State())
@@ -90,7 +92,7 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         }
     }
     func close() {
-        state.withLock { $0.closed = true; $0.connections.removeAll(); $0.blocker = nil }
+        state.withLock { $0.closed = true; $0.connections.removeAll(); $0.blocker = nil; if !$0.closing { $0.marker = nil } }
     }
     private func block(_ id: UUID) throws -> Int {
         try state.withLock {
@@ -118,10 +120,31 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             return Shutdown(admission: self, binding: binding)
         }
     }
+    private func retainCloseMarker(_ marker: AuthorityMaintenanceCloseMarker) throws {
+        try state.withLock {
+            guard !$0.closed, !$0.closing, $0.armed == marker.binding,
+                  $0.marker == nil || $0.marker == marker else { throw RuntimePreparationError.changedScope }
+            $0.marker = marker
+        }
+    }
+    var hasArmedShutdown: Bool { state.withLock { !$0.closed && $0.armed != nil } }
+    func claimCloseMarker() throws -> AuthorityMaintenanceCloseMarker? {
+        try state.withLock {
+            guard !$0.closed, !$0.closing else { throw RuntimePreparationError.changedScope }
+            guard let binding = $0.armed else { return nil }
+            guard let marker = $0.marker, marker.binding == binding else { throw RuntimePreparationError.changedScope }
+            $0.closing = true; return marker
+        }
+    }
+    func requireCloseMarker(_ marker: AuthorityMaintenanceCloseMarker) throws {
+        try state.withLock {
+            guard $0.closing, $0.armed == marker.binding, $0.marker == marker else { throw RuntimePreparationError.changedScope }
+        }
+    }
     private func releaseShutdown(_ binding: AuthorityMaintenanceBinding) throws {
         try state.withLock {
-            guard !$0.closed, $0.armed == binding else { throw RuntimePreparationError.changedScope }
-            $0.armed = nil
+            guard !$0.closed, !$0.closing, $0.armed == binding else { throw RuntimePreparationError.changedScope }
+            $0.armed = nil; $0.marker = nil
         }
     }
     private func releaseUnarmed(_ id: UUID) throws {
@@ -180,6 +203,9 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         private let admission: AuthorityMaintenancePairingAdmission
         fileprivate init(admission: AuthorityMaintenancePairingAdmission, binding: AuthorityMaintenanceBinding) {
             self.admission = admission; self.binding = binding
+        }
+        func retainCloseMarker(_ marker: AuthorityMaintenanceCloseMarker) throws {
+            guard marker.binding == binding else { throw RuntimePreparationError.changedScope }; try admission.retainCloseMarker(marker)
         }
         func cancel(matching expected: AuthorityMaintenanceBinding) throws { try release(expected) }
         func reopen(matching expected: AuthorityMaintenanceBinding) throws { try release(expected) }

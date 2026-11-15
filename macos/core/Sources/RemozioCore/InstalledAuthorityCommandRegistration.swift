@@ -90,6 +90,13 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             return owner
         } catch { try? store?.close(); placement.close(); throw error }
     }
+    static func openOwnedForClose(configuration: InstalledAuthorityCommandConfiguration, activity: ReleaseActivityBarrier,
+        placement: ReleaseDestinationLease, machine: PreparationIntentStore, admission: AuthorityUpdateAdmissionStartup? = nil) throws -> InstalledAuthorityCommandRegistration {
+        guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
+        return try .init(configuration: configuration, activity: activity, startup: activity.acquireShared(), admission: admission,
+            path: "/owned-close-only", selfPath: "/owned-close-only", bundle: URL(fileURLWithPath: "/owned-close-only"),
+            requirement: "", placement: placement, machine: machine)
+    }
     private init(configuration: InstalledAuthorityCommandConfiguration, activity: ReleaseActivityBarrier, startup: ReleaseActivityToken,
                  admission: AuthorityUpdateAdmissionStartup?, path: String, selfPath: String,
                  bundle: URL, requirement: String, placement: ReleaseDestinationLease, machine: PreparationIntentStore) {
@@ -272,6 +279,44 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             try current.close(); try validateRuntime(); try activity.validate()
             return result
         } catch { try? current.close(); throw error }
+    }
+    func makeCloseMarker(binding: AuthorityMaintenanceBinding, gate: PreparationFileIdentity,
+        account: RuntimeMaintenanceWindowRecord.Account) throws -> AuthorityMaintenanceCloseMarker {
+        try validateRuntime()
+        guard binding.accountID == account.accountID,
+              let authority = configuration.codePolicy.entries.first(where: { $0.role == .authority && $0.active }) else { throw RuntimePreparationError.changedScope }
+        return try .init(binding: binding, macID: configuration.command.macID, installationID: configuration.installationID,
+            releaseDigest: configuration.releaseDigest, codeHash: authority.codeDirectoryHash,
+            directoryID: account.directoryID, ownerUID: account.ownerUID, gate: gate)
+    }
+    fileprivate func prepareCloseMarker(service: AuthorityWakeService) async throws -> (@Sendable () throws -> Void)? {
+        guard let admission = service.armedMaintenanceCloseAdmission() else { return nil }
+        let (current, _) = try await service.nativeMaintenanceScope()
+        guard current === admission, let marker = try admission.claimCloseMarker() else { return nil }
+        let activity = try releaseActivity.acquireShared(), configuration = configuration, path = path, requirement = requirement, selfPath = selfPath
+        return {
+            defer { activity.close() }
+            func verify() throws {
+                guard getuid() == 0, geteuid() == 0, try ProtectedServiceConfiguration.read(path: path) == configuration.canonicalBytes,
+                      try DynamicCodeValidation.selfPath() == selfPath else { throw RuntimePreparationError.changedScope }
+                try DynamicCodeValidation.validateSelf(requirement: requirement); try activity.validate(); try admission.requireCloseMarker(marker)
+            }
+            try verify()
+            let path = try RuntimePreparationPaths(accountID: marker.binding.accountID).serviceDirectory
+            let directory = try ProtectedSetupDirectory(anchor: "/", relativePath: String(path.dropFirst()), owner: 0,
+                visibility: .sharedMetadata, createIfMissing: false)
+            defer { directory.close() }
+            let previous = try ProtectedServiceConfiguration.readOptionalPrivate(anchor: directory.path,
+                relativePath: AuthorityMaintenanceCloseMarker.fileName, owner: 0)
+            if let previous {
+                let old = try AuthorityMaintenanceCloseMarker.decode(previous)
+                guard old.binding.accountID == marker.binding.accountID, old.macID == marker.macID,
+                      old.installationID == marker.installationID, old.directoryID == marker.directoryID else { throw RuntimePreparationError.changedScope }
+            }
+            try AdministrativeSetupPublication.replaceMaintenanceCloseMarker(marker.encoded, expected: previous,
+                directory: directory, owner: 0, verify: verify)
+            try AuthorityMaintenanceCloseMarker.readback(marker); try verify()
+        }
     }
     func captureMaintenanceAccount() throws -> RuntimeMaintenanceWindowRecord.Account {
         try withGatewayRecoveryMachine { current, _ in
@@ -549,7 +594,7 @@ extension AuthorityRuntimeRunner {
                         }
                     }
                     let maintenance = AuthorityMaintenanceStartup.prepare { try registration.prepareMaintenance(service: service) }
-                    return AuthorityRuntimeInstance(start: {
+                    var instance = AuthorityRuntimeInstance(start: {
                         let activity = try registration.releaseActivity.acquireShared()
                         do {
                             _ = try await recovery.prepare(verifyCurrent: {
@@ -563,6 +608,8 @@ extension AuthorityRuntimeRunner {
                         await monitor?.close(); await consumerRecovery.close(); await settings.close()
                         try await service.close(); try registration.close()
                     }, retired: { await service.isRetired })
+                    instance.prepareCloseMarker = { try await registration.prepareCloseMarker(service: service) }
+                    return instance
                 } catch { try? registration.close(); throw error }
             }, report: report)
     }

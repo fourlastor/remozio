@@ -12,12 +12,14 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     let admission: AuthorityMaintenancePairingAdmission
     let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
     private let processID = getpid(), owner = getuid()
+    private let marker: @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker?
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
     private init(admission: AuthorityMaintenancePairingAdmission, acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
-        observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork) {
-        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe
+        observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
+        marker: @escaping @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker? = { _, _ in nil }) {
+        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
@@ -34,7 +36,12 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try service.validateNativeMaintenanceIdentity()
             try registration.validateMaintenanceCommand($0, account: account, incarnation: incarnation, admission: admission)
             try service.validateNativeMaintenanceIdentity()
-        }, observe: { _ in try await service.captureNativeMaintenanceWork() })
+        }, observe: { _ in try await service.captureNativeMaintenanceWork() }, marker: { binding, q in
+            try registration.makeCloseMarker(binding: binding, gate: q.gate, account: account)
+        })
+    }
+    func retainCloseMarker(_ shutdown: AuthorityMaintenancePairingAdmission.Shutdown, request: AuthorityMaintenanceChannelRequest) throws {
+        if let value = try marker(shutdown.binding, request) { try shutdown.retainCloseMarker(value) }
     }
     func validateIdentity() throws {
         guard getpid() == processID, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.invalidated }
@@ -160,7 +167,8 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                 if q.action == .arm {
                     _ = try owner.blockNewStages(matching: binding)
                     try access.validate(q); try activity?.validate(); try Task.checkCancellation()
-                    transferred = try owner.transferToShutdown(matching: binding)
+                    let shutdown = try owner.transferToShutdown(matching: binding); transferred = shutdown
+                    try access.retainCloseMarker(shutdown, request: q)
                 }
                 outcome = .applied
             } catch AuthorityMaintenancePairingAdmission.TransferError.stagesPending(_) { outcome = .stagesPending }

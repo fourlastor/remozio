@@ -40,20 +40,18 @@ struct AuthorityMain {
             ? AuthorityRuntimeRunner(installedCommandConfigurationPath: path, report: reportRuntime)
             : AuthorityRuntimeRunner(presenceConfigurationPath: path, report: reportRuntime)
         do {
-            try await runner.start()
-            while true {
-                try Task.checkCancellation()
-                switch runner.status {
-                case .failed(let failure): throw RunFailure.startup(failure)
-                case .retired: throw RunFailure.retired
-                case .shutdownFailed: throw RunFailure.shutdown
-                case .closed: return
-                default: try await Task.sleep(for: .milliseconds(250))
-                }
+            switch try await runner.runUntilExit() {
+            case .failed(let failure): throw RunFailure.startup(failure)
+            case .retired: throw RunFailure.retired
+            case .shutdownFailed: throw RunFailure.shutdown
+            case .closed: return
+            default: throw RunFailure.shutdown
             }
         } catch {
             let failure = error
-            do { try await runner.close() } catch { throw RunFailure.shutdown }
+            do {
+                if failure is CancellationError { try await runner.closeForTermination() } else { try await runner.close() }
+            } catch { throw RunFailure.shutdown }
             throw failure
         }
     }

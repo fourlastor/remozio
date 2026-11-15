@@ -269,6 +269,9 @@ public actor AuthorityWakeService {
     nonisolated func maintenancePresence() -> AuthorityPresenceXPCListener? {
         maintenanceOwners.withLock { owners in owners?.pairing.supportsMaintenance == true ? owners?.pairing : nil }
     }
+    nonisolated func armedMaintenanceCloseAdmission() -> AuthorityMaintenancePairingAdmission? {
+        maintenanceOwners.withLock { $0?.pairing.armedMaintenanceCloseAdmission }
+    }
     nonisolated func validateNativeMaintenanceIdentity() throws {
         guard getuid() == 0, geteuid() == 0, maintenanceActive.withLock({ $0 }),
               maintenanceOwners.withLock({ $0 != nil }), !requestsRetired() else { throw AuthorityXPCEndpointError.unavailable }
