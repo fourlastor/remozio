@@ -164,6 +164,7 @@ enum MachineUpdateRetainedSetupPolicyNativeContext {
         guard try InstallationInventory.digest(release) == InstallationInventory.digest(candidate) else { throw RuntimeActivationError.changedScope }
         try actual.seal.requireCurrentInventory(actual.inventory, epoch: actual.installed, candidate: release)
         try MachineUpdateRetainedSetupPolicyStorage.requireFormats(release)
+        try MachineUpdateRetainedSetupPolicyStorage.requireMaintenanceWriteFormats(actual.schemaVersion, candidate: release)
         try ReleaseGenerationPreflight.validate(release, against: currentCodePolicy)
         for role in [AuthorityCodeRole.app, .setupController] {
             guard let entry = currentCodePolicy.entries.first(where: { $0.role == role && $0.active }),
@@ -184,6 +185,7 @@ enum MachineUpdateRetainedSetupPolicyNativeContext {
     static func requireExpected(_ expected: Snapshot, candidate: SignedReleaseEvidence) throws -> AuthorityInitializationIntent {
         try expected.requireSame(as: .init(activation: expected.activation, intent: expected.intent, candidate: candidate))
         let runtime = expected.activation.runtime
+        try MachineUpdateRetainedSetupPolicyStorage.requireMaintenanceWriteFormats(runtime.setup.source.actual.schemaVersion, candidate: candidate)
         guard MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(runtime.setup.source.actual.schemaVersion),
               let initial = runtime.setup.account?.initialization, initial.complete,
               initial.macID == runtime.preparation.macID, initial.installationID == runtime.preparation.installationID,

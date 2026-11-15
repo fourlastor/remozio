@@ -13,6 +13,7 @@ struct RetainedPolicyWriterFixture {
     let verifyPair: () throws -> Void
     let reopen: ((() throws -> Void)?) throws -> Void
     let scalar: (String) throws -> Int64
+    let databasePath: String
     let openPolicyJournal: (JournalMode) throws -> AuthorityJournal
     let currentAuthorityAccountID: Data
     let openJournalLease: @Sendable (Data) throws -> sending ProtectedJournalLease

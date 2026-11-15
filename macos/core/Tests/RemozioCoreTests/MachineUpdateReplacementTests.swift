@@ -3471,12 +3471,47 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
     }
 
+    private func seedOwnedMaintenanceSchema29(_ files: UpdateCandidateStorageFixture, candidate: SignedReleaseEvidence) throws {
+        XCTAssertEqual(try files.f.f.sql("PRAGMA user_version"), 24)
+        try files.store.close()
+        for sql in [MachineUpdateRetainedSetupPolicyStorage.createSQL, MachineUpdateRetainedSetupCompletionStorage.createSQL,
+                    MachineUpdateRetainedSetupPromotionStorage.createSQL, MachineUpdateRetainedSetupPromotionReadyStorage.createSQL,
+                    RuntimeMaintenanceWindowStorage.createSQL, "PRAGMA user_version=29"] { try files.sql(sql) }
+        try files.reopen()
+        let source = try files.store.stableRuntimeSource(candidate: candidate)
+        let authority = try XCTUnwrap(source.preparations.first { value in
+            source.actual.admission.accounts.contains { $0.accountID == value.accountID }
+        })
+        let target = try XCTUnwrap(source.preparations.first { value in
+            !source.actual.inventory.accounts.contains { $0.accountID == value.accountID }
+        })
+        func account(_ value: AccountPreparationIntent) throws -> RuntimeMaintenanceWindowRecord.Account {
+            var directory = value.directoryID.uuid
+            return try .init(accountID: value.accountID, ownerUID: value.ownerUID,
+                directoryID: withUnsafeBytes(of: &directory) { Data($0) })
+        }
+        let digest = Data(repeating: 71, count: 32)
+        let window = try RuntimeMaintenanceWindowRecord(id: Data(repeating: 72, count: 16), revision: Data(repeating: 73, count: 16),
+            purpose: .retainedRuntime, scope: .init(macID: source.actual.inventory.macID,
+                installationID: source.actual.inventory.installationID, authority: account(authority), target: account(target),
+                releaseDigest: source.actual.inventory.releaseDigest, candidateDigest: digest, authorityPolicyDigest: digest,
+                operationDigest: digest, restorationDigest: digest, mutationFootprintDigest: digest, authorityGrantDigest: digest,
+                targetConsentDigest: digest, administratorIntentDigest: digest), phase: .executing, operation: .unknown, service: .stopped)
+        func hex(_ value: Data) -> String { value.map { String(format: "%02x", $0) }.joined() }
+        try files.store.close()
+        try files.sql("INSERT INTO runtime_maintenance_windows_v1 VALUES(X'\(hex(window.scope.authority.accountID))',X'\(hex(window.id))',X'\(hex(window.revision))',5,X'\(try hex(window.encoded))')")
+        try files.reopen()
+    }
+
     static func withRetainedMaterialWriterFixture(hasReference: Bool = false, additionalRetainedAccount: Bool = false,
+        schema29: Bool = false, setupWriter29: Bool = true,
         _ body: (RetainedMaterialWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testStableActivationSnapshotSeparatesUnpublishedMaterialFromPublishedFacts"))
         var account: AccountPreparationIntent?, material: RuntimePreparationMaterial?
-        try suite.withFinishingFixture(stableFormats: true, retainedPolicySourceFormats: true, beforeActivation: { files in
+        try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: schema29, completionReaderFormats: schema29,
+            promotionReaderFormats: schema29, readinessReaderFormats: schema29, maintenanceReaderFormats: schema29,
+            maintenanceWriterFormats: schema29 && setupWriter29, retainedPolicySourceFormats: true, beforeActivation: { files in
             account = try suite.prepareSecondForeground(files, retainMaterial: hasReference, didPrepareMaterial: { material = $0 }).account
             if additionalRetainedAccount { _ = try suite.prepareSecondForeground(files, offset: 2000, firstServiceUID: 30002, retainMaterial: false) }
         }) { fixture, finishing, _ in
@@ -3488,6 +3523,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: fixture.candidate,
                 directory: fixture.directory, loan: loan) { _, _ in }
             loan.close(); fixture.restart.close()
+            if schema29 { try suite.seedOwnedMaintenanceSchema29(fixture.files, candidate: fixture.candidate) }
             let anchor = fixture.files.f.f.root.path
             let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid())
             let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
@@ -3500,7 +3536,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             try body(.init(machine: { fixture.machine }, owner: owner, candidate: fixture.candidate,
                 directory: directory, admission: admission, material: held,
                 reopen: { hook in try fixture.files.reopen(hook: hook) },
-                scalar: { try fixture.files.f.f.sql($0) }))
+                scalar: { try fixture.files.f.f.sql($0) }, databasePath: anchor + "/machine/installation.sqlite"))
         }
     }
 
@@ -3749,13 +3785,15 @@ final class MachineUpdateReplacementTests: XCTestCase {
     }
 
     static func withRetainedPolicyWriterFixture(writerFormats: Bool = true, migration: Bool = true, noPolicyChange: Bool = false,
-        sharedImportFormats: Bool = false,
+        sharedImportFormats: Bool = false, schema29: Bool = false, setupWriter29: Bool = true,
         _ body: (RetainedPolicyWriterFixture) throws -> Void) throws {
         let suite = MachineUpdateReplacementTests(selector: NSSelectorFromString(
             "testRetainedSetupPolicyObservesTheOriginalPairAndItsStartupSuccessor"))
         var retained: AccountPreparationIntent?
         var runtimeMaterial: RuntimePreparationMaterial?
-        try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, retainedPolicySourceFormats: true,
+        try suite.withFinishingFixture(stableFormats: true, policyReaderFormats: true, completionReaderFormats: schema29,
+            promotionReaderFormats: schema29, readinessReaderFormats: schema29, maintenanceReaderFormats: schema29,
+            maintenanceWriterFormats: schema29 && setupWriter29, retainedPolicySourceFormats: true,
             unchangedCodeGenerations: noPolicyChange, policyWriterFormats: writerFormats, policyMigration: migration, sharedImportFormats: sharedImportFormats,
             beforeActivation: { retained = try suite.prepareSecondForeground($0, didPrepareMaterial: { runtimeMaterial = $0 }).account }) { fixture, finishing, _ in
             let account = try XCTUnwrap(retained)
@@ -3767,6 +3805,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
             _ = try fixture.machine.commitStableMachineUpdate(expected: plan, candidate: fixture.candidate,
                 directory: fixture.directory, loan: loan) { _, _ in }
             loan.close(); fixture.restart.close()
+            if schema29 { try suite.seedOwnedMaintenanceSchema29(fixture.files, candidate: fixture.candidate) }
             let anchor = fixture.files.f.f.root.path
             let activity = try ReleaseActivityBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), owner: getuid())
             let gate = try UpdateAdmissionBarrier(directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()),
@@ -3802,7 +3841,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
                     let initial = try XCTUnwrap(source.runtime.setup.account?.initialization)
                     XCTAssertEqual(try fresh.captureUnactivatedSetupPolicySource(expected: initial), source.accountPolicy)
                 }, reopen: { hook in try fixture.files.reopen(hook: hook) },
-                scalar: { try fixture.files.f.f.sql($0) }, openPolicyJournal: { mode in
+                scalar: { try fixture.files.f.f.sql($0) }, databasePath: anchor + "/machine/installation.sqlite", openPolicyJournal: { mode in
                     switch mode {
                     case .startup, .foreignStartup:
                         let storage = try fixture.policyStorage(readOnly: false,

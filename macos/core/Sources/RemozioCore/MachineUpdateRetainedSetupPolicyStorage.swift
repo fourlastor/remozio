@@ -6,8 +6,8 @@ enum MachineUpdateRetainedSetupPolicyStorage {
     static let tableName = "retained_setup_policy_intents_v1"
     static let createSQL = "CREATE TABLE retained_setup_policy_intents_v1(account BLOB PRIMARY KEY CHECK(length(account)=16),id BLOB NOT NULL CHECK(length(id)=16),revision BLOB NOT NULL CHECK(length(revision)=16),record BLOB NOT NULL CHECK(length(record) BETWEEN 1 AND 131072)) STRICT"
 
-    static let stableSchemaVersions = Set(24...MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion)
-    static let policySchemaVersions: Set<Int64> = [25, 26, 27, 28]
+    static let stableSchemaVersions: Set<Int64> = Set(24...29)
+    static let policySchemaVersions: Set<Int64> = [25, 26, 27, 28, 29]
     /// Requirements for a future policy writer. These values do not declare a reachable manifest producer.
     static var requirements: [RetainedReleaseFormat] { get throws {
         try [AuthorityCodeRole.authority, .setupController].flatMap { role in
@@ -40,6 +40,7 @@ enum MachineUpdateRetainedSetupPolicyStorage {
     static func requireSchema(_ version: Int64, candidate: SignedReleaseEvidence) throws {
         guard stableSchemaVersions.contains(version) else { throw PreparationStoreError.incompatibleStore }
         try MachineUpdateStableReleaseRecord.requireFormats(candidate); try requireFormats(candidate)
+        try requireMaintenanceWriteFormats(version, candidate: candidate)
         if version == 24 { try requireMigrationFormats(candidate) }
         if version >= MachineUpdateRetainedSetupCompletionStorage.schemaVersion {
             try MachineUpdateRetainedSetupCompletionStorage.requireReaderFormats(candidate)
@@ -49,6 +50,16 @@ enum MachineUpdateRetainedSetupPolicyStorage {
         }
         if version >= MachineUpdateRetainedSetupPromotionReadyStorage.schemaVersion {
             try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(candidate)
+        }
+    }
+
+    /// Checks schema 29 metadata support only. The window owner separately grants native execution custody.
+    static func requireMaintenanceWriteFormats(_ version: Int64, candidate: SignedReleaseEvidence) throws {
+        guard version == 29 else { return }
+        try RuntimeMaintenanceWindowStorage.requireReaderFormats(candidate)
+        guard candidate.manifest.components.first(where: { $0.role == .setupController })?
+            .formats.first(where: { $0.name == "authority.installation-preparation" })?.writers.contains(29) == true else {
+            throw PreparationStoreError.incompatibleStore
         }
     }
 

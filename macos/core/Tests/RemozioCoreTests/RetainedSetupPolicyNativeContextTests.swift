@@ -43,6 +43,15 @@ final class RetainedSetupPolicyNativeContextTests: XCTestCase {
             currentCodePolicy: f.source.policy.startupPolicy, controls: controls(f, trace), perform: body)
     }
 
+    func testSchema29OwnedContextKeepsTheActualMaintenanceFrame() throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(schema29: true) { f in
+            let trace = Trace()
+            XCTAssertEqual(try snapshot(f).activation.runtime.setup.source.actual.schemaVersion, 29)
+            try scope(f, trace: trace) { context in try context.verify(snapshot(f)) }
+            XCTAssertEqual(try f.scalar("SELECT COUNT(*) FROM runtime_maintenance_windows_v1"), 1)
+        }
+    }
+
     func testOrdinaryIdentityRefusesBeforeOpeningAnyNativePath() throws {
         try fixture { f in
             XCTAssertNotEqual(getuid(), 0)

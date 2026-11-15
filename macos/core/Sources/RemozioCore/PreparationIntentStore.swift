@@ -4236,6 +4236,7 @@ public final class PreparationIntentStore {
         verifyScoped: (CompletionIntentStorageStage, MachineUpdateRetainedSetupMaterialSnapshot) throws -> Void) throws -> RuntimePreparationState {
         guard fileCustodyAccepted else { throw RuntimePreparationError.custodyNotAccepted }
         try expected.requireReference(reference); try RuntimeRetainedSetupReleaseBinding.requireFormats(candidate)
+        try MachineUpdateRetainedSetupPolicyStorage.requireMaintenanceWriteFormats(expected.runtime.setup.source.actual.schemaVersion, candidate: candidate)
         guard retainedMaterialAuthorization == nil, retainedPublicationAuthorization == nil, retainedSetupPolicyAuthorization == nil, stableRuntimePreparationAuthorization == nil,
               stableServiceAccountAuthorization == nil, stableAccountStorageAuthorization == nil,
               stableAccountReservationAuthorization == nil, retainedSetupPromotionAuthorization == nil else {
@@ -6983,7 +6984,7 @@ public final class PreparationIntentStore {
                 guard stableRuntimePreparation == nil, stableServiceAccount == nil, stableAccountStorage == nil,
                       stableReservation == nil, retainedSetupPromotion == nil, write, activationWrite,
                       retainedMaterialAuthorization === retainedMaterial,
-                      (24...28).contains(try scalar("PRAGMA user_version")) else { throw PreparationStoreError.invalidTransition }
+                      MachineUpdateRetainedSetupPolicyStorage.stableSchemaVersions.contains(try scalar("PRAGMA user_version")) else { throw PreparationStoreError.invalidTransition }
                 _ = try retainedMaterial.capture(in: self)
             } else if let stableRuntimePreparation {
                 guard stableServiceAccount == nil, stableAccountStorage == nil, stableReservation == nil,
