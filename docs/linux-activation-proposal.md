@@ -34,8 +34,8 @@ the least required access (line 155).
 | Authority | `remozio-authority.service`, system user `remozio-authority`, no login shell, no capabilities | Journal, continuity store, checkpoints and recovery marker; decision verification and atomic consumption; grants reading; authority TPM key; dispatch permits | Execute commands; open network sockets; read the transport key |
 | Transport | `remozio-transport.service`, system user `remozio-transport`, no capabilities | Network listener, pinned TLS with its own TPM key, framing to and from the authority | Sign arbitrary bytes with the authority key, consume decisions, reach authority state, execute, reach pairing administration |
 | Execution | `remozio-exec.service`; identity and privilege are an open decision (below) | Receiving one-use dispatch permits from the authority and starting the target command with the retained streams | Accept anything but an authority-issued permit; decide; retry an uncertain dispatch |
-| Caller monitor | Placement is an open decision (below) | Trace ownership of the frontend from protected launch, the kernel-checked submission carrier | Release a stop across the dispatch handoff without the acknowledged protocol |
-| Frontend | `/usr/libexec/remozio/remozio` invoked by the user; launch path is the contract's largest open gate | Submitting one bounded request with its streams | Execute the target itself |
+| Caller monitor | Placement is an open decision (below); candidate: a dedicated system user that keeps only `CAP_SYS_PTRACE` (decisions 2 and 5) | Trace ownership of the frontend from protected launch, the kernel-checked submission carrier | Release a stop across the dispatch handoff without the acknowledged protocol |
+| Frontend | `/usr/libexec/remozio/remozio` invoked by the user; launch path is the contract's largest open gate; candidate: static, set-group-ID to `remozio-frontend` (decision 5) | Submitting one bounded request with its streams | Execute the target itself |
 | Session | `remozio-session.service` as a systemd user unit, the interactive user's identity | Presence observations and read-only status | Modify authority state (contract line 156) |
 
 Mac comparison: the Mac authority and its command helpers run as Root inside one
@@ -59,7 +59,8 @@ system UIDs are required because state ownership is checked against them, so
 | Path | Owner:group | Mode | Contents |
 | --- | --- | --- | --- |
 | `/usr/libexec/remozio/` | `root:root` | 0755 | Service and helper binaries |
-| `/usr/libexec/remozio/*` | `root:root` | 0755 | Regular files, one link, no set-ID bits, no `security.capability` |
+| `/usr/libexec/remozio/*` | `root:root` | 0755 | Regular files, one link, no set-ID bits except the frontend below, no `security.capability` |
+| `/usr/libexec/remozio/remozio` | `root:remozio-frontend` | 2755 | Frontend, candidate (decision 5): static, no program interpreter, the one set-group-ID exception; the `remozio-frontend` group has no members |
 | `/usr/lib/systemd/system/remozio-*.{service,socket}` | `root:root` | 0644 | Units |
 | `/usr/share/remozio/install/{sysusers.conf,state-tmpfiles.conf}` | `root:root` | 0644 | Installer-only account and persistent-state declarations, outside the `sysusers.d` and `tmpfiles.d` discovery directories |
 | `/usr/lib/tmpfiles.d/remozio-runtime.conf` | `root:root` | 0644 | Boot declaration for `/run/remozio` and its socket parents only, with no persistent path |
@@ -118,7 +119,7 @@ ownership is then established by Root, not by the service that serves it.
 
 | Endpoint | Socket owner:group, mode | Parent directory | Connects | Served by | Peer check |
 | --- | --- | --- | --- | --- | --- |
-| `/run/remozio/commands/socket` | `root:root` 0666 | `root:root` 0755 | Frontend, any local user | Caller monitor / authority admission | Per-message `SCM_CREDENTIALS` and kernel pidfd matching the retained admitted process (contract line 68); no other control messages; exact stream descriptor count |
+| `/run/remozio/commands/socket` | `root:remozio-frontend` 0660, candidate (decision 5) | `root:root` 0755 | The frontend only, through its set-group-ID launch | Caller monitor / authority admission | `SO_PEERPIDFD` required; effective GID `remozio-frontend`, real GID not, group absent from the supplementary list; per-message `SCM_CREDENTIALS` and kernel pidfd matching the retained admitted process (contract line 68); no other control messages; exact stream descriptor count |
 | `/run/remozio/transport/socket` | `root:remozio-transport` 0660 | `root:remozio-transport` 0750 | Transport | Authority | `SO_PEERCRED` UID equals `remozio-transport`, rechecked per message; bounded request frames only |
 | `/run/remozio/exec/socket` | `root:remozio-authority` 0660 | `root:remozio-authority` 0750 | Authority | Execution | `SO_PEERCRED` UID equals `remozio-authority`; one-use permits only |
 | `/run/remozio/status/socket` | `root:root` 0666 | `root:root` 0755 | Session component, any local user | Authority | Requesting UID scopes the read-only answer; no state change |
@@ -217,7 +218,8 @@ this proposal still chooses none of them.
    holds the stop and spawns; C: pause until a production design exists) remain
    open, and nothing here selects one.
    **Open.** It depends on the protected-launch design (decision 5); review it
-   again when that design has a candidate.
+   again when that design has a candidate. Decision 5 now has a candidate with a
+   recorded result, so this review is due.
 2. **Monitor and execution privilege.** Ptrace access is checked in layers. Ubuntu's
    default Yama mode adds an ancestry rule: without `CAP_SYS_PTRACE`, a tracer may
    attach only to its descendants. Being the frontend's parent satisfies only that
@@ -230,7 +232,13 @@ this proposal still chooses none of them.
    `CAP_SETUID` and `CAP_SETGID`, or Root. The contract already flags that a
    narrowly privileged monitor needs its own review (lines 110–114).
    **Open.** It depends on the protected-launch design (decision 5) and on where
-   the monitor runs.
+   the monitor runs. Candidate for the monitor, from the decision 5 design: a
+   dedicated system service user that keeps only `CAP_SYS_PTRACE`. The protected
+   launch experiment measured that this capability set is enough for every check
+   except an outside reading of the frontend's personality, which the frontend
+   reports itself. That capability can trace Root processes, so production also
+   needs confinement to the frontend peer, a separate experiment. The execution
+   identity stays open.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths
@@ -261,6 +269,16 @@ this proposal still chooses none of them.
    cannot meet the claim, the capability is reported as unsupported, and a
    narrower guarantee needs the separately reviewed contract decision that the
    contract already requires.
+   **Candidate, measured on one host.** A static frontend installed set-group-ID to
+   `remozio-frontend`, a group with no members; a command socket that only that
+   group can open; a code policy that the frontend applies before it reads its
+   arguments; and a monitor that keeps only `CAP_SYS_PTRACE` and seizes and checks
+   the frontend from outside. The
+   [protected launch experiment](experiments/linux-protected-launch.md) passed all
+   14 cases in one supervised Root run on Ubuntu 25.10 (kernel `6.17.0-41`) on
+   2026-11-13. Adopting the candidate is the Linux host owner's decision. Production
+   execution stays off: monitor confinement, the production frontend, the stopped
+   handoff (decision 1) and the installed services are not measured.
 6. **Package and update trust.** Release manifests, version floors and update
    serialization have no Linux design yet. Updates must also avoid a
    `systemd-tmpfiles --create` run that would repair live `/run/remozio` paths.

@@ -1,0 +1,442 @@
+{
+  "cases": {
+    "n1": {
+      "attacker": {
+        "control.pidfdGetfd": "ok",
+        "control.procMemOpen": "ok",
+        "control.procMemReadMarker": "yes",
+        "control.procMemWrite": "ok",
+        "control.ready": "yes",
+        "control.seize": "ok",
+        "control.vmRead": "ok",
+        "control.vmWrite": "ok",
+        "installed.pidfdGetfd": "EPERM",
+        "installed.procMemOpen": "EACCES",
+        "installed.procMemReadMarker": "not-attempted",
+        "installed.procMemWrite": "not-attempted",
+        "installed.ready": "yes",
+        "installed.seize": "EPERM",
+        "installed.vmRead": "EPERM",
+        "installed.vmWrite": "EPERM"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n10": {
+      "attacker": {
+        "frontendExit": "rejected"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "no",
+        "descriptorsExact": "no",
+        "exeIsCurrentInstalledImage": "no",
+        "fdDirectoryListing": "not-attempted",
+        "frontendAppArmor": "not-attempted",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "no",
+        "mapsAllowed": "no",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "no",
+        "notDumpable": "no",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "no",
+        "pidfdAssociated": "no",
+        "seccompFilterMode": "no",
+        "seize": "EPERM",
+        "signalsReset": "no",
+        "singleSeccompFilter": "no",
+        "singleThread": "no",
+        "statusGidRolesExact": "no",
+        "stopHeld": "no",
+        "tracerIsMonitor": "no",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n12": {
+      "attacker": {
+        "effectiveGidElevated": "no",
+        "frontendExit": "connect-EACCES",
+        "ready": "yes",
+        "userNamespace": "created"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n13": {
+      "attacker": {
+        "frontendExit": "rejected"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "no",
+        "descriptorsExact": "no",
+        "exeIsCurrentInstalledImage": "no",
+        "fdDirectoryListing": "not-attempted",
+        "frontendAppArmor": "not-attempted",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "no",
+        "mapsAllowed": "no",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "no",
+        "notDumpable": "no",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ENOPROTOOPT",
+        "personalityCleared": "no",
+        "pidfdAssociated": "no",
+        "seccompFilterMode": "no",
+        "seize": "not-attempted",
+        "signalsReset": "no",
+        "singleSeccompFilter": "no",
+        "singleThread": "no",
+        "statusGidRolesExact": "no",
+        "stopHeld": "no",
+        "tracerIsMonitor": "no",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n2": {
+      "attacker": {
+        "effectiveGidElevated": "no",
+        "execStop": "yes",
+        "frontendExit": "connect-EACCES",
+        "ready": "yes"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n3": {
+      "attacker": {
+        "effectiveGidElevated": "no",
+        "frontendExit": "connect-EACCES",
+        "ready": "yes"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n4": {
+      "attacker": {
+        "effectiveGidElevated": "no",
+        "frontendExit": "connect-EACCES",
+        "ready": "yes"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n5": {
+      "attacker": {
+        "frontendExit": "accepted"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "yes",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "yes",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n6": {
+      "attacker": {
+        "frontendExit": "accepted"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "yes",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "yes",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n7": {
+      "attacker": {
+        "clone": "SIGSYS",
+        "exec": "SIGSYS",
+        "mmap-exec": "SIGSYS",
+        "mprotect": "SIGSYS",
+        "shared": "SIGSYS",
+        "x32": "SIGSYS"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "connectionQueued": "no",
+      "mismatches": [],
+      "passed": true
+    },
+    "n8": {
+      "attacker": {
+        "frontendExit": "rejected",
+        "oPathOpen": "ok"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "no",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "yes",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "no",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n9-traced": {
+      "attacker": {
+        "effectiveGidElevated": "yes",
+        "execStop": "yes",
+        "frontendExit": "rejected",
+        "ready": "yes"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n9-untraced": {
+      "attacker": {
+        "effectiveGidElevated": "yes",
+        "frontendExit": "rejected",
+        "ready": "yes"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "p1": {
+      "attacker": {
+        "frontendExit": "accepted"
+      },
+      "cleanupReapedAllFixtureProcesses": true,
+      "mismatches": [],
+      "monitor": {
+        "accepted": "yes",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "unconfined",
+        "groupsExcludeFrontendGroup": "yes",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "unconfined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    }
+  },
+  "cleanup": {
+    "filesRemoved": true,
+    "frontendGroupRemoved": true,
+    "monitorUserRemoved": true
+  },
+  "experiment": "linux-protected-launch-v1",
+  "host": {
+    "architecture": "x86_64",
+    "kernelVersion": "6.17.0-41",
+    "os": "Linux",
+    "osRelease": {
+      "id": "ubuntu",
+      "versionId": "25.10"
+    },
+    "pythonVersion": "3.13.7",
+    "runsAsRoot": true,
+    "settings": {
+      "apparmorEnabled": true,
+      "apparmorRestrictUnprivilegedUserns": 1,
+      "protectedHardlinks": 1,
+      "ptraceScope": 1,
+      "suidDumpable": 2,
+      "unprivilegedUsernsClone": 1
+    }
+  },
+  "installedImageSha256": "941f15c9d94ced79e73b460f03195fc685335b3122ec6b7923ef62182a0add18",
+  "limits": [
+    "C measurement fixture, not the production frontend",
+    "the monitor is not confined beyond its capability set",
+    "no stopped handoff, executor, installed services, packaging, TPM or phone approval",
+    "one host, one kernel; set-ID exec semantics are pinned to the recorded version"
+  ],
+  "measuredAtUTC": "2026-11-13T17:57:05.219551+00:00",
+  "passed": true,
+  "productionAdmission": false,
+  "seccompPolicySha256": "7195428c470e57bcec43231e3aaab64f69168a7db422781193b2b77ff2c36c06",
+  "setup": {
+    "frontendGroupHasNoMembers": true,
+    "frontendStaticNonPie": true,
+    "installedImageExact": true,
+    "noAccountUsesFrontendGroupAsPrimary": true,
+    "operatorOutsideFrontendGroup": true
+  },
+  "sources": {
+    "experiments/linux-protected-launch/attacker.c": "d98b08b3b897fdc2c2430034b676ac7a3656ff7331a0ff4137fee75b3a27a600",
+    "experiments/linux-protected-launch/frontend.c": "11888209c4bcdb47a2256c7c6d38d3db3d76b264b67edcf740c30d9154f63173",
+    "experiments/linux-protected-launch/monitor.c": "818895cbed4c188422ba0d67105d0641b43107791fb768ae7eb53f871c83b54b",
+    "scripts/run-linux-caller-experiment.py": "d5065cf8910b6d65d983b1e86a143564b6ccf32020ec7d06c8ad7bc10039ae12",
+    "scripts/run-linux-protected-launch-experiment.py": "1cc0896ece28a04ff464dda4e1a666050a49f3e4d8f5dcaa664f41fba7c3b89d"
+  },
+  "supervised": true,
+  "trustedCode": false
+}
