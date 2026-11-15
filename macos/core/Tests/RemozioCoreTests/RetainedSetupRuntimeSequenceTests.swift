@@ -396,6 +396,42 @@ final class RetainedSetupRuntimeSequenceTests: XCTestCase {
         var fresh = Sequence.CaptureBudget()
         XCTAssertNoThrow(try fresh.claim())
     }
+    func testActualRuntimeBodyPreservesAllRowsAndFilesOutsideItsDeclaredFootprint() throws {
+        try MachineUpdateReplacementTests.withRetainedPolicyWriterFixture(sharedImportFormats: true, schema29: true) { f in
+            let s = State(f)
+            defer { if let files = s.files { XCTAssertNoThrow(try files.close()) }; try? f.machine().close() }
+            XCTAssertEqual(s.initialRuntime.setup.source.actual.schemaVersion, 29)
+            let root = URL(fileURLWithPath: s.directory.path).deletingLastPathComponent()
+            let sentinel = root.appendingPathComponent("outside-maintenance-profile.cbor")
+            try Data([1, 3, 5, 7]).write(to: sentinel)
+            let target = s.initialRuntime.preparation.accountID
+            let initial = try XCTUnwrap(s.initialRuntime.setup.account?.initialization)
+            let database = s.directory.path + "/installation.sqlite"
+            let mutable = Set([database, initial.journalPath, initial.continuityPath].flatMap { [$0, $0 + "-journal"] })
+            func outsideFiles() throws -> [String: Data] {
+                let enumerator = try XCTUnwrap(FileManager.default.enumerator(at: root,
+                    includingPropertiesForKeys: [.isRegularFileKey], options: []))
+                var result: [String: Data] = [:]
+                for case let url as URL in enumerator {
+                    if try url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true,
+                       !mutable.contains(url.path) {
+                        result[String(url.path.dropFirst(root.path.count + 1))] = MachineUpdateActivationRecord.digest(try Data(contentsOf: url))
+                    }
+                }
+                return result
+            }
+            let excluded = ["runtime_preparation_v1": target, MachineUpdateRetainedSetupPolicyStorage.tableName: target]
+            let rows = try runtimeMaintenanceFixtureRows(database, excludingRowsForAccounts: excluded)
+            let files = try outsideFiles()
+            XCTAssertFalse(rows.isEmpty); XCTAssertFalse(files.isEmpty)
+            let actual = try run(s)
+            XCTAssertTrue(actual.entry.runtime.state.configurationPublished)
+            XCTAssertEqual(try XCTUnwrap(s.files).publicationCalls, 8)
+            XCTAssertEqual(try runtimeMaintenanceFixtureRows(database, excludingRowsForAccounts: excluded), rows)
+            XCTAssertEqual(try outsideFiles(), files)
+            XCTAssertNil(actual.entry.activation.plan); XCTAssertFalse(actual.entry.activation.jobsRegistered)
+        }
+    }
     func testOwnedFullChainAndFreshPublishedRecoveryPreserveEveryFileWithoutReplay() throws {
         try fixture { s in
             try s.seedImport(); let original = try XCTUnwrap(s.intent)

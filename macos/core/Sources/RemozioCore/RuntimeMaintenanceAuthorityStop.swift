@@ -161,10 +161,12 @@ final class RuntimeMaintenanceAuthorityStop {
     }
     /// One synchronous body loan. The pair closes before restoration, including when the body throws.
     func withNativeBody<Value>(purpose: RuntimeMaintenanceWindowRecord.Purpose, initialization: AuthorityInitializationIntent,
-        policy: AuthorityCodePolicy, _ body: (AuthorityJournalCutoverInspection) throws -> Value) throws -> Value {
+        policy: AuthorityCodePolicy, capture expectedCapture: RuntimeMaintenanceStopCapture? = nil,
+        _ body: (AuthorityJournalCutoverInspection) throws -> Value) throws -> Value {
         var bodyFailure: Error?
         do { return try performBound {
-            guard !bodyUsed, let permit, let openPair, permit.capture.window.purpose == purpose,
+            guard !bodyUsed, let permit, let openPair, expectedCapture == nil || expectedCapture === permit.capture,
+                  permit.capture.window.purpose == purpose,
                   initialization.macID == permit.capture.window.scope.macID, initialization.installationID == permit.capture.window.scope.installationID,
                   initialization.accountID == permit.capture.window.scope.authority.accountID,
                   initialization.releaseDigest == permit.capture.window.scope.releaseDigest,

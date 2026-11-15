@@ -7,6 +7,9 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     struct RightsState: Equatable, Sendable { let cancelled: Bool, expired: Bool }
     let peer: XPCPeerCredentials
     private let capture: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding
+    private let captureMaintenance: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture
+    private let recaptureMaintenance: (SetupAccountOwner.RetainedMaintenanceCapture, [PreparationIntentStore.RuntimeMaintenanceTransition],
+        RuntimeMaintenanceStopCapture, AuthorityJournalCutoverInspection, SignedReleaseEvidence, () throws -> Void) throws -> SetupAccountOwner.RetainedMaintenanceCapture
     let acceptedPolicy: XPCPeerPolicy
     let incarnation: UUID
     private let processID = getpid(), processOwner = getuid()
@@ -55,6 +58,11 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                 return Self(peer: peer, incarnation: incarnation, policy: policy, verifyRights: verifyRights, closeRights: closeRights,
                     verifyReservation: reservation.verify, closeReservation: reservation.close, capture: { invocation, candidate in
                         try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.admission)
+                    }, captureMaintenance: { invocation, candidate in
+                        try owner.retainedMaintenanceCapture(invocation: invocation, candidate: candidate, admission: reservation.admission)
+                    }, recaptureMaintenance: { expected, transitions, capture, pair, candidate, current in
+                        try owner.recaptureRetainedMaintenance(expected: expected, transitions: transitions, capture: capture,
+                            pair: pair, candidate: candidate, admission: reservation.admission, current: current)
                     })
             } catch { reservation.close(); throw error }
         } catch { closeRights(); throw error }
@@ -62,8 +70,12 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     private init(peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
                  verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
                  verifyReservation: @escaping () throws -> Void, closeReservation: @escaping () -> Void,
-                 capture: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding) {
+                 capture: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding,
+                 captureMaintenance: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture,
+                 recaptureMaintenance: @escaping (SetupAccountOwner.RetainedMaintenanceCapture, [PreparationIntentStore.RuntimeMaintenanceTransition],
+                    RuntimeMaintenanceStopCapture, AuthorityJournalCutoverInspection, SignedReleaseEvidence, () throws -> Void) throws -> SetupAccountOwner.RetainedMaintenanceCapture) {
         self.peer = peer; self.incarnation = incarnation; acceptedPolicy = policy; self.capture = capture
+        self.captureMaintenance = captureMaintenance; self.recaptureMaintenance = recaptureMaintenance
         self.verifyRights = verifyRights; self.closeRights = closeRights
         self.verifyReservation = verifyReservation; self.closeReservation = closeReservation
     }
@@ -78,6 +90,45 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             let value = try capture(invocation, candidate)
             guard value.incarnation == incarnation, value.peer == peer else { throw XPCPeerPolicyError.wrongPeer }
             try validateLifetime(); return value
+        }
+    }
+    func maintenanceCapture(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
+        purpose: RuntimeMaintenanceWindowRecord.Purpose) throws -> SetupAccountOwner.RetainedMaintenanceCapture {
+        try RuntimeMaintenanceCommitments.requireProfile(purpose)
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        return try lock.withLock {
+            guard !active, !invoked, invocation.incarnation == incarnation else { throw XPCPeerPolicyError.wrongConnection }
+            active = true; defer { active = false }; try validateLifetime()
+            guard try invocation.verifyInvocation() == peer else { throw XPCPeerPolicyError.wrongPeer }
+            let value = try captureMaintenance(invocation, candidate); try validateLifetime(); return value
+        }
+    }
+    /// Fresh rights authorize metadata for this invocation. The real writer still proves storage and native ownership.
+    func authorizedMaintenanceWindow(invocation: XPCInvocationGuard, expected: SetupAccountOwner.RetainedMaintenanceCapture,
+        purpose: RuntimeMaintenanceWindowRecord.Purpose, candidate: SignedReleaseEvidence,
+        id: Data, revision: Data) throws -> RuntimeMaintenanceWindowRecord {
+        try RuntimeMaintenanceCommitments.requireProfile(purpose)
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        return try lock.withLock {
+            try validateLifetime()
+            guard !active, !invoked, invocation.incarnation == incarnation, try invocation.verifyInvocation() == peer,
+                  expected.binding.peer == peer, expected.binding.incarnation == incarnation else {
+                throw XPCPeerPolicyError.wrongPeer
+            }
+            let commitments = try RuntimeMaintenanceCommitments.capture(binding: expected.binding,
+                inputs: expected.inputs, candidate: candidate, purpose: purpose)
+            try validateLifetime()
+            return try .init(id: id, revision: revision, purpose: purpose, scope: commitments.scope)
+        }
+    }
+    func recaptureMaintenance(expected: SetupAccountOwner.RetainedMaintenanceCapture,
+        transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], capture: RuntimeMaintenanceStopCapture,
+        pair: AuthorityJournalCutoverInspection, candidate: SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture {
+        try withWorkerContext { scope in
+            try scope.verify()
+            guard expected.binding.peer == peer, expected.binding.incarnation == incarnation else { throw XPCPeerPolicyError.wrongPeer }
+            let result = try recaptureMaintenance(expected, transitions, capture, pair, candidate, scope.verify)
+            try scope.verify(); return result
         }
     }
     private func installContext(_ make: () throws -> SetupRetainedInvocationContext) throws {

@@ -100,4 +100,43 @@ struct SetupRetainedCallerBinding: CustomStringConvertible, CustomDebugStringCon
             throw PreparationStoreError.staleRevision
         }
     }
+    func requireCapturedState(_ actual: State, entry: MachineUpdateRetainedSetupInitialRuntimeEntry) throws {
+        try actual.requireSame(as: state); try entry.requireSame(as: self.entry)
+    }
+    /// Only real writer receipts permit this record-only comparison. The returned binding retains the actual new frame.
+    func recapturing(state actual: State, entry: MachineUpdateRetainedSetupInitialRuntimeEntry,
+        transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], candidate: SignedReleaseEvidence,
+        capture: RuntimeMaintenanceStopCapture, lookup: (UInt32) throws -> LocalAccountIdentity) throws -> Self {
+        guard let bindingTransition = capture.bindingTransition else { throw RuntimePreparationError.changedScope }
+        let window = try PreparationIntentStore.RuntimeMaintenanceTransition.requireChain(transitions,
+            from: state.source.actual, to: actual.source.actual, binding: bindingTransition)
+        try capture.validate()
+        guard try capture.configuration.codePolicy.bytes == publishedAuthorityPolicy.bytes else {
+            throw RuntimePreparationError.changedScope
+        }
+        var a = authorityOwner.directoryID.uuid, b = targetOwner.directoryID.uuid
+        guard window.scope.authority.accountID == authorityAccountID, window.scope.authority.ownerUID == authorityOwner.uid,
+              window.scope.authority.directoryID == withUnsafeBytes(of: &a, { Data($0) }),
+              window.scope.target.accountID == self.entry.runtime.preparation.accountID,
+              window.scope.target.ownerUID == targetOwner.uid, window.scope.target.directoryID == withUnsafeBytes(of: &b, { Data($0) }),
+              window.scope == capture.window.scope, window.purpose == capture.window.purpose,
+              window.shutdownBinding == capture.marker.binding,
+              try lookup(authorityOwner.uid) == authorityOwner, try lookup(targetOwner.uid) == targetOwner else {
+            throw RuntimePreparationError.changedScope
+        }
+        let normalized = try Source(actual: state.source.actual, preparations: actual.source.preparations,
+            initializations: actual.source.initializations, candidate: candidate)
+        try State(source: normalized, runtimes: actual.runtimes, sharedImport: actual.sharedImport).requireSame(as: state)
+        let runtime = entry.runtime
+        let checked = try MachineUpdateStableRuntimePreparationSnapshot(
+            setup: .init(source: normalized, owner: runtime.setup.owner), services: .init(plan: runtime.plan, complete: true),
+            state: runtime.state, reservedNumbers: runtime.reservedNumbers)
+        try MachineUpdateRetainedSetupInitialRuntimeEntry(runtime: checked, activation: entry.activation,
+            intent: entry.intent, candidate: candidate).requireSame(as: self.entry)
+        let (_, host) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(runtime: runtime, accountID: authorityAccountID)
+        guard try host.codePolicy.bytes == publishedAuthorityPolicy.bytes else { throw RuntimePreparationError.changedScope }
+        return .init(state: actual, peer: peer, incarnation: incarnation, authorityAccountID: authorityAccountID,
+            authorityOwner: authorityOwner, targetOwner: targetOwner, policy: host.codePolicy, entry: entry, appRequirement: appRequirement)
+    }
+
 }

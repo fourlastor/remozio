@@ -367,6 +367,77 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    /// Actual initial choices only. This value is neither a native grant nor an alternative caller resolver.
+    struct RetainedMaintenanceCapture {
+        let binding: SetupRetainedCallerBinding
+        let inputs: MachineUpdateRetainedSetupRuntimeInputs
+        var frame: PreparationIntentStore.RetainedImportFrame { (binding.entry, inputs) }
+        fileprivate init(binding: SetupRetainedCallerBinding, inputs: MachineUpdateRetainedSetupRuntimeInputs) {
+            self.binding = binding; self.inputs = inputs
+        }
+    }
+    func retainedMaintenanceCapture(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
+        admission: SetupOwnerAsyncWork.Token) throws -> RetainedMaintenanceCapture {
+        let binding = try retainedCallerBinding(invocation: invocation, candidate: candidate, admission: admission)
+        return try withMachine(admission: admission) { machine in
+            func current() throws {
+                guard try invocation.verifyInvocation() == binding.peer else { throw XPCPeerPolicyError.wrongPeer }
+                try machine.validateStorageLease()
+            }
+            try current()
+            let entry = try machine.retainedSetupInitialRuntimeEntry(owner: binding.targetOwner, candidate: candidate)
+            try binding.requireCapturedState(machine.retainedSetupCallerState(candidate: candidate), entry: entry)
+            let inputs = try maintenanceInputs(machine: machine, entry: entry, current: current)
+            try binding.requireCapturedState(machine.retainedSetupCallerState(candidate: candidate),
+                entry: machine.retainedSetupInitialRuntimeEntry(owner: binding.targetOwner, candidate: candidate))
+            try current(); return .init(binding: binding, inputs: inputs)
+        }
+    }
+    func recaptureRetainedMaintenance(expected: RetainedMaintenanceCapture,
+        transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], capture: RuntimeMaintenanceStopCapture,
+        pair: AuthorityJournalCutoverInspection, candidate: SignedReleaseEvidence, admission: SetupOwnerAsyncWork.Token,
+        current: () throws -> Void) throws -> RetainedMaintenanceCapture {
+        try RuntimeMaintenanceCommitments.requireProfile(capture.window.purpose)
+        let commitments = try RuntimeMaintenanceCommitments.capture(binding: expected.binding, inputs: expected.inputs,
+            candidate: candidate, purpose: capture.window.purpose)
+        guard capture.window.scope == commitments.scope else { throw RuntimePreparationError.changedScope }
+        try current()
+        let (initial, _) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(
+            runtime: expected.binding.entry.runtime, accountID: expected.binding.authorityAccountID)
+        let policy = try pair.maintenancePolicyBoundary(initialization: initial)
+        try commitments.requirePolicy(policy.policy.policy)
+        guard try policy.policy.policy.bytes == expected.binding.publishedAuthorityPolicy.bytes else { throw RuntimePreparationError.changedScope }
+        let result = try withMachine(admission: admission) { machine in
+            _ = try currentInventory(machine); try current()
+            let state = try machine.retainedSetupCallerState(candidate: candidate)
+            let entry = try machine.retainedSetupInitialRuntimeEntry(owner: expected.binding.targetOwner, candidate: candidate)
+            let actual = try expected.binding.recapturing(state: state, entry: entry, transitions: transitions,
+                candidate: candidate, capture: capture, lookup: lookupAccount)
+            let inputs = try maintenanceInputs(machine: machine, entry: entry, current: current)
+            try inputs.requireSame(as: expected.inputs)
+            guard try RuntimeMaintenanceCommitments.capture(binding: actual, inputs: inputs, candidate: candidate,
+                purpose: capture.window.purpose) == commitments else { throw RuntimePreparationError.changedScope }
+            try actual.requireCapturedState(machine.retainedSetupCallerState(candidate: candidate),
+                entry: machine.retainedSetupInitialRuntimeEntry(owner: actual.targetOwner, candidate: candidate))
+            try current(); return RetainedMaintenanceCapture(binding: actual, inputs: inputs)
+        }
+        guard try pair.maintenancePolicyBoundary(initialization: initial) == policy else { throw AuthorityCodePolicyError.staleRevision }
+        try current(); return result
+    }
+    private func maintenanceInputs(machine: PreparationIntentStore, entry: MachineUpdateRetainedSetupInitialRuntimeEntry,
+        current: () throws -> Void) throws -> MachineUpdateRetainedSetupRuntimeInputs {
+        try machine.withSharedImportJournal { journal in
+            func read(_ relay: (SharedSetupImportIntent) throws -> MachineUpdateRetainedSetupRuntimeInputs.RelaySelection)
+                throws -> MachineUpdateRetainedSetupRuntimeInputs {
+                try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: entry.runtime, journal: journal,
+                    verifyCurrent: { try current(); try machine.validateStorageLease() }, readRelay: relay)
+            }
+            if let journal { return try machine.withSharedImportSnapshot(journal: journal) { path, owner in
+                try read { try .read($0, directory: path, owner: owner) }
+            } }
+            return try read { _ in throw SharedSetupImportError.wrongScope }
+        }
+    }
     func requirePortableImportSupport() throws {
         try lock.withLock {
             guard !closed, !closing, importedGatewayOperation != nil else { throw AdministrativeSetupError.unavailable }

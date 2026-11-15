@@ -85,6 +85,34 @@ enum MachineUpdateRetainedSetupRuntimeNativeAuthority {
             }
         }
     }
+    /// The stop owner lends its original pair. Recapture and native approval never reopen the current Authority stores.
+    static func withMaintenanceScope<Value>(stop: RuntimeMaintenanceAuthorityStop, capture: RuntimeMaintenanceStopCapture,
+        owner: SetupRetainedInvocation, expected: SetupAccountOwner.RetainedMaintenanceCapture,
+        transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], candidate: SignedReleaseEvidence,
+        perform: (HeldScope, Native.NativeCustody, Frame) throws -> Value) throws -> Value {
+        try RuntimeMaintenanceCommitments.requireProfile(capture.window.purpose)
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let (initial, host) = try PolicyEntry.publishedAuthority(runtime: expected.binding.entry.runtime,
+            accountID: expected.binding.authorityAccountID)
+        return try stop.withNativeBody(purpose: capture.window.purpose, initialization: initial, policy: host.codePolicy,
+            capture: capture) { pair in
+            let actual = try owner.recaptureMaintenance(expected: expected, transitions: transitions,
+                capture: capture, pair: pair, candidate: candidate)
+            return try Native.withNativeCustody(machineDirectory: MachineBootstrap.machineDirectory, expected: actual.frame,
+                candidate: candidate) { custody in
+                try PolicyEntry.withCurrentPolicy(initial: initial, read: {
+                    try pair.validate(); try custody.requireActive()
+                    return try pair.maintenancePolicyBoundary(initialization: initial)
+                }) { policy, current in
+                    let scope = HeldScope(policy: policy, expected: actual.frame, candidate: candidate, current: current)
+                    defer { scope.expire() }
+                    try scope.verifyRelease(actual.binding.entry, candidate: candidate); try scope.verifyCode()
+                    let value = try perform(scope, custody, actual.frame)
+                    try scope.verifyRelease(actual.binding.entry, candidate: candidate); try scope.verifyCode(); return value
+                }
+            }
+        }
+    }
     /// Owned pairs prove equality and expiry only. This helper cannot construct HeldScope or a native approval.
     static func withAuthorityPair<Value>(initial: AuthorityInitializationIntent, verifyCurrent: Verify,
         openStorage: () throws -> sending AuthorityStorage, perform: (AuthorityCodePolicy, @escaping Verify) throws -> Value) throws -> Value {
