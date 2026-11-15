@@ -15,7 +15,9 @@ enum AuthorityMaintenanceChannelScope {
                   c.relativePath == path, c.codeDirectoryHash == entry.codeDirectoryHash,
                   release.codeDirectoryHashes[entry.role] == entry.codeDirectoryHash,
                   let format = c.formats.first(where: { $0.name == formatName }),
-                  format.readers.contains(1), format.writers.contains(1) else { throw RuntimePreparationError.changedScope }
+                  format.readers.contains(1), format.writers.contains(1),
+                  let close = c.formats.first(where: { $0.name == AuthorityMaintenanceCloseMarker.formatName }), close.readers.contains(1),
+                  entry.role == .authority ? close.writers.contains(1) : close.writers.isEmpty else { throw RuntimePreparationError.changedScope }
         }
     }
 }

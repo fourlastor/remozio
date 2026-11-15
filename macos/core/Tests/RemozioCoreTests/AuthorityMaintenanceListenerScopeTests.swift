@@ -20,8 +20,10 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
     private func release(formats: (AuthorityCodeRole) throws -> [ReleaseFormat],
                          edit: (ReleaseComponent) throws -> ReleaseComponent = { $0 }) throws -> SignedReleaseEvidence {
         let components = try [AuthorityCodeRole.app, .authority, .setupController].map { role in
-            try edit(.init(role: role, identifier: identifier(role), generation: 4, relativePath: path(role),
-                codeDirectoryHash: role == .app ? nil : Data(repeating: 1, count: 20), build: "4", teamID: "ABCDEFGHIJ", formats: formats(role)))
+            var selected = try formats(role)
+            if role != .app { selected.append(try .init(name: AuthorityMaintenanceCloseMarker.formatName, readers: [1], writers: role == .authority ? [1] : [])) }
+            return try edit(.init(role: role, identifier: identifier(role), generation: 4, relativePath: path(role),
+                codeDirectoryHash: role == .app ? nil : Data(repeating: 1, count: 20), build: "4", teamID: "ABCDEFGHIJ", formats: selected))
         }
         return .init(manifest: try .init(release: "0.1.0", build: "4", components: components),
             codeDirectoryHashes: Dictionary(uniqueKeysWithValues: components.map { ($0.role, $0.codeDirectoryHash ?? Data(repeating: 1, count: 20)) }))
@@ -44,6 +46,26 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
         for role in [AuthorityCodeRole.authority, .setupController] {
             for formats in [[], [try format(readers: [2], writers: [2])], [try format(writers: [])], [try format(readers: [1, 2], writers: [2])]] {
                 let evidence = try release { $0 == role ? formats : [try self.format()] }
+                XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
+            }
+        }
+    }
+    func testCloseMarkerNeedsBothReadersAndOnlyTheAuthorityWriter() throws {
+        let original = try validRelease(), authority = try entry(.authority), setup = try entry(.setupController)
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            for mode in 0..<3 {
+                let components = try original.manifest.components.map { c -> ReleaseComponent in
+                    guard c.role == role else { return c }
+                    var formats = c.formats.filter { $0.name != AuthorityMaintenanceCloseMarker.formatName }
+                    if mode != 0 {
+                        formats.append(try .init(name: AuthorityMaintenanceCloseMarker.formatName, readers: mode == 1 ? [2] : [1],
+                            writers: mode == 2 ? (role == .authority ? [] : [1]) : (role == .authority ? [2] : [])))
+                    }
+                    return try .init(role: c.role, identifier: c.identifier, generation: c.generation, relativePath: c.relativePath,
+                        codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats)
+                }
+                let evidence = try SignedReleaseEvidence(manifest: .init(release: "0.1.0", build: "4", components: components),
+                    codeDirectoryHashes: original.codeDirectoryHashes)
                 XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
             }
         }
