@@ -1,5 +1,5 @@
 {
- "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests, RuntimeMaintenanceReaderTests, RuntimeMaintenanceStartupRecoveryTests, RuntimeMaintenanceWindowWriterTests, RuntimeMaintenanceRetainedWriterTests, AuthorityMaintenancePairingAdmissionTests, AuthorityMaintenanceChannelMessageTests, AuthorityMaintenanceEndpointTests, AuthorityMaintenanceListenerScopeTests, AuthorityMaintenanceListenerTests, AuthorityMaintenanceClientTests, AuthorityMaintenanceCommandReaderTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh",
+ "source": "median class duration in seconds from the 4 green rock3r/remozio main push runs that ran the full macos/core suite, 2026-11-13 (8a24c924, 737a0fad, b144c71c and 5de4e383): the Mac core tests jobs, and the Mac build job for the two app-dependent classes. methods: median test duration in seconds for each class whose median exceeds half of an ideal shard with the 6 CI shards (MachineUpdateReplacementTests and MachineUpdateRetainedSetupPromotionSourceValidationTests), from the same runs; a test missing from them counts as the median test of its class; RetainedSetupInitialRuntimeTests, RetainedSetupRuntimeSequenceTests, RetainedSetupRuntimeNativeContextTests, RetainedSetupRuntimeNativeAuthorityTests, ProtectedOptionalPrivateConfigurationTests, RetainedSetupRuntimeNativeFilesTests, ProtectedConfigurationIdentityReadTests, RetainedSetupRuntimeNativeMaterialTests, RetainedSetupInitialPublicationNativeTests, RetainedSetupInitialCompletionNativeTests, RetainedSetupInitialRuntimeNativeTests, RetainedSetupImportAcknowledgementNativeTests, RetainedSetupImportAcknowledgementOwnerTests, RetainedSetupImportAcknowledgementTests, RetainedSetupPolicyNativeContextTests, SetupRetainedCallerBindingTests, SetupRetainedInvocationTests, RuntimeMaintenanceReaderTests, RuntimeMaintenanceStartupRecoveryTests, RuntimeMaintenanceWindowWriterTests, RuntimeMaintenanceRetainedWriterTests, AuthorityMaintenancePairingAdmissionTests, AuthorityMaintenanceChannelMessageTests, AuthorityMaintenanceEndpointTests, AuthorityMaintenanceListenerScopeTests, AuthorityMaintenanceListenerTests, AuthorityMaintenanceClientTests, AuthorityMaintenanceCommandReaderTests, RuntimeMaintenanceBootstrapTests and their methods (RetainedSetupRuntimeSequenceTests refreshed for its 14 methods): local measurement on the review Mac (Xcode 27.2), 2026-11-14, one fresh run of the class; replace it with the main medians in the next refresh",
  "weights": {
   "AcceptedInputMemoTests": 0.0,
   "AccountPreparationTests": 1.69,
@@ -419,6 +419,7 @@
   "RuntimeJobProcessObservationTests": 0.7,
   "RuntimeJobRegistrationTests": 0.01,
   "RuntimeJobStopSessionTests": 0.01,
+  "RuntimeMaintenanceBootstrapTests": 120.31,
   "RuntimeMaintenanceReaderTests": 79.99,
   "RuntimeMaintenanceRetainedWriterTests": 116.06,
   "RuntimeMaintenanceStartupRecoveryTests": 37.9,
@@ -889,6 +890,22 @@
    "testStaleMaterialAndPolicyResultsStopBeforePublicationThenFreshStateRecovers": 76.77,
    "testStalePublicationAndLostAcknowledgementRequireFreshReadOnlyRecovery": 78.28,
    "testUnresolvedWritingRefusesBeforeMaterialPublicationOrAcknowledgement": 26.0
+  },
+  "RuntimeMaintenanceBootstrapTests": {
+   "testAnotherWriterOpensDuringEverySimulatedNativeCallback": 8.35,
+   "testChangedJobAccountBundleAndInstallationCannotUseAnAbsentWindow": 8.75,
+   "testChangedMachineInstallationAndDirectoryCannotAdoptARestoredWindow": 8.81,
+   "testCorruptIndexedRowRefusesBeforeInspectionOrBootstrap": 8.99,
+   "testEveryActivePhaseIncludingRestorationRefusesBeforeNativeCallbacks": 8.39,
+   "testExactRestoredWindowPreservesMatchingAndAbsentRegistration": 8.37,
+   "testLegacyAndAbsentWindowDoNotChangeProtectedRows": 8.38,
+   "testNativeGuardRefusesOrdinaryUsersBeforeReadingProtectedConfiguration": 8.76,
+   "testOtherAccountWindowAndOtherRolesDoNotRestrictTheSelectedJob": 8.63,
+   "testOtherRolesDoNotReadTheMachineStore": 8.29,
+   "testTheProtectedStoreClosesBeforeNativeContinuationAndConfigurationFailure": 8.6,
+   "testUncertainStoreOpeningNeverLooksLikeAnAbsentWindow": 8.62,
+   "testWindowAppearingAfterBootstrapPreventsRegistrationConfirmation": 8.7,
+   "testWindowAppearingAfterPreflightStopsBeforeBootstrap": 8.67
   },
   "RuntimeMaintenanceReaderTests": {
    "testIndexedCorruptionAndNoncanonicalTableDeclarationsRefuse": 18.91,
