@@ -306,3 +306,47 @@ enum RuntimeMaintenanceOwnedControl {
         guard allows(realUID: getuid(), effectiveUID: geteuid()) else { throw JournalLeaseError.unsafeMetadata }
     }
 }
+
+/// One stop and one body entry for captured arm evidence. The clock does not reclassify a completed body.
+final class RuntimeMaintenanceStopPermit: @unchecked Sendable {
+    let capture: RuntimeMaintenanceStopCapture
+    private let deadline: ContinuousClock.Instant, readMarker: () throws -> Void
+    private let lock = NSLock()
+    private var consumed = false, ownerThread: pthread_t?
+    private init(capture: RuntimeMaintenanceStopCapture, deadline: ContinuousClock.Instant, readMarker: @escaping () throws -> Void) {
+        self.capture = capture; self.deadline = deadline; self.readMarker = readMarker
+    }
+    static func openNative(capture: RuntimeMaintenanceStopCapture, until deadline: ContinuousClock.Instant) throws -> RuntimeMaintenanceStopPermit {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }; try capture.validate()
+        return .init(capture: capture, deadline: deadline, readMarker: { try AuthorityMaintenanceCloseMarker.readback(capture.marker) })
+    }
+    static func openOwned(capture: RuntimeMaintenanceStopCapture, until deadline: ContinuousClock.Instant,
+        readMarker: @escaping () throws -> Void) throws -> RuntimeMaintenanceStopPermit {
+        try RuntimeMaintenanceOwnedControl.require(); try capture.validate()
+        return .init(capture: capture, deadline: deadline, readMarker: readMarker)
+    }
+    func consume(cohort: RuntimeMaintenanceAuthorityCohort, purpose: RuntimeMaintenanceWindowRecord.Purpose) throws -> any RuntimeJobExitWitness {
+        try lock.withLock {
+            guard !consumed else { throw JournalLeaseError.invalidated }; consumed = true; ownerThread = pthread_self()
+        }
+        try requireUnexpired()
+        guard capture.window.purpose == purpose, cohort.job.bytes == capture.cohort.job.bytes,
+              cohort.accountID == capture.cohort.accountID, cohort.targetAccountID == capture.cohort.targetAccountID,
+              cohort.machineIdentity == capture.cohort.machineIdentity, cohort.accountIdentity == capture.cohort.accountIdentity,
+              try !capture.witness.hasExited() else { throw RuntimePreparationError.changedScope }
+        return capture.witness
+    }
+    func validate() throws {
+        try capture.validate()
+        try lock.withLock {
+            guard consumed, let ownerThread, pthread_equal(pthread_self(), ownerThread) != 0 else { throw JournalLeaseError.invalidated }
+        }
+    }
+    func requireUnexpired() throws {
+        try validate(); guard ContinuousClock.now < deadline else { throw JournalLeaseError.invalidated }
+    }
+    func requireClosed() throws {
+        try validate(); guard try capture.witness.hasExited() else { throw RuntimeActivationError.unavailable }
+        try readMarker(); try validate()
+    }
+}
