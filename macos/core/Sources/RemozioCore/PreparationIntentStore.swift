@@ -5737,6 +5737,7 @@ public final class PreparationIntentStore {
         let snapshot = MachineUpdateStableReleaseSnapshot(schemaVersion: schema, inventory: inventory, activation: activation,
             admission: admission, candidate: candidate, installed: installed, seal: seal, currentRowsDigest: current.digest)
         let windows = schema >= 29 ? try loadRuntimeMaintenanceWindows() : []
+        if schema >= 29 { try RuntimeMaintenanceWindowStorage.requireReaderFormats(release, recordVersions: Set(windows.map(\.formatVersion))) }
         return (snapshot, completion, promotions, ready, windows)
     }
 
@@ -5745,7 +5746,7 @@ public final class PreparationIntentStore {
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken? = nil,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
-        try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion)
+        try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion, recordVersion: next.formatVersion)
         _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded); try next.requireReplacing(previous)
         try requireRetainedSetupPromotionWriterAvailable()
         var commitAttempted = false
@@ -5818,6 +5819,15 @@ public final class PreparationIntentStore {
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
     }
 
+    /// The existing writer confirms the committed record. The caller closes this store before sending arm.
+    func persistRuntimeMaintenanceBinding(_ binding: AuthorityMaintenanceBinding, window: RuntimeMaintenanceWindowRecord,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
+        admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceWindowRecord {
+        let next = try window.retainingShutdownBinding(binding)
+        return try writeRuntimeMaintenanceWindow(next, replacing: window, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped)
+    }
     /// A negative bootstrap guard only. No phase grants restoration or native custody.
     func requireRuntimeMaintenanceBootstrap(_ job: InstalledAccountJobManifest, installationID: Data) throws {
         _ = try runtimeMaintenanceBootstrapAccount(job, installationID: installationID)
@@ -5889,18 +5899,23 @@ public final class PreparationIntentStore {
                   record.scope.authority == account, record.scope.macID == macID,
                   record.scope.installationID == request.installationID,
                   record.scope.releaseDigest == current.inventory.releaseDigest,
-                  record.id == request.attemptID, record.revision == request.revision,
+                  record.id == request.attemptID,
                   record.phase == (request.action == .reopen ? .reopenPending : .draining),
                   request.binding == nil || request.binding?.incarnation == incarnation else { throw RuntimePreparationError.changedScope }
             var directory = installed.directoryID.uuid
             guard withUnsafeBytes(of: &directory, { Data($0) }) == account.directoryID else { throw RuntimePreparationError.changedScope }
+            if let binding = request.binding {
+                guard record.shutdownBinding == binding else { throw RuntimePreparationError.changedScope }
+            } else {
+                guard record.revision == request.revision else { throw RuntimePreparationError.changedScope }
+            }
             if request.action == .reopen {
                 guard record.service == .notStopped, record.operation == .notStarted,
                       let armedBinding, request.binding == armedBinding else { throw RuntimePreparationError.changedScope }
             }
             if let gate = record.gate {
                 guard gate.identity == request.gate, gate.authorityIncarnation == incarnation,
-                      gate.requestRevision == (request.action == .reopen ? armedBinding?.revision : request.revision) else {
+                      gate.requestRevision == (record.shutdownBinding?.revision ?? (request.action == .reopen ? armedBinding?.revision : request.revision)) else {
                     throw RuntimePreparationError.changedScope
                 }
             }

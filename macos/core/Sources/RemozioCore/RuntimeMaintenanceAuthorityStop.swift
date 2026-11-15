@@ -148,6 +148,7 @@ final class RuntimeMaintenanceAuthorityStop {
             return .init(boundary: boundary, session: session)
         }
     }
+    /// Poll until registrationRemoved before requireRemoved. A bound poll error requires recovery without retry.
     func poll() throws -> RuntimeJobStopSession.Progress { try performBound { try permit?.requireUnexpired(); return try session.poll() } }
     /// Fresh observation only. This method never issues removal or captures another process.
     func requireRemoved() throws { try performBound { try permit?.requireUnexpired(); try session.requireRemoved(); try permit?.requireClosed() } }

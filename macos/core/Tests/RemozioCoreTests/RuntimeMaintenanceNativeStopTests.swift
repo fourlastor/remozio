@@ -289,4 +289,28 @@ final class RuntimeMaintenanceNativeStopTests: XCTestCase, @unchecked Sendable {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fork") else { preconditionFailure("fork is unavailable") }
         return unsafeBitCast(symbol, to: (@convention(c) () -> pid_t).self)
     }()
+    func testPollWaitsForRegistrationRemovalBeforeRequireRemoved() async throws {
+        let h = try await MaintenanceNativeStopHarness()
+        try h.f.ordinary.withMachineAdmission { scope in
+            let session = try h.open(scope, permit: h.permit()); defer { session.close() }
+            XCTAssertEqual(try session.poll(), .removingRegistration)
+            h.observation = .absent
+            XCTAssertEqual(try session.poll(), .waitingForObservedProcesses)
+            h.f.witness.exited.withLock { $0 = true }
+            XCTAssertEqual(try session.poll(), .registrationRemoved)
+            try session.requireRemoved(); XCTAssertEqual(h.removals, 1)
+        }
+    }
+    func testOneBoundInspectionFailureNeedsRecoveryAndCannotRetryTheNativeCommand() async throws {
+        let h = try await MaintenanceNativeStopHarness()
+        try h.f.ordinary.withMachineAdmission { scope in
+            let session = try h.open(scope, permit: h.permit()); defer { session.close() }
+            h.onInspect = { throw MaintenanceStopTestFault.expected }
+            XCTAssertThrowsError(try session.poll()) { XCTAssertEqual($0 as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+            let inspected = h.inspections; h.onInspect = {}
+            XCTAssertThrowsError(try session.poll()) { XCTAssertEqual($0 as? AuthorityMaintenanceClientError, .needsOwnerRecovery) }
+            XCTAssertEqual(h.inspections, inspected); XCTAssertEqual(h.removals, 0); XCTAssertEqual(h.bodyCalls, 0)
+        }
+    }
+
 }

@@ -11,22 +11,23 @@ enum RuntimeMaintenanceWindowStorage {
                  RetainedReleaseFormat(role: role, name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [1])]
         }
     } }
-    static func requireReaderFormats(_ candidate: SignedReleaseEvidence) throws {
+    static func requireReaderFormats(_ candidate: SignedReleaseEvidence, recordVersions: Set<UInt64> = [1]) throws {
         try MachineUpdateRetainedSetupPromotionReadyStorage.requireReaderFormats(candidate)
         for required in try readerRequirements {
             guard let format = candidate.manifest.components.first(where: { $0.role == required.role })?
-                .formats.first(where: { $0.name == required.name }), required.readVersions.isSubset(of: format.readers) else {
+                .formats.first(where: { $0.name == required.name }), required.readVersions.isSubset(of: format.readers),
+                  required.name != RuntimeMaintenanceWindowRecord.formatName || recordVersions.isSubset(of: format.readers) else {
                 throw PreparationStoreError.incompatibleStore
             }
         }
     }
     /// Only Setup produces windows. Authority declarations cannot replace the Setup producer contract.
-    static func requireWriteFormats(_ candidate: SignedReleaseEvidence, sourceSchema: Int64) throws {
+    static func requireWriteFormats(_ candidate: SignedReleaseEvidence, sourceSchema: Int64, recordVersion: UInt64 = 1) throws {
         guard [Int64(28), 29].contains(sourceSchema) else { throw PreparationStoreError.invalidTransition }
-        try requireReaderFormats(candidate)
+        try requireReaderFormats(candidate, recordVersions: [1, recordVersion])
         guard let setup = candidate.manifest.components.first(where: { $0.role == .setupController }),
               let installation = setup.formats.first(where: { $0.name == "authority.installation-preparation" }),
-              installation.writers.contains(29), setup.formats.first(where: { $0.name == RuntimeMaintenanceWindowRecord.formatName })?.writers.contains(1) == true,
+              installation.writers.contains(29), setup.formats.first(where: { $0.name == RuntimeMaintenanceWindowRecord.formatName })?.writers.contains(recordVersion) == true,
               sourceSchema != 28 || installation.migrations[28] == 29 else { throw PreparationStoreError.incompatibleStore }
     }
     /// The caller supplies indexed columns and bytes from one protected transaction. No machine query occurs here.

@@ -75,7 +75,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 XCTAssertTrue(ready.writers.isEmpty)
                 XCTAssertTrue(ready.migrations.isEmpty)
                 let maintenance = try XCTUnwrap(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
-                XCTAssertEqual(maintenance.readers, [1])
+                XCTAssertEqual(maintenance.readers, [1, 2])
+                XCTAssertFalse(maintenance.writers.contains(2), "Binding writer 2 requires the future C02 production entry")
                 XCTAssertEqual(maintenance.writers, role == .setupController ? [1] : [])
                 XCTAssertTrue(maintenance.migrations.isEmpty)
                 XCTAssertEqual(preparation.migrations[28], role == .setupController ? 29 : nil)
@@ -94,6 +95,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
             try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence)
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 28)
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 29)
+            try RuntimeMaintenanceWindowStorage.requireReaderFormats(evidence, recordVersions: [1, 2])
+            XCTAssertThrowsError(try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 29, recordVersion: 2))
             for component in evidence.manifest.components where ![AuthorityCodeRole.authority, .setupController].contains(component.role) {
                 XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
                 XCTAssertNil(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })

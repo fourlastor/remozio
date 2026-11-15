@@ -83,7 +83,7 @@ def declarations(role):
         values.append({0: 'authority.retained-setup-completion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-ready', 1: [1], 2: [], 3: {}})
-        values.append({0: 'runtime.maintenance-window-record', 1: [1], 2: [1] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.maintenance-window-record', 1: [1, 2], 2: [1] if role == 8 else [], 3: {}})
     if role in (2, 12):
         values.append({0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     # Recovery fences include the retained settings revision and selected commit.

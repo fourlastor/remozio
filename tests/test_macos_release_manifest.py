@@ -178,7 +178,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {value[0]: value for value in MANIFEST.declarations(role)}
             if role in (2, 8):
-                self.assertEqual(declarations[name], {0: name, 1: [1], 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[name], {0: name, 1: [1, 2], 2: [1] if role == 8 else [], 3: {}})
                 preparation = declarations['authority.installation-preparation']
                 self.assertEqual(preparation[1], list(range(1, 30)))
                 self.assertEqual(29 in preparation[2], role == 8)
@@ -186,6 +186,13 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                 self.assertNotIn(29, preparation[3])
             else:
                 self.assertNotIn(name, declarations)
+
+    def test_maintenance_binding_reader_does_not_claim_an_unreachable_writer_two(self):
+        name = 'runtime.maintenance-window-record'
+        for role in (2, 8):
+            declaration = next(item for item in MANIFEST.declarations(role) if item[0] == name)
+            self.assertIn(2, declaration[1])
+            self.assertNotIn(2, declaration[2])
 
     def test_update_scheduling_candidate_is_declared_only_by_the_authority_and_setup_controller(self):
         name = 'authority.update-scheduling-candidate'
