@@ -252,7 +252,7 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
     func testAnonymousTransportPreservesArmedTargetAfterCloseAndExactReopenReleasesIt() async throws {
         let q = try context(), admission = try AuthorityMaintenancePairingAdmission(accountID: q.accountID, incarnation: Data(repeating: 4, count: 16))
         let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission, check: { _ in }, observe: { _ in try Self.work(stages: admission.stagedReservations()) })
-        let native = NSXPCListener.anonymous(), owner = try AuthorityMaintenanceXPCListener.openOwned(listener: native, builder: Builder(access: access))
+        let native = NSXPCListener.anonymous(), owner = try OwnedMaintenanceListener.openOwned(listener: native, builder: Builder(access: access))
         try owner.start(); defer { owner.close() }
         let first = AnonymousDriver(native), second = AnonymousDriver(native)
         let c = try AuthorityMaintenanceXPCClient.openOwned(context: q, driver: first)

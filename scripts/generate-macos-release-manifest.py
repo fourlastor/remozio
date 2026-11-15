@@ -125,6 +125,8 @@ def declarations(role):
         values.append({0: 'runtime.audit-upgrade-cutover-record', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     if role in (2, 4, 6, 8):
         values.append({0: 'runtime.audit-upgrade-startup-fence', 1: [1], 2: [1] if role == 8 else [], 3: {}})
+    if role in (2, 8):
+        values.append({0: 'authority.maintenance-channel', 1: [1], 2: [1], 3: {}})
     host_formats = {
         2: [('runtime.activation-plan', [1, 2, 3, 4, 5, 6], []),
             ('runtime.gateway-settings-consumer-host', [1, 2, 3, 4], []),

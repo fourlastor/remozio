@@ -4,7 +4,7 @@ import Foundation
 /// Fixed address and signed participant metadata. These checks do not declare a reachable product service.
 enum AuthorityMaintenanceChannelScope {
     static let formatName = "authority.maintenance-channel"
-    static func serviceName(accountID: Data) throws -> String { try RuntimePreparationPaths(accountID: accountID).namespace + ".maintenance" }
+    static func serviceName(accountID: Data) throws -> String { try RuntimePreparationPaths(accountID: accountID).presenceService }
     static func validate(_ release: SignedReleaseEvidence, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry) throws {
         guard authority.role == .authority, setup.role == .setupController, authority.active, setup.active,
               authority.teamID == setup.teamID else { throw RuntimePreparationError.changedScope }
@@ -37,10 +37,11 @@ private final class NativeMaintenanceConnection: OwnedAuthorityConnection, @unch
     func close() { endpoint.close(); connection.invalidate() }
 }
 
-/// Retains disconnected endpoints until their actual work settles. Closing the listener never closes pairing admission.
-final class AuthorityMaintenanceXPCListener: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
+/// Owns maintenance connections independently of the presence listener. Closing this owner never closes pairing admission.
+final class AuthorityMaintenanceConnections: @unchecked Sendable {
     private let lock = NSRecursiveLock(), processID = getpid(), ownerUID = getuid()
-    private let listener: NSXPCListener, registry: AuthorityConnectionRegistry, budget: AuthorityXPCWorkBudget
+    private let registry: AuthorityConnectionRegistry, budget: AuthorityXPCWorkBudget
+    let setupPolicy: XPCPeerPolicy?
     private let builder: any AuthorityMaintenanceEndpointBuilding
     private let verifyCurrent: @Sendable () throws -> Void
     private var endpoints: [UUID: AuthorityMaintenanceXPCEndpoint] = [:], retired: [UUID: AuthorityMaintenanceXPCEndpoint] = [:]
@@ -62,28 +63,25 @@ final class AuthorityMaintenanceXPCListener: NSObject, NSXPCListenerDelegate, @u
             try DynamicCodeValidation.validateSelf(requirement: requirement)
         }
         try verify()
-        let listener = NSXPCListener(machServiceName: try AuthorityMaintenanceChannelScope.serviceName(accountID: accountID))
-        setupPolicy.configure(listener)
-        try self.init(listener: listener, builder: NativeMaintenanceEndpointBuilder(setupCode: setupCode, access: access),
+        try self.init(builder: NativeMaintenanceEndpointBuilder(setupCode: setupCode, access: access), setupPolicy: setupPolicy,
             maximumConnections: 2, maximumOperations: 1, handshakeTimeoutMilliseconds: 5000, verifyCurrent: verify)
     }
-    private init(listener: NSXPCListener, builder: any AuthorityMaintenanceEndpointBuilding, maximumConnections: Int,
+    private init(builder: any AuthorityMaintenanceEndpointBuilding, setupPolicy: XPCPeerPolicy?, maximumConnections: Int,
         maximumOperations: Int, handshakeTimeoutMilliseconds: UInt64, verifyCurrent: @escaping @Sendable () throws -> Void) throws {
-        self.listener = listener; self.builder = builder; self.verifyCurrent = verifyCurrent
+        self.setupPolicy = setupPolicy; self.builder = builder; self.verifyCurrent = verifyCurrent
         registry = try .init(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         budget = try .init(maximum: maximumOperations)
-        super.init(); listener.delegate = self
     }
-    static func openOwned(listener: NSXPCListener, builder: any AuthorityMaintenanceEndpointBuilding,
+    static func openOwned(builder: any AuthorityMaintenanceEndpointBuilding, setupPolicy: XPCPeerPolicy? = nil,
         maximumConnections: Int = 2, maximumOperations: Int = 1, handshakeTimeoutMilliseconds: UInt64 = 5000,
-        verifyCurrent: @escaping @Sendable () throws -> Void = {}) throws -> AuthorityMaintenanceXPCListener {
+        verifyCurrent: @escaping @Sendable () throws -> Void = {}) throws -> AuthorityMaintenanceConnections {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return try .init(listener: listener, builder: builder, maximumConnections: maximumConnections, maximumOperations: maximumOperations,
+        return try .init(builder: builder, setupPolicy: setupPolicy, maximumConnections: maximumConnections, maximumOperations: maximumOperations,
             handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds, verifyCurrent: verifyCurrent)
     }
     deinit {
         guard getpid() == processID else { return }
-        listener.invalidate(); registry.close()
+        registry.close()
         let pending = Array(endpoints.values) + Array(retired.values)
         Task { for endpoint in pending { await endpoint.closeAndWait() } }
     }
@@ -93,13 +91,13 @@ final class AuthorityMaintenanceXPCListener: NSObject, NSXPCListenerDelegate, @u
     func start() throws {
         try lock.withLock {
             try requireIdentity(); guard !started, !closed else { throw AuthorityXPCEndpointError.unavailable }
-            try verifyCurrent(); try registry.start(); started = true; listener.activate()
+            try verifyCurrent(); try registry.start(); started = true
         }
     }
     func close() {
         guard getpid() == processID else { return }
         lock.withLock {
-            closed = true; listener.invalidate(); listener.delegate = nil
+            closed = true
             for (id, endpoint) in endpoints { retired[id] = endpoint }; endpoints.removeAll()
         }
         registry.close()
@@ -110,10 +108,10 @@ final class AuthorityMaintenanceXPCListener: NSObject, NSXPCListenerDelegate, @u
         for (id, endpoint) in pending { await endpoint.closeAndWait(); reaped(id) }
     }
     func retainedEndpoints() -> Int { lock.withLock { endpoints.count + retired.count } }
-    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+    func accept(_ connection: NSXPCConnection) -> Bool {
         guard getpid() == processID else { return false }
         return lock.withLock {
-            guard listener === self.listener, started, !closed else { connection.invalidate(); return false }
+            guard started, !closed else { connection.invalidate(); return false }
             do {
                 try requireIdentity(); try verifyCurrent()
                 guard let id = registry.reserve() else { connection.invalidate(); return false }

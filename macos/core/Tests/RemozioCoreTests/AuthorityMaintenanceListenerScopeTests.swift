@@ -27,10 +27,10 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
             codeDirectoryHashes: Dictionary(uniqueKeysWithValues: components.map { ($0.role, $0.codeDirectoryHash ?? Data(repeating: 1, count: 20)) }))
     }
     private func validRelease() throws -> SignedReleaseEvidence { try release { $0 == .app ? [] : [try self.format()] } }
-    func testServiceAddressIsFixedPerAccountAndCannotAliasAnotherInterface() throws {
+    func testServiceAddressReusesOnlyTheExactPresenceInterfaceForItsAccount() throws {
         let account = Data(repeating: 1, count: 16), other = Data(repeating: 2, count: 16), paths = try RuntimePreparationPaths(accountID: account)
         let service = try AuthorityMaintenanceChannelScope.serviceName(accountID: account)
-        XCTAssertEqual(service, paths.namespace + ".maintenance")
+        XCTAssertEqual(service, paths.presenceService)
         XCTAssertNotEqual(service, paths.authorityService); XCTAssertNotEqual(service, paths.gatewaySettingsControlService)
         XCTAssertNotEqual(service, try AuthorityMaintenanceChannelScope.serviceName(accountID: other))
         for n in [0, 15, 17] { XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.serviceName(accountID: Data(repeating: 1, count: n))) }
@@ -85,7 +85,7 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
         XCTAssertNotEqual(getuid(), 0)
         let account = Data(repeating: 1, count: 16), admission = try AuthorityMaintenancePairingAdmission(accountID: account, incarnation: Data(repeating: 4, count: 16))
         let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission, check: { _ in XCTFail("No native scope read") }, observe: { _ in throw JournalLeaseError.rootRequired })
-        XCTAssertThrowsError(try AuthorityMaintenanceXPCListener(accountID: account, authorityCode: entry(.authority), setupCode: entry(.setupController), release: validRelease(), access: access)) {
+        XCTAssertThrowsError(try AuthorityMaintenanceConnections(accountID: account, authorityCode: entry(.authority), setupCode: entry(.setupController), release: validRelease(), access: access)) {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
         XCTAssertEqual(try admission.connectionReservations(), 0)

@@ -83,6 +83,8 @@ final class SignedReleaseInspectionTests: XCTestCase {
                 let settings = try XCTUnwrap(component.formats.first { $0.name == "authority.gateway-settings-control" })
                 XCTAssertEqual(settings.readers, GatewaySettingsControlInterface.supportedVersions)
                 XCTAssertEqual(settings.writers, GatewaySettingsControlInterface.supportedVersions)
+                let channel = try XCTUnwrap(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })
+                XCTAssertEqual(channel.readers, [1]); XCTAssertEqual(channel.writers, [1]); XCTAssertTrue(channel.migrations.isEmpty)
                 let host = try XCTUnwrap(component.formats.first { $0.name == "authority.command-host-config" })
                 XCTAssertEqual(host.readers, InstalledAuthorityCommandConfiguration.supportedVersions)
                 XCTAssertEqual(host.writers, InstalledAuthorityCommandConfiguration.supportedVersions)
@@ -92,6 +94,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             try RuntimeMaintenanceWindowStorage.requireWriteFormats(evidence, sourceSchema: 29)
             for component in evidence.manifest.components where ![AuthorityCodeRole.authority, .setupController].contains(component.role) {
                 XCTAssertNil(component.formats.first { $0.name == RuntimeMaintenanceWindowRecord.formatName })
+                XCTAssertNil(component.formats.first { $0.name == AuthorityMaintenanceChannelScope.formatName })
             }
             for role: AuthorityCodeRole in [.authority, .transport, .notificationGateway, .setupController] {
                 let component = try XCTUnwrap(evidence.manifest.components.first { $0.role == role })
