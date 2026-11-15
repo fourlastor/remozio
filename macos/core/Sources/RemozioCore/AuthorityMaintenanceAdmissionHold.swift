@@ -6,7 +6,9 @@ final class AuthorityMaintenanceAdmissionHold: @unchecked Sendable {
     private enum State { case open(Data?), held(Data), unknown, closed }
     private let lock = NSLock(), processID = getpid(), ownerUID = getuid()
     private var state: State
+    private let startupAttempt: Data?
     init(projection: RuntimeMaintenanceAdmissionProjection) {
+        startupAttempt = projection.requiresLocalHold ? projection.attemptID : nil
         if !projection.requiresLocalHold { state = .open(nil) }
         else if let id = projection.attemptID, projection.revision != nil { state = .held(id) }
         else { state = .unknown }
@@ -50,6 +52,30 @@ final class AuthorityMaintenanceAdmissionHold: @unchecked Sendable {
                 guard id == record.id else { throw RuntimePreparationError.changedScope }; try releaseBinding()
             case .unknown, .closed: throw RuntimePreparationError.changedScope
             }
+        }
+    }
+    /// Only the original startup restriction can admit a healthy candidate. Command retention cannot create it.
+    func requireHealthyStartup(_ record: RuntimeMaintenanceWindowRecord) throws {
+        try validate()
+        guard record.purpose == .retainedRuntime, record.phase == .restoring, startupAttempt == record.id else {
+            throw RuntimePreparationError.changedScope
+        }
+        try lock.withLock {
+            guard case .held(let id) = state, id == record.id else { throw RuntimePreparationError.changedScope }
+        }
+    }
+    func reopenHealthy(_ record: RuntimeMaintenanceWindowRecord, restoring: RuntimeMaintenanceWindowRecord,
+        binding: AuthorityMaintenanceBinding, incarnation: Data, releaseBinding: () throws -> Void) throws {
+        try requireHealthyStartup(restoring); try record.requireReplacing(restoring)
+        guard record.phase == .reopenPending, record.service == .healthy, record.operation == restoring.operation,
+              let stopped = record.shutdownBinding, stopped.incarnation != incarnation,
+              binding.incarnation == incarnation, binding.accountID == record.scope.authority.accountID,
+              binding.attemptID == record.id, binding.revision == restoring.revision else {
+            throw RuntimePreparationError.changedScope
+        }
+        try lock.withLock {
+            guard case .held(let id) = state, id == record.id else { throw RuntimePreparationError.changedScope }
+            try releaseBinding(); state = .open(id)
         }
     }
     /// An observation grants no release. The caller must bind the current protected row independently.

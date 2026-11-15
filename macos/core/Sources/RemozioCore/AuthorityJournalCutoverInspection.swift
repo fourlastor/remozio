@@ -14,9 +14,13 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
         var requiresStartupOutcomeRecovery: Bool { interruptedAuthorizations > 0 || interruptedDispatches > 0 }
     }
     let snapshot: Snapshot
+    /// Set to closed only after storage.close returns. A failed or interrupted close never reads as closed.
+    enum CloseOutcome: Equatable, Sendable { case open, closed, failed }
     private let storage: AuthorityStorage
     private let expectedPolicy: AuthorityCodePolicy?
     private let verifyCurrent: () throws -> Void
+    private let closeStorage: (AuthorityStorage) throws -> Void
+    private(set) var closeOutcome = CloseOutcome.open
     private let ownerPID = getpid()
     private let maintenanceThread = pthread_self()
     private var active = false
@@ -87,8 +91,18 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
         return try .init(storage: storage, expectedPolicy: policy, verifyCurrent: verify)
     }
     // Existing ordinary-owner stores can exercise the same read-only path. No injected callback grants Root admission.
-    init(storage: AuthorityStorage, expectedPolicy: AuthorityCodePolicy?, verifyCurrent: @escaping () throws -> Void) throws {
-        self.storage = storage; self.expectedPolicy = expectedPolicy; self.verifyCurrent = verifyCurrent
+    convenience init(storage: AuthorityStorage, expectedPolicy: AuthorityCodePolicy?, verifyCurrent: @escaping () throws -> Void) throws {
+        try self.init(storage: storage, expectedPolicy: expectedPolicy, verifyCurrent: verifyCurrent, closeStorage: { try $0.close() })
+    }
+    /// Ordinary-owner close fault seam. Root cannot replace the storage close.
+    static func openOwned(storage: AuthorityStorage, expectedPolicy: AuthorityCodePolicy?, verifyCurrent: @escaping () throws -> Void,
+        closeStorage: @escaping (AuthorityStorage) throws -> Void) throws -> AuthorityJournalCutoverInspection {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try .init(storage: storage, expectedPolicy: expectedPolicy, verifyCurrent: verifyCurrent, closeStorage: closeStorage)
+    }
+    private init(storage: AuthorityStorage, expectedPolicy: AuthorityCodePolicy?, verifyCurrent: @escaping () throws -> Void,
+        closeStorage: @escaping (AuthorityStorage) throws -> Void) throws {
+        self.storage = storage; self.expectedPolicy = expectedPolicy; self.verifyCurrent = verifyCurrent; self.closeStorage = closeStorage
         do {
             guard storage.journal.readOnlyForCutover, storage.continuity.readOnlyForCutover else { throw JournalDatabaseError.readOnly }
             try verifyCurrent()
@@ -179,8 +193,9 @@ final class AuthorityJournalCutoverInspection: CustomStringConvertible, CustomRe
     }
     func close() throws {
         guard !active else { throw JournalDatabaseError.transactionActive }
-        guard !closed else { return }
-        closed = true; try storage.close()
+        guard !closed else { guard closeOutcome == .closed else { throw JournalDatabaseError.unavailable }; return }
+        closed = true; closeOutcome = .failed
+        try closeStorage(storage); closeOutcome = .closed
     }
     deinit { try? storage.close() }
 }

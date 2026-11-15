@@ -96,6 +96,42 @@ enum RuntimeJobRegistration {
                 })
         }
     }
+    /// Restoration only. The permit's held account drain replaces the ordinary shared account lease, so this entry takes none.
+    /// The ordinary M06a guard is unchanged and still refuses every other bootstrap while the window is active.
+    static func ensureRestoration(_ permit: RuntimeMaintenanceRestorationPermit, release: SignedReleaseEvidence) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let job = permit.cohort.job
+        guard job.declaration.role == .authority, job.declaration.accountID == permit.cohort.accountID else { throw RuntimeActivationError.changedScope }
+        let configuration = try AdministrativeSetupConfiguration.load(path: AdministrativeSetupConfiguration.startupPath)
+        try reconcileRestoration(permit, requireWindow: { window in
+            // The machine store closes before every native inspection or bootstrap, as in the ordinary guard.
+            let machine = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
+            do { try machine.requireRuntimeMaintenanceObservationWindow(window, candidate: release); try machine.close() }
+            catch { try? machine.close(); throw error }
+            guard try AdministrativeSetupConfiguration.load(path: AdministrativeSetupConfiguration.startupPath).canonicalBytes
+                == configuration.canonicalBytes else { throw RuntimePreparationError.changedScope }
+        }, inspect: { try inspect(job) }, bootstrap: {
+            _ = try BoundedNativeCommand.run(executable: "/bin/launchctl", arguments: ["bootstrap", "system", job.path])
+        })
+    }
+    /// Same restoration order with ordinary-owner callbacks. Root cannot select them.
+    static func reconcileOwnedRestoration(_ permit: RuntimeMaintenanceRestorationPermit,
+        requireWindow: (RuntimeMaintenanceWindowRecord) throws -> Void, inspect: () throws -> Observation,
+        bootstrap: () throws -> Void) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        try reconcileRestoration(permit, requireWindow: requireWindow, inspect: inspect, bootstrap: bootstrap)
+    }
+    // The stopped job must still be absent. A matching registration here is not ours to adopt.
+    private static func reconcileRestoration(_ permit: RuntimeMaintenanceRestorationPermit,
+        requireWindow: (RuntimeMaintenanceWindowRecord) throws -> Void, inspect: () throws -> Observation,
+        bootstrap: () throws -> Void) throws {
+        try permit.withRegistration { _, validate in
+            func verify() throws { try validate(); try requireWindow(permit.window); try validate() }
+            try verify()
+            guard try inspect() == .absent else { throw RuntimeActivationError.conflictingPlan }
+            try reconcile(verifyCurrent: verify, inspect: inspect, bootstrap: bootstrap)
+        }
+    }
     static func inspect(_ job: InstalledAccountJobManifest) throws -> Observation {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let target = "system/" + job.declaration.label

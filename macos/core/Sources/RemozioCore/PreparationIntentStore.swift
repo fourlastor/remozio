@@ -6012,6 +6012,45 @@ public final class PreparationIntentStore {
             return record
         }
     }
+    /// A separate healthy branch. The ordinary command reader keeps its original binding and revision rules.
+    func runtimeMaintenanceHealthyRecord(_ request: AuthorityMaintenanceChannelRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data,
+        restoring: RuntimeMaintenanceWindowRecord? = nil, candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceWindowRecord? {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+            guard current.schemaVersion == RuntimeMaintenanceWindowStorage.schemaVersion,
+                  incarnation.count == 16, request.accountID == account.accountID,
+                  current.inventory.installationID == request.installationID,
+                  current.admission.installationID == request.installationID,
+                  current.admission.accounts.first(where: { $0.accountID == account.accountID })?.identity == request.gate,
+                  current.inventory.accounts.contains(where: { $0.accountID == account.accountID && $0.ownerUID == account.ownerUID }),
+                  let installed = try loadAccountPreparation(ownerUID: account.ownerUID), installed.storagePrepared,
+                  installed.accountID == account.accountID, installed.installationID == request.installationID,
+                  let row = frame.maintenanceWindows.first(where: { $0.scope.authority.accountID == account.accountID }),
+                  row.scope.authority == account, row.scope.macID == macID,
+                  row.scope.installationID == request.installationID, row.scope.releaseDigest == current.inventory.releaseDigest,
+                  row.id == request.attemptID else { throw RuntimePreparationError.changedScope }
+            var directory = installed.directoryID.uuid
+            guard withUnsafeBytes(of: &directory, { Data($0) }) == account.directoryID else { throw RuntimePreparationError.changedScope }
+            if request.action == .open, row.phase == .draining, restoring == nil { return nil }
+            guard row.purpose == .retainedRuntime, row.revision == request.revision, let stopped = row.shutdownBinding,
+                  stopped.incarnation != incarnation else { throw RuntimePreparationError.changedScope }
+            if let restoring {
+                guard request.action == .reopen, row.phase == .reopenPending, row.service == .healthy,
+                      row.operation == restoring.operation, let binding = request.binding,
+                      binding.incarnation == incarnation, binding.revision == restoring.revision,
+                      binding.accountID == row.scope.authority.accountID, binding.attemptID == row.id else {
+                    throw RuntimePreparationError.changedScope
+                }
+                try row.requireReplacing(restoring)
+            } else {
+                guard request.action == .open, request.binding == nil, row.phase == .restoring else {
+                    throw RuntimePreparationError.changedScope
+                }
+            }
+            return row
+        }
+    }
     /// Exact protected observation scope only. No gate, release or restoration authority comes from this row.
     func runtimeMaintenanceGateRecord(_ request: AuthorityMaintenanceGateRequest,
         account: RuntimeMaintenanceWindowRecord.Account, candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceWindowRecord {

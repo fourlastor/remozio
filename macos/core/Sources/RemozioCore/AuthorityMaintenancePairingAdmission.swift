@@ -95,6 +95,11 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
     func close() {
         state.withLock { $0.closed = true; $0.connections.removeAll(); $0.blocker = nil; if !$0.closing { $0.marker = nil } }
     }
+    private func requireLiveConnection(_ id: UUID) throws {
+        try state.withLock {
+            guard !$0.closed, $0.connections.contains(id), $0.armed == nil else { throw RuntimePreparationError.changedScope }
+        }
+    }
     private func block(_ id: UUID) throws -> Int {
         try state.withLock {
             guard !$0.closed, $0.armed == nil, $0.connections.contains(id), $0.blocker == nil || $0.blocker == id else {
@@ -184,8 +189,29 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         let binding: AuthorityMaintenanceBinding
         private let admission: AuthorityMaintenancePairingAdmission
         private let id: UUID
+        private let healthy = Mutex<RuntimeMaintenanceWindowRecord?>(nil)
         fileprivate init(admission: AuthorityMaintenancePairingAdmission, id: UUID, binding: AuthorityMaintenanceBinding) {
             self.admission = admission; self.id = id; self.binding = binding
+        }
+        /// This connection owns the candidate. It never creates an armed shutdown or a pairing block.
+        func retainHealthyCandidate(_ record: RuntimeMaintenanceWindowRecord) throws {
+            guard record.purpose == .retainedRuntime, record.phase == .restoring,
+                  record.id == binding.attemptID, record.revision == binding.revision,
+                  record.scope.authority.accountID == binding.accountID,
+                  let stopped = record.shutdownBinding, stopped.incarnation != binding.incarnation else {
+                throw RuntimePreparationError.changedScope
+            }
+            try admission.requireLiveConnection(id)
+            try healthy.withLock { guard $0 == nil else { throw RuntimePreparationError.changedScope }; $0 = record }
+        }
+        func healthyCandidate(matching expected: AuthorityMaintenanceBinding) throws -> RuntimeMaintenanceWindowRecord? {
+            guard expected == binding else { throw RuntimePreparationError.changedScope }
+            guard let row = healthy.withLock({ $0 }) else { return nil }
+            try admission.requireLiveConnection(id); return row
+        }
+        func releaseHealthy(matching expected: AuthorityMaintenanceBinding) throws {
+            guard try healthyCandidate(matching: expected) != nil else { throw RuntimePreparationError.changedScope }
+            try admission.releaseUnarmed(id, binding: binding); healthy.withLock { $0 = nil }
         }
         /// Blocks new stages but preserves every existing reservation. The count is an observation only.
         func blockNewStages(matching expected: AuthorityMaintenanceBinding) throws -> Int {
