@@ -126,7 +126,8 @@ def declarations(role):
     if role in (2, 4, 6, 8):
         values.append({0: 'runtime.audit-upgrade-startup-fence', 1: [1], 2: [1] if role == 8 else [], 3: {}})
     if role in (2, 8):
-        values.append({0: 'authority.maintenance-channel', 1: [1], 2: [1], 3: {}})
+        # Channel version 2 adds the read-only incarnation probe. Swift pins it as AuthorityMaintenanceChannelScope.protocolVersion.
+        values.append({0: 'authority.maintenance-channel', 1: [2], 2: [2], 3: {}})
         values.append({0: 'authority.maintenance-gate', 1: [1], 2: [1], 3: {}})
         values.append({0: 'authority.maintenance-close-marker', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     host_formats = {

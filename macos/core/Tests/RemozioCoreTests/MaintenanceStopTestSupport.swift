@@ -29,7 +29,7 @@ final class MaintenanceStopTestDriver: AuthorityMaintenanceClientDriver, Sendabl
             pairing: .init(ready: ready, stagedAttempts: 0, activityOwners: 0, operationActive: false))
     }
     func start(_ invalidated: @escaping @Sendable () -> Void) { state.withLock { $0.invalidated = invalidated } }
-    func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { reply(.hello(1)) }
+    func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { reply(.hello(AuthorityMaintenanceChannelScope.protocolVersion)) }
     func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do {
             let q = try AuthorityMaintenanceChannelRequest.decode(bytes)

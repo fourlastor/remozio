@@ -24,11 +24,11 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         private struct State {
             var invalidated: (@Sendable () -> Void)?, held: (@Sendable (AuthorityMaintenanceClientReply) -> Void)?
             var heldRequest: Request?, mode = Mode.normal, pendingArms = 0, calls: [Request] = []
-            var helloVersion: UInt64 = 1, peerAllowed = true, starts = 0, hellos = 0, closes = 0, duplicate = false
+            var helloVersion: UInt64 = AuthorityMaintenanceChannelScope.protocolVersion, peerAllowed = true, starts = 0, hellos = 0, closes = 0, duplicate = false
             var invalidateAfterReply: Request.Action?
         }
         private let state = Mutex(State())
-        func configure(mode: Mode = .normal, pendingArms: Int = 0, helloVersion: UInt64 = 1, peerAllowed: Bool = true, duplicate: Bool = false, invalidateAfterReply: Request.Action? = nil) {
+        func configure(mode: Mode = .normal, pendingArms: Int = 0, helloVersion: UInt64 = AuthorityMaintenanceChannelScope.protocolVersion, peerAllowed: Bool = true, duplicate: Bool = false, invalidateAfterReply: Request.Action? = nil) {
             state.withLock { $0.mode = mode; $0.pendingArms = pendingArms; $0.helloVersion = helloVersion; $0.peerAllowed = peerAllowed; $0.duplicate = duplicate; $0.invalidateAfterReply = invalidateAfterReply }
         }
         var calls: [Request] { state.withLock { $0.calls } }
@@ -107,8 +107,12 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(d.hellos, 1); XCTAssertTrue(d.calls.isEmpty); XCTAssertGreaterThan(d.closes, 0)
     }
     func testUnsupportedHelloVersionCannotSendOpen() async throws {
-        let d = Driver(); d.configure(helloVersion: 2); let c = try client(d)
-        await expect(.needsOwnerRecovery) { _ = try await c.start(until: self.deadline) }; XCTAssertTrue(d.calls.isEmpty)
+        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 2)
+        // Version 1 peers lack the incarnation probe, so the client refuses them like any other mismatch.
+        for version: UInt64 in [0, 1, 3] {
+            let d = Driver(); d.configure(helloVersion: version); let c = try client(d)
+            await expect(.needsOwnerRecovery) { _ = try await c.start(until: self.deadline) }; XCTAssertTrue(d.calls.isEmpty)
+        }
     }
     func testChangedLocalIdentityBeforeHelloCannotStartTheDriver() async throws {
         let d = Driver(), c = try client(d, verify: { throw Fault.denied })
@@ -200,7 +204,7 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         let checks = Mutex(0), handshakes = Mutex(0), version = Mutex(UInt64.max)
         let access = try AuthorityMaintenanceChannelAccess.openOwned(admission: admission, check: { _ in XCTFail("No protected read") }, observe: { _ in throw Fault.denied })
         let endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: .init(maximum: 1), verify: { checks.withLock { $0 += 1 } }, onHandshake: { handshakes.withLock { $0 += 1 } })
-        endpoint.hello { n in version.withLock { $0 = n } }; XCTAssertEqual(version.withLock { $0 }, 1)
+        endpoint.hello { n in version.withLock { $0 = n } }; XCTAssertEqual(version.withLock { $0 }, AuthorityMaintenanceChannelScope.protocolVersion)
         XCTAssertEqual(checks.withLock { $0 }, 1); XCTAssertEqual(handshakes.withLock { $0 }, 0)
         XCTAssertEqual(endpoint.pendingOperations(), 0); XCTAssertEqual(try admission.connectionReservations(), 0)
         let stage = try admission.reserveStage(); stage.close(); endpoint.close(); endpoint.hello { n in version.withLock { $0 = n } }; XCTAssertEqual(version.withLock { $0 }, 0)

@@ -14,7 +14,8 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
         try .init(role: role, teamID: team, identifier: identifier(role), installedGeneration: 4, minimumGeneration: 4,
             codeDirectoryHash: Data(repeating: 1, count: 20), active: active)
     }
-    private func format(readers: Set<UInt64> = [1], writers: Set<UInt64> = [1]) throws -> ReleaseFormat {
+    private func format(readers: Set<UInt64> = [AuthorityMaintenanceChannelScope.protocolVersion],
+                        writers: Set<UInt64> = [AuthorityMaintenanceChannelScope.protocolVersion]) throws -> ReleaseFormat {
         try .init(name: AuthorityMaintenanceChannelScope.formatName, readers: readers, writers: writers)
     }
     private func release(formats: (AuthorityCodeRole) throws -> [ReleaseFormat],
@@ -39,12 +40,15 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
     }
     func testBothParticipantsMustDeclareReadingAndWritingTheSelectedVersion() throws {
         let authority = try entry(.authority), setup = try entry(.setupController)
-        for versions: Set<UInt64> in [[1], [1, 2]] {
+        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 2)
+        for versions: Set<UInt64> in [[2], [1, 2], [2, 3]] {
             let evidence = try release { $0 == .app ? [] : [try self.format(readers: versions, writers: versions)] }
             XCTAssertNoThrow(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
         }
         for role in [AuthorityCodeRole.authority, .setupController] {
-            for formats in [[], [try format(readers: [2], writers: [2])], [try format(writers: [])], [try format(readers: [1, 2], writers: [2])]] {
+            // A participant that declares only version 1 lacks the incarnation probe.
+            for formats in [[], [try format(readers: [1], writers: [1])], [try format(readers: [3], writers: [3])], [try format(writers: [])],
+                            [try format(readers: [1, 2], writers: [1])], [try format(readers: [2, 3], writers: [3])]] {
                 let evidence = try release { $0 == role ? formats : [try self.format()] }
                 XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
             }

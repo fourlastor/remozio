@@ -73,6 +73,14 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
             guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
         }
     }
+    /// Read-only. Returns the epoch that every binding from this admission carries; it changes no reservation or restriction.
+    func liveIncarnation(accountID: Data) throws -> Data {
+        try state.withLock {
+            guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
+            guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+            return incarnation
+        }
+    }
     func openConnection(accountID: Data, attemptID: Data, revision: Data) throws -> Connection {
         try requireAccount(accountID)
         return try openConnection(attemptID: attemptID, revision: revision)

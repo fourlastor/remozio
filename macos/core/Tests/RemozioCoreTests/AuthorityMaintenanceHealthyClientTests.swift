@@ -20,7 +20,7 @@ final class AuthorityMaintenanceHealthyClientTests: XCTestCase, @unchecked Senda
         }
         func start(_ invalidated: @escaping @Sendable () -> Void) { }
         func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
-            trace.values.withLock { $0.append("hello") }; reply(.hello(1))
+            trace.values.withLock { $0.append("hello") }; reply(.hello(AuthorityMaintenanceChannelScope.protocolVersion))
         }
         func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             do {

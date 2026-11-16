@@ -9,10 +9,12 @@ protocol AuthorityMaintenanceClientDriver: Sendable {
     func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
     func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
     func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
+    func observeIncarnation(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void)
     func close()
 }
 extension AuthorityMaintenanceClientDriver {
     func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { reply(.bytes(nil)) }
+    func observeIncarnation(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { reply(.bytes(nil)) }
 }
 private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @unchecked Sendable {
     private let connection: NSXPCConnection, policy: XPCPeerPolicy
@@ -33,6 +35,10 @@ private final class NativeMaintenanceClient: AuthorityMaintenanceClientDriver, @
     }
     func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
         do { _ = try policy.verifyCredentials(connection); proxy(reply)?.readGate(bytes) { [self] in checked(.bytes($0), reply) } }
+        catch { reply(.bytes(nil)) }
+    }
+    func observeIncarnation(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+        do { _ = try policy.verifyCredentials(connection); proxy(reply)?.observeIncarnation(bytes) { [self] in checked(.bytes($0), reply) } }
         catch { reply(.bytes(nil)) }
     }
     private func proxy(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) -> (any AuthorityMaintenanceXPCProtocol)? {
@@ -86,10 +92,34 @@ private final class MaintenanceHealthyPendingReceipt: @unchecked Sendable {
         try lock.withLock { guard let receipt else { throw JournalLeaseError.invalidated }; return receipt }
     }
 }
+/// Serial access to one process-bound witness. The witness protocol remains non-Sendable.
+private final class MaintenanceStartupPeer: @unchecked Sendable {
+    private let witness: any RuntimeJobExitWitness
+    private let check: @Sendable (any RuntimeJobExitWitness) throws -> Void
+    private let lock = NSLock(), processID = getpid()
+    init(_ witness: any RuntimeJobExitWitness, check: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void) {
+        self.witness = witness; self.check = check
+    }
+    func requireLive() throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try lock.withLock { try check(witness) }
+    }
+    func accept(_ owner: RuntimeMaintenanceRestoration) throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try lock.withLock { try check(witness); try owner.acceptWitness(witness); try check(witness) }
+    }
+}
 private final class MaintenanceClientLifetime: @unchecked Sendable {
     private let lock = NSRecursiveLock(); private var active = true, expected: UUID?
-    private var delivered: AuthorityMaintenanceClientReply?
-    func close() { lock.withLock { active = false; expected = nil; delivered = nil } }
+    private var delivered: AuthorityMaintenanceClientReply?, observed: (accountID: Data, incarnation: Data)?
+    func close() { lock.withLock { active = false; expected = nil; delivered = nil; observed = nil } }
+    /// Records the latest verified incarnation reply. An inactive lifetime records nothing.
+    func observe(accountID: Data, incarnation: Data) -> Bool {
+        lock.withLock { guard active else { return false }; observed = (accountID, incarnation); return true }
+    }
+    func hasObserved(accountID: Data, incarnation: Data) -> Bool {
+        lock.withLock { active && observed?.accountID == accountID && observed?.incarnation == incarnation }
+    }
     func invalidate() { lock.withLock { active = false } }
     func begin(_ id: UUID) -> Bool { lock.withLock { guard active else { return false }; expected = id; delivered = nil; return true } }
     func record(_ id: UUID, _ value: AuthorityMaintenanceClientReply, until deadline: ContinuousClock.Instant) -> Bool {
@@ -103,10 +133,10 @@ private final class MaintenanceClientLifetime: @unchecked Sendable {
 actor AuthorityMaintenanceXPCClient {
     private typealias Request = AuthorityMaintenanceChannelRequest
     private typealias Response = AuthorityMaintenanceChannelResponse
-    private enum State { case new, open, armed, closed }
+    private enum State { case new, greeted, open, armed, closed }
     private let driver: any AuthorityMaintenanceClientDriver, context: Request
     private let verify: @Sendable () throws -> Void, timeout: Duration, interval: Duration
-    private let lifetime = MaintenanceClientLifetime()
+    fileprivate nonisolated let lifetime = MaintenanceClientLifetime()
     private var state = State.new, busy = false, cleanupUsed = false, binding: AuthorityMaintenanceBinding?
     private var pending: (UUID, CheckedContinuation<AuthorityMaintenanceClientReply, Error>)?, timer: Task<Void, Never>?
     init(context: AuthorityMaintenanceChannelRequest, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry,
@@ -144,8 +174,54 @@ actor AuthorityMaintenanceXPCClient {
     deinit { lifetime.close(); timer?.cancel(); driver.close() }
     func start(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .new else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
-        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        try await greet(until: deadline); return try await openGreeted(until: deadline)
+    }
+    /// Healthy open on the connection that produced the proof. It sends no second hello and needs a new Authority epoch.
+    func startObserved(_ proof: AuthorityMaintenanceIncarnationProof, stopped: AuthorityMaintenanceBinding,
+        until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
+        guard state == .greeted else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
+        do {
+            try proof.requireObserved(by: self)
+            guard proof.accountID == context.accountID, stopped.accountID == context.accountID,
+                  proof.incarnation != stopped.incarnation else { throw RuntimePreparationError.changedScope }
+        } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        let response = try await openGreeted(until: deadline)
+        do {
+            try proof.requireObserved(by: self)
+            guard response.binding.incarnation == proof.incarnation else { throw RuntimePreparationError.changedScope }
+        } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        return response
+    }
+    private func openGreeted(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         let response = try await send(.open, until: deadline); binding = response.binding; if state != .closed { state = .open }; return response
+    }
+    private func greet(until deadline: ContinuousClock.Instant) async throws {
+        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        if state == .new { state = .greeted }
+    }
+    /// Root native entry. The proof is read-only evidence from this connection's authenticated Authority.
+    func observeIncarnationNative(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceIncarnationProof {
+        guard getuid() == 0, geteuid() == 0, driver is NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        return try await observeIncarnation(until: deadline)
+    }
+    /// Ordinary-owner tests use the same sequence. Root cannot select a callback driver for this proof.
+    func observeIncarnationOwned(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceIncarnationProof {
+        try RuntimeMaintenanceOwnedControl.require(); return try await observeIncarnation(until: deadline)
+    }
+    /// Sends hello first when needed, then one fresh challenge. Any failure retires the connection.
+    private func observeIncarnation(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceIncarnationProof {
+        guard state != .closed else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
+        if state == .new { try await greet(until: deadline) }
+        do {
+            var challenge = Data(count: 16)
+            guard challenge.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, $0.count, $0.baseAddress!) }) == errSecSuccess else { throw RuntimePreparationError.invalidRecord }
+            let q = try AuthorityMaintenanceIncarnationRequest(accountID: context.accountID, challenge: challenge)
+            guard case .bytes(let bytes) = try await invoke(nil, incarnation: q, until: deadline), let bytes else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            let response = try AuthorityMaintenanceIncarnationResponse.decode(bytes, expected: q)
+            guard state != .closed, response.accountID == context.accountID,
+                  lifetime.observe(accountID: response.accountID, incarnation: response.incarnation) else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            return .init(accountID: response.accountID, incarnation: response.incarnation, observer: ObjectIdentifier(lifetime))
+        } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
     func observe(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .open else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
@@ -340,9 +416,23 @@ actor AuthorityMaintenanceXPCClient {
     private func reopenSaved(_ target: AuthorityMaintenanceBinding, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
         guard state == .new else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         defer { finish() }
-        guard case .hello(let version) = try await invoke(nil, until: deadline), version == AuthorityMaintenanceChannelScope.protocolVersion else {
-            throw AuthorityMaintenanceClientError.needsOwnerRecovery
-        }
+        try await greet(until: deadline); return try await reopenGreeted(target, until: deadline)
+    }
+    /// Same-epoch reopen of the saved target on the connection that produced the proof. It sends no second hello.
+    /// The client context must carry the pending cleanup revision, as the replacement recovery client does in cancelAndReopen.
+    func reopenSavedObserved(_ proof: AuthorityMaintenanceIncarnationProof, target: AuthorityMaintenanceBinding,
+        until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
+        guard state == .greeted else { throw AuthorityMaintenanceClientError.invalidState }; try enter()
+        defer { busy = false; finish() }
+        do {
+            try proof.requireObserved(by: self)
+            guard proof.accountID == context.accountID, target.accountID == context.accountID, target.attemptID == context.attemptID,
+                  proof.incarnation == target.incarnation else { throw RuntimePreparationError.changedScope }
+        } catch { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        return try await reopenGreeted(target, until: deadline)
+    }
+    private func reopenGreeted(_ target: AuthorityMaintenanceBinding, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
+        guard state == .greeted else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         binding = target; state = .open
         _ = try await send(.reopen, target: target, until: deadline)
         return try await readReleasedGate(target, revision: context.revision,
@@ -515,6 +605,163 @@ actor AuthorityMaintenanceXPCClient {
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
     }
+    /// Completes healthy restoration on the exact native connection that produced the incarnation proof.
+    func restoreStartupHealthyNative(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
+        until deadline: ContinuousClock.Instant, persist: @escaping CleanupCommit) async throws -> CleanupRecord {
+        guard getuid() == 0, geteuid() == 0, let native = driver as? NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        let receipts = MaintenanceHealthyPendingReceipt()
+        return try await restoreStartupHealthy(proof, owner: owner, until: deadline, capturePeer: {
+            try native.captureProcess(job: owner.job, code: owner.code)
+        }, requirePeerLive: { witness in
+            guard let witness = witness as? RuntimeJobProcessObservation else { throw RuntimePreparationError.changedScope }
+            try native.requireProcess(witness)
+        }, releaseDrain: { pending in try owner.releaseDrain(after: receipts.require()) }, persist: { next, previous in
+            let receipt = try persist(next, previous); try receipt.requireReplacement(next, replacing: previous)
+            if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
+        })
+    }
+    /// The owned flow uses the same owner API. Root cannot inject a driver, process witness, or record-only writer.
+    func restoreStartupHealthyOwned(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
+        capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
+        requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        afterProbe: @escaping @Sendable () -> Void = {},
+        until deadline: ContinuousClock.Instant,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try await restoreStartupHealthy(proof, owner: owner, afterProbe: afterProbe, until: deadline, capturePeer: capturePeer,
+            requirePeerLive: requirePeerLive, releaseDrain: { try owner.releaseOwnedDrain(after: $0) }, persist: persist)
+    }
+    private func restoreStartupHealthy(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
+        afterProbe: @escaping @Sendable () -> Void = {},
+        until deadline: ContinuousClock.Instant,
+        capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
+        requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        releaseDrain: @escaping @Sendable (CleanupRecord) throws -> Void,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        afterProbe()
+        try Task.checkCancellation()
+        try requireRestorationContext(owner)
+        guard !cleanupUsed, !busy else {
+            try? owner.commitOwnerRecovery(.changedScope); finish()
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        guard state == .greeted, lifetime.ifActive() else { finish(); throw RuntimeMaintenanceStartupAttemptError.beforePending }
+        cleanupUsed = true; defer { finish() }
+        let window = owner.window, stopped = owner.stoppedBinding
+        guard window.purpose == .retainedRuntime, window.phase == .restoring,
+              window.shutdownBinding == stopped else {
+            try? owner.commitOwnerRecovery(.changedScope)
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        var current = window, attemptedCommit = false, pendingWriteOwned = false
+        do {
+            do { try proof.requireObserved(by: self) }
+            catch { throw RuntimeMaintenanceStartupAttemptError.beforePending }
+            try verify()
+            let opened = try await startObserved(proof, stopped: stopped, until: deadline)
+            guard opened.outcome == .applied else { throw RuntimeMaintenanceStartupAttemptError.beforePending }
+            try owner.requireHealthyBinding(opened.binding); try proof.requireObserved(by: self)
+            try owner.validateBeforePending()
+            let peer: MaintenanceStartupPeer
+            do {
+                peer = MaintenanceStartupPeer(try capturePeer(), check: requirePeerLive)
+                try peer.requireLive(); try peer.accept(owner)
+            } catch {
+                throw RuntimeMaintenanceStartupFailure(
+                    RuntimeMaintenanceStartupRecovery.failure(error, fallback: .serviceUnavailable), error)
+            }
+            try owner.validateBeforePending(); try peer.requireLive(); try owner.requireWitnessLive()
+            let pending = try owner.pendingRecord(binding: opened.binding); pendingWriteOwned = true
+            try pending.requireReplacing(window)
+            attemptedCommit = true
+            guard try persist(pending, window) == pending else { throw PreparationStoreError.staleRevision }
+            current = pending; attemptedCommit = false
+            try peer.requireLive(); try owner.requireWitnessLive(); try releaseDrain(pending)
+            let requireLive: @Sendable () throws -> Void = { try peer.requireLive(); try owner.requireWitnessLive() }
+            let readback = try await reopenHealthyCandidate(opened.binding, pending: pending, stopped: stopped,
+                requirePeerLive: requireLive, until: deadline)
+            try requireLive()
+            let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
+                scope: pending.scope, phase: .restored, operation: pending.operation, service: .healthy, gate: readback)
+            try restored.requireReplacing(pending); attemptedCommit = true
+            guard try persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
+            return restored
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            if !attemptedCommit {
+                if current.phase == .restoring && !pendingWriteOwned {
+                    if error is AuthorityMaintenanceClientError || error is RuntimeMaintenanceStartupAttemptError {
+                        throw RuntimeMaintenanceStartupAttemptError.beforePending
+                    }
+                    throw error
+                } else if let failed = try? CleanupRecord(id: current.id, revision: AccountPreparationIntent.randomID(), purpose: current.purpose,
+                    scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation, service: current.service,
+                    failure: current.phase == .reopenPending ? .admissionUnconfirmed : .healthFailed, shutdownBinding: stopped) {
+                    _ = try? persist(failed, current)
+                }
+            }
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+    }
+    func cancelAndReopenStartupNative(_ proof: AuthorityMaintenanceIncarnationProof,
+        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord {
+        guard getuid() == 0, geteuid() == 0, driver is NativeMaintenanceClient, custody.native else { throw JournalLeaseError.rootRequired }
+        let receipts = MaintenanceHealthyPendingReceipt()
+        return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
+            releaseDrain: { pending, previous in
+                try custody.releaseCleanupDrain(after: receipts.require(), pending: pending, previous: previous)
+            }, persist: { next, previous in
+                let receipt = try custody.persistNative(next, previous: previous)
+                if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
+            })
+    }
+    func cancelAndReopenStartupOwned(_ proof: AuthorityMaintenanceIncarnationProof,
+        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord {
+        try RuntimeMaintenanceOwnedControl.require()
+        guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
+        return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
+            releaseDrain: { pending, _ in try custody.releaseOwnedCleanupDrain(after: pending) },
+            persist: { try custody.persistOwned($0, previous: $1) })
+    }
+    private func cancelAndReopenStartup(_ proof: AuthorityMaintenanceIncarnationProof,
+        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant,
+        releaseDrain: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> Void,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord) async throws -> CleanupRecord {
+        try Task.checkCancellation()
+        guard state == .greeted, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        cleanupUsed = true; defer { finish() }
+        let window = custody.current
+        guard window.phase == .draining, window.operation == .notStarted, window.service == .notStopped,
+              let target = window.shutdownBinding, target.attemptID == context.attemptID,
+              context.accountID == window.scope.authority.accountID, context.installationID == window.scope.installationID else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        var current = window, attemptedCommit = false
+        do {
+            try proof.requireObserved(by: self)
+            guard proof.incarnation == target.incarnation else { throw RuntimePreparationError.changedScope }
+            try custody.requireCleanup(window)
+            let pending = try CleanupRecord(id: window.id, revision: context.revision, purpose: window.purpose,
+                scope: window.scope, phase: .reopenPending, shutdownBinding: target)
+            try pending.requireReplacing(window); attemptedCommit = true
+            guard try persist(pending, window) == pending else { throw PreparationStoreError.staleRevision }
+            current = pending; attemptedCommit = false
+            try proof.requireObserved(by: self); try releaseDrain(pending, window)
+            let readback = try await reopenSavedObserved(proof, target: target, until: deadline)
+            let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
+                scope: pending.scope, phase: .restored, gate: readback)
+            try restored.requireReplacing(pending); attemptedCommit = true
+            guard try persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
+            return restored
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            if !attemptedCommit, let failed = try? CleanupRecord(id: current.id, revision: AccountPreparationIntent.randomID(),
+                purpose: current.purpose, scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation,
+                service: current.service, failure: .admissionUnconfirmed, shutdownBinding: target) { _ = try? persist(failed, current) }
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+    }
+
     private func reopenHealthyCandidate(_ candidate: AuthorityMaintenanceBinding, pending: CleanupRecord,
         stopped: AuthorityMaintenanceBinding, requirePeerLive: @escaping @Sendable () throws -> Void,
         until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
@@ -552,10 +799,11 @@ actor AuthorityMaintenanceXPCClient {
             return response
         } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
-    private func invoke(_ q: Request?, gate: AuthorityMaintenanceGateRequest? = nil, until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceClientReply {
+    private func invoke(_ q: Request?, gate: AuthorityMaintenanceGateRequest? = nil, incarnation: AuthorityMaintenanceIncarnationRequest? = nil,
+                        until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceClientReply {
         do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         guard state != .closed, lifetime.ifActive(), ContinuousClock.now < deadline else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        let id = UUID(), end = min(deadline, .now.advanced(by: timeout)), payload = try q?.encoded ?? gate?.encoded
+        let id = UUID(), end = min(deadline, .now.advanced(by: timeout)), payload = try q?.encoded ?? gate?.encoded ?? incarnation?.encoded
         let value: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 pending = (id, continuation)
@@ -566,8 +814,13 @@ actor AuthorityMaintenanceXPCClient {
                 let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self, lifetime] value in
                     guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }
                 }
-                if q == nil && gate == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }
-                guard lifetime.ifActive({ if let payload { if gate != nil { driver.readGate(payload, reply) } else { driver.exchange(payload, reply) } } else { driver.hello(reply) } }) else { finish(); return }
+                if payload == nil { driver.start { [weak self, lifetime] in lifetime.invalidate(); Task { await self?.finish(preservingReply: true) } } }
+                guard lifetime.ifActive({
+                    if let payload {
+                        if gate != nil { driver.readGate(payload, reply) }
+                        else if incarnation != nil { driver.observeIncarnation(payload, reply) } else { driver.exchange(payload, reply) }
+                    } else { driver.hello(reply) }
+                }) else { finish(); return }
             }
         } onCancel: { [weak self, lifetime, driver] in lifetime.close(); driver.close(); Task { await self?.close() } }
         do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
@@ -585,6 +838,22 @@ actor AuthorityMaintenanceXPCClient {
         state = .closed; if preservingReply { lifetime.invalidate() } else { lifetime.close() }; timer?.cancel(); timer = nil
         pending = nil; driver.close()
         if let value { p?.1.resume(returning: value) } else { p?.1.resume(throwing: error) }
+    }
+}
+
+/// Read-only evidence of the live Authority incarnation, observed on one authenticated maintenance connection.
+/// It grants no admission, release, stop or restoration. It proves only what the Authority reported at observation time.
+struct AuthorityMaintenanceIncarnationProof: Equatable, Sendable {
+    let accountID: Data
+    let incarnation: Data
+    fileprivate let observer: ObjectIdentifier
+    fileprivate init(accountID: Data, incarnation: Data, observer: ObjectIdentifier) {
+        self.accountID = accountID; self.incarnation = incarnation; self.observer = observer
+    }
+    /// Throws unless this client's still-live connection lifetime recorded this exact observation.
+    func requireObserved(by client: AuthorityMaintenanceXPCClient) throws {
+        guard observer == ObjectIdentifier(client.lifetime),
+              client.lifetime.hasObserved(accountID: accountID, incarnation: incarnation) else { throw RuntimePreparationError.changedScope }
     }
 }
 

@@ -5938,6 +5938,17 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Reads current protected metadata in one transaction. This value grants no startup custody.
+    func runtimeMaintenanceStartupFrame(accountID: Data, candidate: SignedReleaseEvidence)
+        throws -> RuntimeMaintenanceStartupFrame {
+        try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate)
+            let source = try loadStableRuntimeSource(candidate: candidate)
+            try source.actual.requireSame(as: frame.snapshot)
+            let window = frame.maintenanceWindows.first { $0.scope.authority.accountID == accountID }
+            return .init(source: source, window: window)
+        }
+    }
     /// Exact readback only. A decoded window grants no recovery ownership or native permission.
     func requireRuntimeMaintenanceObservationWindow(_ expected: RuntimeMaintenanceWindowRecord, candidate: SignedReleaseEvidence) throws {
         try transaction(write: false) {

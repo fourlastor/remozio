@@ -9,6 +9,26 @@ struct RuntimeMaintenanceAuthorityCohort {
     let machineIdentity: PreparationFileIdentity
     let accountIdentity: PreparationFileIdentity
 
+    /// Checked startup declarations only. The fresh custody is issued separately.
+    init(startupJob job: InstalledAccountJobManifest, host: InstalledAuthorityCommandConfiguration,
+        inventory: InstallationInventory, registration: UpdateAdmissionRegistrationRecord, targetAccountID: Data) throws {
+        let accountID = host.command.accountID
+        guard targetAccountID.count == 16, targetAccountID != accountID,
+              registration.macID == inventory.macID, registration.installationID == inventory.installationID,
+              host.jobPlacement == .systemAccount, host.installationID == inventory.installationID,
+              host.releaseDigest == inventory.releaseDigest, host.command.macID == inventory.macID,
+              inventory.accounts.contains(where: { $0.accountID == accountID && $0.ownerUID == host.command.callerUID }),
+              !inventory.accounts.contains(where: { $0.accountID == targetAccountID }),
+              inventory.services.contains(job.declaration), job.bundlePath == inventory.bundlePath,
+              job.declaration.role == .authority, job.declaration.accountID == accountID,
+              job.declaration.executionUID == 0, job.declaration.domainUID == nil,
+              job.declaration.label == host.label, job.declaration.plistName == host.plistName,
+              let gate = registration.accounts.first(where: { $0.accountID == accountID }) else {
+            throw RuntimePreparationError.changedScope
+        }
+        self.job = job; self.accountID = accountID; self.targetAccountID = targetAccountID
+        machineIdentity = registration.machine; accountIdentity = gate.identity
+    }
     init(plan: RuntimeActivationPlan, inventory: InstallationInventory,
          registration: UpdateAdmissionRegistrationRecord, targetAccountID: Data) throws {
         let services = plan.reference.services
@@ -306,22 +326,53 @@ final class RuntimeMaintenanceRestorationPermit {
 /// the account drain, the installed configuration and the original process exit. It holds no stop owner or scope.
 final class RuntimeMaintenanceRestorationHold: @unchecked Sendable {
     let window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort, code: AuthorityCodeEntry
-    let stopped: any RuntimeJobExitWitness
+    private enum Origin {
+        case stop(any RuntimeJobExitWitness)
+        case startup(RuntimeMaintenanceStartupRecovery.Custody)
+    }
+    private let origin: Origin
     private let admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken, directory: ReleaseDestinationLease
     private let verifyConfiguration: @Sendable () throws -> Void
     private let processID = getpid(), ownerUID = getuid()
     fileprivate init(window: RuntimeMaintenanceWindowRecord, cohort: RuntimeMaintenanceAuthorityCohort, code: AuthorityCodeEntry,
         stopped: any RuntimeJobExitWitness, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken,
         directory: ReleaseDestinationLease, verifyConfiguration: @escaping @Sendable () throws -> Void) {
-        self.window = window; self.cohort = cohort; self.code = code; self.stopped = stopped; self.admission = admission
+        self.window = window; self.cohort = cohort; self.code = code; self.origin = .stop(stopped); self.admission = admission
         self.drain = drain; self.directory = directory; self.verifyConfiguration = verifyConfiguration
+    }
+    private init(custody: RuntimeMaintenanceStartupRecovery.Custody, window: RuntimeMaintenanceWindowRecord) {
+        self.window = window; cohort = custody.floor.cohort; code = custody.floor.code
+        origin = .startup(custody); admission = custody.admission; drain = custody.drain; directory = custody.directory
+        verifyConfiguration = custody.verifyConfiguration
+    }
+    static func startup(_ custody: RuntimeMaintenanceStartupRecovery.Custody,
+        window: RuntimeMaintenanceWindowRecord) throws -> RuntimeMaintenanceRestorationHold {
+        try custody.requireRestoring(window)
+        return .init(custody: custody, window: window)
+    }
+    func requireStartupOrigin() throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        guard case .startup(let custody) = origin else { throw JournalLeaseError.invalidated }
+        try custody.validateResources(recovery: true)
+    }
+    func requireNewProcess(_ pid: pid_t) throws {
+        if case .stop(let witness) = origin {
+            guard pid != witness.processID, try witness.hasExited() else { throw RuntimeActivationError.unavailable }
+        }
+    }
+    func requireOldExit() throws {
+        switch origin {
+        case .stop(let witness):
+            guard try witness.hasExited() else { throw RuntimeActivationError.unavailable }
+        case .startup(let custody): try custody.validateResources()
+        }
     }
     func validate() throws {
         guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
         try admission.validateMachineBoundary(directory: directory, expected: cohort.machineIdentity)
         try drain.validateAccountBoundary(directory: directory, accountID: cohort.accountID, expected: cohort.accountIdentity)
         try verifyConfiguration()
-        guard try stopped.hasExited() else { throw RuntimeActivationError.unavailable }
+        try requireOldExit()
         try admission.validateMachineBoundary(directory: directory, expected: cohort.machineIdentity)
         try drain.validateAccountBoundary(directory: directory, accountID: cohort.accountID, expected: cohort.accountIdentity)
     }

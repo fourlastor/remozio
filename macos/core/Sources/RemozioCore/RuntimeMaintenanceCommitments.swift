@@ -85,6 +85,17 @@ struct RuntimeMaintenanceCommitments: Equatable {
                 .bytes(runtime.preparation.bytes), .bytes(initial.bytes), .bytes(runtime.plan.encoded), choices]))
         } }
     }
+    /// Compares declarations only. A matching digest grants no startup custody.
+    static func requireStartupRestoration(_ window: RuntimeMaintenanceWindowRecord,
+        initial: AuthorityInitializationIntent, host: InstalledAuthorityCommandConfiguration,
+        inventory: InstallationInventory, candidate: SignedReleaseEvidence) throws {
+        try requireProfile(window.purpose)
+        guard try RestorationDeclarations(initial: initial, host: host, inventory: inventory).digest == window.scope.restorationDigest,
+              try digest(.authorityPolicy, .bytes(host.codePolicy.bytes)) == window.scope.authorityPolicyDigest,
+              try InstallationInventory.digest(candidate) == window.scope.candidateDigest else {
+            throw RuntimePreparationError.changedScope
+        }
+    }
     private struct RestorationDeclarations {
         let initial: AuthorityInitializationIntent
         let host: InstalledAuthorityCommandConfiguration
