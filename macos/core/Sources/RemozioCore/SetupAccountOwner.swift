@@ -61,7 +61,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let activationOperations: RuntimeActivationOperations
     private let asynchronousWork = SetupOwnerAsyncWork()
     private let setupReplyWork = SetupOwnerAsyncWork()
-    private var retainedInvocationReservation: (admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token, activity: ReleaseActivityToken?)?
+    private var retainedInvocationReservation: SetupRetainedInvocationReservation?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
@@ -315,30 +315,34 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return result
         }
     }
-    /// Reserves operation and reply admission. Shared release activity remains held until explicit close.
-    func reserveRetainedInvocation() throws -> (admission: SetupOwnerAsyncWork.Token,
-                                               verify: () throws -> Void, close: () -> Void) {
+    /// Returns metadata only. A reserved record with no invocation is still constructing.
+    func retainedInvocationState() throws -> SetupRetainedInvocationReservation.State? {
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        let reservation = lock.withLock { retainedInvocationReservation }
+        return try reservation?.state()
+    }
+    /// Reserves both admissions before construction. The private record retains shared activity through orphaning.
+    func reserveRetainedInvocation(incarnation: UUID) throws -> (record: SetupRetainedInvocationReservation,
+                                                               verify: () throws -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
-            guard !closed, !closing, retainedInvocationReservation == nil else { throw AdministrativeSetupError.unavailable }
+            guard !closed, !closing,
+                  try retainedInvocationReservation == nil || retainedInvocationReservation?.state() == .settled else {
+                throw AdministrativeSetupError.unavailable
+            }
             let reply = try setupReplyWork.admit()
             let admission: SetupOwnerAsyncWork.Token
             do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
             do {
-                let activity = try releaseActivity?.acquireShared()
-                retainedInvocationReservation = (admission, reply, activity)
-                return (admission, {
+                let record = SetupRetainedInvocationReservation(incarnation: incarnation, admission: admission, reply: reply,
+                    activity: try releaseActivity?.acquireShared())
+                retainedInvocationReservation = record
+                return (record, {
                     try self.lock.withLock {
-                        guard !self.closed, !self.closing, getpid() == self.processID,
-                              self.asynchronousWork.permits(admission), self.setupReplyWork.permits(reply) else {
-                            throw AdministrativeSetupError.unavailable
-                        }
-                        try activity?.validate()
-                    }
-                }, {
-                    self.lock.withLock {
-                        guard self.retainedInvocationReservation?.admission === admission else { return }
-                        activity?.close(); admission.close(); reply.close(); self.retainedInvocationReservation = nil
+                        guard self.retainedInvocationReservation === record, !self.closed, !self.closing,
+                              getpid() == self.processID, self.asynchronousWork.permits(admission),
+                              self.setupReplyWork.permits(reply) else { throw AdministrativeSetupError.unavailable }
+                        try record.verify()
                     }
                 })
             } catch { admission.close(); reply.close(); throw error }

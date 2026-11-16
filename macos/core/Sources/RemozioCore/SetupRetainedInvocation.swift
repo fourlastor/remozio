@@ -5,6 +5,18 @@ import Security
 /// Owns one retained invocation through work, reply and explicit cleanup. It cannot create native loans.
 final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     struct RightsState: Equatable, Sendable { let cancelled: Bool, expired: Bool }
+    private final class RightsOwner {
+        private let lock = NSLock(), process = getpid()
+        private var release: (() -> Void)?
+        init(_ release: @escaping () -> Void) { self.release = release }
+        func close() {
+            guard getpid() == process else { return }
+            let action = lock.withLock { let action = release; release = nil; return action }
+            action?()
+        }
+        deinit { close() }
+    }
+
     let peer: XPCPeerCredentials
     private let capture: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding
     private let captureMaintenance: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture
@@ -18,8 +30,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     private let verifyRights: () throws -> Void
     private let closeRights: () -> Void
     private let verifyReservation: () throws -> Void
-    private let closeReservation: () -> Void
-    private var active = false, invoked = false, closed = false
+    private let reservation: SetupRetainedInvocationReservation
+    private var active = false, invoked = false, closing = false, closed = false
     private var context: SetupRetainedInvocationContext?
     private let contextWorker = NSLock()
     private var contextThread: pthread_t?
@@ -41,35 +53,44 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         do { try result.installContext { try .open(owner: result, invocation: invocation) }; return result }
         catch { try? result.close(); throw error }
     }
-    /// Ordinary-owner controls cannot import Root rights or construct an invocation in a Root process.
+    /// Ordinary-owner controls cannot import Root rights. An alternate incarnation tests attachment refusal only.
     static func openOwned(owner: SetupAccountOwner, binding: SetupRetainedCallerBinding, policy: XPCPeerPolicy,
-                          verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void = {}) throws -> Self {
+                          verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void = {},
+                          rejectedIncarnation: UUID? = nil) throws -> Self {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupAdministratorAuthorizationError.wrongProcess }
         return try begin(owner: owner, peer: binding.peer, incarnation: binding.incarnation, policy: policy,
-            verifyRights: verifyRights, closeRights: closeRights)
+            verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation)
     }
     private static func begin(owner: SetupAccountOwner, peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
-        verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void) throws -> Self {
+        verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
+        rejectedIncarnation: UUID? = nil) throws -> Self {
+        let rights = RightsOwner(closeRights)
         do {
+            if let rejectedIncarnation {
+                guard rejectedIncarnation != incarnation else { throw XPCPeerPolicyError.wrongConnection }
+            }
             try verifyRights()
-            let reservation = try owner.reserveRetainedInvocation()
+            let reservation = try owner.reserveRetainedInvocation(incarnation: incarnation)
             do {
                 try verifyRights(); try reservation.verify()
-                return Self(peer: peer, incarnation: incarnation, policy: policy, verifyRights: verifyRights, closeRights: closeRights,
-                    verifyReservation: reservation.verify, closeReservation: reservation.close, capture: { invocation, candidate in
-                        try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.admission)
+                let value = Self(peer: peer, incarnation: rejectedIncarnation ?? incarnation, policy: policy,
+                    verifyRights: verifyRights, closeRights: rights.close,
+                    verifyReservation: reservation.verify, reservation: reservation.record, capture: { invocation, candidate in
+                        try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
                     }, captureMaintenance: { invocation, candidate in
-                        try owner.retainedMaintenanceCapture(invocation: invocation, candidate: candidate, admission: reservation.admission)
+                        try owner.retainedMaintenanceCapture(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
                     }, recaptureMaintenance: { expected, transitions, capture, pair, candidate, current in
                         try owner.recaptureRetainedMaintenance(expected: expected, transitions: transitions, capture: capture,
-                            pair: pair, candidate: candidate, admission: reservation.admission, current: current)
+                            pair: pair, candidate: candidate, admission: reservation.record.admission, current: current)
                     })
-            } catch { reservation.close(); throw error }
-        } catch { closeRights(); throw error }
+                try reservation.record.attach(value)
+                return value
+            } catch { rights.close(); reservation.record.abortConstruction(); throw error }
+        } catch { rights.close(); throw error }
     }
     private init(peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
                  verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
-                 verifyReservation: @escaping () throws -> Void, closeReservation: @escaping () -> Void,
+                 verifyReservation: @escaping () throws -> Void, reservation: SetupRetainedInvocationReservation,
                  capture: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding,
                  captureMaintenance: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture,
                  recaptureMaintenance: @escaping (SetupAccountOwner.RetainedMaintenanceCapture, [PreparationIntentStore.RuntimeMaintenanceTransition],
@@ -77,7 +98,10 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         self.peer = peer; self.incarnation = incarnation; acceptedPolicy = policy; self.capture = capture
         self.captureMaintenance = captureMaintenance; self.recaptureMaintenance = recaptureMaintenance
         self.verifyRights = verifyRights; self.closeRights = closeRights
-        self.verifyReservation = verifyReservation; self.closeReservation = closeReservation
+        self.verifyReservation = verifyReservation; self.reservation = reservation
+    }
+    func belongs(to reservation: SetupRetainedInvocationReservation) -> Bool {
+        getpid() == processID && self.reservation === reservation
     }
     /// Capture on the exported invocation after this owner exists. Failure keeps its reservation for cleanup.
     func callerBinding(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence) throws -> SetupRetainedCallerBinding {
@@ -184,7 +208,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         }
     }
     private func validateOwner() throws {
-        guard getpid() == processID, !closed, getuid() == processOwner, geteuid() == processOwner else {
+        guard getpid() == processID, !closed, !closing, getuid() == processOwner, geteuid() == processOwner else {
             throw SetupAdministratorAuthorizationError.closed
         }
     }
@@ -198,21 +222,33 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     func run<Value>(work: () throws -> Value, reply: (Value, RightsState) throws -> Void) throws {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         try lock.withLock {
-            guard !active, !invoked, !closed else { throw AdministrativeSetupError.unavailable }
+            guard !active, !invoked, !closing, !closed else { throw AdministrativeSetupError.unavailable }
+            try reservation.beginWorker(self)
             active = true; invoked = true; contextWorker.withLock { contextThread = pthread_self() }
-            defer { active = false; contextWorker.withLock { contextThread = nil } }
+            defer { active = false; contextWorker.withLock { contextThread = nil }; reservation.endWorker(self) }
             try validateLifetime(); let value = try work(); try validateOwner()
             let state = rightsState(); try validateOwner()
             try reply(value, state)
         }
     }
-    /// Call only after the outer operation has settled its resources. Expired rights cannot prevent cleanup.
+    /// Register the real cleanup owner before borrowing its resources. This does not grant native authority.
+    func retainCleanup(_ close: @escaping () throws -> Void) throws {
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        try lock.withLock {
+            guard !closing, !closed else { throw AdministrativeSetupError.unavailable }
+            try reservation.retainCleanup(self, close)
+        }
+    }
+    /// Expired rights cannot prevent cleanup. A failed join leaves both admissions and shared activity held.
     func close() throws {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         try lock.withLock {
             guard !active else { throw AdministrativeSetupError.unavailable }
             guard !closed else { return }
-            closed = true; context?.retire(); context = nil; closeRights(); closeReservation()
+            closing = true
+            try reservation.settle(self) {
+                closed = true; context?.retire(); context = nil; closeRights()
+            }
         }
     }
     deinit { if getpid() == processID { closeRightsIfNeeded() } }

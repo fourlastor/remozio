@@ -35,7 +35,15 @@ final class SetupRetainedInvocationTests: XCTestCase {
             let (binding, policy) = try values(f)
             var checks = 0, closes = 0, replies = 0
             let invocation = try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
-                verifyRights: { checks += 1 }, closeRights: { closes += 1 })
+                verifyRights: { checks += 1 }, closeRights: {
+                    closes += 1
+                    do {
+                        XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+                        XCTAssertThrowsError(try owner.verifyCurrent())
+                        XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                        XCTAssertThrowsError(try installer.acquireExclusive())
+                    } catch { XCTFail("Rights cleanup observation failed: \(error)") }
+                })
             XCTAssertEqual(invocation.incarnation, binding.incarnation)
             XCTAssertEqual(invocation.acceptedPolicy.requirement, policy.requirement)
             XCTAssertEqual(invocation.peer, binding.peer)
@@ -191,6 +199,208 @@ final class SetupRetainedInvocationTests: XCTestCase {
                 XCTAssertEqual(value, "committed"); XCTAssertEqual(state, .init(cancelled: false, expired: false)); replies += 1
             })
             XCTAssertEqual(replies, 1); try shutdown.close(); try owner.close()
+        }
+    }
+    func testConstructionGapIsReservedUntilTheExactInvocationAttaches() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            var checks = 0
+            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {
+                checks += 1
+                if checks == 2 {
+                    XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
+                    XCTAssertThrowsError(try owner.verifyCurrent())
+                    XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                }
+            })
+            XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            try value.close(); XCTAssertEqual(try owner.retainedInvocationState(), .settled)
+            try owner.verifyCurrent()
+        }
+    }
+    func testConstructionFailureSettlesOnlyItsReservedRecord() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            var checks = 0
+            XCTAssertThrowsError(try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {
+                checks += 1
+                if checks == 2 {
+                    XCTAssertEqual(try owner.retainedInvocationState(), .reserved); throw Failure.rights
+                }
+            }))
+            XCTAssertEqual(try owner.retainedInvocationState(), .settled); try owner.verifyCurrent()
+            let current = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            try current.close()
+        }
+    }
+    func testForeignInvocationCannotAttachEvenWithTheSameIncarnation() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let first = try owner(f), second = try owner(f)
+            defer { try? first.close(); try? second.close() }; let (binding, policy) = try values(f)
+            let reserved = try first.reserveRetainedInvocation(incarnation: binding.incarnation)
+            defer { reserved.record.abortConstruction() }
+            let foreign = try Invocation.openOwned(owner: second, binding: binding, policy: policy, verifyRights: {})
+            defer { try? foreign.close() }
+            XCTAssertThrowsError(try reserved.record.attach(foreign))
+            XCTAssertEqual(try first.retainedInvocationState(), .reserved)
+            XCTAssertThrowsError(try reserved.record.settle(foreign))
+            XCTAssertThrowsError(try first.verifyCurrent()); try foreign.validateLifetime()
+        }
+    }
+    func testOrphanKeepsBothAdmissionsAndSharedActivityAfterCancellationAndConnectionLoss() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            let owner = try owner(f, activity: activity.open()); let (binding, policy) = try values(f)
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            var value: Invocation? = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            try value?.installOwnedContext(connection: connection, readPeer: { _ in binding.peer })
+            value?.cancel(incarnation: UUID()); XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            value?.cancel(incarnation: binding.incarnation); connection.invalidate()
+            weak var lost = value; value = nil
+            XCTAssertNil(lost); XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+            XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+            XCTAssertThrowsError(try installer.acquireExclusive()); XCTAssertThrowsError(try owner.close())
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+        }
+    }
+    private final class WorkerRetention: @unchecked Sendable {
+        let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), joined = DispatchSemaphore(value: 0)
+        let failure = Mutex(false)
+        func execute(_ invocation: Invocation) {
+            defer { joined.signal() }
+            do {
+                try invocation.run(work: {
+                    try invocation.withWorkerContext { scope in
+                        try scope.verify(); XCTAssertThrowsError(try invocation.close())
+                        entered.signal()
+                        guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.work }
+                        try scope.verify()
+                    }
+                }, reply: { _, _ in })
+            } catch { failure.withLock { $0 = true } }
+        }
+    }
+    func testDroppingTheCallerReferenceCannotSettleAnActiveWorker() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); let (binding, policy) = try values(f)
+            var value: Invocation? = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            defer { connection.invalidate() }
+            try value?.installOwnedContext(connection: connection, readPeer: { _ in binding.peer })
+            weak var actual = value; let worker = WorkerRetention()
+            func dispatch(_ invocation: Invocation) {
+                DispatchQueue.global().async { [invocation] in worker.execute(invocation) }
+            }
+            try dispatch(XCTUnwrap(value))
+            XCTAssertEqual(worker.entered.wait(timeout: .now() + 3), .success)
+            value = nil
+            XCTAssertNotNil(actual); XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+            worker.resume.signal(); XCTAssertEqual(worker.joined.wait(timeout: .now() + 3), .success)
+            let deadline = DispatchTime.now().uptimeNanoseconds + 3_000_000_000
+            while actual != nil, DispatchTime.now().uptimeNanoseconds < deadline { usleep(1_000) }
+            XCTAssertNil(actual); XCTAssertFalse(worker.failure.withLock { $0 })
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+            XCTAssertThrowsError(try owner.close())
+        }
+    }
+    func testFailedCleanupRemainsRetainedAndPreventsSettlementOrReplay() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            let owner = try owner(f, activity: activity.open()); defer { try? owner.close() }
+            let (binding, policy) = try values(f)
+            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            var attempts = 0, completed = 0
+            try value.retainCleanup { completed += 1 }
+            try value.retainCleanup { attempts += 1; if attempts == 1 { throw Failure.cleanup } }
+            try value.run(work: {}, reply: { _, _ in })
+            XCTAssertThrowsError(try value.close()); XCTAssertEqual(attempts, 1); XCTAssertEqual(completed, 0)
+            XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            XCTAssertThrowsError(try value.run(work: { XCTFail("Replay") }, reply: { _, _ in }))
+            XCTAssertThrowsError(try value.retainCleanup { XCTFail("Late cleanup") })
+            XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+            XCTAssertThrowsError(try installer.acquireExclusive())
+            try value.close(); try value.close()
+            XCTAssertEqual(attempts, 2); XCTAssertEqual(completed, 1)
+            XCTAssertEqual(try owner.retainedInvocationState(), .settled)
+            let released = try installer.acquireExclusive(); released.close(); try owner.verifyCurrent()
+        }
+    }
+    func testCleanupReentryCannotReleaseTheReservationOrJoinTwice() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            var calls = 0
+            try value.retainCleanup { [weak value] in
+                calls += 1; XCTAssertThrowsError(try value?.close())
+                XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            }
+            try value.close(); XCTAssertEqual(calls, 1)
+            XCTAssertEqual(try owner.retainedInvocationState(), .settled)
+        }
+    }
+    func testSecondReservationIsRefusedWhileReservedAttachedAndOrphaned() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); let (binding, policy) = try values(f)
+            var checks = 0
+            var value: Invocation? = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {
+                checks += 1
+                if checks == 2 {
+                    XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
+                    XCTAssertThrowsError(try owner.reserveRetainedInvocation(incarnation: UUID()))
+                    XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
+                }
+            })
+            XCTAssertNotNil(value); XCTAssertEqual(try owner.retainedInvocationState(), .attached)
+            XCTAssertThrowsError(try owner.reserveRetainedInvocation(incarnation: binding.incarnation))
+            weak var weakValue = value; value = nil
+            XCTAssertNil(weakValue); XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+            XCTAssertThrowsError(try owner.reserveRetainedInvocation(incarnation: binding.incarnation))
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+        }
+    }
+    func testForeignConstructedIncarnationRefusesItsOwnRecordAndClosesRightsOnce() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            let owner = try owner(f, activity: activity.open()); defer { try? owner.close() }
+            let (binding, policy) = try values(f); var closes = 0
+            XCTAssertThrowsError(try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
+                verifyRights: {}, closeRights: {
+                    closes += 1
+                    do {
+                        XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
+                        XCTAssertThrowsError(try owner.verifyCurrent())
+                        XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                        XCTAssertThrowsError(try installer.acquireExclusive())
+                    } catch { XCTFail("Attachment cleanup observation failed: \(error)") }
+                }, rejectedIncarnation: UUID())) {
+                if case XPCPeerPolicyError.wrongConnection = $0 {} else { XCTFail("Unexpected attachment failure: \($0)") }
+            }
+            XCTAssertEqual(closes, 1); XCTAssertEqual(try owner.retainedInvocationState(), .settled)
+            try owner.verifyCurrent(); let reply = try owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try installer.acquireExclusive(); exclusive.close()
+        }
+    }
+    func testFailedConstructionClosesRightsBeforeReleasingAdmissions() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let activity = try ReleaseActivityFixture(), installer = try activity.open()
+            let owner = try owner(f, activity: activity.open()); defer { try? owner.close() }
+            let (binding, policy) = try values(f); var checks = 0, closes = 0
+            XCTAssertThrowsError(try Invocation.openOwned(owner: owner, binding: binding, policy: policy,
+                verifyRights: { checks += 1; if checks == 2 { throw Failure.rights } }, closeRights: {
+                    closes += 1
+                    do {
+                        XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
+                        XCTAssertThrowsError(try owner.verifyCurrent())
+                        XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+                        XCTAssertThrowsError(try installer.acquireExclusive())
+                    } catch { XCTFail("Construction cleanup observation failed: \(error)") }
+                }))
+            XCTAssertEqual(closes, 1); XCTAssertEqual(try owner.retainedInvocationState(), .settled)
+            try owner.verifyCurrent(); let reply = try owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try installer.acquireExclusive(); exclusive.close()
         }
     }
     private final class ContextProbe: @unchecked Sendable {
