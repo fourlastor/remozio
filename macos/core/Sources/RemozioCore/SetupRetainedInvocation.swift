@@ -5,6 +5,18 @@ import Security
 /// Owns one retained invocation through work, reply and explicit cleanup. It cannot create native loans.
 final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
     struct RightsState: Equatable, Sendable { let cancelled: Bool, expired: Bool }
+    private final class RightsOwner {
+        private let lock = NSLock(), process = getpid()
+        private var release: (() -> Void)?
+        init(_ release: @escaping () -> Void) { self.release = release }
+        func close() {
+            guard getpid() == process else { return }
+            let action = lock.withLock { let action = release; release = nil; return action }
+            action?()
+        }
+        deinit { close() }
+    }
+
     let peer: XPCPeerCredentials
     private let capture: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding
     private let captureMaintenance: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture
@@ -41,21 +53,28 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         do { try result.installContext { try .open(owner: result, invocation: invocation) }; return result }
         catch { try? result.close(); throw error }
     }
-    /// Ordinary-owner controls cannot import Root rights or construct an invocation in a Root process.
+    /// Ordinary-owner controls cannot import Root rights. An alternate incarnation tests attachment refusal only.
     static func openOwned(owner: SetupAccountOwner, binding: SetupRetainedCallerBinding, policy: XPCPeerPolicy,
-                          verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void = {}) throws -> Self {
+                          verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void = {},
+                          rejectedIncarnation: UUID? = nil) throws -> Self {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupAdministratorAuthorizationError.wrongProcess }
         return try begin(owner: owner, peer: binding.peer, incarnation: binding.incarnation, policy: policy,
-            verifyRights: verifyRights, closeRights: closeRights)
+            verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation)
     }
     private static func begin(owner: SetupAccountOwner, peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
-        verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void) throws -> Self {
+        verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
+        rejectedIncarnation: UUID? = nil) throws -> Self {
+        let rights = RightsOwner(closeRights)
         do {
+            if let rejectedIncarnation {
+                guard rejectedIncarnation != incarnation else { throw XPCPeerPolicyError.wrongConnection }
+            }
             try verifyRights()
             let reservation = try owner.reserveRetainedInvocation(incarnation: incarnation)
             do {
                 try verifyRights(); try reservation.verify()
-                let value = Self(peer: peer, incarnation: incarnation, policy: policy, verifyRights: verifyRights, closeRights: closeRights,
+                let value = Self(peer: peer, incarnation: rejectedIncarnation ?? incarnation, policy: policy,
+                    verifyRights: verifyRights, closeRights: rights.close,
                     verifyReservation: reservation.verify, reservation: reservation.record, capture: { invocation, candidate in
                         try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
                     }, captureMaintenance: { invocation, candidate in
@@ -66,8 +85,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                     })
                 try reservation.record.attach(value)
                 return value
-            } catch { reservation.record.abortConstruction(); throw error }
-        } catch { closeRights(); throw error }
+            } catch { rights.close(); reservation.record.abortConstruction(); throw error }
+        } catch { rights.close(); throw error }
     }
     private init(peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
                  verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
