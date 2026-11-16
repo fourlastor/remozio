@@ -485,7 +485,7 @@
   "SetupFilePreviewReaderTests": 0.36,
   "SetupGatewayActivationProgressTests": 1.15,
   "SetupGatewayProgressTests": 0.9,
-  "SetupMaintenanceRecoverySupervisorTests": 0.054,
+  "SetupMaintenanceRecoverySupervisorTests": 0.089,
   "SetupPortableImportOperationTests": 1.69,
   "SetupPortableImportProgressTests": 0.93,
   "SetupPortableImportRecoveryOwnerTests": 3.17,
