@@ -61,6 +61,14 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         return try begin(owner: owner, peer: binding.peer, incarnation: binding.incarnation, policy: policy,
             verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation)
     }
+    /// Ordinary-owner fixtures supply a completed protected capture. Root cannot use this seam.
+    func captureOwnedBinding(_ binding: SetupRetainedCallerBinding) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        try lock.withLock {
+            guard !active, !invoked else { throw AdministrativeSetupError.unavailable }
+            try validateLifetime(); try reservation.bind(binding, invocation: self)
+        }
+    }
     private static func begin(owner: SetupAccountOwner, peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
         verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
         rejectedIncarnation: UUID? = nil) throws -> Self {
@@ -70,7 +78,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                 guard rejectedIncarnation != incarnation else { throw XPCPeerPolicyError.wrongConnection }
             }
             try verifyRights()
-            let reservation = try owner.reserveRetainedInvocation(incarnation: incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: peer, incarnation: incarnation)
             do {
                 try verifyRights(); try reservation.verify()
                 let value = Self(peer: peer, incarnation: rejectedIncarnation ?? incarnation, policy: policy,
@@ -113,7 +121,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             guard try invocation.verifyInvocation() == peer else { throw XPCPeerPolicyError.wrongPeer }
             let value = try capture(invocation, candidate)
             guard value.incarnation == incarnation, value.peer == peer else { throw XPCPeerPolicyError.wrongPeer }
-            try validateLifetime(); return value
+            try validateLifetime(); try reservation.bind(value, invocation: self); return value
         }
     }
     func maintenanceCapture(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
@@ -124,7 +132,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             guard !active, !invoked, invocation.incarnation == incarnation else { throw XPCPeerPolicyError.wrongConnection }
             active = true; defer { active = false }; try validateLifetime()
             guard try invocation.verifyInvocation() == peer else { throw XPCPeerPolicyError.wrongPeer }
-            let value = try captureMaintenance(invocation, candidate); try validateLifetime(); return value
+            let value = try captureMaintenance(invocation, candidate); try validateLifetime()
+            try reservation.bind(value.binding, invocation: self); return value
         }
     }
     /// Fresh rights authorize metadata for this invocation. The real writer still proves storage and native ownership.
@@ -251,6 +260,11 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             }
         }
     }
-    deinit { if getpid() == processID { closeRightsIfNeeded() } }
+    deinit {
+        if getpid() == processID {
+            reservation.invocationDidDeinit(ObjectIdentifier(self), incarnation: incarnation)
+            closeRightsIfNeeded()
+        }
+    }
     private func closeRightsIfNeeded() { if !closed { closed = true; context?.retire(); context = nil; closeRights() } }
 }

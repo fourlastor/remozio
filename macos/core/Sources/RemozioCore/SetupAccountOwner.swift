@@ -61,6 +61,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let activationOperations: RuntimeActivationOperations
     private let asynchronousWork = SetupOwnerAsyncWork()
     private let setupReplyWork = SetupOwnerAsyncWork()
+    private let retainedStatus = SetupRetainedInvocationStatus.Reader()
     private var retainedInvocationReservation: SetupRetainedInvocationReservation?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
@@ -155,7 +156,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed else { return }
             closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission()
             guard asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
-            try machines.close(); closed = true
+            try machines.close(); closed = true; retainedStatus.close()
         }
     }
     func closeWhenIdle() async throws {
@@ -316,13 +317,17 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
     /// Returns metadata only. A reserved record with no invocation is still constructing.
+    /// Library-only snapshot. The future status endpoint authenticates the peer and current account before calling it.
+    func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
+        retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
     func retainedInvocationState() throws -> SetupRetainedInvocationReservation.State? {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         let reservation = lock.withLock { retainedInvocationReservation }
         return try reservation?.state()
     }
     /// Reserves both admissions before construction. The private record retains shared activity through orphaning.
-    func reserveRetainedInvocation(incarnation: UUID) throws -> (record: SetupRetainedInvocationReservation,
+    func reserveRetainedInvocation(authenticatedPeer: XPCPeerCredentials, incarnation: UUID) throws -> (record: SetupRetainedInvocationReservation,
                                                                verify: () throws -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
@@ -334,9 +339,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
             let admission: SetupOwnerAsyncWork.Token
             do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
             do {
-                let record = SetupRetainedInvocationReservation(incarnation: incarnation, admission: admission, reply: reply,
+                let record = try SetupRetainedInvocationReservation(authenticatedPeer: authenticatedPeer, incarnation: incarnation, admission: admission, reply: reply,
                     activity: try releaseActivity?.acquireShared())
-                retainedInvocationReservation = record
+                retainedInvocationReservation = record; retainedStatus.publish(record)
                 return (record, {
                     try self.lock.withLock {
                         guard self.retainedInvocationReservation === record, !self.closed, !self.closing,
