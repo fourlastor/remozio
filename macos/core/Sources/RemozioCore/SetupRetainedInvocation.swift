@@ -190,6 +190,14 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             try scope.verify(); return result
         }
     }
+    /// Recording a real cleanup receipt needs no new rights and grants no writer or native custody.
+    func retainMaintenanceRecoveryTransition(_ receipt: PreparationIntentStore.RuntimeMaintenanceTransition) throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            guard !closed, !closing else { throw JournalLeaseError.invalidated }
+            try reservation.retainMaintenanceRecoveryTransition(receipt, invocation: self)
+        }
+    }
     private func installContext(_ make: () throws -> SetupRetainedInvocationContext) throws {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         try lock.withLock {

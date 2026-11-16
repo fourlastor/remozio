@@ -5770,6 +5770,16 @@ public final class PreparationIntentStore {
             guard record == next, self.previous == previous else { throw PreparationStoreError.staleRevision }
             try record.requireReplacing(previous)
         }
+        /// The real writer, not a decoded recovery row, proves an automatic-M09d reconnectable origin.
+        func requireSavedTargetReconnectOrigin(_ expected: RuntimeMaintenanceWindowRecord) throws {
+            guard record == expected, expected.phase == .needsOwnerRecovery, expected.operation == .notStarted,
+                  expected.service == .notStopped, let previous, previous.phase == .draining,
+                  previous.operation == .notStarted, previous.service == .notStopped,
+                  let binding = previous.shutdownBinding, expected.shutdownBinding == binding else {
+                throw RuntimePreparationError.changedScope
+            }
+            try expected.requireReplacing(previous)
+        }
         static func requireChain(_ values: [Self], from before: MachineUpdateStableReleaseSnapshot,
             to after: MachineUpdateStableReleaseSnapshot, binding: Self? = nil) throws -> RuntimeMaintenanceWindowRecord {
             if let binding {

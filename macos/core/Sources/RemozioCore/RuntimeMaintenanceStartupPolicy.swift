@@ -3,7 +3,7 @@ import Foundation
 /// Phase decisions only. They grant no custody, RPC, write, or registration permission.
 enum RuntimeMaintenanceStartupPolicy {
     typealias Record = RuntimeMaintenanceWindowRecord
-    enum Action: Equatable {
+    enum Action: Equatable, Sendable {
         case nothing, ownerRecovery(Record.Failure), probeIncarnation, cancelAndReopen, restartRestoration
         case observeOperation, restore
     }

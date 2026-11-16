@@ -16,10 +16,15 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     private let activity: ReleaseActivityToken?
     private let statusID = UUID()
     private let authenticatedPeerUID: uid_t
-    private let authenticatedOwner: LocalAccountIdentity?
+    private let authenticatedOwner: LocalAccountIdentity
     private let recovery: SetupRetainedRecoveryLedger
+    private let recoveryExecutor: SetupAuditUpgradeWorkExecutor?
     private var recoverySeal: UUID?, recoveryClaimID: UUID?
     private var recoveryClaimLive = false
+    private var restorationWork: RestorationWork?
+    private var restorationClaimID: UUID?
+    private var restorationJoined = true
+    private var savedTargetRecoveryTransition: PreparationIntentStore.RuntimeMaintenanceTransition?
     private let ownerUID = getuid()
     private var capturedBinding: SetupRetainedInvocationStatus.Binding?
     private var capturedWindow: SetupRetainedInvocationStatus.Window?
@@ -33,14 +38,15 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
 
     /// An injected status lock is an ordinary-owner test seam. Root cannot inject this lock.
     init(authenticatedPeer: XPCPeerCredentials, incarnation: UUID, admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
-         activity: ReleaseActivityToken?, ownedStatusLock: NSLock? = nil, authenticatedOwner: LocalAccountIdentity? = nil,
+         activity: ReleaseActivityToken?, ownedStatusLock: NSLock? = nil, authenticatedOwner: LocalAccountIdentity,
          recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil) throws {
         guard authenticatedPeer.processID > 0, authenticatedPeer.userID > 0, authenticatedPeer.userID < UInt32.max else {
             throw XPCPeerPolicyError.wrongPeer
         }
         if ownedStatusLock != nil { try RuntimeMaintenanceOwnedControl.require() }
-        guard authenticatedOwner == nil || authenticatedOwner?.uid == authenticatedPeer.userID else { throw XPCPeerPolicyError.wrongPeer }
-        self.authenticatedOwner = authenticatedOwner; recovery = .init(executor: recoveryExecutor)
+        guard authenticatedOwner.uid == authenticatedPeer.userID else { throw XPCPeerPolicyError.wrongPeer }
+        self.authenticatedOwner = authenticatedOwner; self.recoveryExecutor = recoveryExecutor
+        recovery = .init(executor: recoveryExecutor)
         lock = ownedStatusLock ?? NSLock()
         authenticatedPeerUID = authenticatedPeer.userID
         self.incarnation = incarnation; self.admission = admission; self.reply = reply; self.activity = activity
@@ -51,7 +57,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
               peer.processID > 0, peer.userID == authenticatedPeerUID, currentOwner.uid == authenticatedPeerUID,
               lock.try() else { return .unavailable }
         defer { lock.unlock() }
-        if let authenticatedOwner, authenticatedOwner != currentOwner { return .unavailable }
+        if authenticatedOwner != currentOwner { return .unavailable }
         if let capturedBinding, !capturedBinding.matches(currentOwner) { return .unavailable }
         let observed: SetupRetainedInvocationStatus.Reservation
         switch phase {
@@ -63,10 +69,11 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
         let cleanupState: SetupRetainedInvocationStatus.Fact<SetupRetainedInvocationStatus.Cleanup>
         if phase == .settled { cleanupState = .observed(.settled) }
-        else if settling { cleanupState = .observed(.joining) }
+        else if settling || !restorationJoined { cleanupState = .observed(.joining) }
         else { cleanupState = recovery.status() }
         return .reservation(observed, identity: .init(reservationID: statusID, incarnation: incarnation), binding: capturedBinding,
-            expectedWindow: capturedWindow, worker: recovery.workerStatus(synchronous: worker), cleanup: cleanupState)
+            expectedWindow: capturedWindow,
+            worker: !restorationJoined ? .observed(.registered) : recovery.workerStatus(synchronous: worker), cleanup: cleanupState)
     }
     /// Store only a completed protected capture, never an unvalidated target hint or request UID.
     func bind(_ value: SetupRetainedCallerBinding, invocation owner: SetupRetainedInvocation) throws {
@@ -78,7 +85,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                   value.authorityOwner.uid == authenticatedPeerUID, value.incarnation == incarnation else {
                 throw XPCPeerPolicyError.wrongPeer
             }
-            guard authenticatedOwner == nil || authenticatedOwner == value.authorityOwner else { throw RuntimePreparationError.changedScope }
+            guard authenticatedOwner == value.authorityOwner else { throw RuntimePreparationError.changedScope }
             let binding = try SetupRetainedInvocationStatus.capturedBinding(value)
             guard capturedBinding == nil || capturedBinding == binding else { throw RuntimePreparationError.changedScope }
             capturedBinding = binding
@@ -119,6 +126,19 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                   transitions.allSatisfy({ capturedWindow.identifies($0.record) }) else {
                 throw RuntimePreparationError.changedScope
             }
+        }
+    }
+    /// An actual writer receipt preserves the old phase. Metadata alone cannot grant reconnect eligibility.
+    func retainMaintenanceRecoveryTransition(_ receipt: PreparationIntentStore.RuntimeMaintenanceTransition,
+        invocation owner: SetupRetainedInvocation) throws {
+        defer { withExtendedLifetime(owner) {} }
+        guard getpid() == process, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            try requireAttached(owner)
+            guard let capturedWindow, capturedWindow.identifies(receipt.record),
+                  capturedBinding?.matches(receipt.record.scope) == true else { throw RuntimePreparationError.changedScope }
+            try receipt.requireSavedTargetReconnectOrigin(receipt.record)
+            savedTargetRecoveryTransition = receipt
         }
     }
     func state() throws -> State {
@@ -232,7 +252,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     }
     private func requireRecoveryOwner(_ authorization: SetupRetainedRecoveryAuthorization) throws {
         guard getpid() == process, getuid() == ownerUID, geteuid() == ownerUID,
-              let authenticatedOwner, authorization.peer.processID > 0,
+              authorization.peer.processID > 0,
               authorization.peer.userID == authenticatedPeerUID, authorization.currentOwner == authenticatedOwner,
               authorization.incarnation != incarnation else { throw XPCPeerPolicyError.wrongPeer }
         if let capturedBinding, !capturedBinding.matches(authorization.currentOwner) { throw XPCPeerPolicyError.wrongPeer }
@@ -267,6 +287,192 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             return true
         }
     }
+    /// Uses the original owner's executor. This capability never creates another worker executor.
+    final class RestorationPhases: @unchecked Sendable {
+        /// A phase-named control for ordinary-owner tests. It can shorten, never extend, the real deadline.
+        struct OwnedDeadlineControl: Sendable {
+            enum Phase: Sendable { case beforePending, beforeRestored, afterRestored }
+            /// Declares the test trigger point. Production checks only the expiry predicate.
+            let phase: Phase
+            let expired: @Sendable () -> Bool
+            init(phase: Phase, expired: @escaping @Sendable () -> Bool) throws {
+                try RuntimeMaintenanceOwnedControl.require()
+                self.phase = phase; self.expired = expired
+            }
+        }
+        private let executor: SetupAuditUpgradeWorkExecutor
+        private let deadline: ContinuousClock.Instant?
+        private let ownedExpiration: OwnedDeadlineControl?
+        private let processID = getpid(), ownerUID = getuid()
+        fileprivate init(executor: SetupAuditUpgradeWorkExecutor, deadline: ContinuousClock.Instant? = nil,
+            ownedExpiration: OwnedDeadlineControl? = nil) {
+            self.executor = executor; self.deadline = deadline; self.ownedExpiration = ownedExpiration
+        }
+        private func requireProcess() throws {
+            guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        }
+        func forAttempt(until deadline: ContinuousClock.Instant) throws -> RestorationPhases {
+            try requireProcess(); return .init(executor: executor, deadline: deadline)
+        }
+        func forOwnedAttempt(until deadline: ContinuousClock.Instant,
+            expiration: OwnedDeadlineControl) throws -> RestorationPhases {
+            try RuntimeMaintenanceOwnedControl.require(); try requireProcess()
+            return .init(executor: executor, deadline: deadline, ownedExpiration: expiration)
+        }
+        private func admitted<Value: Sendable>(until deadline: ContinuousClock.Instant?,
+            _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+            while true {
+                try requireProcess(); try Task.checkCancellation()
+                if let deadline, ContinuousClock.now >= deadline { throw CancellationError() }
+                if deadline != nil, ownedExpiration?.expired() == true { throw CancellationError() }
+                let ownedExpiration = self.ownedExpiration
+                do {
+                    return try await executor.runRestorationPhase { _ in
+                        if let deadline, ContinuousClock.now >= deadline { throw CancellationError() }
+                        if deadline != nil, ownedExpiration?.expired() == true { throw CancellationError() }
+                        return try body()
+                    }
+                } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
+                    try await ContinuousClock().sleep(for: .milliseconds(25))
+                }
+            }
+        }
+        func run<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+            try await admitted(until: deadline, body)
+        }
+        /// Actual cleanup ignores caller cancellation and the attempt deadline. It never repeats a started body.
+        func cleanup<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+            try requireProcess()
+            let cleanup = Task { try await self.admitted(until: nil, body) }
+            return try await cleanup.value
+        }
+        func closeActual(_ body: @escaping @Sendable () -> Void) async throws {
+            try await cleanup { body() }
+        }
+    }
+    /// A typed slot for restoration only. The sealed general worker ledger stays closed permanently.
+    final class RestorationWork: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+        typealias Completion = RuntimeMaintenanceStartupRecovery.ExplicitCompletion
+        let id: UUID
+        private let task: Task<Completion, any Error>
+        private let processID = getpid(), ownerUID = getuid()
+        private let lock = NSLock()
+        private var returned = false, completed = false
+        fileprivate init(id: UUID, start: RestorationStart,
+            body: @escaping @Sendable (UUID) async throws -> Completion) {
+            self.id = id
+            task = Task { await start.wait(); return try await body(id) }
+        }
+        func value() async throws -> Completion {
+            guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+            let result = await task.result
+            lock.withLock {
+                returned = true
+                if case .success = result { completed = true }
+            }
+            return try result.get()
+        }
+        fileprivate var actualReturnObserved: Bool {
+            guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { return false }
+            return lock.withLock { returned }
+        }
+        fileprivate var holdsUnsettledCompletion: Bool { lock.withLock { completed } }
+        var description: String { "SetupRetainedRestorationWork(redacted)" }
+        var debugDescription: String { description }
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+    }
+    /// The slot must retain the actual task before its first custody acquisition or RPC can start.
+    fileprivate final class RestorationStart: @unchecked Sendable {
+        private let lock = NSLock()
+        private var opened = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        func wait() async {
+            await withCheckedContinuation { continuation in
+                let ready = lock.withLock {
+                    if opened { return true }; waiter = continuation; return false
+                }
+                if ready { continuation.resume() }
+            }
+        }
+        func open() {
+            let pending = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                opened = true; let pending = waiter; waiter = nil; return pending
+            }
+            pending?.resume()
+        }
+    }
+    private func requireJoinedRecovery(seal: UUID, claim: UUID) throws -> SetupRetainedRecoveryLedger.Evidence {
+        try requireRecovery(seal: seal, claim: claim)
+        guard restorationJoined else { throw AdministrativeSetupError.unavailable }
+        return try recovery.requireJoined()
+    }
+    private func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord, seal: UUID, claim: UUID) throws {
+        try requireRecovery(seal: seal, claim: claim)
+        guard let capturedWindow, capturedWindow.identifies(row), let capturedBinding,
+              capturedBinding.matches(row.scope) else { throw RuntimePreparationError.changedScope }
+    }
+    private func joinRecovery(seal: UUID, claim: UUID) throws -> Task<Void, any Error> {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        let (original, restoration) = try lock.withLock {
+            try requireRecovery(seal: seal, claim: claim)
+            return (try recovery.joinSealed(), restorationWork)
+        }
+        return Task {
+            try await original.value
+            if let restoration { _ = try? await restoration.value() }
+            try self.lock.withLock {
+                try self.requireRecovery(seal: seal, claim: claim)
+                guard self.restorationWork === restoration else { throw JournalLeaseError.invalidated }
+                self.restorationJoined = true
+            }
+        }
+    }
+    private func startRestoration(seal: UUID, claim: UUID,
+        body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) throws -> RestorationWork {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        let start = RestorationStart()
+        let (current, retired) = try lock.withLock {
+            _ = try requireJoinedRecovery(seal: seal, claim: claim)
+            guard capturedWindow != nil, capturedBinding != nil, restorationClaimID != claim else {
+                throw AdministrativeSetupError.unavailable
+            }
+            let retired = restorationWork
+            guard retired == nil || retired?.actualReturnObserved == true,
+                  retired?.holdsUnsettledCompletion != true else { throw AdministrativeSetupError.unavailable }
+            let current = RestorationWork(id: UUID(), start: start, body: body)
+            restorationWork = current; restorationClaimID = claim; restorationJoined = false
+            return (current, retired)
+        }
+        // A retired result may own a claim through its error. Drop it outside every record or owner lock.
+        withExtendedLifetime(retired) {}
+        start.open()
+        return current
+    }
+    private func currentRestoration(seal: UUID, claim: UUID) throws -> RestorationWork {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        return try lock.withLock {
+            try requireRecovery(seal: seal, claim: claim)
+            guard let restorationWork else { throw PreparationStoreError.notFound }
+            return restorationWork
+        }
+    }
+    private func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
+        work: RestorationWork, seal: UUID, claim: UUID) throws {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            try requireRecovery(seal: seal, claim: claim)
+            _ = try recovery.requireJoined()
+            guard restorationWork === work, work.actualReturnObserved, completed.workID == work.id else {
+                throw JournalLeaseError.invalidated
+            }
+            try requireRestorationWindow(completed.window, seal: seal, claim: claim)
+            guard completed.window.phase == .restored, completed.window.gate?.hold == .released,
+                  completed.window.gate?.admission == .available else { throw RuntimePreparationError.changedScope }
+            try activity?.validate()
+            restorationJoined = true
+            phase = .settled; activity?.close(); admission.close(); reply.close()
+        }
+    }
     /// Only this record can mint a token for its sealed generation. The token grants no restoration or body replay.
     final class RecoveryToken: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
         var description: String { "SetupRetainedRecoveryToken(redacted)" }
@@ -280,8 +486,61 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             guard getpid() == record.process else { throw JournalLeaseError.invalidated }
             try record.lock.withLock { try record.requireRecovery(seal: seal, claim: claim) }
         }
-        func joinTask() throws -> Task<Void, any Error> { try requireCurrent(); return try record.recovery.joinSealed() }
-        func joinedEvidence() throws -> SetupRetainedRecoveryLedger.Evidence { try requireCurrent(); return try record.recovery.requireJoined() }
+        func joinTask() throws -> Task<Void, any Error> { try record.joinRecovery(seal: seal, claim: claim) }
+        func joinedEvidence() throws -> SetupRetainedRecoveryLedger.Evidence {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            return try record.lock.withLock { try record.requireJoinedRecovery(seal: seal, claim: claim) }
+        }
+        func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord) throws {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            try record.lock.withLock { try record.requireRestorationWindow(row, seal: seal, claim: claim) }
+        }
+        func restorationPhases() throws -> RestorationPhases {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            return try record.lock.withLock {
+                try record.requireRecovery(seal: seal, claim: claim)
+                guard let executor = record.recoveryExecutor else { throw AdministrativeSetupError.unavailable }
+                return .init(executor: executor)
+            }
+        }
+        func requireSavedTargetReconnect(_ row: RuntimeMaintenanceWindowRecord) throws {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            try record.lock.withLock {
+                try record.requireRestorationWindow(row, seal: seal, claim: claim)
+                guard let receipt = record.savedTargetRecoveryTransition else { throw RuntimePreparationError.changedScope }
+                try receipt.requireSavedTargetReconnectOrigin(row)
+            }
+        }
+        func requireRestorationAccount(_ accountID: Data) throws {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            try record.lock.withLock {
+                try record.requireRecovery(seal: seal, claim: claim)
+                guard let captured = record.capturedWindow,
+                      captured.scope.authority.accountID == accountID else { throw XPCPeerPolicyError.wrongPeer }
+            }
+        }
+        func startRestoration(_ body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) throws -> RestorationWork {
+            try record.startRestoration(seal: seal, claim: claim, body: body)
+        }
+        func currentRestoration() throws -> RestorationWork { try record.currentRestoration(seal: seal, claim: claim) }
+        func finishRestorationNative(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
+            work: RestorationWork, processLease: SetupProcessLease, joined: SetupRetainedOrphanClaim.Joined) throws {
+            try joined.requireCurrentAuthorization(for: self)
+            try completed.requireNative(processLease: processLease)
+            try joined.requireCurrentAuthorization(for: self)
+            try settleRestoration(completed, work: work)
+        }
+        func finishRestorationOwned(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
+            work: RestorationWork, processLease: SetupProcessLease, joined: SetupRetainedOrphanClaim.Joined) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try joined.requireCurrentAuthorization(for: self)
+            try completed.requireOwned(processLease: processLease)
+            try joined.requireCurrentAuthorization(for: self)
+            try settleRestoration(completed, work: work)
+        }
+        fileprivate func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion, work: RestorationWork) throws {
+            try record.settleRestoration(completed, work: work, seal: seal, claim: claim)
+        }
         func releaseWindowFree() throws -> Bool { try record.releaseWindowFree(seal: seal, claim: claim) }
         func ownerDropped() {
             guard getpid() == record.process else { return }

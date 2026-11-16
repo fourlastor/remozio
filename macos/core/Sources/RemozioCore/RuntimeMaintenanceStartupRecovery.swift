@@ -16,10 +16,110 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
     typealias Record = RuntimeMaintenanceWindowRecord
     typealias Transition = PreparationIntentStore.RuntimeMaintenanceTransition
     typealias Frame = RuntimeMaintenanceStartupFrame
-    enum Result {
+    enum Result: Sendable {
         case nothing, ownerRecovery(Record), probeRequired
         case cancelAndReopen(Custody)
         case restoration(PreparedRestoration)
+    }
+    /// A completion is issued by the actual explicit runner after the restored writer and protected readback.
+    /// Its reader owns no live restoration custody after the registered task returns.
+    final class ExplicitCompletion: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+        let window: Record, workID: UUID
+        let originalRunFailed: Bool
+        private let floor: RuntimeMaintenanceStartupFloor, release: SignedReleaseEvidence
+        private let read: @Sendable () throws -> Frame, verifySetup: @Sendable () throws -> Void
+        private let native: Bool, processID = getpid()
+        fileprivate init(window: Record, workID: UUID, custody: Custody, originalRunFailed: Bool) throws {
+            guard window.phase == .restored, custody.current == window,
+                  window.gate?.hold == .released, window.gate?.admission == .available else {
+                throw RuntimePreparationError.changedScope
+            }
+            try custody.requireExplicitCompletion(window)
+            self.window = window; self.workID = workID; self.originalRunFailed = originalRunFailed
+            floor = custody.floor; release = custody.release
+            read = custody.completionReader; verifySetup = custody.completionVerifier; native = custody.native
+        }
+        func requireNative(processLease: SetupProcessLease) throws {
+            guard native, getpid() == processID, getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try requireCurrent(processLease: processLease)
+        }
+        func requireOwned(processLease: SetupProcessLease) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            guard !native, getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
+            try requireCurrent(processLease: processLease)
+        }
+        private func requireCurrent(processLease: SetupProcessLease) throws {
+            try processLease.validate(); try verifySetup()
+            let first = try read(); try floor.requireCurrent(first, window: window, release: release)
+            let second = try read(); try floor.requireCurrent(second, window: window, release: release)
+            try second.source.actual.requireSame(as: first.source.actual)
+            try verifySetup(); try processLease.validate()
+        }
+        var description: String { "RuntimeMaintenanceExplicitCompletion(redacted)" }
+        var debugDescription: String { description }
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+    }
+    /// In-process only. A restart origin will have its own type and cannot construct M12a evidence.
+    private final class ExplicitAuthority: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+        var description: String { "RuntimeMaintenanceExplicitAuthority(redacted)" }
+        var debugDescription: String { description }
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+        let joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease
+        let phases: SetupRetainedInvocationReservation.RestorationPhases
+        private let lock = NSLock()
+        private var captured: SetupRetainedInvocationStatus.Window?
+        init(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease, native: Bool,
+            phases: SetupRetainedInvocationReservation.RestorationPhases) throws {
+            if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
+            else { try RuntimeMaintenanceOwnedControl.require() }
+            self.joined = joined; self.processLease = processLease; self.phases = phases
+            try requireCurrent()
+        }
+        func requireCurrent() throws { try processLease.validate(); try joined.requireCurrentAuthorization() }
+        func capture(_ row: Record) throws {
+            try requireCurrent(); try joined.requireRestorationWindow(row)
+            guard row.phase == .needsOwnerRecovery, row.shutdownBinding != nil, row.purpose == .retainedRuntime,
+                  let failure = row.failure, failure != .repairRequired else {
+                throw RuntimeMaintenanceStartupFailure(.repairRequired, RuntimePreparationError.changedScope)
+            }
+            try lock.withLock {
+                guard captured == nil else { throw JournalLeaseError.invalidated }
+                captured = .init(row)
+            }
+        }
+        func requireWindow(_ row: Record) throws {
+            try requireCurrent(); try joined.requireRestorationWindow(row)
+            try lock.withLock {
+                guard captured?.identifies(row) == true else { throw RuntimePreparationError.changedScope }
+            }
+        }
+    }
+    /// Only the explicit dispatcher can issue this capability after committing its exact restoring row.
+    final class ExplicitReconnect: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+        var description: String { "RuntimeMaintenanceExplicitReconnect(redacted)" }
+        var debugDescription: String { description }
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+        let custody: Custody
+        let phases: SetupRetainedInvocationReservation.RestorationPhases
+        private let window: Record, origin: Record
+        var beforePendingFailure: Record.Failure { origin.failure ?? .cleanupPending }
+        private let lock = NSLock(), processID = getpid()
+        private var used = false
+        fileprivate init(custody: Custody, window: Record, origin: Record,
+            phases: SetupRetainedInvocationReservation.RestorationPhases) throws {
+            guard origin.phase == .needsOwnerRecovery, origin.service == .notStopped,
+                  origin.operation == .notStarted else { throw PreparationStoreError.invalidTransition }
+            try window.requireReplacing(origin)
+            self.custody = custody; self.window = window; self.origin = origin; self.phases = phases
+        }
+        func consume() throws -> Record {
+            guard getpid() == processID else { throw JournalLeaseError.invalidated }
+            try lock.withLock { guard !used else { throw JournalLeaseError.invalidated }; used = true }
+            guard window.phase == .restoring, window.service == .restartPending, window.operation == .notStarted else {
+                throw PreparationStoreError.invalidTransition
+            }
+            try custody.requireCleanup(window); return window
+        }
     }
     final class Custody: @unchecked Sendable {
         let floor: RuntimeMaintenanceStartupFloor
@@ -30,6 +130,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let inspect: @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation
         let observe: @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness
         private let read: @Sendable () throws -> Frame
+        private let verifySetupIdentity: @Sendable () throws -> Void
+        private var restoredTransition: Transition?, restoredOwned: Record?
         private let writeNative: (@Sendable (Record, Record, Frame) throws -> Transition)?
         private let writeOwned: (@Sendable (Record, Record) throws -> Record)?
         fileprivate let release: SignedReleaseEvidence
@@ -43,7 +145,9 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             verifyCaller: @escaping @Sendable () throws -> Void,
             verifyConfiguration: @escaping @Sendable () throws -> Void,
             inspect: @escaping @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation,
-            observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness) {
+            observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness,
+            verifySetupIdentity: @escaping @Sendable () throws -> Void = {}) {
+            self.verifySetupIdentity = verifySetupIdentity
             self.floor = floor; self.row = row; self.admission = admission; self.drain = drain; self.directory = directory
             self.release = release; self.read = read; self.writeNative = writeNative; self.writeOwned = writeOwned
             native = writeNative != nil; self.verifyCaller = verifyCaller; self.verifyConfiguration = verifyConfiguration
@@ -102,6 +206,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     try receipt.requireReplacement(next, replacing: previous)
                 } catch { invalidated = true; throw AuthorityMaintenanceClientError.needsOwnerRecovery }
                 row = next
+                if next.phase == .restored { restoredTransition = receipt }
                 do { _ = try requireCurrent(next) }
                 catch {
                     // The commit is confirmed. A failed scope check can attempt exactly one recovery write.
@@ -126,6 +231,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     guard try writeOwned(next, previous) == next else { throw PreparationStoreError.staleRevision }
                 } catch { invalidated = true; throw AuthorityMaintenanceClientError.needsOwnerRecovery }
                 row = next
+                if next.phase == .restored { restoredOwned = next }
                 do { _ = try requireCurrent(next) }
                 catch {
                     _ = try? persistRecovery(next, failure: .changedScope)
@@ -170,9 +276,10 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 } catch { invalidated = true; throw AuthorityMaintenanceClientError.needsOwnerRecovery }
             }
         }
-        fileprivate func persistRecovery(_ previous: Record, failure: Record.Failure) throws -> Record {
+        fileprivate func persistRecovery(_ previous: Record, failure: Record.Failure,
+            service: Record.ServiceOutcome? = nil) throws -> Record {
             let next = try RuntimeMaintenanceStartupPolicy.row(previous, phase: .needsOwnerRecovery,
-                service: previous.service, failure: failure)
+                service: service ?? previous.service, failure: failure)
             if native { _ = try persistNativeFailure(next, previous: previous) }
             else { _ = try persistOwnedFailure(next, previous: previous) }
             return next
@@ -216,7 +323,30 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             if native { return try persistNative(next, previous: previous) }
             _ = try persistOwned(next, previous: previous); return nil
         }
-        deinit { drain.close(); admission.close(); directory.close() }
+        fileprivate var completionReader: @Sendable () throws -> Frame { read }
+        fileprivate var completionVerifier: @Sendable () throws -> Void { verifySetupIdentity }
+        fileprivate func requireExplicitCompletion(_ expected: Record) throws {
+            try lock.withLock {
+                guard !invalidated, expected.phase == .restored, row == expected else { throw RuntimePreparationError.changedScope }
+                if native {
+                    guard let restoredTransition, restoredTransition.record == expected else { throw PreparationStoreError.invalidTransition }
+                } else {
+                    try RuntimeMaintenanceOwnedControl.require()
+                    guard restoredOwned == expected else { throw PreparationStoreError.invalidTransition }
+                }
+                // Recording a confirmed completion is cleanup, not a new caller action.
+                // An expired caller cannot erase its actual receipt. Releasing admission still needs fresh rights.
+                try admission.validateMachineBoundary(directory: directory, expected: floor.cohort.machineIdentity)
+                try verifySetupIdentity()
+                let first = try read(); try floor.requireCurrent(first, window: expected, release: release)
+                let second = try read(); try floor.requireCurrent(second, window: expected, release: release)
+                try second.source.actual.requireSame(as: first.source.actual)
+                try verifySetupIdentity()
+                try admission.validateMachineBoundary(directory: directory, expected: floor.cohort.machineIdentity)
+            }
+        }
+        fileprivate func close() { lock.withLock { invalidated = true; drain.close(); admission.close(); directory.close() } }
+        deinit { close() }
     }
     /// Issued after the exact restoring row and one registration or adoption under fresh custody.
     final class PreparedRestoration: @unchecked Sendable {
@@ -269,24 +399,28 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         }
     }
     private let custody: Custody
+    private let explicitAuthority: ExplicitAuthority?
     private let observeOperation: @Sendable (Record) -> RuntimeMaintenanceRuntimeObservation.State
     private let register: @Sendable (Custody, Record) throws -> Void
     private let lock = NSRecursiveLock()
     private var prepared = false, probePending = false, runUsed = false
     private let afterProbePolicy: @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action
     private let continuationRevision = AccountPreparationIntent.randomID()
-    private init(custody: Custody,
+    private init(custody: Custody, explicitAuthority: ExplicitAuthority? = nil,
         observeOperation: @escaping @Sendable (Record) -> RuntimeMaintenanceRuntimeObservation.State,
         register: @escaping @Sendable (Custody, Record) throws -> Void,
         afterProbePolicy: @escaping @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action = {
             try RuntimeMaintenanceStartupPolicy.afterProbe($0, sameIncarnation: $1)
         }) {
-        self.custody = custody; self.observeOperation = observeOperation; self.register = register; self.afterProbePolicy = afterProbePolicy
+        self.custody = custody; self.explicitAuthority = explicitAuthority; self.observeOperation = observeOperation; self.register = register; self.afterProbePolicy = afterProbePolicy
     }
     var window: Record { custody.current }
 
     /// Fixed installed Setup only. Busy means no row write and no RPC.
     static func open(accountID: Data) throws -> RuntimeMaintenanceStartupRecovery? {
+        try open(accountID: accountID, explicit: nil)
+    }
+    private static func open(accountID: Data, explicit: ExplicitAuthority?) throws -> RuntimeMaintenanceStartupRecovery? {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let configuration = try AdministrativeSetupConfiguration.load(path: AdministrativeSetupConfiguration.startupPath)
         guard configuration.machineDirectory == MachineBootstrap.machineDirectory,
@@ -297,13 +431,20 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let policy = try XPCPeerPolicy(teamID: setup.teamID, componentIdentifier: setup.identifier,
             approvedCodeDirectoryHashes: [setup.codeDirectoryHash], expectedUserID: 0)
         let processID = getpid()
-        let verify: @Sendable () throws -> Void = {
+        let verifySetupIdentity: @Sendable () throws -> Void = {
             guard getpid() == processID, getuid() == 0, geteuid() == 0,
                   try DynamicCodeValidation.selfPath() == MachineBootstrap.bundlePath + "/" + AdministrativeSetupConfiguration.executablePath,
                   try AdministrativeSetupConfiguration.load(path: AdministrativeSetupConfiguration.startupPath).canonicalBytes
                     == configuration.canonicalBytes else { throw RuntimePreparationError.changedScope }
             try DynamicCodeValidation.validateSelf(requirement: policy.requirement
                 + " and info[\"RemozioSecurityGeneration\"] = \"\(setup.installedGeneration)\"")
+        }
+        let verify: @Sendable () throws -> Void = {
+            try verifySetupIdentity(); try explicit?.requireCurrent()
+        }
+        let instance = explicit?.processLease
+        let verifyCompletionIdentity: @Sendable () throws -> Void = {
+            try verifySetupIdentity(); try instance?.validate()
         }
         try verify()
         let release = try SignedReleaseInspection.inspect(URL(fileURLWithPath: MachineBootstrap.bundlePath),
@@ -331,38 +472,44 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     let read: @Sendable () throws -> Frame = { try files.read() }
                     let frame = try read()
                     guard let row = frame.window else { drain.close(); admission.close(); directory.close(); return nil }
-                    if row.phase == .restored || row.phase == .needsOwnerRecovery {
+                    if let explicit { try explicit.capture(row) }
+                    else if row.phase == .restored || row.phase == .needsOwnerRecovery {
                         drain.close(); admission.close(); directory.close(); return nil
                     }
                     guard frame.source.actual.admission == registration else { throw RuntimePreparationError.changedScope }
                     try configuration.validate(inventory: frame.source.actual.inventory, release: release)
                     let floor = try RuntimeMaintenanceStartupFloor(frame: frame, release: release)
-                    let custody = Custody(floor: floor, row: row, admission: admission, drain: drain, directory: directory,
-                        release: release, read: read, writeNative: { try files.write($0, $1, $2) },
-                        writeOwned: nil, verifyCaller: verify, verifyConfiguration: {
-                            try verify()
-                            guard try ProtectedServiceConfiguration.read(path: floor.cohort.job.configurationPath) == floor.host.canonicalBytes else {
+                    let verifyHost: @Sendable () throws -> Void = {
+                        try verifyCompletionIdentity()
+                        guard try ProtectedServiceConfiguration.read(path: floor.cohort.job.configurationPath) == floor.host.canonicalBytes else {
+                            throw RuntimePreparationError.changedScope
+                        }
+                        let jobDirectory = try ProtectedSetupDirectory(anchor: "/",
+                            relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
+                            visibility: .sharedMetadata, createIfMissing: false)
+                        defer { jobDirectory.close() }
+                        _ = try MachineUpdateRetainedSetupPromotionSourceValidation.retainedJobBytes(
+                            floor.cohort.job, directory: jobDirectory, owner: 0)
+                        for account in [row.scope.authority, row.scope.target] {
+                            guard let prepared = floor.source.preparations.first(where: { $0.accountID == account.accountID }) else {
                                 throw RuntimePreparationError.changedScope
                             }
-                            let jobDirectory = try ProtectedSetupDirectory(anchor: "/",
-                                relativePath: String(InstalledAccountJobManifest.directory.dropFirst()), owner: 0,
-                                visibility: .sharedMetadata, createIfMissing: false)
-                            defer { jobDirectory.close() }
-                            _ = try MachineUpdateRetainedSetupPromotionSourceValidation.retainedJobBytes(
-                                floor.cohort.job, directory: jobDirectory, owner: 0)
-                            for account in [row.scope.authority, row.scope.target] {
-                                guard let prepared = floor.source.preparations.first(where: { $0.accountID == account.accountID }) else {
-                                    throw RuntimePreparationError.changedScope
-                                }
-                                try LocalAccountDirectory.validateOwnership(LocalAccountDirectory.lookup(uid: account.ownerUID),
-                                    uid: account.ownerUID, directoryID: prepared.directoryID)
-                            }
+                            try LocalAccountDirectory.validateOwnership(LocalAccountDirectory.lookup(uid: account.ownerUID),
+                                uid: account.ownerUID, directoryID: prepared.directoryID)
+                        }
+
+                    }
+                    let custody = Custody(floor: floor, row: row, admission: admission, drain: drain, directory: directory,
+                        release: release, read: read, writeNative: { try files.write($0, $1, $2) },
+                        writeOwned: nil, verifyCaller: verifyCompletionIdentity, verifyConfiguration: {
+                            try explicit?.requireCurrent(); try verifyHost()
                         }, inspect: { job in
                             try RuntimeJobStopSession.classify(BoundedNativeCommand.run(executable: "/bin/launchctl",
                                 arguments: ["print", "system/" + job.declaration.label]), job: job)
-                        }, observe: { try RuntimeJobProcessObservation.open(job: $0, code: $1, processID: $2) })
+                        }, observe: { try RuntimeJobProcessObservation.open(job: $0, code: $1, processID: $2) },
+                        verifySetupIdentity: verifyHost)
                     _ = try custody.requireCurrent(row)
-                    return .init(custody: custody, observeOperation: { window in
+                    return .init(custody: custody, explicitAuthority: explicit, observeOperation: { window in
                         // The synchronous M08 loan opens B only and ends before any async transfer.
                         do {
                             try custody.validateResources()
@@ -397,6 +544,93 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         } catch { directory.close(); throw error }
     }
 
+    /// The actual task is retained in the claim's typed slot before this factory opens any custody.
+    /// This library method adds no endpoint and never acquires another Setup reservation.
+    static func restoreExplicitNative(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease,
+        accountID: Data, until deadline: ContinuousClock.Instant) async throws -> Record {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let phases = try joined.restorationPhases().forAttempt(until: deadline)
+        try await phases.run { try joined.requireRestorationAccount(accountID) }
+        let work = try await joined.startRestoration { workID in
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw CancellationError() }
+            let recovery = try await phases.run {
+                let authority = try ExplicitAuthority(joined: joined, processLease: processLease, native: true, phases: phases)
+                guard let recovery = try open(accountID: accountID, explicit: authority) else { throw PreparationStoreError.notFound }
+                return recovery
+            }
+            let outcome: Swift.Result<ExplicitCompletion, any Error>
+            do { outcome = .success(try await recovery.finishExplicit(workID: workID) { try await recovery.runNative(until: deadline) }) }
+            catch { outcome = .failure(error) }
+            try await phases.closeActual { recovery.custody.close() }
+            return try outcome.get()
+        }
+        return try await joined.finishRestorationNative(work: work, processLease: processLease)
+    }
+
+    /// Ordinary-owner control data only. The native factory cannot accept this bundle or its callbacks.
+    private struct OwnedExplicitInputs: @unchecked Sendable {
+        let frame: Frame, release: SignedReleaseEvidence
+        let admission: UpdateOrdinaryAdmissionLease, directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier
+        let read: @Sendable () throws -> Frame, persist: @Sendable (Record, Record) throws -> Record
+        let verify: @Sendable () throws -> Void
+        let inspect: @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation
+        let observe: @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness
+        let register: @Sendable () throws -> Void
+        let makeDriver: @Sendable () throws -> any AuthorityMaintenanceClientDriver
+        let capturePeer: @Sendable () throws -> any RuntimeJobExitWitness
+        let requirePeerLive: @Sendable (any RuntimeJobExitWitness) throws -> Void
+        let phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl?
+    }
+    static func restoreExplicitOwned(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease,
+        frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
+        directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier,
+        read: @escaping @Sendable () throws -> Frame, persist: @escaping @Sendable (Record, Record) throws -> Record,
+        verify: @escaping @Sendable () throws -> Void,
+        inspect: @escaping @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation,
+        observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness,
+        register: @escaping @Sendable () throws -> Void,
+        makeDriver: @escaping @Sendable () throws -> any AuthorityMaintenanceClientDriver,
+        capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
+        requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
+        ownedDeadline: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
+        ownedPhaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
+        until deadline: ContinuousClock.Instant) async throws -> Record {
+        try RuntimeMaintenanceOwnedControl.require()
+        guard let window = frame.window else { throw PreparationStoreError.notFound }
+        let originalPhases = try joined.restorationPhases()
+        let phases: SetupRetainedInvocationReservation.RestorationPhases
+        if let ownedDeadline { phases = try originalPhases.forOwnedAttempt(until: deadline, expiration: ownedDeadline) }
+        else { phases = try originalPhases.forAttempt(until: deadline) }
+        try await phases.run { try joined.requireRestorationAccount(window.scope.authority.accountID) }
+        let inputs = OwnedExplicitInputs(frame: frame, release: release, admission: admission, directory: directory,
+            accountBarrier: accountBarrier, read: read, persist: persist, verify: verify, inspect: inspect, observe: observe,
+            register: register, makeDriver: makeDriver, capturePeer: capturePeer, requirePeerLive: requirePeerLive, phaseControl: ownedPhaseControl)
+        let work = try await joined.startRestoration { workID in
+            try RuntimeMaintenanceOwnedControl.require()
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw CancellationError() }
+            let recovery = try await phases.run {
+                let authority = try ExplicitAuthority(joined: joined, processLease: processLease, native: false, phases: phases)
+                return try openOwned(frame: inputs.frame, release: inputs.release, admission: inputs.admission,
+                    directory: inputs.directory, accountBarrier: inputs.accountBarrier, read: inputs.read,
+                    persist: inputs.persist, verify: inputs.verify, inspect: inputs.inspect, observe: inputs.observe,
+                    observeOperation: { _ in .unknown }, register: inputs.register,
+                    afterProbePolicy: { try RuntimeMaintenanceStartupPolicy.afterProbe($0, sameIncarnation: $1) }, explicit: authority)
+            }
+            let outcome: Swift.Result<ExplicitCompletion, any Error>
+            do {
+                outcome = .success(try await recovery.finishExplicit(workID: workID) {
+                    try await recovery.runOwned(makeDriver: inputs.makeDriver, capturePeer: inputs.capturePeer,
+                        requirePeerLive: inputs.requirePeerLive, ownedPhaseControl: inputs.phaseControl, until: deadline)
+                })
+            } catch { outcome = .failure(error) }
+            try await phases.closeActual { recovery.custody.close() }
+            return try outcome.get()
+        }
+        return try await joined.finishRestorationOwned(work: work, processLease: processLease)
+    }
+
     /// Native and record-only constructors are separate. Root cannot inject readers, writes, or native callbacks.
     static func openOwned(frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
         directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier,
@@ -410,19 +644,62 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         afterProbePolicy: @escaping @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action = {
             try RuntimeMaintenanceStartupPolicy.afterProbe($0, sameIncarnation: $1)
         }) throws -> RuntimeMaintenanceStartupRecovery {
+        try openOwned(frame: frame, release: release, admission: admission, directory: directory, accountBarrier: accountBarrier,
+            read: read, persist: persist, verify: verify, inspect: inspect, observe: observe,
+            observeOperation: observeOperation, register: register, afterProbePolicy: afterProbePolicy, explicit: nil)
+    }
+    private static func openOwned(frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
+        directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier,
+        read: @escaping @Sendable () throws -> Frame, persist: @escaping @Sendable (Record, Record) throws -> Record,
+        verify: @escaping @Sendable () throws -> Void,
+        inspect: @escaping @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation,
+        observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness,
+        observeOperation: @escaping @Sendable (Record) -> RuntimeMaintenanceRuntimeObservation.State,
+        register: @escaping @Sendable () throws -> Void,
+        afterProbePolicy: @escaping @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action,
+        explicit: ExplicitAuthority?) throws -> RuntimeMaintenanceStartupRecovery {
         try RuntimeMaintenanceOwnedControl.require()
         guard let row = frame.window else { throw PreparationStoreError.notFound }
         let drain = try accountBarrier.beginDrain()
         do {
+            if let explicit { try explicit.capture(row) }
             let floor = try RuntimeMaintenanceStartupFloor(frame: frame, release: release)
+            let instance = explicit?.processLease
             let custody = Custody(floor: floor, row: row, admission: admission, drain: drain, directory: directory,
-                release: release, read: read, writeNative: nil, writeOwned: persist, verifyCaller: {}, verifyConfiguration: verify,
-                inspect: inspect, observe: observe)
+                release: release, read: read, writeNative: nil, writeOwned: persist,
+                verifyCaller: { try instance?.validate() }, verifyConfiguration: { try verify(); try explicit?.requireCurrent() },
+                inspect: inspect, observe: observe, verifySetupIdentity: verify)
             _ = try custody.requireCurrent(row)
-            return .init(custody: custody, observeOperation: observeOperation, register: { custody, restoring in
+            return .init(custody: custody, explicitAuthority: explicit, observeOperation: observeOperation, register: { custody, restoring in
                 try custody.withRegistration(restoring) { try register() }
             }, afterProbePolicy: afterProbePolicy)
         } catch { drain.close(); throw error }
+    }
+
+    private func blockingPhase<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+        if let explicitAuthority { return try await explicitAuthority.phases.run(body) }
+        return try body()
+    }
+    private func cleanupPhase<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+        if let explicitAuthority { return try await explicitAuthority.phases.cleanup(body) }
+        return try body()
+    }
+    /// Preserve a real final receipt if the caller disappears after its confirmed restored write.
+    /// The registered task closes custody before its result can release either retained admission.
+    private func finishExplicit(workID: UUID, operation: @Sendable () async throws -> Record) async throws -> ExplicitCompletion {
+        let failure: (any Error)?
+        do {
+            let row = try await operation()
+            guard row == custody.current else { throw PreparationStoreError.staleRevision }
+            failure = nil
+        } catch { failure = error }
+        return try await cleanupPhase {
+            if self.custody.current.phase == .restored {
+                return try ExplicitCompletion(window: self.custody.current, workID: workID, custody: self.custody, originalRunFailed: failure != nil)
+            }
+            if let failure { throw failure }
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
     }
 
     /// A one-shot synchronous dispatcher. A probe is the only branch that continues after this returns.
@@ -431,6 +708,14 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             guard !prepared else { throw JournalLeaseError.invalidated }; prepared = true
             let row = custody.current
             _ = try custody.requireCurrent(row)
+            if let explicitAuthority {
+                try explicitAuthority.requireWindow(row)
+                guard row.phase == .needsOwnerRecovery else { throw PreparationStoreError.invalidTransition }
+                if row.service == .notStopped && row.operation == .notStarted {
+                    probePending = true; return .probeRequired
+                }
+                return .restoration(try restoring(row))
+            }
             switch try RuntimeMaintenanceStartupPolicy.initial(row) {
             case .nothing: return .nothing
             case .ownerRecovery(let failure): return .ownerRecovery(try recover(row, failure: failure))
@@ -458,6 +743,18 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 throw RuntimePreparationError.changedScope
             }
             probePending = false
+            if let explicitAuthority {
+                try explicitAuthority.requireWindow(row)
+                guard row.phase == .needsOwnerRecovery, row.operation == .notStarted, row.service == .notStopped else {
+                    throw PreparationStoreError.invalidTransition
+                }
+                if proof.incarnation == target.incarnation {
+                    do { try explicitAuthority.joined.requireSavedTargetReconnect(row) }
+                    catch { throw RuntimeMaintenanceStartupFailure(.repairRequired, error) }
+                    return .cancelAndReopen
+                }
+                return .restartRestoration
+            }
             return try afterProbePolicy(row, proof.incarnation == target.incarnation)
         }
     }
@@ -468,6 +765,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let beforeHealthyOpen: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
         let afterProbe: @Sendable () -> Void
         let beforeCancel: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
+        let phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl?
     }
     private enum ClientMode { case native, owned(OwnedClients) }
     func runNative(until deadline: ContinuousClock.Instant) async throws -> Record {
@@ -480,12 +778,13 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         beforeHealthyOpen: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
         afterProbe: @escaping @Sendable () -> Void = {},
         beforeCancel: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
+        ownedPhaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
         until deadline: ContinuousClock.Instant) async throws -> Record {
         try RuntimeMaintenanceOwnedControl.require()
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
         return try await run(mode: .owned(.init(makeDriver: makeDriver, capturePeer: capturePeer,
             requirePeerLive: requirePeerLive, beforeHealthyOpen: beforeHealthyOpen,
-            afterProbe: afterProbe, beforeCancel: beforeCancel)), until: deadline)
+            afterProbe: afterProbe, beforeCancel: beforeCancel, phaseControl: ownedPhaseControl)), until: deadline)
     }
     private func makeClient(_ mode: ClientMode, context: AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceXPCClient {
         switch mode {
@@ -511,13 +810,14 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             guard !runUsed else { throw JournalLeaseError.invalidated }
             runUsed = true
         }
+        var reconnectOrigin: Record?
         do {
             try Task.checkCancellation()
             let owner: RuntimeMaintenanceRestoration
-            switch try prepare() {
+            switch try await blockingPhase({ try self.prepare() }) {
             case .nothing: return window
             case .ownerRecovery(let row): return row
-            case .restoration(let prepared): owner = try .openStartup(prepared)
+            case .restoration(let prepared): owner = try await blockingPhase { try .openStartup(prepared) }
             case .probeRequired:
                 let row = window
                 let context = try AuthorityMaintenanceChannelRequest(action: .open,
@@ -528,12 +828,30 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 do {
                     if decision == .cancelAndReopen {
                         let restored: Record
+                        let explicitReconnect: ExplicitReconnect?
+                        if let explicitAuthority {
+                            reconnectOrigin = row
+                            explicitReconnect = try await blockingPhase {
+                                try explicitAuthority.requireWindow(row)
+                                let restoring = try RuntimeMaintenanceStartupPolicy.row(row, phase: .restoring, service: .restartPending)
+                                _ = try self.custody.persist(restoring, previous: row)
+                                return try ExplicitReconnect(custody: self.custody, window: restoring, origin: row, phases: explicitAuthority.phases)
+                            }
+                        } else { explicitReconnect = nil }
                         switch mode {
                         case .native:
-                            restored = try await client.cancelAndReopenStartupNative(proof, custody: custody, until: deadline)
+                            if let explicitReconnect {
+                                restored = try await client.cancelAndReopenExplicitNative(proof, prepared: explicitReconnect, until: deadline)
+                            } else {
+                                restored = try await client.cancelAndReopenStartupNative(proof, custody: custody, until: deadline)
+                            }
                         case .owned(let owned):
                             await owned.beforeCancel(client)
-                            restored = try await client.cancelAndReopenStartupOwned(proof, custody: custody, until: deadline)
+                            if let explicitReconnect {
+                                restored = try await client.cancelAndReopenExplicitOwned(proof, prepared: explicitReconnect, until: deadline, ownedPhaseControl: owned.phaseControl)
+                            } else {
+                                restored = try await client.cancelAndReopenStartupOwned(proof, custody: custody, until: deadline)
+                            }
                         }
                         await client.close()
                         return restored
@@ -545,22 +863,39 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 // No store write, registration or process observation uses the decision connection.
                 await client.close()
                 switch decision {
-                case .ownerRecovery(let failure): return try recover(window, failure: failure)
+                case .ownerRecovery(let failure): return try await blockingPhase { try self.recover(self.window, failure: failure) }
                 case .restartRestoration:
+                    if explicitAuthority != nil {
+                        owner = try await blockingPhase { try .openStartup(self.restoring(self.window)) }; break
+                    }
                     let previous = window
                     let bridge = try RuntimeMaintenanceStartupPolicy.row(previous, phase: .needsOwnerRecovery,
                         service: previous.service, failure: .serviceUnavailable)
-                    _ = try custody.persistRestartBridge(bridge, previous: previous)
-                    owner = try .openStartup(restoring(bridge))
+                    owner = try await blockingPhase {
+                        _ = try self.custody.persistRestartBridge(bridge, previous: previous)
+                        return try .openStartup(self.restoring(bridge))
+                    }
                 default: throw PreparationStoreError.invalidTransition
                 }
             case .cancelAndReopen: throw PreparationStoreError.invalidTransition
             }
             return try await restoreHealthy(owner, mode: mode, until: deadline)
         } catch {
-            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            let cancelled = Task.isCancelled || error is CancellationError
             let row = window
-            _ = try? custody.persistRecovery(row, failure: Self.failure(error, fallback: .healthFailed))
+            if explicitAuthority != nil || !cancelled {
+                // A deadline can stop a phase before its body starts. Use the last confirmed row.
+                // An uncertain writer invalidates custody and still refuses this cleanup write.
+                let pending = row.phase == .reopenPending
+                let reconnect = reconnectOrigin != nil && row.phase == .restoring
+                let fallback: Record.Failure = pending ? .admissionUnconfirmed
+                    : reconnect ? reconnectOrigin?.failure ?? .cleanupPending : .healthFailed
+                let failure: Record.Failure = pending ? .admissionUnconfirmed
+                    : explicitAuthority != nil && cancelled ? fallback : Self.failure(error, fallback: .healthFailed)
+                let service: Record.ServiceOutcome? = reconnect ? .notStopped : nil
+                _ = try? await cleanupPhase { try self.custody.persistRecovery(row, failure: failure, service: service) }
+            }
+            if cancelled { throw CancellationError() }
             if let failure = error as? RuntimeMaintenanceStartupFailure { throw failure.underlying }
             throw error
         }
@@ -569,18 +904,18 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         until deadline: ContinuousClock.Instant) async throws -> (AuthorityMaintenanceXPCClient, AuthorityMaintenanceIncarnationProof, RuntimeMaintenanceStartupPolicy.Action) {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            _ = try custody.requireCurrent(window)
-            let client = try makeClient(mode, context: context)
+            _ = try await blockingPhase { try self.custody.requireCurrent(self.window) }
+            let client = try await blockingPhase { try self.makeClient(mode, context: context) }
             do {
                 let proof = try await observe(client, mode: mode, until: deadline)
                 if case .owned(let owned) = mode { owned.afterProbe() }
                 try Task.checkCancellation()
-                let decision = try afterAuthenticatedProbe(proof, client: client)
+                let decision = try await blockingPhase { try self.afterAuthenticatedProbe(proof, client: client) }
                 return (client, proof, decision)
             } catch {
                 await client.close(); try Task.checkCancellation()
                 guard error is AuthorityMaintenanceClientError || error is RuntimeMaintenanceStartupAttemptError else { throw error }
-                _ = try custody.requireCurrent(window)
+                _ = try await blockingPhase { try self.custody.requireCurrent(self.window) }
                 try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))
             }
         }
@@ -591,15 +926,18 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         var refreshWitness = false
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            try custody.requireBeforePendingRetry()
-            if refreshWitness {
-                try owner.discardStartupCandidate()
+            let discardWitness = refreshWitness
+            try await blockingPhase {
+                try self.custody.requireBeforePendingRetry()
+                if discardWitness { try owner.discardStartupCandidate() }
             }
             try await requireRestoringProcess(until: deadline)
             // Check protected metadata and job liveness before creating the new connection.
-            try owner.validateBeforePending()
-            let context = try owner.openRequest(challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
-            let client = try makeClient(mode, context: context)
+            let context = try await blockingPhase {
+                try owner.validateBeforePending()
+                return try owner.openRequest(challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
+            }
+            let client = try await blockingPhase { try self.makeClient(mode, context: context) }
             do {
                 let proof: AuthorityMaintenanceIncarnationProof
                 do { proof = try await observe(client, mode: mode, until: deadline) }
@@ -608,12 +946,12 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 switch mode {
                 case .native:
                     restored = try await client.restoreStartupHealthyNative(proof, owner: owner, until: deadline,
-                        persist: { try self.custody.persistNative($0, previous: $1) })
+                        persist: { try self.custody.persistNative($0, previous: $1) }, phases: explicitAuthority?.phases)
                 case .owned(let owned):
                     await owned.beforeHealthyOpen(client)
                     restored = try await client.restoreStartupHealthyOwned(proof, owner: owner,
                         capturePeer: owned.capturePeer, requirePeerLive: owned.requirePeerLive, afterProbe: owned.afterProbe, until: deadline,
-                        persist: { try self.custody.persistOwned($0, previous: $1) })
+                        persist: { try self.custody.persistOwned($0, previous: $1) }, phases: explicitAuthority?.phases, ownedPhaseControl: owned.phaseControl)
                 }
                 await client.close()
                 return restored
@@ -622,7 +960,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 try Task.checkCancellation()
                 guard case RuntimeMaintenanceStartupAttemptError.beforePending = error else { throw error }
                 // Scope failures and policy refusals end the run instead of entering a hidden retry loop.
-                try custody.requireRestoring(owner.window)
+                try await blockingPhase { try self.custody.requireRestoring(owner.window) }
                 refreshWitness = true
                 try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))
             }
@@ -641,6 +979,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
     }
     private func restoring(_ previous: Record) throws -> PreparedRestoration {
         let restoring: Record, receipt: Transition?
+        // An explicit restoring row is already authorized. After a crash, automatic M09d
+        // resumes it with fresh custody and the same healthy path as its own restoring row.
         if previous.phase == .restoring { restoring = previous; receipt = nil }
         else {
             restoring = try RuntimeMaintenanceStartupPolicy.row(previous, phase: .restoring, service: .restartPending,
@@ -659,23 +999,25 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
     private func requireRestoringProcess(until deadline: ContinuousClock.Instant) async throws {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
-            try custody.requireRestoring(window)
+            try await blockingPhase { try self.custody.requireRestoring(self.window) }
+            let live: Bool
             do {
-                switch try custody.inspect(custody.floor.cohort.job) {
-                case .absent, .matching(nil): break
-                case .conflicting: throw RuntimeActivationError.unavailable
-                case .matching(let pid?):
-                    guard pid > 1 else { throw RuntimeActivationError.unavailable }
-                    let observed = try custody.observe(custody.floor.cohort.job, custody.floor.code, pid)
-                    guard observed.processID == pid, try !observed.hasExited(),
-                          try custody.inspect(custody.floor.cohort.job) == .matching(pid) else {
-                        throw RuntimeActivationError.unavailable
+                live = try await blockingPhase {
+                    switch try self.custody.inspect(self.custody.floor.cohort.job) {
+                    case .absent, .matching(nil): return false
+                    case .conflicting: throw RuntimeActivationError.unavailable
+                    case .matching(let pid?):
+                        guard pid > 1 else { throw RuntimeActivationError.unavailable }
+                        let observed = try self.custody.observe(self.custody.floor.cohort.job, self.custody.floor.code, pid)
+                        guard observed.processID == pid, try !observed.hasExited(),
+                              try self.custody.inspect(self.custody.floor.cohort.job) == .matching(pid) else {
+                            throw RuntimeActivationError.unavailable
+                        }
+                        return true
                     }
-                    return
                 }
-            } catch {
-                throw RuntimeMaintenanceStartupFailure(Self.failure(error, fallback: .serviceUnavailable), error)
-            }
+            } catch { throw RuntimeMaintenanceStartupFailure(Self.failure(error, fallback: .serviceUnavailable), error) }
+            if live { return }
             try await ContinuousClock().sleep(until: min(deadline, .now.advanced(by: .milliseconds(250))))
         }
         throw RuntimeMaintenanceStartupFailure(.serviceUnavailable, RuntimeActivationError.unavailable)

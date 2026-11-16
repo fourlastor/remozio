@@ -238,7 +238,7 @@ final class SetupRetainedInvocationTests: XCTestCase {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let first = try owner(f), second = try owner(f)
             defer { try? first.close(); try? second.close() }; let (binding, policy) = try values(f)
-            let reserved = try first.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            let reserved = try first.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner)
             defer { reserved.record.abortConstruction() }
             let foreign = try Invocation.openOwned(owner: second, binding: binding, policy: policy, verifyRights: {})
             defer { try? foreign.close() }
@@ -349,15 +349,15 @@ final class SetupRetainedInvocationTests: XCTestCase {
                 checks += 1
                 if checks == 2 {
                     XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
-                    XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: UUID()))
+                    XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: UUID(), authenticatedOwner: binding.authorityOwner))
                     XCTAssertEqual(try owner.retainedInvocationState(), .reserved)
                 }
             })
             XCTAssertNotNil(value); XCTAssertEqual(try owner.retainedInvocationState(), .attached)
-            XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation))
+            XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner))
             weak var weakValue = value; value = nil
             XCTAssertNil(weakValue); XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
-            XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation))
+            XCTAssertThrowsError(try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner))
             XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
         }
     }

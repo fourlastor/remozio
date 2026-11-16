@@ -5,9 +5,9 @@ import XCTest
 @testable import RemozioCore
 
 final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
-    private typealias Invocation = SetupRetainedInvocation
-    private typealias Claim = SetupRetainedOrphanClaim
-    private typealias Authorization = SetupRetainedRecoveryAuthorization
+    typealias Invocation = SetupRetainedInvocation
+    typealias Claim = SetupRetainedOrphanClaim
+    typealias Authorization = SetupRetainedRecoveryAuthorization
     private enum Failure: Error { case expected, timeout }
     private final class InvocationCell: @unchecked Sendable { var value: Invocation? }
     private final class ClaimCell: @unchecked Sendable { weak var value: Claim? }
@@ -57,6 +57,26 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             XCTAssertTrue(failed.withLock { $0 }); XCTAssertNil(result.withLock { $0 })
         }
     }
+    private final class RestorationProbe: @unchecked Sendable {
+        typealias Work = SetupRetainedInvocationReservation.RestorationWork
+        let done = DispatchSemaphore(value: 0), failed = Mutex(false), result = Mutex<Work?>(nil)
+        init(_ joined: Claim.Joined,
+            body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) {
+            let starting = Task {
+                do { let work = try await joined.startRestoration(body); result.withLock { $0 = work } }
+                catch { failed.withLock { $0 = true } }
+            }
+            Task { await starting.value; done.signal() }
+        }
+        func wait() throws -> Work {
+            guard done.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+            XCTAssertFalse(failed.withLock { $0 }); return try XCTUnwrap(result.withLock { $0 })
+        }
+        func waitForRefusal() throws {
+            guard done.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+            XCTAssertTrue(failed.withLock { $0 }); XCTAssertNil(result.withLock { $0 })
+        }
+    }
     private final class VoidProbe: @unchecked Sendable {
         let done = DispatchSemaphore(value: 0), failed = Mutex(false)
         init(_ body: @escaping @Sendable () async throws -> Void) {
@@ -68,15 +88,19 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             XCTAssertFalse(failed.withLock { $0 })
         }
     }
-    private final class Frame: @unchecked Sendable {
-        let fixture: RetainedMaterialWriterFixture
+    final class Frame: @unchecked Sendable {
+        let candidate: SignedReleaseEvidence
         let owner: SetupAccountOwner, installer: ReleaseActivityBarrier
         let binding: SetupRetainedCallerBinding, policy: XPCPeerPolicy
         let connection: NSXPCConnection, guardValue: XPCInvocationGuard
         let capture: SetupAccountOwner.RetainedMaintenanceCapture
-        init(_ f: RetainedMaterialWriterFixture, activity: ReleaseActivityFixture) throws {
-            let machine = try f.machine(), state = try machine.retainedSetupCallerState(candidate: f.candidate)
-            let entry = try machine.retainedSetupInitialRuntimeEntry(owner: f.owner, candidate: f.candidate)
+        convenience init(_ f: RetainedMaterialWriterFixture, activity: ReleaseActivityFixture) throws {
+            try self.init(machine: f.machine(), candidate: f.candidate, targetOwner: f.owner, activity: activity)
+        }
+        init(machine: PreparationIntentStore, candidate: SignedReleaseEvidence,
+            targetOwner: LocalAccountIdentity, activity: ReleaseActivityFixture) throws {
+            let state = try machine.retainedSetupCallerState(candidate: candidate)
+            let entry = try machine.retainedSetupInitialRuntimeEntry(owner: targetOwner, candidate: candidate)
             let member = try XCTUnwrap(state.source.actual.inventory.accounts.first)
             let (_, host) = try MachineUpdateRetainedSetupPolicyNativeEntry.publishedAuthority(runtime: entry.runtime, accountID: member.accountID)
             let app = try XCTUnwrap(host.codePolicy.entries.first { $0.role == .app && $0.active })
@@ -92,9 +116,9 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
                 })
             let inputs = try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: entry.runtime, journal: nil,
                 verifyCurrent: {}, readRelay: { _ in throw SharedSetupImportError.wrongScope })
-            fixture = f; installer = try activity.open(); policy = accepted; connection = actualConnection; guardValue = exported
+            self.candidate = candidate; installer = try activity.open(); policy = accepted; connection = actualConnection; guardValue = exported
             binding = captured; capture = try .openOwned(binding: captured, inputs: inputs)
-            owner = try .init(machine: machine, expectedReleaseDigest: InstallationInventory.digest(f.candidate),
+            owner = try .init(machine: machine, expectedReleaseDigest: InstallationInventory.digest(candidate),
                 resume: { _, value in value }, releaseActivity: activity.open())
         }
         func invocation(captured: Bool = true, closeRights: @escaping () -> Void = {}) throws -> Invocation {
@@ -115,10 +139,11 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             let exact = try target ?? Claim.Target.capture(owner: owner, authorization: rights)
             return try .open(owner: owner, target: exact, authorization: rights)
         }
-        func window(_ value: Invocation) throws {
-            let actual = try value.maintenanceCapture(invocation: guardValue, candidate: fixture.candidate, purpose: .retainedRuntime)
+        func window(_ value: Invocation, id: Data = Data(repeating: 0xa1, count: 16),
+            revision: Data = Data(repeating: 0xa2, count: 16)) throws {
+            let actual = try value.maintenanceCapture(invocation: guardValue, candidate: candidate, purpose: .retainedRuntime)
             _ = try value.authorizedMaintenanceWindow(invocation: guardValue, expected: actual, purpose: .retainedRuntime,
-                candidate: fixture.candidate, id: Data(repeating: 0xa1, count: 16), revision: Data(repeating: 0xa2, count: 16))
+                candidate: candidate, id: id, revision: revision)
         }
         func lose(_ value: inout Invocation?) throws {
             weak var old = value; value = nil; XCTAssertNil(old)
@@ -224,6 +249,30 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             f.assertHeld(); XCTAssertTrue(try joined(f.claim()).releaseIfWindowFree())
         }
     }
+    func testJoinedRefusesAForeignRealTokenWithoutReleasingEitherReservation() throws {
+        try withFrame { first in
+            var a: Invocation? = try first.invocation(); try first.lose(&a)
+            let rights = try first.authorize()
+            defer { rights.close() }
+            let target = try Claim.Target.capture(owner: first.owner, authorization: rights)
+            let token = try first.owner.claimRetainedOrphan(target: target, authorization: rights)
+            let joining = VoidProbe { try await token.joinTask().value }
+            try joining.wait()
+            try withFrame { second in
+                var b: Invocation? = try second.invocation(); try second.lose(&b)
+                let claim = try second.claim(), other = try joined(claim)
+                XCTAssertThrowsError(try other.requireCurrentAuthorization(for: token)) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                }
+                try other.requireCurrentAuthorization()
+                first.assertHeld(); second.assertHeld()
+                XCTAssertTrue(try other.releaseIfWindowFree()); try second.assertReleased()
+                first.assertHeld()
+            }
+            XCTAssertTrue(try token.releaseWindowFree()); try first.assertReleased()
+        }
+    }
+
     func testExactTargetCannotSelectAnotherOwnerRecord() throws {
         try withFrame { first in
             var a: Invocation? = try first.invocation(); try first.lose(&a)
@@ -242,7 +291,7 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             let rights = try f.authorize(), target = try Claim.Target.capture(owner: f.owner, authorization: rights)
             try rights.takeForClaim()
             XCTAssertThrowsError(try Claim.open(owner: f.owner, target: target, authorization: rights)); f.assertHeld()
-            XCTAssertThrowsError(try f.owner.reserveRetainedInvocation(authenticatedPeer: f.binding.peer, incarnation: UUID()))
+            XCTAssertThrowsError(try f.owner.reserveRetainedInvocation(authenticatedPeer: f.binding.peer, incarnation: UUID(), authenticatedOwner: f.binding.authorityOwner))
             XCTAssertTrue(try joined(f.claim()).releaseIfWindowFree()); try f.assertReleased()
         }
     }
@@ -403,7 +452,7 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
     func testMaintenanceCaptureWithoutWindowKeepsTheOrphanTokensAfterJoin() throws {
         try withFrame { f in
             var value: Invocation? = try f.invocation()
-            _ = try value?.maintenanceCapture(invocation: f.guardValue, candidate: f.fixture.candidate, purpose: .retainedRuntime)
+            _ = try value?.maintenanceCapture(invocation: f.guardValue, candidate: f.candidate, purpose: .retainedRuntime)
             try f.lose(&value)
             let actual = try joined(f.claim())
             XCTAssertTrue(actual.evidence.neverEntered)
@@ -425,7 +474,7 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
                 let pair = try stores.pair(policy: stop.runtime.plan.host.codePolicy); defer { try? pair.close() }
                 try invocation.run(work: {
                     XCTAssertThrowsError(try invocation.recaptureMaintenance(expected: f.capture, transitions: [],
-                        capture: capture, pair: pair, candidate: f.fixture.candidate)) {
+                        capture: capture, pair: pair, candidate: f.candidate)) {
                         XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
                     }
                 }, reply: { _, _ in })
@@ -503,6 +552,122 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             try JoinProbe(claim).waitForFailure(); try JoinProbe(claim).waitForFailure()
             XCTAssertEqual(calls.withLock { $0 }, 1)
             XCTAssertEqual(f.status.cleanup, .observed(.joinFailed)); f.assertHeld()
+        }
+    }
+    func testRestorationSlotIsRetainedBeforeTheFirstCallbackAndAClaimJoinsActualReturn() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let first = try f.claim(), original = try joined(first), gate = Gate()
+            let entered = DispatchSemaphore(value: 0); defer { gate.finish() }
+            let starting = RestorationProbe(original) { _ in
+                XCTAssertEqual(f.status.cleanup, .observed(.joining)); XCTAssertEqual(f.status.worker, .observed(.registered))
+                entered.signal(); await gate.worker().value; throw Failure.expected
+            }
+            let work = try starting.wait(); XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            f.assertHeld(); first.abandon()
+            let pending = JoinProbe(try f.claim())
+            XCTAssertEqual(pending.done.wait(timeout: .now() + 0.05), .timedOut); f.assertHeld()
+            gate.finish(); let fresh = try pending.wait()
+            XCTAssertEqual(fresh.evidence.workersRegistered, 0)
+            XCTAssertEqual(f.status.cleanup, .observed(.joined)); XCTAssertFalse(try fresh.releaseIfWindowFree()); f.assertHeld()
+            withExtendedLifetime(work) {}
+        }
+    }
+    func testCancelledFreshClaimWaiterStillJoinsTheRestorationTask() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let first = try f.claim(), gate = Gate(), entered = DispatchSemaphore(value: 0); defer { gate.finish() }
+            let starting = RestorationProbe(try joined(first)) { _ in
+                entered.signal(); await gate.worker().value; throw Failure.expected
+            }
+            let work = try starting.wait(); XCTAssertEqual(entered.wait(timeout: .now() + 3), .success); first.abandon()
+            let pending = JoinProbe(try f.claim()); pending.cancel()
+            XCTAssertEqual(pending.done.wait(timeout: .now() + 0.05), .timedOut); f.assertHeld()
+            gate.finish(); let fresh = try pending.wait()
+            XCTAssertFalse(try fresh.releaseIfWindowFree()); f.assertHeld(); withExtendedLifetime(work) {}
+        }
+    }
+    func testFailedRestorationNeedsAFreshClaimBeforeAnotherSlotAttempt() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let calls = Mutex(0), first = try f.claim()
+            let starting = RestorationProbe(try joined(first)) { _ in calls.withLock { $0 += 1 }; throw Failure.expected }
+            let work = try starting.wait()
+            let returned = VoidProbe { do { _ = try await work.value(); XCTFail("Unexpected completion") } catch {} }; try returned.wait()
+            let repeated = RestorationProbe(try joined(first)) { _ in calls.withLock { $0 += 1 }; throw Failure.expected }
+            try repeated.waitForRefusal(); XCTAssertEqual(calls.withLock { $0 }, 1); f.assertHeld(); first.abandon()
+            let retry = RestorationProbe(try joined(f.claim())) { _ in calls.withLock { $0 += 1 }; throw Failure.expected }
+            let renewed = try retry.wait()
+            let retryReturned = VoidProbe { do { _ = try await renewed.value(); XCTFail("Unexpected completion") } catch {} }
+            try retryReturned.wait(); XCTAssertEqual(calls.withLock { $0 }, 2); f.assertHeld()
+        }
+    }
+    func testRestorationPhasesUseTheOriginalExecutorAndCloseOnlyAfterItReturns() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let original = try joined(f.claim()), phases = try original.restorationPhases()
+            let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), closed = Mutex(0), stack = Mutex(0)
+            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
+            defer { resume.signal(); authorization.close() }
+            let busy = VoidProbe {
+                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
+                    entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+                }
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            let refusal = VoidProbe {
+                do {
+                    let bounded = try phases.forAttempt(until: .now.advanced(by: .milliseconds(50)))
+                    try await bounded.run { XCTFail("The original executor was busy") }; XCTFail("Unexpected second worker")
+                } catch is CancellationError {}
+            }
+            try refusal.wait()
+            let closing = VoidProbe {
+                try await phases.closeActual {
+                    stack.withLock { $0 = pthread_get_stacksize_np(pthread_self()) }; closed.withLock { $0 += 1 }
+                }
+            }
+            XCTAssertEqual(closing.done.wait(timeout: .now() + 0.05), .timedOut); XCTAssertEqual(closed.withLock { $0 }, 0)
+            resume.signal(); try busy.wait(); try closing.wait()
+            XCTAssertEqual(closed.withLock { $0 }, 1)
+            XCTAssertGreaterThanOrEqual(stack.withLock { $0 }, SetupAuditUpgradeWorkExecutor.stackBytes); f.assertHeld()
+        }
+    }
+    func testRestorationPhaseRetriesBusyOnlyUntilTheOriginalExecutorReturns() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let phases = try joined(f.claim()).restorationPhases()
+            let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), calls = Mutex(0)
+            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
+            defer { resume.signal(); authorization.close() }
+            let busy = VoidProbe {
+                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
+                    entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+                }
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            let waiting = VoidProbe {
+                try await phases.run {
+                    XCTAssertGreaterThanOrEqual(pthread_get_stacksize_np(pthread_self()), SetupAuditUpgradeWorkExecutor.stackBytes)
+                    calls.withLock { $0 += 1 }
+                }
+            }
+            XCTAssertEqual(waiting.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertEqual(calls.withLock { $0 }, 0); resume.signal(); try busy.wait(); try waiting.wait()
+            XCTAssertEqual(calls.withLock { $0 }, 1); f.assertHeld()
+        }
+    }
+    func testRestorationPhaseDoesNotRetryUnavailableFromAStartedBody() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let phases = try joined(f.claim()).restorationPhases(), calls = Mutex(0)
+            let failed = VoidProbe {
+                do {
+                    try await phases.run { calls.withLock { $0 += 1 }; throw AdministrativeSetupError.unavailable }
+                    XCTFail("Unexpected phase success")
+                } catch AdministrativeSetupError.unavailable {}
+            }
+            try failed.wait(); XCTAssertEqual(calls.withLock { $0 }, 1); f.assertHeld()
         }
     }
     private static let forkProcess: @convention(c) () -> pid_t = {

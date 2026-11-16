@@ -10,8 +10,18 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
     private let name: String
     init(name: String = "Remozio audit upgrade") { self.name = name }
 
+    /// Only this executor can mint the retryable result, before it starts any body.
+    final class BusyBeforeBody: Error, @unchecked Sendable { fileprivate init() {} }
+    func runRestorationPhase<Value: Sendable>(
+        _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+        try await execute(cancellation: .init(), busy: BusyBeforeBody(), body)
+    }
     func run<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(),
                               _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+        try await execute(cancellation: cancellation, busy: AdministrativeSetupError.unavailable, body)
+    }
+    private func execute<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation, busy: any Error,
+        _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try await withTaskCancellationHandler {
             try Task.checkCancellation(); try cancellation.check()
@@ -19,7 +29,7 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
                 let admitted = lock.withLock { () -> Bool in
                     guard !running else { return false }; running = true; return true
                 }
-                guard admitted else { continuation.resume(throwing: AdministrativeSetupError.unavailable); return }
+                guard admitted else { continuation.resume(throwing: busy); return }
                 let thread = Thread { [self, cancellation] in
                     let result: Result<Value, any Error> = Result {
                         try cancellation.check()

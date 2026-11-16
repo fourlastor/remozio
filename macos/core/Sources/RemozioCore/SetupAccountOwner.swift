@@ -357,7 +357,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     /// Reserves both admissions before construction. The private record retains shared activity through orphaning.
     func reserveRetainedInvocation(authenticatedPeer: XPCPeerCredentials, incarnation: UUID,
-        authenticatedOwner: LocalAccountIdentity? = nil) throws -> (record: SetupRetainedInvocationReservation,
+        authenticatedOwner: LocalAccountIdentity) throws -> (record: SetupRetainedInvocationReservation,
                                                                verify: () throws -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
