@@ -52,8 +52,9 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         guard getuid() == 0, geteuid() == 0 else { throw SetupAdministratorAuthorizationError.wrongProcess }
         let peer = try invocation.verifyInvocation()
         guard peer.userID > 0, peer.userID < UInt32.max else { throw SetupAdministratorAuthorizationError.wrongProcess }
+        let authenticatedOwner = try LocalAccountDirectory.lookup(uid: peer.userID)
         let reference = try SetupAdministratorNative.importCurrentRights(externalForm: externalForm)
-        let result = try begin(owner: owner, peer: peer, incarnation: invocation.incarnation, policy: invocation.acceptedPeerPolicy, verifyRights: {
+        let result = try begin(owner: owner, peer: peer, incarnation: invocation.incarnation, policy: invocation.acceptedPeerPolicy, authenticatedOwner: authenticatedOwner, verifyRights: {
             try SetupAdministratorNative.validatePolicy()
             try SetupAdministratorNative.copyRights(reference, flags: [])
             try SetupAdministratorNative.validatePolicy()
@@ -67,7 +68,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                           rejectedIncarnation: UUID? = nil, ownedCapture: OwnedCapture? = nil) throws -> Self {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupAdministratorAuthorizationError.wrongProcess }
         return try begin(owner: owner, peer: binding.peer, incarnation: binding.incarnation, policy: policy,
-            verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation, ownedCapture: ownedCapture)
+            authenticatedOwner: binding.authorityOwner, verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation, ownedCapture: ownedCapture)
     }
     /// Ordinary-owner fixtures supply a completed protected capture. Root cannot use this seam.
     func captureOwnedBinding(_ binding: SetupRetainedCallerBinding) throws {
@@ -78,7 +79,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         }
     }
     private static func begin(owner: SetupAccountOwner, peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
-        verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
+        authenticatedOwner: LocalAccountIdentity, verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
         rejectedIncarnation: UUID? = nil, ownedCapture: OwnedCapture? = nil) throws -> Self {
         if ownedCapture != nil { try RuntimeMaintenanceOwnedControl.require() }
         let rights = RightsOwner(closeRights)
@@ -87,7 +88,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                 guard rejectedIncarnation != incarnation else { throw XPCPeerPolicyError.wrongConnection }
             }
             try verifyRights()
-            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: peer, incarnation: incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: peer, incarnation: incarnation, authenticatedOwner: authenticatedOwner)
             do {
                 try verifyRights(); try reservation.verify()
                 let value = Self(peer: peer, incarnation: rejectedIncarnation ?? incarnation, policy: policy,
@@ -204,7 +205,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         try requireContextThread()
         return try lock.withLock {
-            guard let context else { throw JournalLeaseError.invalidated }; return try context.withWorker(body)
+            guard let context else { throw JournalLeaseError.invalidated }
+            return try reservation.withContextLoan(self) { try context.withWorker(body) }
         }
     }
     @discardableResult
@@ -270,6 +272,23 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             try reservation.retainCleanup(self, close)
         }
     }
+    /// Register the actual worker task before its resources can escape this invocation.
+    func retainWorker(_ task: Task<Void, Never>) throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            guard !closing, !closed else { throw AdministrativeSetupError.unavailable }
+            try reservation.retainWorker(self, task: task)
+        }
+    }
+    /// Await actual task completion outside the invocation lock. A synchronous close still refuses unfinished joins.
+    func joinRegisteredWorkers() async throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        let ledger = try lock.withLock {
+            guard !active, !closed else { throw AdministrativeSetupError.unavailable }
+            return try reservation.ledgerForJoin(self)
+        }
+        try await ledger.joinWorkers()
+    }
     /// Expired rights cannot prevent cleanup. A failed join leaves both admissions and shared activity held.
     func close() throws {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
@@ -284,7 +303,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     }
     deinit {
         if getpid() == processID {
-            reservation.invocationDidDeinit(ObjectIdentifier(self), incarnation: incarnation)
+            let tracked = reservation.invocationDidDeinit(ObjectIdentifier(self), incarnation: incarnation)
+            defer { if tracked { reservation.invocationCleanupReturned(ObjectIdentifier(self), incarnation: incarnation) } }
             closeRightsIfNeeded()
         }
     }

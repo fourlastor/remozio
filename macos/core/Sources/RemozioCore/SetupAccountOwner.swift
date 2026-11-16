@@ -327,7 +327,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
         return try reservation?.state()
     }
     /// Reserves both admissions before construction. The private record retains shared activity through orphaning.
-    func reserveRetainedInvocation(authenticatedPeer: XPCPeerCredentials, incarnation: UUID) throws -> (record: SetupRetainedInvocationReservation,
+    func reserveRetainedInvocation(authenticatedPeer: XPCPeerCredentials, incarnation: UUID,
+        authenticatedOwner: LocalAccountIdentity? = nil) throws -> (record: SetupRetainedInvocationReservation,
                                                                verify: () throws -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
@@ -340,7 +341,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
             do {
                 let record = try SetupRetainedInvocationReservation(authenticatedPeer: authenticatedPeer, incarnation: incarnation, admission: admission, reply: reply,
-                    activity: try releaseActivity?.acquireShared())
+                    activity: try releaseActivity?.acquireShared(), authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor)
                 retainedInvocationReservation = record; retainedStatus.publish(record)
                 return (record, {
                     try self.lock.withLock {
@@ -352,6 +353,30 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 })
             } catch { admission.close(); reply.close(); throw error }
         }
+    }
+    /// Recovery observes the retained record. Closing admission does not prevent cleanup of that same record.
+    func retainedOrphanTarget(authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedOrphanClaim.Target {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try authorization.requireCurrent()
+        return try lock.withLock {
+            guard !closed, let record = retainedInvocationReservation, asynchronousWork.permits(record.admission) else {
+                throw AdministrativeSetupError.unavailable
+            }
+            return try record.recoveryTarget(authorization: authorization)
+        }
+    }
+    func claimRetainedOrphan(target: SetupRetainedOrphanClaim.Target,
+        authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedInvocationReservation.RecoveryToken {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try authorization.takeForClaim()
+        let claimed = try lock.withLock {
+            guard !closed, let record = retainedInvocationReservation, record === target.record,
+                  asynchronousWork.permits(record.admission) else { throw AdministrativeSetupError.unavailable }
+            return try record.claim(target, authorization: authorization)
+        }
+        // A failed task can retain an error that owns a claim. Drop it only after both locks are released.
+        withExtendedLifetime(claimed.retiredTask) {}
+        return claimed.token
     }
     /// Call synchronously on the accepted invocation. This captures metadata and does not dispatch retained work.
     func retainedCallerBinding(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
