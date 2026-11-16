@@ -387,14 +387,16 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             let completed = statusDone.wait(timeout: .now() + 1); XCTAssertEqual(completed, .success)
             resume.signal()
             if completed != .success { _ = statusDone.wait(timeout: .now() + 3) }
-            XCTAssertEqual(result.withLock { $0?.reservation }, .observed(.absent)); XCTAssertEqual(commits.withLock { $0 }, 0)
+            // The slot is empty, so no UID matches its owner and status answers unavailable without waiting.
+            XCTAssertEqual(result.withLock { $0 }, .unavailable); XCTAssertEqual(commits.withLock { $0 }, 0)
             blocked.withLock { $0 = false }
         }
     }
     func testClosedReaderAndInvalidPeerReturnUnavailable() throws {
         let reader = Status.Reader(), peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
         let owner = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
-        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner).reservation, .observed(.absent))
+        // An empty slot has no owner, so even a valid peer cannot learn that no reservation exists.
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner), .unavailable)
         let invalid = XPCPeerCredentials(processID: 0, userID: peer.userID, auditSessionID: peer.auditSessionID)
         XCTAssertEqual(reader.read(authenticatedPeer: invalid, currentOwner: owner), .unavailable)
         reader.close(); XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner), .unavailable)

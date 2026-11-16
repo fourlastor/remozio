@@ -134,7 +134,9 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                   lock.try() else { return .unavailable }
             let current = record, stopped = closed; lock.unlock()
             guard !stopped else { return .unavailable }
-            guard let current else { return .init(reservation: .observed(.absent)) }
+            // An empty slot has no recorded owner, so no peer UID can match it. Answering `absent` would let any
+            // authenticated UID tell an empty slot from another account's reservation (#795 review, contract section 7).
+            guard let current else { return .unavailable }
             let result = current.status(authenticatedPeer: peer, currentOwner: currentOwner)
             afterSnapshot?()
             guard lock.try() else { return .unavailable }

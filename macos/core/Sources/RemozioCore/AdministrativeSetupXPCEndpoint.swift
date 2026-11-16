@@ -108,6 +108,18 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         // Handler execution retires the context before the prior handler and endpoint close.
         try invocation.observeConnectionLifetime(onClose: { [weak self] in self?.close() })
     }
+    /// Facade-owned endpoint. The facade has already checked credentials, configured and exported the connection,
+    /// and installed connection-lifetime handling. The normal lane keeps the existing construction checks.
+    static func openNormal(invocation: XPCInvocationGuard, owner: SetupAccountOwner, onHandshake: @escaping @Sendable () -> Void,
+                           close: @escaping @Sendable () -> Void) throws -> AdministrativeSetupXPCEndpoint {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        // Retained maintenance cleanup runs before normal owner admission. It never resumes an upgrade or starts services.
+        _ = owner.retryAuditUpgradeCleanup()
+        try owner.verifyCurrent()
+        return .init(owner: owner, verify: { try invocation.verifyInvocation().userID },
+            authorize: { try SetupAdministratorAuthorization.validate(externalForm: $0, invocation: invocation) },
+            invalidate: close, onHandshake: onHandshake, auditUpgradeOperations: try .native(owner: owner, invocation: invocation))
+    }
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,
          authorize: @escaping (Data) throws -> Void, invalidate: @escaping () -> Void,

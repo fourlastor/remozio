@@ -321,6 +321,12 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
         retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
     }
+    /// Status lane entry. The directory identity comes from the authenticated peer UID, never from the request.
+    /// Neither the owner lock nor the machine store is touched, so a held reservation or a busy writer cannot block it.
+    func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials) -> SetupRetainedInvocationStatus {
+        guard getpid() == processID, let currentOwner = try? lookupAccount(authenticatedPeer.userID) else { return .unavailable }
+        return retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
     func retainedInvocationState() throws -> SetupRetainedInvocationReservation.State? {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         let reservation = lock.withLock { retainedInvocationReservation }
