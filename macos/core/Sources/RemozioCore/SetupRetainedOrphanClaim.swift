@@ -137,7 +137,8 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
         try await task.value
         return try .init(claim: self, evidence: token.joinedEvidence())
     }
-    /// Retire a lost caller while an async join still retains this object. The ledger's actual join keeps running.
+    /// The native endpoint must call this when its connection is lost, even while join retains this claim.
+    /// The ledger's actual join keeps running. A fresh caller can claim the same sealed generation.
     func abandon() { token.ownerDropped(); authorization.close() }
     deinit { abandon() }
 }

@@ -153,7 +153,9 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             active = true; defer { active = false }; try validateLifetime()
             guard try verifyPeer(invocation) == peer else { throw XPCPeerPolicyError.wrongPeer }
             let value = try captureMaintenance(invocation, candidate); try validateLifetime()
-            try reservation.bind(value.binding, invocation: self); return value
+            try reservation.bind(value.binding, invocation: self)
+            try reservation.maintenanceCaptured(invocation: self)
+            return value
         }
     }
     /// Fresh rights authorize metadata for this invocation. The real writer still proves storage and native ownership.
@@ -183,6 +185,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         try withWorkerContext { scope in
             try scope.verify()
             guard expected.binding.peer == peer, expected.binding.incarnation == incarnation else { throw XPCPeerPolicyError.wrongPeer }
+            try reservation.recapturingWindow(capture.window, transitions: transitions, invocation: self)
             let result = try recaptureMaintenance(expected, transitions, capture, pair, candidate, scope.verify)
             try scope.verify(); return result
         }
@@ -280,7 +283,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             try reservation.retainWorker(self, task: task)
         }
     }
-    /// Await actual task completion outside the invocation lock. A synchronous close still refuses unfinished joins.
+    /// Cancel registered workers, then await their actual completion outside the invocation lock.
+    /// A synchronous close still refuses unfinished joins.
     func joinRegisteredWorkers() async throws {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         let ledger = try lock.withLock {

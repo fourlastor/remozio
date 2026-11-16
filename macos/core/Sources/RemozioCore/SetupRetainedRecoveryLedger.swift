@@ -2,7 +2,10 @@ import Darwin
 import Foundation
 
 /// Actual owners and monotonic facts only. Joined resources grant no restoration or admission-release authority.
-final class SetupRetainedRecoveryLedger: @unchecked Sendable {
+final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "SetupRetainedRecoveryLedger(redacted)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
     struct Evidence: Equatable, Sendable {
         let neverEntered: Bool, stopNeverPossible: Bool, windowWriteNeverPossible: Bool
         let workersRegistered: Int, workersJoined: Int, contextLoansStarted: Int, contextLoansReturned: Int
@@ -21,11 +24,13 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable {
     private var deinitWaiters: [CheckedContinuation<Void, Never>] = []
     private var joinTask: Task<Void, any Error>?
     private var joinFailed = false, joined = false
+    // Lifetime limits bound the generation's monotonic ledger, including returned loans and cleanup owners.
+    // A long-lived invocation must start a new generation instead of resetting these facts.
     private static let maximumOwners = 128
 
     init(executor: SetupAuditUpgradeWorkExecutor?) { self.executor = executor }
-    /// Every path that produces a writable window for this invocation must pass this latch before returning metadata.
-    /// authorizedMaintenanceWindow is currently the only such path. Never clear this fact.
+    /// Latch before returning maintenance inputs or window metadata, and before consuming a recapture chain.
+    /// A capture without a durable row stays held until restart. Never clear this conservative fact.
     func windowMayBeWritten() throws {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
         try lock.withLock { guard !sealed else { throw JournalLeaseError.invalidated }; windowWritePossible = true }
@@ -164,7 +169,8 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable {
     func status() -> SetupRetainedInvocationStatus.Fact<SetupRetainedInvocationStatus.Cleanup> {
         guard getpid() == process, lock.try() else { return .unavailable }; defer { lock.unlock() }
         if joined { return .observed(.joined) }
-        if joinTask != nil && !joinFailed { return .observed(.joining) }
+        if joinFailed { return .observed(.joinFailed) }
+        if joinTask != nil { return .observed(.joining) }
         if !cleanup.isEmpty { return .observed(.pending) }
         return .observed(.noneRegistered)
     }

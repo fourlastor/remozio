@@ -6,7 +6,7 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
     enum Fact<Value: Equatable & Sendable>: Equatable, Sendable { case unavailable, observed(Value) }
     enum Reservation: Equatable, Sendable { case absent, reserved, attached, orphan, recovering, settled }
     enum Worker: Equatable, Sendable { case idle, running, registered }
-    enum Cleanup: Equatable, Sendable { case noneRegistered, pending, joining, joined, settled }
+    enum Cleanup: Equatable, Sendable { case noneRegistered, pending, joining, joinFailed, joined, settled }
     enum Supervisor: Equatable, Sendable {
         case recovering, joining, busy, cancelled, retired, noWindow
         case phase(RuntimeMaintenanceWindowRecord.Phase), failed(RuntimeMaintenanceWindowRecord.Failure)

@@ -37,13 +37,16 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
     private final class JoinProbe: @unchecked Sendable {
         let done = DispatchSemaphore(value: 0), finished = Mutex(false), failed = Mutex(false)
         let result = Mutex<Claim.Joined?>(nil)
+        private var work: Task<Void, Never>?
         init(_ claim: Claim) {
             let work = Task {
                 do { let joined = try await claim.join(); result.withLock { $0 = joined } }
                 catch { failed.withLock { $0 = true } }
             }
+            self.work = work
             Task { await work.value; finished.withLock { $0 = true }; done.signal() }
         }
+        func cancel() { work?.cancel() }
         func wait() throws -> Claim.Joined {
             guard done.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
             if failed.withLock({ $0 }) { throw Failure.expected }
@@ -387,11 +390,119 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
                 XCTAssertTrue(reaped); XCTAssertEqual(status, 0)
             }
             let claim = try Claim.open(owner: f.owner, target: target, authorization: rights), actual = try joined(claim)
-            for object in [rights as Any, target as Any, claim as Any, actual as Any] {
+            let ledger = SetupRetainedRecoveryLedger(executor: nil)
+            for object in [rights as Any, target as Any, target.record as Any, ledger as Any, claim as Any, actual as Any] {
                 XCTAssertTrue(Mirror(reflecting: object).children.isEmpty)
-                var output = ""; dump(object, to: &output); XCTAssertFalse(output.contains(f.binding.incarnation.uuidString))
+                var output = ""; dump(object, to: &output)
+                XCTAssertTrue(output.contains("redacted")); XCTAssertFalse(output.contains(f.binding.incarnation.uuidString))
+                XCTAssertFalse(output.contains(f.binding.authorityOwner.directoryID.uuidString))
             }
             XCTAssertTrue(try actual.releaseIfWindowFree())
+        }
+    }
+    func testMaintenanceCaptureWithoutWindowKeepsTheOrphanTokensAfterJoin() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation()
+            _ = try value?.maintenanceCapture(invocation: f.guardValue, candidate: f.fixture.candidate, purpose: .retainedRuntime)
+            try f.lose(&value)
+            let actual = try joined(f.claim())
+            XCTAssertTrue(actual.evidence.neverEntered)
+            XCTAssertFalse(actual.evidence.windowWriteNeverPossible)
+            XCTAssertFalse(try actual.releaseIfWindowFree()); f.assertHeld()
+            XCTAssertEqual(f.status.window, .unavailable)
+        }
+    }
+    func testRefusedRecaptureKeepsTheOrphanTokensWithoutInventingAWindow() async throws {
+        let stop = try MaintenanceStopTestFixture(), client = try stop.client()
+        let capture = try await stop.capture(client)
+        try withFrame { f in
+            var value: Invocation? = try f.invocation()
+            do {
+                let invocation = try XCTUnwrap(value)
+                try invocation.installOwnedContext(connection: f.connection, readPeer: { _ in f.binding.peer })
+                let stores = try MaintenanceBodyStores(mac: stop.window.scope.macID,
+                    account: stop.cohort.accountID, policy: stop.runtime.plan.host.codePolicy)
+                let pair = try stores.pair(policy: stop.runtime.plan.host.codePolicy); defer { try? pair.close() }
+                try invocation.run(work: {
+                    XCTAssertThrowsError(try invocation.recaptureMaintenance(expected: f.capture, transitions: [],
+                        capture: capture, pair: pair, candidate: f.fixture.candidate)) {
+                        XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+                    }
+                }, reply: { _, _ in })
+            }
+            try f.lose(&value)
+            let actual = try joined(f.claim())
+            XCTAssertFalse(actual.evidence.windowWriteNeverPossible)
+            XCTAssertEqual(actual.evidence.contextLoansStarted, 1); XCTAssertEqual(actual.evidence.contextLoansReturned, 1)
+            XCTAssertFalse(try actual.releaseIfWindowFree()); f.assertHeld()
+        }
+        await client.close()
+    }
+    func testCancelledWaiterStillWaitsForTheActualWorkerReturn() throws {
+        try withFrame { f in
+            let gate = Gate(); defer { gate.finish() }
+            var value: Invocation? = try f.invocation(); let worker = gate.worker()
+            try value?.retainWorker(worker); XCTAssertEqual(gate.parked.wait(timeout: .now() + 3), .success)
+            try f.lose(&value)
+            let pending = JoinProbe(try f.claim()); pending.cancel()
+            XCTAssertEqual(pending.done.wait(timeout: .now() + 0.05), .timedOut); f.assertHeld()
+            gate.finish(); let actual = try pending.wait()
+            XCTAssertEqual(actual.evidence.workersJoined, 1)
+            XCTAssertTrue(try actual.releaseIfWindowFree()); try f.assertReleased()
+        }
+    }
+    func testConcurrentClaimantsProduceOneLiveClaimForTheSameActualRecord() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.lose(&value)
+            let first = try f.authorize(), second = try f.authorize()
+            let target = try Claim.Target.capture(owner: f.owner, authorization: first)
+            let ready = DispatchSemaphore(value: 0), go = DispatchSemaphore(value: 0), group = DispatchGroup()
+            let accepted = Mutex<[Claim]>([]), refused = Mutex(0)
+            for rights in [first, second] {
+                group.enter()
+                DispatchQueue.global().async {
+                    defer { group.leave() }; ready.signal()
+                    guard go.wait(timeout: .now() + 3) == .success else { return }
+                    do { let claim = try Claim.open(owner: f.owner, target: target, authorization: rights); accepted.withLock { $0.append(claim) } }
+                    catch { refused.withLock { $0 += 1 } }
+                }
+            }
+            XCTAssertEqual(ready.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(ready.wait(timeout: .now() + 3), .success); go.signal(); go.signal()
+            XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(accepted.withLock { $0.count }, 1); XCTAssertEqual(refused.withLock { $0 }, 1); f.assertHeld()
+            let actual = try joined(XCTUnwrap(accepted.withLock { $0.first }))
+            XCTAssertTrue(try actual.releaseIfWindowFree()); try f.assertReleased()
+        }
+    }
+    func testBusyOwnerExecutorReportsJoinFailureAndKeepsTokensUntilAFreshClaim() throws {
+        try withFrame { f in
+            let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            defer { resume.signal() }
+            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
+            defer { authorization.close() }
+            let busy = VoidProbe {
+                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
+                    entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+                }
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            var value: Invocation? = try f.invocation(); try f.lose(&value)
+            let first = try f.claim(); try JoinProbe(first).waitForFailure()
+            XCTAssertEqual(f.status.cleanup, .observed(.joinFailed)); f.assertHeld()
+            first.abandon(); resume.signal(); try busy.wait()
+            let actual = try joined(f.claim()); XCTAssertTrue(try actual.releaseIfWindowFree()); try f.assertReleased()
+        }
+    }
+    func testRepeatedJoinOnTheSameFailedClaimDoesNotRepeatCleanup() throws {
+        try withFrame { f in
+            let calls = Mutex(0)
+            var value: Invocation? = try f.invocation()
+            try value?.retainCleanup { calls.withLock { $0 += 1 }; throw Failure.expected }
+            try f.lose(&value); let claim = try f.claim()
+            try JoinProbe(claim).waitForFailure(); try JoinProbe(claim).waitForFailure()
+            XCTAssertEqual(calls.withLock { $0 }, 1)
+            XCTAssertEqual(f.status.cleanup, .observed(.joinFailed)); f.assertHeld()
         }
     }
     private static let forkProcess: @convention(c) () -> pid_t = {

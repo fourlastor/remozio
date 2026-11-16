@@ -2,7 +2,10 @@ import Darwin
 import Foundation
 
 /// Keeps admission and cleanup independently of the invocation. Object loss never proves settlement.
-final class SetupRetainedInvocationReservation: @unchecked Sendable {
+final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    var description: String { "SetupRetainedInvocationReservation(redacted)" }
+    var debugDescription: String { description }
+    var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
     // Lock order: owner, record, ledger. The ledger never calls external code while holding its lock.
     // RecoveryToken and SetupRetainedOrphanClaim deinit take this lock. Never release either object under this lock.
     // Keep a strong invocation parameter through each locked weak load. Release removed cleanup closures outside this lock.
@@ -92,6 +95,30 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable {
             guard capturedWindow == nil || capturedWindow == identity else { throw RuntimePreparationError.changedScope }
             try recovery.windowMayBeWritten()
             capturedWindow = identity
+        }
+    }
+    /// Captured maintenance inputs can produce writable metadata even without authorizedMaintenanceWindow.
+    func maintenanceCaptured(invocation owner: SetupRetainedInvocation) throws {
+        defer { withExtendedLifetime(owner) {} }
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            try requireAttached(owner)
+            guard capturedBinding != nil else { throw RuntimePreparationError.changedScope }
+            try recovery.windowMayBeWritten()
+        }
+    }
+    /// Revision changes during the chain. Its window ID, purpose and full immutable scope must stay pinned.
+    func recapturingWindow(_ window: RuntimeMaintenanceWindowRecord,
+        transitions: [PreparationIntentStore.RuntimeMaintenanceTransition], invocation owner: SetupRetainedInvocation) throws {
+        defer { withExtendedLifetime(owner) {} }
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            try requireAttached(owner)
+            try recovery.windowMayBeWritten()
+            guard let capturedWindow, capturedWindow.identifies(window), !transitions.isEmpty,
+                  transitions.allSatisfy({ capturedWindow.identifies($0.record) }) else {
+                throw RuntimePreparationError.changedScope
+            }
         }
     }
     func state() throws -> State {
