@@ -4,9 +4,9 @@ import Foundation
 /// Captured facts only. No field authorizes work, releases admission, or proves a durable outcome by inference.
 struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     enum Fact<Value: Equatable & Sendable>: Equatable, Sendable { case unavailable, observed(Value) }
-    enum Reservation: Equatable, Sendable { case absent, reserved, attached, orphan, settled }
-    enum Worker: Equatable, Sendable { case idle, running }
-    enum Cleanup: Equatable, Sendable { case noneRegistered, pending, joining, settled }
+    enum Reservation: Equatable, Sendable { case absent, reserved, attached, orphan, recovering, settled }
+    enum Worker: Equatable, Sendable { case idle, running, registered }
+    enum Cleanup: Equatable, Sendable { case noneRegistered, pending, joining, joinFailed, joined, settled }
     enum Supervisor: Equatable, Sendable {
         case recovering, joining, busy, cancelled, retired, noWindow
         case phase(RuntimeMaintenanceWindowRecord.Phase), failed(RuntimeMaintenanceWindowRecord.Failure)
@@ -145,8 +145,8 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
     }
     static func capturedBinding(_ value: SetupRetainedCallerBinding) throws -> Binding { try .init(value) }
     static func reservation(_ value: Reservation, identity: Identity, binding: Binding?, expectedWindow: Window?,
-        worker: Worker, cleanup: Fact<Cleanup>) -> Self {
+        worker: Fact<Worker>, cleanup: Fact<Cleanup>) -> Self {
         .init(reservation: .observed(value), identity: binding == nil ? .unavailable : .observed(identity),
-            binding: binding.map { .observed($0) } ?? .unavailable, worker: .observed(worker), cleanup: cleanup, expectedWindow: expectedWindow)
+            binding: binding.map { .observed($0) } ?? .unavailable, worker: worker, cleanup: cleanup, expectedWindow: expectedWindow)
     }
 }
