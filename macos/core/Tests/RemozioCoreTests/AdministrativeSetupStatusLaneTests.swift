@@ -16,57 +16,57 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let calls = Mutex<[String]>([]), closes = Mutex(0)
         private func record(_ name: String) { calls.withLock { $0.append(name) } }
         func close() { closes.withLock { $0 += 1 } }
-        func auditUpgradeHello(reply: @escaping @Sendable (UInt64) -> Void) { record("auditUpgradeHello:"); reply(1) }
-        func auditUpgradeProgress(reply: @escaping @Sendable (Data?) -> Void) { record("auditUpgradeProgress:"); reply(Data([1])) }
+        func auditUpgradeHello(reply: @escaping @Sendable (UInt64) -> Void) { record("auditUpgradeHelloWithReply:"); reply(1) }
+        func auditUpgradeProgress(reply: @escaping @Sendable (Data?) -> Void) { record("auditUpgradeProgressWithReply:"); reply(Data([1])) }
         func performAuditUpgrade(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("performAuditUpgrade:authorization:reply:"); reply(Data([1]))
         }
-        func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) { record("portableImportRecoveryHello:"); reply(1) }
-        func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) { record("portableImportRecovery:"); reply(Data([1])) }
-        func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) { record("portableImportHello:"); reply(1) }
-        func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) { record("portableImportProgress:"); reply(Data([1])) }
+        func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) { record("portableImportRecoveryHelloWithReply:"); reply(1) }
+        func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) { record("portableImportRecoveryWithReply:"); reply(Data([1])) }
+        func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) { record("portableImportHelloWithReply:"); reply(1) }
+        func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) { record("portableImportProgressWithReply:"); reply(Data([1])) }
         func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("performPortableImport:authorization:reply:"); reply(Data([1]))
         }
-        func gatewaySettingsHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewaySettingsHello:"); reply(1) }
-        func gatewaySettingsProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewaySettingsProgress:"); reply(Data([1])) }
+        func gatewaySettingsHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewaySettingsHelloWithReply:"); reply(1) }
+        func gatewaySettingsProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewaySettingsProgressWithReply:"); reply(Data([1])) }
         func retainGatewaySettings(_ expected: Data, selection: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("retainGatewaySettings:selection:authorization:reply:"); reply(Data([1]))
         }
         func resumeGatewaySettings(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("resumeGatewaySettings:authorization:reply:"); reply(Data([1]))
         }
-        func gatewayActivationHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewayActivationHello:"); reply(1) }
-        func gatewayActivationProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewayActivationProgress:"); reply(Data([1])) }
+        func gatewayActivationHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewayActivationHelloWithReply:"); reply(1) }
+        func gatewayActivationProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewayActivationProgressWithReply:"); reply(Data([1])) }
         func activateGateway(_ expected: Data, settings: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("activateGateway:settings:authorization:reply:"); reply(Data([1]))
         }
-        func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewayHello:"); reply(1) }
-        func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewayProgress:"); reply(Data([1])) }
+        func gatewayHello(reply: @escaping @Sendable (UInt64) -> Void) { record("gatewayHelloWithReply:"); reply(1) }
+        func gatewayProgress(reply: @escaping @Sendable (Data?) -> Void) { record("gatewayProgressWithReply:"); reply(Data([1])) }
         func prepareGateway(_ expected: Data, choices: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("prepareGateway:choices:authorization:reply:"); reply(Data([1]))
         }
         func resumeGatewayJournal(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("resumeGatewayJournal:authorization:reply:"); reply(Data([1]))
         }
-        func activationHello(reply: @escaping @Sendable (UInt64) -> Void) { record("activationHello:"); reply(1) }
-        func activationProgress(reply: @escaping @Sendable (Data?) -> Void) { record("activationProgress:"); reply(Data([1])) }
+        func activationHello(reply: @escaping @Sendable (UInt64) -> Void) { record("activationHelloWithReply:"); reply(1) }
+        func activationProgress(reply: @escaping @Sendable (Data?) -> Void) { record("activationProgressWithReply:"); reply(Data([1])) }
         func activateRuntime(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("activateRuntime:authorization:reply:"); reply(Data([1]))
         }
-        func runtimeHello(reply: @escaping @Sendable (UInt64) -> Void) { record("runtimeHello:"); reply(1) }
-        func runtimeProgress(reply: @escaping @Sendable (Data?) -> Void) { record("runtimeProgress:"); reply(Data([1])) }
+        func runtimeHello(reply: @escaping @Sendable (UInt64) -> Void) { record("runtimeHelloWithReply:"); reply(1) }
+        func runtimeProgress(reply: @escaping @Sendable (Data?) -> Void) { record("runtimeProgressWithReply:"); reply(Data([1])) }
         func prepareRuntime(_ expected: Data, fileCustodyAccepted: Bool, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("prepareRuntime:fileCustodyAccepted:authorization:reply:"); reply(Data([1]))
         }
-        func hello(reply: @escaping @Sendable (UInt64) -> Void) { record("hello:"); reply(1) }
-        func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) { record("serviceAccountsHello:"); reply(1) }
-        func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void) { record("serviceAccountsProgress:"); reply(Data([1])) }
+        func hello(reply: @escaping @Sendable (UInt64) -> Void) { record("helloWithReply:"); reply(1) }
+        func serviceAccountsHello(reply: @escaping @Sendable (UInt64) -> Void) { record("serviceAccountsHelloWithReply:"); reply(1) }
+        func serviceAccountsProgress(reply: @escaping @Sendable (Data?) -> Void) { record("serviceAccountsProgressWithReply:"); reply(Data([1])) }
         func prepareServiceAccounts(_ expected: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("prepareServiceAccounts:authorization:reply:"); reply(Data([1]))
         }
-        func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) { record("enrollmentHello:"); reply(1) }
-        func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void) { record("accountEnrollmentProgress:"); reply(Data([1])) }
+        func enrollmentHello(reply: @escaping @Sendable (UInt64) -> Void) { record("enrollmentHelloWithReply:"); reply(1) }
+        func accountEnrollmentProgress(reply: @escaping @Sendable (Data?) -> Void) { record("accountEnrollmentProgressWithReply:"); reply(Data([1])) }
         func beginAccountEnrollment(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
             record("beginAccountEnrollment:authorization:reply:"); reply(Data([1]))
         }
@@ -114,9 +114,9 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
     }
 
     /// Every exported normal selector, keyed by its Objective-C name. Hello selectors are the only ones that may open the lane.
-    private static let hellos: Set<String> = ["auditUpgradeHello:", "portableImportRecoveryHello:", "portableImportHello:",
-        "gatewaySettingsHello:", "gatewayActivationHello:", "gatewayHello:", "activationHello:", "runtimeHello:", "hello:",
-        "serviceAccountsHello:", "enrollmentHello:"]
+    private static let hellos: Set<String> = ["auditUpgradeHelloWithReply:", "portableImportRecoveryHelloWithReply:", "portableImportHelloWithReply:",
+        "gatewaySettingsHelloWithReply:", "gatewayActivationHelloWithReply:", "gatewayHelloWithReply:", "activationHelloWithReply:", "runtimeHelloWithReply:", "helloWithReply:",
+        "serviceAccountsHelloWithReply:", "enrollmentHelloWithReply:"]
     /// Returns (forwarded, repliedOnce): a nonzero hello or non-nil data reply means the recorder answered.
     nonisolated(unsafe) private static let selectors: [String: (Facade) -> (Bool, Bool)] = {
         let bytes = Data(repeating: 0, count: 16)
@@ -127,45 +127,45 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
             { facade in let reply = Reply<Data?>(); call(facade, reply.callback); return (reply.only.map { $0 != nil } ?? false, reply.only != nil) }
         }
         return [
-            "auditUpgradeHello:": hello { $0.auditUpgradeHello(reply: $1) },
-            "auditUpgradeProgress:": data { $0.auditUpgradeProgress(reply: $1) },
+            "auditUpgradeHelloWithReply:": hello { $0.auditUpgradeHello(reply: $1) },
+            "auditUpgradeProgressWithReply:": data { $0.auditUpgradeProgress(reply: $1) },
             "performAuditUpgrade:authorization:reply:": data { $0.performAuditUpgrade(bytes, authorization: bytes, reply: $1) },
-            "portableImportRecoveryHello:": hello { $0.portableImportRecoveryHello(reply: $1) },
-            "portableImportRecovery:": data { $0.portableImportRecovery(reply: $1) },
-            "portableImportHello:": hello { $0.portableImportHello(reply: $1) },
-            "portableImportProgress:": data { $0.portableImportProgress(reply: $1) },
+            "portableImportRecoveryHelloWithReply:": hello { $0.portableImportRecoveryHello(reply: $1) },
+            "portableImportRecoveryWithReply:": data { $0.portableImportRecovery(reply: $1) },
+            "portableImportHelloWithReply:": hello { $0.portableImportHello(reply: $1) },
+            "portableImportProgressWithReply:": data { $0.portableImportProgress(reply: $1) },
             "performPortableImport:authorization:reply:": data { $0.performPortableImport(bytes, authorization: bytes, reply: $1) },
-            "gatewaySettingsHello:": hello { $0.gatewaySettingsHello(reply: $1) },
-            "gatewaySettingsProgress:": data { $0.gatewaySettingsProgress(reply: $1) },
+            "gatewaySettingsHelloWithReply:": hello { $0.gatewaySettingsHello(reply: $1) },
+            "gatewaySettingsProgressWithReply:": data { $0.gatewaySettingsProgress(reply: $1) },
             "retainGatewaySettings:selection:authorization:reply:": data {
                 $0.retainGatewaySettings(bytes, selection: bytes, authorization: bytes, reply: $1)
             },
             "resumeGatewaySettings:authorization:reply:": data { $0.resumeGatewaySettings(bytes, authorization: bytes, reply: $1) },
-            "gatewayActivationHello:": hello { $0.gatewayActivationHello(reply: $1) },
-            "gatewayActivationProgress:": data { $0.gatewayActivationProgress(reply: $1) },
+            "gatewayActivationHelloWithReply:": hello { $0.gatewayActivationHello(reply: $1) },
+            "gatewayActivationProgressWithReply:": data { $0.gatewayActivationProgress(reply: $1) },
             "activateGateway:settings:authorization:reply:": data {
                 $0.activateGateway(bytes, settings: bytes, authorization: bytes, reply: $1)
             },
-            "gatewayHello:": hello { $0.gatewayHello(reply: $1) },
-            "gatewayProgress:": data { $0.gatewayProgress(reply: $1) },
+            "gatewayHelloWithReply:": hello { $0.gatewayHello(reply: $1) },
+            "gatewayProgressWithReply:": data { $0.gatewayProgress(reply: $1) },
             "prepareGateway:choices:authorization:reply:": data {
                 $0.prepareGateway(bytes, choices: bytes, authorization: bytes, reply: $1)
             },
             "resumeGatewayJournal:authorization:reply:": data { $0.resumeGatewayJournal(bytes, authorization: bytes, reply: $1) },
-            "activationHello:": hello { $0.activationHello(reply: $1) },
-            "activationProgress:": data { $0.activationProgress(reply: $1) },
+            "activationHelloWithReply:": hello { $0.activationHello(reply: $1) },
+            "activationProgressWithReply:": data { $0.activationProgress(reply: $1) },
             "activateRuntime:authorization:reply:": data { $0.activateRuntime(bytes, authorization: bytes, reply: $1) },
-            "runtimeHello:": hello { $0.runtimeHello(reply: $1) },
-            "runtimeProgress:": data { $0.runtimeProgress(reply: $1) },
+            "runtimeHelloWithReply:": hello { $0.runtimeHello(reply: $1) },
+            "runtimeProgressWithReply:": data { $0.runtimeProgress(reply: $1) },
             "prepareRuntime:fileCustodyAccepted:authorization:reply:": data {
                 $0.prepareRuntime(bytes, fileCustodyAccepted: true, authorization: bytes, reply: $1)
             },
-            "hello:": hello { $0.hello(reply: $1) },
-            "serviceAccountsHello:": hello { $0.serviceAccountsHello(reply: $1) },
-            "serviceAccountsProgress:": data { $0.serviceAccountsProgress(reply: $1) },
+            "helloWithReply:": hello { $0.hello(reply: $1) },
+            "serviceAccountsHelloWithReply:": hello { $0.serviceAccountsHello(reply: $1) },
+            "serviceAccountsProgressWithReply:": data { $0.serviceAccountsProgress(reply: $1) },
             "prepareServiceAccounts:authorization:reply:": data { $0.prepareServiceAccounts(bytes, authorization: bytes, reply: $1) },
-            "enrollmentHello:": hello { $0.enrollmentHello(reply: $1) },
-            "accountEnrollmentProgress:": data { $0.accountEnrollmentProgress(reply: $1) },
+            "enrollmentHelloWithReply:": hello { $0.enrollmentHello(reply: $1) },
+            "accountEnrollmentProgressWithReply:": data { $0.accountEnrollmentProgress(reply: $1) },
             "beginAccountEnrollment:authorization:reply:": data { $0.beginAccountEnrollment(bytes, authorization: bytes, reply: $1) },
             "resumeAccountEnrollment:expectedRevision:authorization:reply:": data {
                 $0.resumeAccountEnrollment(bytes, expectedRevision: bytes, authorization: bytes, reply: $1)
@@ -248,7 +248,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
     }
     func testStatusIsRefusedOnANormalConnectionAndClosesIt() throws {
         let h = Harness()
-        XCTAssertTrue(Self.selectors["hello:"]!(h.facade).0)
+        XCTAssertTrue(Self.selectors["helloWithReply:"]!(h.facade).0)
         let reply = status(h.facade, try request())
         XCTAssertEqual(reply, .some(nil)); XCTAssertEqual(h.statusReads.withLock { $0 }, 0)
         XCTAssertEqual(h.facade.state, .closed); XCTAssertEqual(h.recorder.closes.withLock { $0 }, 1)
@@ -256,7 +256,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
     }
     func testFullNormalLaneRefusesTheHelloWithoutOpeningAnEndpoint() {
         let h = Harness(); h.normalAllowed.withLock { $0 = false }
-        let result = Self.selectors["runtimeHello:"]!(h.facade)
+        let result = Self.selectors["runtimeHelloWithReply:"]!(h.facade)
         XCTAssertFalse(result.0); XCTAssertTrue(result.1)
         XCTAssertEqual(h.opens.withLock { $0 }, 0); XCTAssertEqual(h.facade.state, .closed)
     }
@@ -270,7 +270,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
     }
     func testUnverifiedHelloNeverReachesTheOwner() {
         let h = Harness(); h.verified.withLock { $0 = false }
-        XCTAssertFalse(Self.selectors["enrollmentHello:"]!(h.facade).0)
+        XCTAssertFalse(Self.selectors["enrollmentHelloWithReply:"]!(h.facade).0)
         XCTAssertEqual(h.opens.withLock { $0 }, 0); XCTAssertEqual(h.selections.withLock { $0 }, []); XCTAssertEqual(h.facade.state, .closed)
     }
     func testEndpointSelfCloseClosesTheFacadeOnce() {
