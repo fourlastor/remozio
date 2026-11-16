@@ -90,6 +90,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let recorder = Recorder()
         let source = Mutex<Status>(.unavailable)
         let checks = Mutex(SetupAccountOwner.StatusLaneCheck.verified), touches = Mutex(0)
+        let clock = Mutex<UInt64>(1)
         lazy var facade = Facade(
             verify: { [unowned self] in
                 guard self.verified.withLock({ $0 }) else { throw XPCPeerPolicyError.wrongConnection }
@@ -107,6 +108,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
             },
             check: { [unowned self] in self.checks.withLock { $0 } },
             touch: { [unowned self] in self.touches.withLock { $0 += 1 } },
+            now: { [unowned self] in self.clock.withLock { $0 } },
             invalidate: { [unowned self] in self.invalidations.withLock { $0 += 1 } })
     }
 
@@ -329,6 +331,8 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         // Drift found on a later call of an existing status connection also closes it.
         let later = Harness()
         XCTAssertNotNil(status(later.facade, try request()) ?? nil)
+        // The verified result is reused for 5 s, so the drift is seen once the interval has passed.
+        later.clock.withLock { $0 += Facade.checkInterval }
         later.checks.withLock { $0 = .refused }
         XCTAssertEqual(status(later.facade, try request()), .some(nil)); XCTAssertEqual(later.facade.state, .closed)
         XCTAssertEqual(later.statusReads.withLock { $0 }, 1)
