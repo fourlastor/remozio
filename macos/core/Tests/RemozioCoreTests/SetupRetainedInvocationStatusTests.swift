@@ -404,8 +404,6 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
         XCTAssertEqual(reader.read(authenticatedPeer: invalid, currentOwner: owner), .unavailable)
         reader.close(); XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner), .unavailable)
     }
-    /// The Setup owner is machine-wide and records no single account owner before a reservation exists, so an empty
-    /// slot has no owner to match: every UID, including the caller's own, reads unavailable rather than absent.
     func testStatusLaneCheckNeverWaitsAndNeverBorrowsTheReservationAdmission() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let blocked = Mutex(false), drift = Mutex(false), leaseBusy = Mutex(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
@@ -457,6 +455,8 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer), .unavailable)
         }
     }
+    /// The Setup owner is machine-wide and records no single account owner before a reservation exists, so an empty
+    /// slot has no owner to match: every UID, including the caller's own, reads unavailable rather than absent.
     func testEmptySlotAnswersUnavailableForEveryUID() throws {
         let reader = Status.Reader()
         for uid in [getuid(), getuid() + 1, 501, 502] {
