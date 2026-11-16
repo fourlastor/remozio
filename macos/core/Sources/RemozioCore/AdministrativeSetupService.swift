@@ -100,6 +100,7 @@ public final class AdministrativeSetupService {
         guard path.hasSuffix(suffix) else { throw AdministrativeSetupServiceError.wrongExecutable }
         let bundle = URL(fileURLWithPath: String(path.dropLast(suffix.count)))
         let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
+        var processLease: SetupProcessLease?
         var machine: PreparationIntentStore?
         var owner: SetupAccountOwner?
         do {
@@ -109,6 +110,8 @@ public final class AdministrativeSetupService {
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
             let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
             try configuration.validate(release: release)
+            let instance = try SetupProcessLease.acquire()
+            processLease = instance
             let nativeMode = try GatewaySettingsNativeSupport.mode(release: release, policy: configuration.codePolicy)
             let store = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             machine = store
@@ -116,6 +119,7 @@ public final class AdministrativeSetupService {
                 throw AdministrativeSetupServiceError.wrongRelease
             }
             func verifyHost(_ inventory: InstallationInventory) throws {
+                try instance.validate()
                 guard inventory.bundlePath == bundle.path else { throw AdministrativeSetupServiceError.wrongRelease }
                 guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
                 guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
@@ -159,12 +163,13 @@ public final class AdministrativeSetupService {
             let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                 teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,
                 maximumConnections: configuration.maximumConnections, handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds)
-            return .init(owner: next, listener: listener, placement: placement)
-        } catch { try? owner?.close(); if owner == nil { try? machine?.close() }; placement.close(); throw error }
+            return .init(owner: next, listener: listener, placement: placement, processLease: instance)
+        } catch { try? owner?.close(); if owner == nil { try? machine?.close() }; placement.close(); processLease?.close(); throw error }
     }
 
-    private init(owner: SetupAccountOwner, listener: AdministrativeSetupXPCListener, placement: ReleaseDestinationLease) {
-        self.owner = owner; self.listener = listener; shutdown = .init(owner: owner, placement: placement)
+    private init(owner: SetupAccountOwner, listener: AdministrativeSetupXPCListener, placement: ReleaseDestinationLease,
+                 processLease: SetupProcessLease) {
+        self.owner = owner; self.listener = listener; shutdown = .init(owner: owner, placement: placement, processLease: processLease)
     }
     public func start() throws { guard !closed else { throw AdministrativeSetupError.unavailable }; try listener.start() }
     public func close() async throws {
