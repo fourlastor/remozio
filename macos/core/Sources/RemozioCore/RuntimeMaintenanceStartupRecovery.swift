@@ -580,6 +580,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let makeDriver: @Sendable () throws -> any AuthorityMaintenanceClientDriver
         let capturePeer: @Sendable () throws -> any RuntimeJobExitWitness
         let requirePeerLive: @Sendable (any RuntimeJobExitWitness) throws -> Void
+        let phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl?
     }
     static func restoreExplicitOwned(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease,
         frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
@@ -593,6 +594,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
         ownedDeadline: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
+        ownedPhaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
         until deadline: ContinuousClock.Instant) async throws -> Record {
         try RuntimeMaintenanceOwnedControl.require()
         guard let window = frame.window else { throw PreparationStoreError.notFound }
@@ -603,7 +605,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         try await phases.run { try joined.requireRestorationAccount(window.scope.authority.accountID) }
         let inputs = OwnedExplicitInputs(frame: frame, release: release, admission: admission, directory: directory,
             accountBarrier: accountBarrier, read: read, persist: persist, verify: verify, inspect: inspect, observe: observe,
-            register: register, makeDriver: makeDriver, capturePeer: capturePeer, requirePeerLive: requirePeerLive)
+            register: register, makeDriver: makeDriver, capturePeer: capturePeer, requirePeerLive: requirePeerLive, phaseControl: ownedPhaseControl)
         let work = try await joined.startRestoration { workID in
             try RuntimeMaintenanceOwnedControl.require()
             try Task.checkCancellation()
@@ -620,7 +622,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             do {
                 outcome = .success(try await recovery.finishExplicit(workID: workID) {
                     try await recovery.runOwned(makeDriver: inputs.makeDriver, capturePeer: inputs.capturePeer,
-                        requirePeerLive: inputs.requirePeerLive, until: deadline)
+                        requirePeerLive: inputs.requirePeerLive, ownedPhaseControl: inputs.phaseControl, until: deadline)
                 })
             } catch { outcome = .failure(error) }
             try await phases.closeActual { recovery.custody.close() }
@@ -763,6 +765,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         let beforeHealthyOpen: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
         let afterProbe: @Sendable () -> Void
         let beforeCancel: @Sendable (AuthorityMaintenanceXPCClient) async -> Void
+        let phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl?
     }
     private enum ClientMode { case native, owned(OwnedClients) }
     func runNative(until deadline: ContinuousClock.Instant) async throws -> Record {
@@ -775,12 +778,13 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         beforeHealthyOpen: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
         afterProbe: @escaping @Sendable () -> Void = {},
         beforeCancel: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in },
+        ownedPhaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
         until deadline: ContinuousClock.Instant) async throws -> Record {
         try RuntimeMaintenanceOwnedControl.require()
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
         return try await run(mode: .owned(.init(makeDriver: makeDriver, capturePeer: capturePeer,
             requirePeerLive: requirePeerLive, beforeHealthyOpen: beforeHealthyOpen,
-            afterProbe: afterProbe, beforeCancel: beforeCancel)), until: deadline)
+            afterProbe: afterProbe, beforeCancel: beforeCancel, phaseControl: ownedPhaseControl)), until: deadline)
     }
     private func makeClient(_ mode: ClientMode, context: AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceXPCClient {
         switch mode {
@@ -844,7 +848,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                         case .owned(let owned):
                             await owned.beforeCancel(client)
                             if let explicitReconnect {
-                                restored = try await client.cancelAndReopenExplicitOwned(proof, prepared: explicitReconnect, until: deadline)
+                                restored = try await client.cancelAndReopenExplicitOwned(proof, prepared: explicitReconnect, until: deadline, ownedPhaseControl: owned.phaseControl)
                             } else {
                                 restored = try await client.cancelAndReopenStartupOwned(proof, custody: custody, until: deadline)
                             }
@@ -886,7 +890,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 let reconnect = reconnectOrigin != nil && row.phase == .restoring
                 let fallback: Record.Failure = pending ? .admissionUnconfirmed
                     : reconnect ? reconnectOrigin?.failure ?? .cleanupPending : .healthFailed
-                let failure = explicitAuthority != nil && cancelled ? fallback : Self.failure(error, fallback: .healthFailed)
+                let failure: Record.Failure = pending ? .admissionUnconfirmed
+                    : explicitAuthority != nil && cancelled ? fallback : Self.failure(error, fallback: .healthFailed)
                 let service: Record.ServiceOutcome? = reconnect ? .notStopped : nil
                 _ = try? await cleanupPhase { try self.custody.persistRecovery(row, failure: failure, service: service) }
             }
@@ -946,7 +951,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     await owned.beforeHealthyOpen(client)
                     restored = try await client.restoreStartupHealthyOwned(proof, owner: owner,
                         capturePeer: owned.capturePeer, requirePeerLive: owned.requirePeerLive, afterProbe: owned.afterProbe, until: deadline,
-                        persist: { try self.custody.persistOwned($0, previous: $1) }, phases: explicitAuthority?.phases)
+                        persist: { try self.custody.persistOwned($0, previous: $1) }, phases: explicitAuthority?.phases, ownedPhaseControl: owned.phaseControl)
                 }
                 await client.close()
                 return restored

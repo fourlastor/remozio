@@ -249,6 +249,30 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             f.assertHeld(); XCTAssertTrue(try joined(f.claim()).releaseIfWindowFree())
         }
     }
+    func testJoinedRefusesAForeignRealTokenWithoutReleasingEitherReservation() throws {
+        try withFrame { first in
+            var a: Invocation? = try first.invocation(); try first.lose(&a)
+            let rights = try first.authorize()
+            defer { rights.close() }
+            let target = try Claim.Target.capture(owner: first.owner, authorization: rights)
+            let token = try first.owner.claimRetainedOrphan(target: target, authorization: rights)
+            let joining = VoidProbe { try await token.joinTask().value }
+            try joining.wait()
+            try withFrame { second in
+                var b: Invocation? = try second.invocation(); try second.lose(&b)
+                let claim = try second.claim(), other = try joined(claim)
+                XCTAssertThrowsError(try other.requireCurrentAuthorization(for: token)) {
+                    XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                }
+                try other.requireCurrentAuthorization()
+                first.assertHeld(); second.assertHeld()
+                XCTAssertTrue(try other.releaseIfWindowFree()); try second.assertReleased()
+                first.assertHeld()
+            }
+            XCTAssertTrue(try token.releaseWindowFree()); try first.assertReleased()
+        }
+    }
+
     func testExactTargetCannotSelectAnotherOwnerRecord() throws {
         try withFrame { first in
             var a: Invocation? = try first.invocation(); try first.lose(&a)

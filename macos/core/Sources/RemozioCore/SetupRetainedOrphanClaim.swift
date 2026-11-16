@@ -110,6 +110,10 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
         func requireCurrentAuthorization() throws {
             try claim.authorization.requireCurrent(); try claim.token.requireCurrent()
         }
+        func requireCurrentAuthorization(for token: SetupRetainedInvocationReservation.RecoveryToken) throws {
+            guard claim.token === token else { throw JournalLeaseError.invalidated }
+            try requireCurrentAuthorization()
+        }
         func restorationPhases() throws -> SetupRetainedInvocationReservation.RestorationPhases {
             try claim.token.restorationPhases()
         }
@@ -139,9 +143,7 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
             let completed = try await work.value()
             let phases = try restorationPhases()
             try await phases.run {
-                try self.requireCurrentAuthorization(); try completed.requireNative(processLease: processLease)
-                try self.requireCurrentAuthorization()
-                try self.claim.token.settleRestoration(completed, work: work)
+                try self.claim.token.finishRestorationNative(completed, work: work, processLease: processLease, joined: self)
             }
             return completed.window
         }
@@ -155,9 +157,7 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
             let completed = try await work.value()
             let phases = try restorationPhases()
             try await phases.run {
-                try self.requireCurrentAuthorization(); try completed.requireOwned(processLease: processLease)
-                try self.requireCurrentAuthorization()
-                try self.claim.token.settleRestoration(completed, work: work)
+                try self.claim.token.finishRestorationOwned(completed, work: work, processLease: processLease, joined: self)
             }
             return completed.window
         }

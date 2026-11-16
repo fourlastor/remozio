@@ -439,17 +439,20 @@ actor AuthorityMaintenanceXPCClient {
             incarnation: target.incarnation, requirePeerLive: {}, until: deadline)
     }
     private func readReleasedGate(_ target: AuthorityMaintenanceBinding, revision: Data, incarnation: Data,
-        requirePeerLive: @escaping @Sendable () async throws -> Void,
+        requirePeerLive: @escaping @Sendable () throws -> Void,
+        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
         until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
         while ContinuousClock.now < deadline {
-            try await requirePeerLive()
+            if let phases { try await restorationPhase(phases, state: .open, binding: binding, requirePeerLive) }
+            else { try requirePeerLive() }
             let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
                 revision: revision, installationID: context.installationID, gate: context.gate,
                 target: target, challenge: AccountPreparationIntent.randomID())
             guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
                 throw AuthorityMaintenanceClientError.needsOwnerRecovery
             }
-            try await requirePeerLive()
+            if let phases { try await phases.run(requirePeerLive) }
+            else { try requirePeerLive() }
             let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: incarnation)
             guard result.hold == .released else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
             if result.admission == .available { return result }
@@ -605,19 +608,47 @@ actor AuthorityMaintenanceXPCClient {
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
     }
+    struct OwnedRestorationPhaseControl: Sendable {
+        enum Boundary: Int, CaseIterable, Equatable, Sendable { case beforePending, pendingWrite, drainRelease }
+        enum Scope: Sendable {
+            case healthy(RuntimeMaintenanceRestoration)
+            case reconnect(RuntimeMaintenanceStartupRecovery.ExplicitReconnect)
+        }
+        struct Event: Sendable {
+            let boundary: Boundary, client: AuthorityMaintenanceXPCClient
+            let proof: AuthorityMaintenanceIncarnationProof, scope: Scope
+        }
+        private let body: @Sendable (Event) throws -> Void
+        init(_ body: @escaping @Sendable (Event) throws -> Void) throws {
+            try RuntimeMaintenanceOwnedControl.require(); self.body = body
+        }
+        fileprivate func visit(_ boundary: Boundary, client: AuthorityMaintenanceXPCClient,
+            proof: AuthorityMaintenanceIncarnationProof, scope: Scope) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try body(.init(boundary: boundary, client: client, proof: proof, scope: scope))
+        }
+    }
+    /// Only explicit phases suspend. The automatic path executes each body directly on this actor.
+    private func restorationPhase<Value: Sendable>(_ phases: SetupRetainedInvocationReservation.RestorationPhases,
+        state expected: State, binding expectedBinding: AuthorityMaintenanceBinding?,
+        _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        guard cleanupUsed, !busy, state == expected, binding == expectedBinding, lifetime.ifActive() else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        busy = true; defer { busy = false }
+        let lifetime = self.lifetime
+        let result = try await phases.run {
+            guard lifetime.ifActive() else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            return try body()
+        }
+        try Task.checkCancellation()
+        guard cleanupUsed, busy, state == expected, binding == expectedBinding, lifetime.ifActive() else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        return result
+    }
     /// Completes healthy restoration on the exact native connection that produced the incarnation proof.
-    private nonisolated static func restorationPhase<Value: Sendable>(
-        _ phases: SetupRetainedInvocationReservation.RestorationPhases?,
-        _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
-        if let phases { return try await phases.run(body) }
-        return try body()
-    }
-    private nonisolated static func restorationCleanup<Value: Sendable>(
-        _ phases: SetupRetainedInvocationReservation.RestorationPhases?,
-        _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
-        if let phases { return try await phases.cleanup(body) }
-        return try body()
-    }
     func restoreStartupHealthyNative(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
         until deadline: ContinuousClock.Instant, persist: @escaping CleanupCommit,
         phases: SetupRetainedInvocationReservation.RestorationPhases? = nil) async throws -> CleanupRecord {
@@ -628,55 +659,52 @@ actor AuthorityMaintenanceXPCClient {
         }, requirePeerLive: { witness in
             guard let witness = witness as? RuntimeJobProcessObservation else { throw RuntimePreparationError.changedScope }
             try native.requireProcess(witness)
-        }, releaseDrain: { pending in
-            try await Self.restorationPhase(phases) { try owner.releaseDrain(after: receipts.require()) }
-        }, persist: { next, previous in
-            let write: @Sendable () throws -> CleanupRecord = {
-                let receipt = try persist(next, previous); try receipt.requireReplacement(next, replacing: previous)
-                if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
-            }
-            if next.phase == .needsOwnerRecovery { return try await Self.restorationCleanup(phases, write) }
-            return try await Self.restorationPhase(phases, write)
+        }, releaseDrain: { _ in try owner.releaseDrain(after: receipts.require()) }, persist: { next, previous in
+            let receipt = try persist(next, previous); try receipt.requireReplacement(next, replacing: previous)
+            if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
         }, phases: phases)
     }
-    /// The owned flow uses the same owner API. Root cannot inject a driver, process witness, or record-only writer.
+    /// Root cannot inject a driver, process witness, or record-only writer.
     func restoreStartupHealthyOwned(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
-        afterProbe: @escaping @Sendable () -> Void = {},
-        until deadline: ContinuousClock.Instant,
+        afterProbe: @escaping @Sendable () -> Void = {}, until deadline: ContinuousClock.Instant,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
-        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil) async throws -> CleanupRecord {
+        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
+        ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
         try RuntimeMaintenanceOwnedControl.require()
-        return try await restoreStartupHealthy(proof, owner: owner, afterProbe: afterProbe, until: deadline, capturePeer: capturePeer,
-            requirePeerLive: requirePeerLive, releaseDrain: { pending in
-                try await Self.restorationPhase(phases) { try owner.releaseOwnedDrain(after: pending) }
-            }, persist: { next, previous in
-                if next.phase == .needsOwnerRecovery { return try await Self.restorationCleanup(phases) { try persist(next, previous) } }
-                return try await Self.restorationPhase(phases) { try persist(next, previous) }
-            }, phases: phases)
+        return try await restoreStartupHealthy(proof, owner: owner, afterProbe: afterProbe, until: deadline,
+            capturePeer: capturePeer, requirePeerLive: requirePeerLive,
+            releaseDrain: { try owner.releaseOwnedDrain(after: $0) }, persist: persist, phases: phases, ownedPhaseControl: ownedPhaseControl)
     }
     private func restoreStartupHealthy(_ proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration,
         afterProbe: @escaping @Sendable () -> Void = {},
         until deadline: ContinuousClock.Instant,
         capturePeer: @escaping @Sendable () throws -> any RuntimeJobExitWitness,
         requirePeerLive: @escaping @Sendable (any RuntimeJobExitWitness) throws -> Void,
-        releaseDrain: @escaping @Sendable (CleanupRecord) async throws -> Void,
-        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) async throws -> CleanupRecord,
-        phases: SetupRetainedInvocationReservation.RestorationPhases?) async throws -> CleanupRecord {
-        try await Self.restorationPhase(phases) { afterProbe() }
+        releaseDrain: @escaping @Sendable (CleanupRecord) throws -> Void,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
+        phases: SetupRetainedInvocationReservation.RestorationPhases?,
+        ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
+        if let phases { try await phases.run { afterProbe() } }
+        else { afterProbe() }
         try Task.checkCancellation()
         let expectedContext = context
         do {
-            guard try await Self.restorationPhase(phases, { try owner.openRequest(challenge: expectedContext.challenge) }) == expectedContext else {
+            let actualContext: AuthorityMaintenanceChannelRequest
+            if let phases { actualContext = try await phases.run { try owner.openRequest(challenge: expectedContext.challenge) } }
+            else { actualContext = try owner.openRequest(challenge: expectedContext.challenge) }
+            guard actualContext == expectedContext else {
                 throw RuntimePreparationError.changedScope
             }
         } catch {
-            try? await Self.restorationCleanup(phases) { try owner.commitOwnerRecovery(.changedScope) }
+            if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }
+            else { try? owner.commitOwnerRecovery(.changedScope) }
             finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
         guard !cleanupUsed, !busy else {
-            try? await Self.restorationCleanup(phases) { try owner.commitOwnerRecovery(.changedScope) }; finish()
+            if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }
+            else { try? owner.commitOwnerRecovery(.changedScope) }; finish()
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
         guard state == .greeted, lifetime.ifActive() else { finish(); throw RuntimeMaintenanceStartupAttemptError.beforePending }
@@ -684,7 +712,8 @@ actor AuthorityMaintenanceXPCClient {
         let window = owner.window, stopped = owner.stoppedBinding
         guard window.purpose == .retainedRuntime, window.phase == .restoring,
               window.shutdownBinding == stopped else {
-            try? await Self.restorationCleanup(phases) { try owner.commitOwnerRecovery(.changedScope) }
+            if let phases { try? await phases.cleanup { try owner.commitOwnerRecovery(.changedScope) } }
+            else { try? owner.commitOwnerRecovery(.changedScope) }
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
         var current = window, attemptedCommit = false, pendingWriteOwned = false
@@ -692,43 +721,70 @@ actor AuthorityMaintenanceXPCClient {
             do { try proof.requireObserved(by: self) }
             catch { throw RuntimeMaintenanceStartupAttemptError.beforePending }
             let check = verify
-            try await Self.restorationPhase(phases) { try check() }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil) { try check() } }
+            else { try check() }
             let opened = try await startObserved(proof, stopped: stopped, until: deadline)
             guard opened.outcome == .applied else { throw RuntimeMaintenanceStartupAttemptError.beforePending }
-            try await Self.restorationPhase(phases) { try owner.requireHealthyBinding(opened.binding) }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding) { try owner.requireHealthyBinding(opened.binding) } }
+            else { try owner.requireHealthyBinding(opened.binding) }
             try proof.requireObserved(by: self)
-            try await Self.restorationPhase(phases) { try owner.validateBeforePending() }
+            let validate: @Sendable () throws -> Void = {
+                try ownedPhaseControl?.visit(.beforePending, client: self, proof: proof, scope: .healthy(owner))
+                try owner.validateBeforePending()
+            }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, validate) }
+            else { try validate() }
             let peer: MaintenanceStartupPeer
             do {
-                peer = try await Self.restorationPhase(phases) {
+                let capture: @Sendable () throws -> MaintenanceStartupPeer = {
                     let peer = MaintenanceStartupPeer(try capturePeer(), check: requirePeerLive)
                     try peer.requireLive(); try peer.accept(owner); return peer
                 }
+                if let phases { peer = try await restorationPhase(phases, state: .open, binding: opened.binding, capture) }
+                else { peer = try capture() }
             } catch {
                 throw RuntimeMaintenanceStartupFailure(
                     RuntimeMaintenanceStartupRecovery.failure(error, fallback: .serviceUnavailable), error)
             }
-            let pending = try await Self.restorationPhase(phases) {
+            let preparePending: @Sendable () throws -> CleanupRecord = {
                 try owner.validateBeforePending(); try peer.requireLive(); try owner.requireWitnessLive()
                 return try owner.pendingRecord(binding: opened.binding)
             }
+            let pending: CleanupRecord
+            if let phases { pending = try await restorationPhase(phases, state: .open, binding: opened.binding, preparePending) }
+            else { pending = try preparePending() }
             pendingWriteOwned = true
             try pending.requireReplacing(window)
             attemptedCommit = true
-            guard try await persist(pending, window) == pending else { throw PreparationStoreError.staleRevision }
-            current = pending; attemptedCommit = false
-            try await Self.restorationPhase(phases) { try peer.requireLive(); try owner.requireWitnessLive() }
-            try await releaseDrain(pending)
-            let requireLive: @Sendable () async throws -> Void = {
-                try await Self.restorationPhase(phases) { try peer.requireLive(); try owner.requireWitnessLive() }
+            let committed: CleanupRecord
+            let write: @Sendable () throws -> CleanupRecord = {
+                let committed = try persist(pending, window)
+                try ownedPhaseControl?.visit(.pendingWrite, client: self, proof: proof, scope: .healthy(owner))
+                return committed
             }
+            if let phases { committed = try await restorationPhase(phases, state: .open, binding: opened.binding, write) }
+            else { committed = try write() }
+            guard committed == pending else { throw PreparationStoreError.staleRevision }
+            current = pending; attemptedCommit = false
+            let requireLive: @Sendable () throws -> Void = { try peer.requireLive(); try owner.requireWitnessLive() }
+            let release: @Sendable () throws -> Void = {
+                try requireLive()
+                try ownedPhaseControl?.visit(.drainRelease, client: self, proof: proof, scope: .healthy(owner))
+                try releaseDrain(pending)
+            }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, release) }
+            else { try release() }
             let readback = try await reopenHealthyCandidate(opened.binding, pending: pending, stopped: stopped,
-                requirePeerLive: requireLive, until: deadline)
-            try await requireLive()
+                requirePeerLive: requireLive, phases: phases, until: deadline)
+            if let phases { try await phases.run(requireLive) }
+            else { try requireLive() }
             let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
                 scope: pending.scope, phase: .restored, operation: pending.operation, service: .healthy, gate: readback)
             try restored.requireReplacing(pending); attemptedCommit = true
-            guard try await persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
+            let confirmed: CleanupRecord
+            if let phases { confirmed = try await phases.run { try persist(restored, pending) } }
+            else { confirmed = try persist(restored, pending) }
+            guard confirmed == restored else { throw PreparationStoreError.staleRevision }
             return restored
         } catch {
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
@@ -741,7 +797,9 @@ actor AuthorityMaintenanceXPCClient {
                 } else if let failed = try? CleanupRecord(id: current.id, revision: AccountPreparationIntent.randomID(), purpose: current.purpose,
                     scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation, service: current.service,
                     failure: current.phase == .reopenPending ? .admissionUnconfirmed : .healthFailed, shutdownBinding: stopped) {
-                    _ = try? await persist(failed, current)
+                    let previous = current
+                    if let phases { _ = try? await phases.cleanup { try persist(failed, previous) } }
+                    else { _ = try? persist(failed, previous) }
                 }
             }
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
@@ -775,45 +833,41 @@ actor AuthorityMaintenanceXPCClient {
         let receipts = MaintenanceHealthyPendingReceipt()
         return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
             releaseDrain: { pending, previous in
-                try await Self.restorationPhase(prepared.phases) {
-                    try custody.releaseCleanupDrain(after: receipts.require(), pending: pending, previous: previous)
-                }
+                try custody.releaseCleanupDrain(after: receipts.require(), pending: pending, previous: previous)
             }, persist: { next, previous in
                 let write: @Sendable () throws -> CleanupRecord = {
                     let receipt = try custody.persistNative(next, previous: previous)
                     if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
                 }
-                if next.phase == .needsOwnerRecovery { return try await Self.restorationCleanup(prepared.phases, write) }
-                return try await Self.restorationPhase(prepared.phases, write)
+                return try write()
             }, explicit: prepared)
     }
     func cancelAndReopenExplicitOwned(_ proof: AuthorityMaintenanceIncarnationProof,
-        prepared: RuntimeMaintenanceStartupRecovery.ExplicitReconnect, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord {
+        prepared: RuntimeMaintenanceStartupRecovery.ExplicitReconnect, until deadline: ContinuousClock.Instant,
+        ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
         try RuntimeMaintenanceOwnedControl.require()
         let custody = prepared.custody
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
         return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
             releaseDrain: { pending, _ in
-                try await Self.restorationPhase(prepared.phases) { try custody.releaseOwnedCleanupDrain(after: pending) }
+                try custody.releaseOwnedCleanupDrain(after: pending)
             }, persist: { next, previous in
-                if next.phase == .needsOwnerRecovery {
-                    return try await Self.restorationCleanup(prepared.phases) { try custody.persistOwned(next, previous: previous) }
-                }
-                return try await Self.restorationPhase(prepared.phases) { try custody.persistOwned(next, previous: previous) }
-            }, explicit: prepared)
+                try custody.persistOwned(next, previous: previous)
+            }, explicit: prepared, ownedPhaseControl: ownedPhaseControl)
     }
     private func cancelAndReopenStartup(_ proof: AuthorityMaintenanceIncarnationProof,
         custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant,
-        releaseDrain: @escaping @Sendable (CleanupRecord, CleanupRecord) async throws -> Void,
-        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) async throws -> CleanupRecord,
-        explicit: RuntimeMaintenanceStartupRecovery.ExplicitReconnect? = nil) async throws -> CleanupRecord {
+        releaseDrain: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> Void,
+        persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
+        explicit: RuntimeMaintenanceStartupRecovery.ExplicitReconnect? = nil,
+        ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
         try Task.checkCancellation()
         guard state == .greeted, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         cleanupUsed = true; defer { finish() }
         let window = custody.current
         let phases = explicit?.phases
         let explicitWindow: CleanupRecord?
-        if let explicit { explicitWindow = try await Self.restorationPhase(phases) { try explicit.consume() } }
+        if let explicit { explicitWindow = try await explicit.phases.run { try explicit.consume() } }
         else { explicitWindow = nil }
         guard (explicitWindow == nil && window.phase == .draining && window.service == .notStopped
                 || explicitWindow == window && window.phase == .restoring && window.service == .restartPending),
@@ -826,18 +880,40 @@ actor AuthorityMaintenanceXPCClient {
         do {
             try proof.requireObserved(by: self)
             guard proof.incarnation == target.incarnation else { throw RuntimePreparationError.changedScope }
-            try await Self.restorationPhase(phases) { try custody.requireCleanup(window) }
+            let validate: @Sendable () throws -> Void = {
+                if let explicit { try ownedPhaseControl?.visit(.beforePending, client: self, proof: proof, scope: .reconnect(explicit)) }
+                try custody.requireCleanup(window)
+            }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, validate) }
+            else { try validate() }
             let pending = try CleanupRecord(id: window.id, revision: context.revision, purpose: window.purpose,
                 scope: window.scope, phase: .reopenPending, shutdownBinding: target)
             try pending.requireReplacing(window); attemptedCommit = true
-            guard try await persist(pending, window) == pending else { throw PreparationStoreError.staleRevision }
+            let committed: CleanupRecord
+            let write: @Sendable () throws -> CleanupRecord = {
+                let committed = try persist(pending, window)
+                if let explicit { try ownedPhaseControl?.visit(.pendingWrite, client: self, proof: proof, scope: .reconnect(explicit)) }
+                return committed
+            }
+            if let phases { committed = try await restorationPhase(phases, state: .greeted, binding: nil, write) }
+            else { committed = try write() }
+            guard committed == pending else { throw PreparationStoreError.staleRevision }
             current = pending; attemptedCommit = false
-            try proof.requireObserved(by: self); try await releaseDrain(pending, window)
+            try proof.requireObserved(by: self)
+            let release: @Sendable () throws -> Void = {
+                if let explicit { try ownedPhaseControl?.visit(.drainRelease, client: self, proof: proof, scope: .reconnect(explicit)) }
+                try releaseDrain(pending, window)
+            }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, release) }
+            else { try release() }
             let readback = try await reopenSavedObserved(proof, target: target, until: deadline)
             let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
                 scope: pending.scope, phase: .restored, gate: readback)
             try restored.requireReplacing(pending); attemptedCommit = true
-            guard try await persist(restored, pending) == restored else { throw PreparationStoreError.staleRevision }
+            let confirmed: CleanupRecord
+            if let phases { confirmed = try await phases.run { try persist(restored, pending) } }
+            else { confirmed = try persist(restored, pending) }
+            guard confirmed == restored else { throw PreparationStoreError.staleRevision }
             return restored
         } catch {
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
@@ -845,26 +921,33 @@ actor AuthorityMaintenanceXPCClient {
                 purpose: current.purpose, scope: current.scope, phase: .needsOwnerRecovery, operation: current.operation,
                 service: explicit != nil && current.phase == .restoring ? .notStopped : current.service,
                 failure: current.phase == .reopenPending ? .admissionUnconfirmed : explicit?.beforePendingFailure ?? .admissionUnconfirmed,
-                shutdownBinding: target) { _ = try? await persist(failed, current) }
+                shutdownBinding: target) {
+                let previous = current
+                if let phases { _ = try? await phases.cleanup { try persist(failed, previous) } }
+                else { _ = try? persist(failed, previous) }
+            }
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
     }
 
     private func reopenHealthyCandidate(_ candidate: AuthorityMaintenanceBinding, pending: CleanupRecord,
-        stopped: AuthorityMaintenanceBinding, requirePeerLive: @escaping @Sendable () async throws -> Void,
+        stopped: AuthorityMaintenanceBinding, requirePeerLive: @escaping @Sendable () throws -> Void,
+        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
         until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
         guard state == .open, binding == candidate, pending.phase == .reopenPending,
               candidate.incarnation != stopped.incarnation else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         defer { finish() }
-        try await requirePeerLive()
+        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, requirePeerLive) }
+        else { try requirePeerLive() }
         let q = try Request(action: .reopen, accountID: context.accountID, attemptID: context.attemptID,
             revision: pending.revision, installationID: context.installationID, gate: context.gate,
             binding: candidate, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
         guard case .bytes(let bytes) = try await invoke(q, until: deadline), let bytes,
               try Response.decode(bytes, expected: q).outcome == .applied else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        try await requirePeerLive()
+        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, requirePeerLive) }
+        else { try requirePeerLive() }
         return try await readReleasedGate(stopped, revision: pending.revision,
-            incarnation: candidate.incarnation, requirePeerLive: requirePeerLive, until: deadline)
+            incarnation: candidate.incarnation, requirePeerLive: requirePeerLive, phases: phases, until: deadline)
     }
 
     func close() { finish() }

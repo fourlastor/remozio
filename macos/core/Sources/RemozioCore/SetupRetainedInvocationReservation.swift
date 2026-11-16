@@ -523,7 +523,22 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             try record.startRestoration(seal: seal, claim: claim, body: body)
         }
         func currentRestoration() throws -> RestorationWork { try record.currentRestoration(seal: seal, claim: claim) }
-        func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion, work: RestorationWork) throws {
+        func finishRestorationNative(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
+            work: RestorationWork, processLease: SetupProcessLease, joined: SetupRetainedOrphanClaim.Joined) throws {
+            try joined.requireCurrentAuthorization(for: self)
+            try completed.requireNative(processLease: processLease)
+            try joined.requireCurrentAuthorization(for: self)
+            try settleRestoration(completed, work: work)
+        }
+        func finishRestorationOwned(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
+            work: RestorationWork, processLease: SetupProcessLease, joined: SetupRetainedOrphanClaim.Joined) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try joined.requireCurrentAuthorization(for: self)
+            try completed.requireOwned(processLease: processLease)
+            try joined.requireCurrentAuthorization(for: self)
+            try settleRestoration(completed, work: work)
+        }
+        fileprivate func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion, work: RestorationWork) throws {
             try record.settleRestoration(completed, work: work, seal: seal, claim: claim)
         }
         func releaseWindowFree() throws -> Bool { try record.releaseWindowFree(seal: seal, claim: claim) }

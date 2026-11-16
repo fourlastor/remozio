@@ -700,6 +700,62 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 1)
         }
     }
+    func testAutomaticCallbacksWithoutPhasesStayOnTheClientActor() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let clientCell = Mutex<AuthorityMaintenanceXPCClient?>(nil), seen = Mutex<Set<String>>([])
+            let isolated: @Sendable (String) -> Void = { label in
+                guard let client = clientCell.withLock({ $0 }) else { return XCTFail("Missing actual client") }
+                client.assertIsolated()
+                _ = seen.withLock { $0.insert(label) }
+            }
+            h.beforeWrite = { row in
+                if row.phase == .reopenPending { isolated("pending") }
+                if row.phase == .restored { isolated("restored") }
+            }
+            defer { h.beforeWrite = nil }
+            let control = try AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl { event in
+                if event.boundary == .drainRelease { isolated("releaseDrain") }
+            }
+            let row = try await h.open().runOwned(makeDriver: { driver }, capturePeer: {
+                isolated("capturePeer"); return h.witness
+            }, requirePeerLive: { _ in isolated("requirePeerLive") }, beforeHealthyOpen: { client in
+                clientCell.withLock { $0 = client }
+            }, afterProbe: { isolated("afterProbe") }, ownedPhaseControl: control,
+                until: .now.advanced(by: .seconds(25)))
+            XCTAssertEqual(row.phase, .restored)
+            XCTAssertEqual(seen.withLock { $0 }, Set(["afterProbe", "capturePeer", "requirePeerLive", "pending", "restored", "releaseDrain"]))
+        }
+    }
+
+    func testAutomaticPhaseKeepsActorIsolationAndReopenPrecedesQueuedReentry() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let events = Mutex<[String]>([]), armed = Mutex(true)
+            let closing = Mutex<Task<Void, Never>?>(nil)
+            driver.onExchange.withLock { hook in
+                hook = { action in if action == .reopen { events.withLock { $0.append("reopen") } } }
+            }
+            defer { h.verifyOverride = nil; driver.onExchange.withLock { $0 = nil } }
+            _ = try? await Self.complete(h, driver, beforeOpen: { client in
+                h.verifyOverride = {
+                    let first = armed.withLock { value in let first = value; value = false; return first }
+                    guard first else { return }
+                    client.preconditionIsolated()
+                    events.withLock { $0.append("phase") }
+                    let task = Task {
+                        await client.close()
+                        events.withLock { $0.append("closed") }
+                    }
+                    closing.withLock { $0 = task }
+                }
+            })
+            let task = try XCTUnwrap(closing.withLock { $0 })
+            await task.value
+            XCTAssertEqual(events.withLock { $0 }, ["phase", "reopen", "closed"])
+            XCTAssertEqual(driver.metrics.actions.withLock { $0.filter { $0 == .reopen }.count }, 1)
+            XCTAssertEqual(h.writes.filter { $0 == .reopenPending }.count, 1)
+        }
+    }
+
     func testNativeConstructorRefusesTheOrdinaryCallerBeforeProtectedAccess() throws {
         guard getuid() > 0, geteuid() == getuid() else { return XCTFail("This test requires the ordinary owner") }
         XCTAssertThrowsError(try RuntimeMaintenanceStartupRecovery.open(accountID: Data(repeating: 61, count: 16))) {
@@ -776,7 +832,10 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
     }
     func restore(_ joined: Joined, until deadline: ContinuousClock.Instant = .now.advanced(by: .seconds(12)),
         frame: RuntimeMaintenanceStartupFrame? = nil,
-        ownedDeadline: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil) async throws -> Row {
+        ownedDeadline: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
+        phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
+        retryDriverFactory: (@Sendable () -> StartupDriver)? = nil,
+        onClientAttempt: (@Sendable (Int, ContinuousClock.Instant) -> Void)? = nil) async throws -> Row {
         let (directory, admission) = try resources()
         defer { admission.close(); directory.close() }
         let attempts = Mutex(0), h = self.h, driver = self.driver
@@ -791,12 +850,40 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
             }, register: {
                 h.beforeRegistration?(); h.registrations += 1; h.inspected = .matching(h.witness.processID)
             }, makeDriver: {
-                attempts.withLock { $0 += 1; return $0 == 1 } ? driver : driver.fresh()
+                let attempt = attempts.withLock { $0 += 1; return $0 }
+                onClientAttempt?(attempt, .now)
+                return attempt == 1 ? driver : retryDriverFactory?() ?? driver.fresh()
             }, capturePeer: { h.witness }, requirePeerLive: {
                 guard try !$0.hasExited() else { throw StartupTestError.expected }
-            }, ownedDeadline: ownedDeadline, until: deadline)
+            }, ownedDeadline: ownedDeadline, ownedPhaseControl: phaseControl, until: deadline)
     }
     deinit { claim?.abandon(); processLease.close() }
+}
+
+private final class ExplicitActorPhaseGate: @unchecked Sendable {
+    typealias Control = AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl
+    let stream: AsyncStream<Control.Event>
+    private let continuation: AsyncStream<Control.Event>.Continuation
+    private let released = DispatchSemaphore(value: 0)
+    private let used = Mutex(false)
+    private let deadline: ContinuousClock.Instant
+    let visited = Mutex<[Control.Boundary]>([])
+    init(until deadline: ContinuousClock.Instant) {
+        self.deadline = deadline
+        let pair = AsyncStream<Control.Event>.makeStream()
+        stream = pair.stream; continuation = pair.continuation
+    }
+    func stop(_ event: Control.Event) throws {
+        let first = used.withLock { used in guard !used else { return false }; used = true; return true }
+        guard first else { return }
+        visited.withLock { $0.append(event.boundary) }
+        continuation.yield(event)
+        let remaining = ContinuousClock.now.duration(to: deadline).components
+        let seconds = max(0, Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18)
+        guard released.wait(timeout: .now() + seconds) == .success else { throw StartupTestError.expected }
+    }
+    func open() { released.signal(); continuation.finish() }
+    deinit { open() }
 }
 
 final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
@@ -835,6 +922,127 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             throw error
         }
     }
+    private enum PhaseReentry: Int, Sendable { case close, observe, secondRestore, secondReconnect }
+    private enum PhaseWaitError: Error { case boundaryDeadline }
+    private struct PhaseWaitFailure: Error { let wait: any Error, worker: any Error }
+    private static func phaseEvent(_ gate: ExplicitActorPhaseGate, until deadline: ContinuousClock.Instant)
+        async throws -> ExplicitActorPhaseGate.Control.Event {
+        try await withThrowingTaskGroup(of: ExplicitActorPhaseGate.Control.Event.self) { group in
+            group.addTask { for await event in gate.stream { return event }; throw StartupTestError.expected }
+            group.addTask { try await ContinuousClock().sleep(until: deadline); throw PhaseWaitError.boundaryDeadline }
+            defer { group.cancelAll() }
+            let event = try await group.next()
+            return try XCTUnwrap(event)
+        }
+    }
+    private func phaseReentry(_ boundary: ExplicitActorPhaseGate.Control.Boundary, _ action: PhaseReentry) throws {
+        let reconnect = action == .secondReconnect
+        try withFixture(epoch: reconnect ? 71 : 81) { f in
+            try f.seed(reconnect ? .needsOwnerRecovery : .stopped, retainReceipt: reconnect)
+            let joined = try await f.join(), deadline = ContinuousClock.now.advanced(by: .seconds(25))
+            let gate = ExplicitActorPhaseGate(until: deadline)
+            let control = try ExplicitActorPhaseGate.Control { event in
+                if event.boundary == boundary { try gate.stop(event) }
+            }
+            let fresh = Mutex<[StartupDriver]>([]), attempts = Mutex<[(Int, ContinuousClock.Instant)]>([])
+            let worker = Task {
+                try await f.restore(joined, until: deadline, phaseControl: control, retryDriverFactory: {
+                    let driver = StartupDriver(epoch: Data(repeating: 82, count: 16), barrier: f.h.barrier)
+                    fresh.withLock { $0.append(driver) }; return driver
+                }, onClientAttempt: { number, started in attempts.withLock { $0.append((number, started)) } })
+            }
+            let event: ExplicitActorPhaseGate.Control.Event
+            do { event = try await Self.phaseEvent(gate, until: deadline) }
+            catch {
+                gate.open()
+                if case .failure(let workerError) = await worker.result { throw PhaseWaitFailure(wait: error, worker: workerError) }
+                throw error
+            }
+            XCTAssertEqual(event.boundary, boundary)
+            XCTAssertEqual(gate.visited.withLock { $0 }, [boundary])
+            XCTAssertLessThan(ContinuousClock.now, deadline)
+            switch event.scope {
+            case .healthy: XCTAssertFalse(reconnect)
+            case .reconnect: XCTAssertTrue(reconnect)
+            }
+            let before = f.driver.metrics.actions.withLock { $0 }
+            var refused = action == .close
+            do {
+                switch action {
+                case .close: await event.client.close()
+                case .observe: _ = try await event.client.observeIncarnationOwned(until: .now.advanced(by: .seconds(1)))
+                case .secondRestore:
+                    guard case .healthy(let owner) = event.scope else { throw StartupTestError.expected }
+                    _ = try await event.client.restoreStartupHealthyOwned(event.proof, owner: owner,
+                        capturePeer: { f.h.witness }, requirePeerLive: { _ in }, until: .now.advanced(by: .seconds(1)),
+                        persist: { try f.h.persistForRecovery($0, previous: $1) })
+                case .secondReconnect:
+                    guard case .reconnect(let prepared) = event.scope else { throw StartupTestError.expected }
+                    _ = try await event.client.cancelAndReopenExplicitOwned(event.proof, prepared: prepared,
+                        until: .now.advanced(by: .seconds(1)))
+                }
+            } catch {
+                refused = true
+                XCTAssertEqual(error as? AuthorityMaintenanceClientError, .needsOwnerRecovery)
+            }
+            XCTAssertTrue(refused)
+            XCTAssertTrue(f.driver.closed.withLock { $0 })
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, before)
+            gate.open()
+            let result = await worker.result
+            // This driver belongs only to the refused connection. A later attempt has a distinct driver and metrics.
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, before)
+            XCTAssertTrue(f.driver.closed.withLock { $0 })
+            let starts = attempts.withLock { $0 }, later = fresh.withLock { $0 }
+            XCTAssertFalse(starts.isEmpty)
+            XCTAssertTrue(starts.allSatisfy { $0.1 < deadline })
+            XCTAssertLessThanOrEqual(starts.count, 2)
+            XCTAssertEqual(starts.map { $0.0 }, (0..<starts.count).map { $0 + 1 })
+            let row = try XCTUnwrap(f.h.frame().window)
+            switch result {
+            case .success(let restored):
+                XCTAssertEqual(boundary, .beforePending)
+                XCTAssertFalse(reconnect)
+                XCTAssertEqual(starts.count, 2); XCTAssertEqual(later.count, 1)
+                let retry = try XCTUnwrap(later.first)
+                XCTAssertFalse(retry === f.driver); XCTAssertNotEqual(retry.epoch, f.driver.epoch)
+                XCTAssertEqual(retry.metrics.hellos.withLock { $0 }, 1)
+                XCTAssertEqual(retry.metrics.probes.withLock { $0 }, 1)
+                XCTAssertEqual(retry.metrics.actions.withLock { $0 }, [.open, .reopen])
+                XCTAssertEqual(retry.metrics.gates.withLock { $0 }, 1)
+                XCTAssertEqual(f.driver.metrics.gates.withLock { $0 }, 0)
+                XCTAssertLessThan(ContinuousClock.now, deadline)
+                XCTAssertEqual(restored, row); XCTAssertEqual(row.phase, .restored)
+                let gate = try XCTUnwrap(row.gate)
+                XCTAssertEqual(gate.authorityIncarnation, retry.epoch)
+                XCTAssertNotEqual(gate.authorityIncarnation, f.driver.epoch)
+                XCTAssertEqual(gate.hold, .released); XCTAssertEqual(gate.admission, .available)
+                XCTAssertEqual(gate.challenge.count, 16); XCTAssertEqual(gate.responseDigest.count, 32)
+                let pending = try XCTUnwrap(f.h.committedRows.first { $0.phase == .reopenPending })
+                XCTAssertEqual(gate.requestRevision, pending.revision)
+                try f.retained.assertReleased()
+            case .failure:
+                XCTAssertEqual(row.phase, .needsOwnerRecovery)
+                XCTAssertTrue(later.isEmpty)
+                if boundary != .beforePending { XCTAssertEqual(row.failure, .admissionUnconfirmed) }
+                else { XCTAssertFalse(f.h.committedRows.contains { $0.phase == .reopenPending }) }
+                f.retained.assertHeld()
+            }
+        }
+    }
+    func testActorReentryBeforePendingClose() throws { try phaseReentry(.beforePending, .close) }
+    func testActorReentryBeforePendingObserve() throws { try phaseReentry(.beforePending, .observe) }
+    func testActorReentryBeforePendingSecondRestore() throws { try phaseReentry(.beforePending, .secondRestore) }
+    func testActorReentryBeforePendingSecondReconnect() throws { try phaseReentry(.beforePending, .secondReconnect) }
+    func testActorReentryPendingWriteClose() throws { try phaseReentry(.pendingWrite, .close) }
+    func testActorReentryPendingWriteObserve() throws { try phaseReentry(.pendingWrite, .observe) }
+    func testActorReentryPendingWriteSecondRestore() throws { try phaseReentry(.pendingWrite, .secondRestore) }
+    func testActorReentryPendingWriteSecondReconnect() throws { try phaseReentry(.pendingWrite, .secondReconnect) }
+    func testActorReentryDrainReleaseClose() throws { try phaseReentry(.drainRelease, .close) }
+    func testActorReentryDrainReleaseObserve() throws { try phaseReentry(.drainRelease, .observe) }
+    func testActorReentryDrainReleaseSecondRestore() throws { try phaseReentry(.drainRelease, .secondRestore) }
+    func testActorReentryDrainReleaseSecondReconnect() throws { try phaseReentry(.drainRelease, .secondReconnect) }
+
     func testExplicitSavedTargetReconnectUsesThePendingRevisionAndReleasesOnlyAfterReadback() throws {
         try withFixture(epoch: 71) { f in
             try f.seed(.needsOwnerRecovery, retainReceipt: true)
@@ -1100,6 +1308,64 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.retained.assertHeld()
         }
     }
+    func testCheckedSettlementRejectsForeignAndStaleJoinedThenTheCurrentClaimAdopts() throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { first in
+            try MachineUpdateReplacementTests.withMaintenanceWriterFixture { second in
+                let f = try ExplicitStartupFixture(first), activity = try ReleaseActivityFixture()
+                let source = try second.machine().stableRuntimeSource(candidate: second.candidate)
+                let target = try XCTUnwrap(source.preparations.first { $0.accountID == second.target.accountID })
+                let other = try SetupRetainedOrphanClaimTests.Frame(machine: second.machine(), candidate: second.candidate,
+                    targetOwner: .init(uid: target.ownerUID, primaryGroupID: getgid(), directoryID: target.directoryID), activity: activity)
+                let done = DispatchSemaphore(value: 0), outcome = Mutex<Result<Void, Error>?>(nil)
+                Task {
+                    do {
+                        try f.seed(.stopped); let stale = try await f.join()
+                        f.h.afterWrite = { row in if row.phase == .restored { f.rightsLive.value.withLock { $0 = false } } }
+                        await Self.refuses { try await f.restore(stale) }
+                        f.h.afterWrite = nil; f.claim?.abandon(); f.rightsLive.value.withLock { $0 = true }
+                        let rights = try f.retained.authorize(), target = try SetupRetainedOrphanClaim.Target.capture(owner: f.retained.owner, authorization: rights)
+                        let token = try f.retained.owner.claimRetainedOrphan(target: target, authorization: rights)
+                        try await token.joinTask().value
+                        let work = try token.currentRestoration(), completed = try await work.value()
+                        var invocation: SetupRetainedInvocation? = try other.invocation(); try other.lose(&invocation)
+                        let claim = try other.claim(), foreign = try await claim.join()
+                        let reads = Mutex(0)
+                        f.h.verifyOverride = { reads.withLock { $0 += 1 } }
+                        for joined in [foreign, stale] {
+                            XCTAssertThrowsError(try token.finishRestorationOwned(completed, work: work,
+                                processLease: f.processLease, joined: joined)) {
+                                XCTAssertEqual($0 as? JournalLeaseError, .invalidated)
+                            }
+                            XCTAssertEqual(reads.withLock { $0 }, 0)
+                            f.retained.assertHeld(); other.assertHeld()
+                        }
+                        f.h.verifyOverride = nil; token.ownerDropped(); rights.close()
+                        XCTAssertTrue(try foreign.releaseIfWindowFree()); try other.assertReleased()
+                        let current = try await f.freshJoined(), before = f.driver.metrics.actions.withLock { $0 }
+                        let confirmed = try f.h.frame().window
+                        f.h.verifyOverride = { throw StartupTestError.expected }
+                        await Self.refuses { try await current.finishRecordedRestorationOwned(processLease: f.processLease) }
+                        f.h.verifyOverride = nil
+                        XCTAssertEqual(try f.h.frame().window, confirmed); f.retained.assertHeld()
+                        f.processLease.close()
+                        await Self.refuses { try await current.finishRecordedRestorationOwned(processLease: f.processLease) }
+                        XCTAssertEqual(try f.h.frame().window, confirmed); f.retained.assertHeld()
+                        let freshLease = try SetupProcessLease.openOwned(directory: .init(anchor: f.activity.root.path,
+                            relativeDirectory: "Machine", owner: getuid()))
+                        defer { freshLease.close() }
+                        let row = try await current.finishRecordedRestorationOwned(processLease: freshLease)
+                        XCTAssertEqual(row.phase, .restored); XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, before)
+                        try f.retained.assertReleased()
+                        outcome.withLock { $0 = .success(()) }
+                    } catch { outcome.withLock { $0 = .failure(error) } }
+                    done.signal()
+                }
+                guard done.wait(timeout: .now() + 50) == .success else { return XCTFail("Checked settlement did not return") }
+                try XCTUnwrap(outcome.withLock { $0 }).get()
+            }
+        }
+    }
+
     func testCallerLossAfterTheConfirmedRestoredWriteKeepsACompletionForFreshClaimAdoption() throws {
         try withFixture { f in
             try f.seed(.stopped); let joined = try await f.join()
