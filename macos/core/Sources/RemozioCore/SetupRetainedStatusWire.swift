@@ -44,7 +44,7 @@ enum SetupRetainedStatusWire {
 
     /// Unavailable facts encode as null. A decoder never turns null into a terminal outcome.
     static func reply(_ request: Request, _ status: SetupRetainedInvocationStatus) throws -> Data {
-        func fact<V>(_ value: SetupRetainedInvocationStatus.Fact<V>, _ encode: (V) -> CBORValue) -> CBORValue {
+        func fact<V: Equatable & Sendable>(_ value: SetupRetainedInvocationStatus.Fact<V>, _ encode: (V) -> CBORValue) -> CBORValue {
             if case .observed(let observed) = value { return encode(observed) }
             return .null
         }

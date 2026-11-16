@@ -91,20 +91,20 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let source = Mutex<Status>(.unavailable)
         lazy var facade = Facade(
             verify: { [unowned self] in
-                guard verified.withLock({ $0 }) else { throw XPCPeerPolicyError.wrongConnection }
-                return peer
+                guard self.verified.withLock({ $0 }) else { throw XPCPeerPolicyError.wrongConnection }
+                return self.peer
             },
             select: { [unowned self] mode in
-                selections.withLock { $0.append(mode) }
-                return mode == .statusOnly ? statusAllowed.withLock { $0 } : normalAllowed.withLock { $0 }
+                self.selections.withLock { $0.append(mode) }
+                return mode == .statusOnly ? self.statusAllowed.withLock { $0 } : self.normalAllowed.withLock { $0 }
             },
-            openNormal: { [unowned self] _ in opens.withLock { $0 += 1 }; return recorder },
+            openNormal: { [unowned self] _ in self.opens.withLock { $0 += 1 }; return self.recorder },
             status: { [unowned self] value in
-                statusReads.withLock { $0 += 1 }
-                XCTAssertEqual(value, peer)
-                return source.withLock { $0 }
+                self.statusReads.withLock { $0 += 1 }
+                XCTAssertEqual(value, self.peer)
+                return self.source.withLock { $0 }
             },
-            invalidate: { [unowned self] in invalidations.withLock { $0 += 1 } })
+            invalidate: { [unowned self] in self.invalidations.withLock { $0 += 1 } })
     }
 
     private final class Reply<Value: Sendable>: @unchecked Sendable {
@@ -378,10 +378,22 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         slots.remove(normal[0])
         XCTAssertTrue(slots.select(.normal, id: eighth))
     }
-    func testSmallStoredTotalsKeepANormalSlotAndHaveNoStatusLane() throws {
+    /// The status lane never takes capacity from the normal service. With a total of 1 or 2 a status selection is
+    /// refused at once (the facade then replies nil and closes, as for every other refusal); with 3 it is accepted.
+    func testSmallStoredTotalsRefuseStatusAtOnceAndKeepTheirNormalCapacity() throws {
         for (total, normal, status) in [(1, 1, 0), (2, 1, 0), (3, 1, 1)] {
-            let slots = try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 1000)
+            let slots = try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 60_000); try slots.start()
+            defer { slots.close() }
             XCTAssertEqual([slots.maximumNormal, slots.maximumStatus], [normal, status], "\(total)")
+            let first = try XCTUnwrap(slots.reserve(), "\(total)")
+            XCTAssertEqual(slots.select(.statusOnly, id: first), status == 1, "\(total)")
+            if status == 0 {
+                XCTAssertEqual(slots.mode(first), .undecided, "\(total)")
+                XCTAssertTrue(slots.select(.normal, id: first), "a refused status choice leaves the normal slot usable (\(total))")
+            } else {
+                let second = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.normal, id: second))
+            }
+            XCTAssertEqual(slots.mode(first), status == 1 ? .statusOnly : .normal, "\(total)")
         }
         for total in [0, 65] { XCTAssertThrowsError(try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 1000)) }
     }
