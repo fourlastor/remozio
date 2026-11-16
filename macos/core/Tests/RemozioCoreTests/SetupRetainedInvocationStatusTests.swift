@@ -82,7 +82,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     func testReservedRecordStoresOnlyTheAuthenticatedOwnerUntilCapture() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let owner = try owner(f); defer { try? owner.close() }; let (binding, _) = try values(f)
-            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner)
             defer { reservation.record.abortConstruction() }
             let before = read(owner, binding)
             XCTAssertEqual(before.reservation, .observed(.reserved)); XCTAssertEqual(before.binding, .unavailable)
@@ -338,9 +338,9 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
         let account = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
         let work = SetupOwnerAsyncWork(), replies = SetupOwnerAsyncWork(), reader = Status.Reader()
         let first = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
-            admission: work.admit(), reply: replies.admit(), activity: nil)
+            admission: work.admit(), reply: replies.admit(), activity: nil, authenticatedOwner: account)
         let second = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
-            admission: SetupOwnerAsyncWork().admit(), reply: SetupOwnerAsyncWork().admit(), activity: nil)
+            admission: SetupOwnerAsyncWork().admit(), reply: SetupOwnerAsyncWork().admit(), activity: nil, authenticatedOwner: account)
         defer { first.abortConstruction(); second.abortConstruction() }
         reader.publish(first)
         XCTAssertEqual(try reader.readOwned(authenticatedPeer: peer, currentOwner: account, afterSnapshot: { reader.publish(second) }), .unavailable)
@@ -351,7 +351,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
         let input = Input(peer, .init(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID()))
         let readerLock = NSLock(), recordLock = NSLock(), work = SetupOwnerAsyncWork(), replies = SetupOwnerAsyncWork()
         let record = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
-            admission: work.admit(), reply: replies.admit(), activity: nil, ownedStatusLock: recordLock)
+            admission: work.admit(), reply: replies.admit(), activity: nil, ownedStatusLock: recordLock, authenticatedOwner: input.owner)
         defer { record.abortConstruction() }
         let reader = try Status.Reader.openOwned(statusLock: readerLock); reader.publish(record)
         for lock in [readerLock, recordLock] {

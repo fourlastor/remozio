@@ -110,6 +110,57 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
         func requireCurrentAuthorization() throws {
             try claim.authorization.requireCurrent(); try claim.token.requireCurrent()
         }
+        func restorationPhases() throws -> SetupRetainedInvocationReservation.RestorationPhases {
+            try claim.token.restorationPhases()
+        }
+        func requireSavedTargetReconnect(_ row: RuntimeMaintenanceWindowRecord) throws {
+            try requireCurrentAuthorization(); try claim.token.requireSavedTargetReconnect(row)
+        }
+        func requireRestorationAccount(_ accountID: Data) throws {
+            try requireCurrentAuthorization(); try claim.token.requireRestorationAccount(accountID)
+        }
+        func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord) throws {
+            try requireCurrentAuthorization(); try claim.token.requireRestorationWindow(row)
+        }
+        /// Only the typed restoration slot can admit work after the general M12a ledger was sealed.
+        func startRestoration(_ body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion)
+            async throws -> SetupRetainedInvocationReservation.RestorationWork {
+            let phases = try restorationPhases()
+            try await phases.run { try self.requireCurrentAuthorization() }
+            return try claim.token.startRestoration(body)
+        }
+        /// A new claimant can finish an actual completed write without replaying restoration or its RPCs.
+        func finishRecordedRestorationNative(processLease: SetupProcessLease) async throws -> RuntimeMaintenanceWindowRecord {
+            try await finishRestorationNative(work: claim.token.currentRestoration(), processLease: processLease)
+        }
+        func finishRestorationNative(work: SetupRetainedInvocationReservation.RestorationWork,
+            processLease: SetupProcessLease) async throws -> RuntimeMaintenanceWindowRecord {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            let completed = try await work.value()
+            let phases = try restorationPhases()
+            try await phases.run {
+                try self.requireCurrentAuthorization(); try completed.requireNative(processLease: processLease)
+                try self.requireCurrentAuthorization()
+                try self.claim.token.settleRestoration(completed, work: work)
+            }
+            return completed.window
+        }
+        func finishRecordedRestorationOwned(processLease: SetupProcessLease) async throws -> RuntimeMaintenanceWindowRecord {
+            try RuntimeMaintenanceOwnedControl.require()
+            return try await finishRestorationOwned(work: claim.token.currentRestoration(), processLease: processLease)
+        }
+        func finishRestorationOwned(work: SetupRetainedInvocationReservation.RestorationWork,
+            processLease: SetupProcessLease) async throws -> RuntimeMaintenanceWindowRecord {
+            try RuntimeMaintenanceOwnedControl.require()
+            let completed = try await work.value()
+            let phases = try restorationPhases()
+            try await phases.run {
+                try self.requireCurrentAuthorization(); try completed.requireOwned(processLease: processLease)
+                try self.requireCurrentAuthorization()
+                try self.claim.token.settleRestoration(completed, work: work)
+            }
+            return completed.window
+        }
         /// No window was ever made writable by this generation. A window-bearing record needs M12b or M12c instead.
         @discardableResult
         func releaseIfWindowFree() throws -> Bool {
