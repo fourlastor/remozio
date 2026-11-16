@@ -377,7 +377,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             defer { resume.signal(); _ = done.wait(timeout: .now() + 3); try? owner.close() }
             let (binding, _) = try values(f), input = Input(binding.peer, binding.authorityOwner)
             // A settled record stays published and releases both admissions, so the owner lock can be held below.
-            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner)
             reservation.record.abortConstruction()
             blocked.withLock { $0 = true }
             DispatchQueue.global().async { try? owner.verifyCurrent(); done.signal() }
@@ -420,7 +420,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             leaseBusy.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .busy); leaseBusy.withLock { $0 = false }
             XCTAssertEqual(owner.statusLaneCheck(), .verified)
             let (binding, _) = try values(f)
-            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner)
             // The reservation holds the admission: the store is not read, so even drift cannot be observed here.
             drift.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .pinned); drift.withLock { $0 = false }
             XCTAssertEqual(try reservation.record.state(), .reserved)
@@ -446,7 +446,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
                     return binding.authorityOwner
                 })
             defer { try? owner.close() }
-            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner)
             defer { reservation.record.abortConstruction() }
             XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer), read(owner, binding))
             XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer).reservation, .observed(.reserved))
