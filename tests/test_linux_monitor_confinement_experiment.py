@@ -81,7 +81,8 @@ class CaseTableTests(unittest.TestCase):
     def test_controls_differ_from_the_confined_case_only_in_reach(self):
         confined, control = EXPERIMENT.CASES["n1c"]["expect"], EXPERIMENT.CASES["c1"]["expect"]
         differ = {key for key in confined.keys() & control.keys() if confined[key] != control[key]}
-        self.assertEqual(differ, {"sleeper.seize", "sleeper.vmRead", "sleeper.pidfdGetfd", "sleeper.getfdCopyIsPipe"})
+        self.assertEqual(differ, {"sleeper.seize", "sleeper.vmRead", "sleeper.pidfdGetfd", "sleeper.getfdCopyIsPipe",
+                                  "sleeper.mapsRead"})
         self.assertEqual(EXPERIMENT.CASES["c1"]["labels"]["probe"], EXPERIMENT.UNCONFINED)
         self.assertEqual(EXPERIMENT.CASES["c2"]["shape"], "none-B")
 
@@ -355,6 +356,15 @@ class RunTests(unittest.TestCase):
             self.assertFalse(run.remove_profile("rmzmc-other-ffffffff"))
             self.assertTrue(run.remove_profile(run.name("monitor")))
         self.assertEqual(written, [run.name("monitor")])
+
+    def test_kernel_log_excerpt_is_private(self):
+        run = new_run()
+        with tempfile.TemporaryDirectory() as directory:
+            run.path = lambda name: os.path.join(directory, name)
+            run.tools = {"journalctl": "/bin/true"}
+            with patch.object(EXPERIMENT, "summarize_denials", return_value=[]):
+                self.assertEqual(run.denials(0), [])
+            self.assertEqual(os.stat(os.path.join(directory, "journal")).st_mode & 0o777, 0o600)
 
     def test_cleanup_order_is_units_then_profiles_then_files_and_accounts(self):
         run = new_run()

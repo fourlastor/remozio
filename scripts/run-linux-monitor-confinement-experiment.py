@@ -78,9 +78,13 @@ IDENTITY_B = {**IDENTITY_A, "selfDrop": "not-requested", "capsInheritable": "ptr
 # dumpable. The probe's identity is never that owner and holds no DAC capability, so the open
 # fails with EACCES in the permission check, before AppArmor or the ptrace check sees it, for
 # every target here, confined or not. Reach is shown by seize, process_vm_readv and pidfd_getfd.
+# /proc/<pid>/maps is 0444 and checked with PTRACE_MODE_READ: it measures AppArmor's ptrace
+# read permission (the monitor profile has a file rule for it), refused with EACCES.
 SLEEPER_REFUSED = {"seize": "EPERM", "memOpen": "EACCES", "memRead": "not-attempted", "vmRead": "EPERM",
-                   "pidfdOpen": "ok", "pidfdGetfd": "EPERM", "getfdCopyIsPipe": "not-attempted", "statusRead": "ok"}
-SLEEPER_REACHED = {**SLEEPER_REFUSED, "seize": "ok", "vmRead": "match", "pidfdGetfd": "ok", "getfdCopyIsPipe": "yes"}
+                   "pidfdOpen": "ok", "pidfdGetfd": "EPERM", "getfdCopyIsPipe": "not-attempted", "mapsRead": "EACCES",
+                   "statusRead": "ok"}
+SLEEPER_REACHED = {**SLEEPER_REFUSED, "seize": "ok", "vmRead": "match", "pidfdGetfd": "ok", "getfdCopyIsPipe": "yes",
+                   "mapsRead": "ok"}
 FRONTEND_REACHED = {"seize": "ok", "interrupt": "yes", "vmRead": "match", "memOpen": "EACCES", "detach": "ok"}
 FRONTEND_REFUSED = {"seize": "EPERM", "interrupt": "not-attempted", "vmRead": "EPERM", "memOpen": "EACCES",
                     "detach": "not-attempted"}
@@ -230,6 +234,8 @@ def wait_for_image(pid, image, deadline):
             info = os.stat(f"/proc/{pid}/exe")
             if (info.st_dev, info.st_ino) == (want.st_dev, want.st_ino):
                 return True
+        except FileNotFoundError:
+            pass  # the link can be briefly absent during the exec
         except OSError:
             return False
         time.sleep(0.01)
@@ -555,10 +561,15 @@ class Run(PL.Run):
         return code in (0, 5) and empty
 
     def unit_label(self, unit):
-        code, output = PL.run_owned([self.tools["systemctl"], "show", "--property=MainPID", "--value", unit],
-                                    self.timeout)
-        return read_label(int(output), self.tag) if code == 0 and re.fullmatch(rb"[1-9][0-9]{0,9}\n", output) \
-            else "not-measured"
+        deadline = time.monotonic() + 2
+        while True:  # MainPID can read 0 for a moment after the start
+            code, output = PL.run_owned([self.tools["systemctl"], "show", "--property=MainPID", "--value", unit],
+                                        self.timeout)
+            if code == 0 and re.fullmatch(rb"[1-9][0-9]{0,9}\n", output):
+                return read_label(int(output), self.tag)
+            if time.monotonic() >= deadline:
+                return "not-measured"
+            time.sleep(0.05)
 
     # Cases ------------------------------------------------------------------------------------
 
@@ -782,7 +793,8 @@ class Run(PL.Run):
         """This run's AppArmor audit lines from the kernel log, summarized."""
         path = self.path("journal")
         try:
-            with open(path, "xb") as output:
+            # 0600: a raw kernel log excerpt, in a 0755 directory, until cleanup removes it.
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600), "wb") as output:
                 subprocess.run([self.tools["journalctl"], "-k", "-o", "cat", "--no-pager", f"--since=@{int(since)}"],
                                stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL, env=PL.TOOL_ENV,
                                cwd="/", timeout=self.timeout, check=False)
@@ -891,7 +903,7 @@ def main():
             report = measure(args.timeout)
         except KeyboardInterrupt:
             parser.exit(130, "Monitor confinement experiment cancelled.\n")
-        except (RuntimeError, ValueError, OSError, KeyError, subprocess.SubprocessError):
+        except Exception:  # noqa: BLE001 - never publish a traceback with paths or PIDs
             parser.exit(2, "Monitor confinement experiment unavailable; no raw diagnostic data published.\n")
     finally:
         for number, handler in previous.items():

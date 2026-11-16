@@ -93,6 +93,9 @@ Differences from the reviewed plan, found while writing the policy:
   experiment. The rule could not show ptrace mediation, and the monitor reads memory
   with `process_vm_readv`, so the profiles grant nothing for `mem`. The cases require
   `EACCES` there and take reach from the seize, `process_vm_readv` and `pidfd_getfd`.
+  A read of `/proc/<pid>/maps` (mode `0444`, checked with `PTRACE_MODE_READ`)
+  measures the ptrace `read` permission: refused with `EACCES` under the profile,
+  read without it.
 - **The ABI is pinned.** Each profile declares `abi <abi/4.0>,`. Without it the parser
   falls back to its default feature set and warns that network rules are not
   enforced. The tests compile every rendered profile with `--warn=all` and require
@@ -196,7 +199,7 @@ prints one JSON object of closed-vocabulary values.
   credentials and capability categories, whether it can regain Root, then on the
   runner's go byte runs the actions against each target: against a sleeper, the seize,
   `/proc/<pid>/mem`, `process_vm_readv` of the random bytes, `pidfd_open`,
-  `pidfd_getfd` of the pipe and a `status` read; against a frontend in `hold` mode, the
+  `pidfd_getfd` of the pipe, a `maps` read and a `status` read; against a frontend in `hold` mode, the
   seize, a `PTRACE_INTERRUPT` stop, `process_vm_readv` of the frontend's marker,
   `/proc/<pid>/mem` and the detach. With a directory it also tries to create a file
   there, to execute `/bin/true` and to open an `AF_INET` socket.

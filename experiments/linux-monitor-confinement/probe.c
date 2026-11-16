@@ -304,8 +304,13 @@ static void probe_sleeper(const struct target *t) {
         role_field(t->role, "getfdCopyIsPipe", "not-attempted");
     }
 
-    /* /proc/<pid>/status is not ptrace-checked: readable whatever the policy. */
+    /* /proc/<pid>/maps is checked with PTRACE_MODE_READ: AppArmor's ptrace read permission. */
     char path[64];
+    static char maps[8192];
+    snprintf(path, sizeof path, "/proc/%d/maps", (int)t->pid);
+    role_field(t->role, "mapsRead", read_file(path, maps, sizeof maps) > 0 ? "ok" : errname(errno));
+
+    /* /proc/<pid>/status is not ptrace-checked: readable whatever the policy. */
     static char status[8192];
     snprintf(path, sizeof path, "/proc/%d/status", (int)t->pid);
     role_field(t->role, "statusRead", read_file(path, status, sizeof status) > 0 ? "ok" : errname(errno));
