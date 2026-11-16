@@ -321,6 +321,26 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
         retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
     }
+    enum StatusLaneCheck: Equatable, Sendable { case verified, pinned, busy, refused }
+    /// The installation and configuration check for a connection that selects status. It never waits:
+    /// - owner lock held by other work: `busy` (the caller answers unavailable and keeps the connection);
+    /// - admission held by a reservation: `pinned`. Reading the store would borrow that admission, which the status
+    ///   lane must never do, so only the release barrier and the open owner are checked against the pinned identity;
+    /// - otherwise the same store-backed check as `verifyCurrent`: `verified`, or `refused` on drift or closure.
+    func statusLaneCheck() -> StatusLaneCheck {
+        guard getpid() == processID else { return .refused }
+        guard lock.try() else { return .busy }
+        defer { lock.unlock() }
+        guard !closed, !closing else { return .refused }
+        do {
+            guard asynchronousWork.isIdle else { try releaseActivity?.validate(); return .pinned }
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            _ = try machines.use { try currentInventory($0) }
+            try activity?.validate()
+            return .verified
+        } catch { return .refused }
+    }
     /// Status lane entry. The directory identity comes from the authenticated peer UID, never from the request.
     /// Neither the owner lock nor the machine store is touched, so a held reservation or a busy writer cannot block it.
     func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials) -> SetupRetainedInvocationStatus {

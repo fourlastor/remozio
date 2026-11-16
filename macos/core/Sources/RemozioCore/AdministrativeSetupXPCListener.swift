@@ -84,6 +84,8 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                     onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
             },
             status: { [weak owner] in owner?.retainedInvocationStatus(authenticatedPeer: $0) ?? .unavailable },
+            check: { [weak owner] in owner?.statusLaneCheck() ?? .refused },
+            touch: { [weak registry] in registry?.touch(id) },
             invalidate: { [weak connection, weak registry] in invocation.retireConnection(); connection?.invalidate(); registry?.remove(id) })
         policy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupServiceXPCProtocol.self)

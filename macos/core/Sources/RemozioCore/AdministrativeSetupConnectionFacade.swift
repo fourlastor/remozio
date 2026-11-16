@@ -14,6 +14,8 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     private let select: (SetupConnectionSlots.Mode) -> Bool
     private let openNormal: (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint
     private let status: (XPCPeerCredentials) -> SetupRetainedInvocationStatus
+    private let check: () -> SetupAccountOwner.StatusLaneCheck
+    private let touch: () -> Void
     private let invalidate: () -> Void
     private var current = State.undecided
     private var endpoint: (any SetupNormalEndpoint)?
@@ -22,8 +24,11 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     /// Fixtures inject every capability. The native listener passes the accepted invocation guard, its slot and the shared owner.
     init(verify: @escaping () throws -> XPCPeerCredentials, select: @escaping (SetupConnectionSlots.Mode) -> Bool,
          openNormal: @escaping (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint,
-         status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus, invalidate: @escaping () -> Void) {
-        self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status; self.invalidate = invalidate
+         status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus,
+         check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
+         invalidate: @escaping () -> Void) {
+        self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status
+        self.check = check; self.touch = touch; self.invalidate = invalidate
     }
     var state: State { lock.withLock { current } }
 
@@ -41,11 +46,21 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
 
     // MARK: Status lane
 
+    /// Status calls never close a normal connection: the call alone is refused, and in-flight normal work continues.
+    /// Every other refusal replies nil and closes the connection, like the rest of this interface.
     func retainedInvocationStatus(_ request: Data, reply: @escaping @Sendable (Data?) -> Void) {
-        // The exported call stack proves the peer before any asynchronous work or owner access.
+        // The exported call stack proves the peer before any owner access.
         guard let peer = try? verify() else { close(); reply(nil); return }
+        let state = lock.withLock { current }
+        if state == .normal || state == .openingNormal { reply(nil); return }
+        guard state == .undecided || state == .statusOnly, request.count <= SetupRetainedStatusWire.maximumRequestBytes else {
+            close(); reply(nil); return
+        }
+        // Installation and configuration drift are checked on every status call, without waiting for the owner.
+        let checked = check()
+        guard checked != .refused else { close(); reply(nil); return }
         let admitted = lock.withLock { () -> Bool in
-            guard !statusInFlight, request.count <= SetupRetainedStatusWire.maximumRequestBytes else { return false }
+            guard !statusInFlight else { return false }
             switch current {
             case .undecided:
                 guard select(.statusOnly) else { return false }
@@ -57,10 +72,13 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
             return true
         }
         guard admitted else { close(); reply(nil); return }
-        defer { lock.withLock { statusInFlight = false } }
+        touch()
+        defer { lock.withLock { statusInFlight = false }; touch() }
         do {
             let decoded = try SetupRetainedStatusWire.Request.decode(request)
-            let bytes = try SetupRetainedStatusWire.reply(decoded, status(peer))
+            // A busy owner leaves freshness uncertain, so every fact is unavailable rather than read.
+            let value = checked == .busy ? SetupRetainedInvocationStatus.unavailable : status(peer)
+            let bytes = try SetupRetainedStatusWire.reply(decoded, value)
             // Recheck the same peer and connection lifetime before the reply leaves.
             guard (try? verify()) == peer, lock.withLock({ current == .statusOnly }) else { close(); reply(nil); return }
             reply(bytes)

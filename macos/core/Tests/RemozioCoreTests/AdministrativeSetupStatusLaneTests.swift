@@ -89,6 +89,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let selections = Mutex<[SetupConnectionSlots.Mode]>([]), opens = Mutex(0), invalidations = Mutex(0), statusReads = Mutex(0)
         let recorder = Recorder()
         let source = Mutex<Status>(.unavailable)
+        let checks = Mutex(SetupAccountOwner.StatusLaneCheck.verified), touches = Mutex(0)
         lazy var facade = Facade(
             verify: { [unowned self] in
                 guard self.verified.withLock({ $0 }) else { throw XPCPeerPolicyError.wrongConnection }
@@ -104,6 +105,8 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
                 XCTAssertEqual(value, self.peer)
                 return self.source.withLock { $0 }
             },
+            check: { [unowned self] in self.checks.withLock { $0 } },
+            touch: { [unowned self] in self.touches.withLock { $0 += 1 } },
             invalidate: { [unowned self] in self.invalidations.withLock { $0 += 1 } })
     }
 
@@ -243,16 +246,18 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
                 XCTAssertTrue(result.0, "\(helloName) then \(name)"); XCTAssertTrue(result.1, name)
             }
             XCTAssertEqual(h.opens.withLock { $0 }, 1, helloName)
-            XCTAssertEqual(h.recorder.calls.withLock { $0 }.count, 1 + Self.selectors.count, helloName)
+            // Each selector reached the endpoint method of the same name, in call order.
+            XCTAssertEqual(h.recorder.calls.withLock { $0 }, [helloName] + Self.selectors.keys.sorted(), helloName)
         }
     }
-    func testStatusIsRefusedOnANormalConnectionAndClosesIt() throws {
+    func testStatusOnANormalConnectionRefusesOnlyThatCall() throws {
         let h = Harness()
         XCTAssertTrue(Self.selectors["helloWithReply:"]!(h.facade).0)
-        let reply = status(h.facade, try request())
-        XCTAssertEqual(reply, .some(nil)); XCTAssertEqual(h.statusReads.withLock { $0 }, 0)
-        XCTAssertEqual(h.facade.state, .closed); XCTAssertEqual(h.recorder.closes.withLock { $0 }, 1)
-        XCTAssertEqual(h.invalidations.withLock { $0 }, 1)
+        XCTAssertEqual(status(h.facade, try request()), .some(nil))
+        XCTAssertEqual(h.statusReads.withLock { $0 }, 0); XCTAssertEqual(h.selections.withLock { $0 }, [.normal])
+        XCTAssertEqual(h.facade.state, .normal); XCTAssertEqual(h.recorder.closes.withLock { $0 }, 0)
+        XCTAssertEqual(h.invalidations.withLock { $0 }, 0)
+        XCTAssertTrue(Self.selectors["runtimeProgressWithReply:"]!(h.facade).0, "normal work continues on the same connection")
     }
     func testFullNormalLaneRefusesTheHelloWithoutOpeningAnEndpoint() {
         let h = Harness(); h.normalAllowed.withLock { $0 = false }
@@ -316,6 +321,39 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         XCTAssertEqual(status(unverified.facade, try request()), .some(nil)); XCTAssertEqual(unverified.selections.withLock { $0 }, [])
         for h in [full, malformed, oversized, unverified] { XCTAssertEqual(h.statusReads.withLock { $0 }, 0); XCTAssertEqual(h.opens.withLock { $0 }, 0) }
     }
+    func testRefusedInstallationCheckClosesWithoutSelectingOrReading() throws {
+        let h = Harness(); h.checks.withLock { $0 = .refused }
+        XCTAssertEqual(status(h.facade, try request()), .some(nil))
+        XCTAssertEqual(h.selections.withLock { $0 }, []); XCTAssertEqual(h.statusReads.withLock { $0 }, 0)
+        XCTAssertEqual(h.facade.state, .closed)
+        // Drift found on a later call of an existing status connection also closes it.
+        let later = Harness()
+        XCTAssertNotNil(status(later.facade, try request()) ?? nil)
+        later.checks.withLock { $0 = .refused }
+        XCTAssertEqual(status(later.facade, try request()), .some(nil)); XCTAssertEqual(later.facade.state, .closed)
+        XCTAssertEqual(later.statusReads.withLock { $0 }, 1)
+    }
+    func testBusyOwnerAnswersUnavailableWithoutReadingAndPinnedReadsTheProjection() throws {
+        let busy = Harness(); busy.checks.withLock { $0 = .busy }
+        busy.source.withLock { $0 = Status.reservation(.reserved, identity: .init(reservationID: UUID(), incarnation: UUID()),
+            binding: nil, expectedWindow: nil, worker: .observed(.idle), cleanup: .observed(.noneRegistered)) }
+        let bytes = try XCTUnwrap(status(busy.facade, try request()) ?? nil)
+        XCTAssertEqual(busy.statusReads.withLock { $0 }, 0); XCTAssertEqual(busy.facade.state, .statusOnly)
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: .init(maxBytes: 16384, maxDepth: 4, maxItems: 64)) else {
+            return XCTFail("reply is not a map")
+        }
+        for key in UInt64(3)...10 { XCTAssertEqual(fields[key], .null, "field \(key)") }
+        let pinned = Harness(); pinned.checks.withLock { $0 = .pinned }
+        pinned.source.withLock { $0 = busy.source.withLock { $0 } }
+        let observed = try XCTUnwrap(status(pinned.facade, try request()) ?? nil)
+        XCTAssertEqual(pinned.statusReads.withLock { $0 }, 1)
+        guard case .map(let read) = try DeterministicCBOR.decode(observed, limits: .init(maxBytes: 16384, maxDepth: 4, maxItems: 64)) else {
+            return XCTFail("reply is not a map")
+        }
+        XCTAssertEqual(read[3], .unsigned(Wire.code(Status.Reservation.reserved)))
+        XCTAssertEqual(read[8], .unsigned(Wire.code(Status.Worker.idle)))
+        XCTAssertEqual(pinned.touches.withLock { $0 }, 2, "a status call restarts the idle limit when it starts and ends")
+    }
     func testRequestCodecIsCanonicalAndBounded() throws {
         let id = Data(repeating: 3, count: 16), bytes = try Wire.Request(requestID: id).bytes
         XCTAssertEqual(try Wire.Request.decode(bytes).requestID, id)
@@ -357,56 +395,62 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
 
     // MARK: Slots
 
-    func testSlotsSplitTheTotalIntoSixNormalOneStatusAndOneUndecided() throws {
+    func testSlotsKeepOneStatusSlotAndLetUndecidedConnectionsHoldNormalSlots() throws {
         let slots = try SetupConnectionSlots(maximumConnections: 8, timeoutMilliseconds: 60_000); try slots.start()
         defer { slots.close() }
-        XCTAssertEqual([slots.maximumNormal, slots.maximumStatus, slots.maximumUndecided], [6, 1, 1])
-        var normal: [UUID] = []
-        for _ in 0..<6 {
-            let id = try XCTUnwrap(slots.reserve())
-            XCTAssertNil(slots.reserve(), "only one undecided connection at a time")
-            XCTAssertTrue(slots.select(.normal, id: id)); normal.append(id)
-        }
-        let seventh = try XCTUnwrap(slots.reserve())
-        XCTAssertFalse(slots.select(.normal, id: seventh), "normal connections cannot take the status or undecided slots")
-        XCTAssertEqual(slots.mode(seventh), .undecided)
-        XCTAssertTrue(slots.select(.statusOnly, id: seventh))
-        let eighth = try XCTUnwrap(slots.reserve())
-        XCTAssertFalse(slots.select(.statusOnly, id: eighth)); XCTAssertFalse(slots.select(.normal, id: eighth))
-        XCTAssertNil(slots.reserve(), "the total stays eight")
-        XCTAssertFalse(slots.select(.normal, id: seventh), "status-only never becomes normal")
+        XCTAssertEqual([slots.maximumNormal, slots.maximumStatus], [7, 1])
+        // Two connections opened at the same moment are both accepted while undecided.
+        let first = try XCTUnwrap(slots.reserve()), second = try XCTUnwrap(slots.reserve())
+        XCTAssertEqual(slots.mode(first), .undecided); XCTAssertEqual(slots.mode(second), .undecided)
+        XCTAssertTrue(slots.select(.statusOnly, id: first))
+        XCTAssertFalse(slots.select(.statusOnly, id: second), "one status slot")
+        XCTAssertEqual(slots.mode(second), .undecided)
+        XCTAssertTrue(slots.select(.normal, id: second))
+        var normal = [second]
+        for _ in 0..<6 { let id = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.normal, id: id)); normal.append(id) }
+        XCTAssertNil(slots.reserve(), "seven normal slots and one status slot fill the total of eight")
+        XCTAssertFalse(slots.select(.normal, id: first), "status-only never becomes normal")
+        slots.remove(first)
+        XCTAssertNil(slots.reserve(), "the freed status slot does not add normal capacity")
         slots.remove(normal[0])
-        XCTAssertTrue(slots.select(.normal, id: eighth))
+        let next = try XCTUnwrap(slots.reserve())
+        XCTAssertTrue(slots.select(.statusOnly, id: next), "an undecided connection moves its slot to the free status slot")
+        XCTAssertNotNil(slots.reserve(), "and frees its provisional normal slot")
     }
-    /// The status lane never takes capacity from the normal service. With a total of 1 or 2 a status selection is
-    /// refused at once (the facade then replies nil and closes, as for every other refusal); with 3 it is accepted.
-    func testSmallStoredTotalsRefuseStatusAtOnceAndKeepTheirNormalCapacity() throws {
-        for (total, normal, status) in [(1, 1, 0), (2, 1, 0), (3, 1, 1)] {
+    func testTotalsOneAndTwoBehaveLikeTheSharedRegistryAndThreeAddsTheStatusSlot() throws {
+        for total in [1, 2, 3, 8] {
             let slots = try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 60_000); try slots.start()
             defer { slots.close() }
-            XCTAssertEqual([slots.maximumNormal, slots.maximumStatus], [normal, status], "\(total)")
-            let first = try XCTUnwrap(slots.reserve(), "\(total)")
-            XCTAssertEqual(slots.select(.statusOnly, id: first), status == 1, "\(total)")
+            let status = total >= 3 ? 1 : 0
+            XCTAssertEqual([slots.maximumNormal, slots.maximumStatus], [total - status, status], "\(total)")
+            // Below 3, as on main: every slot is normal, status is refused at once and the connection can still go normal.
+            var ids: [UUID] = []
+            for _ in 0..<(total - status) { ids.append(try XCTUnwrap(slots.reserve(), "\(total)")) }
+            XCTAssertNil(slots.reserve(), "\(total)")
             if status == 0 {
-                XCTAssertEqual(slots.mode(first), .undecided, "\(total)")
-                XCTAssertTrue(slots.select(.normal, id: first), "a refused status choice leaves the normal slot usable (\(total))")
+                XCTAssertFalse(slots.select(.statusOnly, id: ids[0]), "\(total)")
+                XCTAssertEqual(slots.mode(ids[0]), .undecided, "\(total)")
             } else {
-                let second = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.normal, id: second))
+                XCTAssertTrue(slots.select(.statusOnly, id: ids[0]), "\(total)")
+                XCTAssertNotNil(slots.reserve(), "\(total)")
             }
-            XCTAssertEqual(slots.mode(first), status == 1 ? .statusOnly : .normal, "\(total)")
+            for id in ids.dropFirst() { XCTAssertTrue(slots.select(.normal, id: id), "\(total)") }
         }
         for total in [0, 65] { XCTAssertThrowsError(try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 1000)) }
     }
-    func testUndecidedAndUnreadyNormalExpireButStatusOnlyDoesNot() async throws {
-        let slots = try SetupConnectionSlots(maximumConnections: 8, timeoutMilliseconds: 50); try slots.start()
+    func testUndecidedAndUnreadyNormalExpireAndStatusOnlyExpiresWhenIdle() async throws {
+        let slots = try SetupConnectionSlots(maximumConnections: 8, timeoutMilliseconds: 200); try slots.start()
         defer { slots.close() }
         let undecided = try XCTUnwrap(slots.reserve())
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertNil(slots.mode(undecided))
-        let status = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.statusOnly, id: status))
         let opening = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.normal, id: opening))
         let ready = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.normal, id: ready)); slots.handshake(ready)
-        try await Task.sleep(for: .milliseconds(300))
-        XCTAssertEqual(slots.mode(status), .statusOnly); XCTAssertNil(slots.mode(opening)); XCTAssertEqual(slots.mode(ready), .normal)
+        let status = try XCTUnwrap(slots.reserve()); XCTAssertTrue(slots.select(.statusOnly, id: status))
+        // Touching the status connection keeps it while it is in use.
+        for _ in 0..<4 { try await Task.sleep(for: .milliseconds(100)); slots.touch(status) }
+        XCTAssertNil(slots.mode(undecided)); XCTAssertNil(slots.mode(opening)); XCTAssertEqual(slots.mode(ready), .normal)
+        XCTAssertEqual(slots.mode(status), .statusOnly)
+        try await Task.sleep(for: .milliseconds(600))
+        XCTAssertNil(slots.mode(status), "an idle status-only connection frees the status slot")
+        XCTAssertEqual(slots.mode(ready), .normal)
     }
 }

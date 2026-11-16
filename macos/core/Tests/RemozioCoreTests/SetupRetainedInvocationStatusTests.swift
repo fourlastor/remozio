@@ -376,6 +376,9 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             })
             defer { resume.signal(); _ = done.wait(timeout: .now() + 3); try? owner.close() }
             let (binding, _) = try values(f), input = Input(binding.peer, binding.authorityOwner)
+            // A settled record stays published and releases both admissions, so the owner lock can be held below.
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            reservation.record.abortConstruction()
             blocked.withLock { $0 = true }
             DispatchQueue.global().async { try? owner.verifyCurrent(); done.signal() }
             XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
@@ -387,8 +390,8 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             let completed = statusDone.wait(timeout: .now() + 1); XCTAssertEqual(completed, .success)
             resume.signal()
             if completed != .success { _ = statusDone.wait(timeout: .now() + 3) }
-            // The slot is empty, so no UID matches its owner and status answers unavailable without waiting.
-            XCTAssertEqual(result.withLock { $0 }, .unavailable); XCTAssertEqual(commits.withLock { $0 }, 0)
+            // Real facts while the owner lock is held: status reads the published projection, never the owner lock.
+            XCTAssertEqual(result.withLock { $0?.reservation }, .observed(.settled)); XCTAssertEqual(commits.withLock { $0 }, 0)
             blocked.withLock { $0 = false }
         }
     }
@@ -403,6 +406,53 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     }
     /// The Setup owner is machine-wide and records no single account owner before a reservation exists, so an empty
     /// slot has no owner to match: every UID, including the caller's own, reads unavailable rather than absent.
+    func testStatusLaneCheckNeverWaitsAndNeverBorrowsTheReservationAdmission() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let blocked = Mutex(false), drift = Mutex(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            let done = DispatchSemaphore(value: 0)
+            let owner = try owner(f, verifyHost: { _ in
+                if drift.withLock({ $0 }) { throw AdministrativeSetupError.changedInstallation }
+                if blocked.withLock({ $0 }) { entered.signal(); _ = resume.wait(timeout: .now() + 3) }
+            })
+            defer { resume.signal(); _ = done.wait(timeout: .now() + 3); try? owner.close() }
+            XCTAssertEqual(owner.statusLaneCheck(), .verified)
+            drift.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .refused); drift.withLock { $0 = false }
+            let (binding, _) = try values(f)
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            // The reservation holds the admission: the store is not read, so even drift cannot be observed here.
+            drift.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .pinned); drift.withLock { $0 = false }
+            XCTAssertEqual(try reservation.record.state(), .reserved)
+            reservation.record.abortConstruction()
+            blocked.withLock { $0 = true }
+            DispatchQueue.global().async { try? owner.verifyCurrent(); done.signal() }
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            let started = DispatchTime.now()
+            XCTAssertEqual(owner.statusLaneCheck(), .busy)
+            XCTAssertLessThan(DispatchTime.now().uptimeNanoseconds - started.uptimeNanoseconds, 1_000_000_000)
+            blocked.withLock { $0 = false }; resume.signal()
+            XCTAssertEqual(done.wait(timeout: .now() + 3), .success)
+            try owner.close(); XCTAssertEqual(owner.statusLaneCheck(), .refused)
+        }
+    }
+    func testOwnerStatusEntryLooksUpTheDirectoryIdentityFromTheAuthenticatedUID() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let (binding, _) = try values(f), lookups = Mutex<[uid_t]>([]), unknown = Mutex(false)
+            let owner = try SetupAccountOwner(machine: f.machine(), expectedReleaseDigest: InstallationInventory.digest(f.candidate),
+                resume: { _, value in value }, lookupAccount: { uid in
+                    lookups.withLock { $0.append(uid) }
+                    if unknown.withLock({ $0 }) { throw AdministrativeSetupError.wrongAccount }
+                    return binding.authorityOwner
+                })
+            defer { try? owner.close() }
+            let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
+            defer { reservation.record.abortConstruction() }
+            XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer), read(owner, binding))
+            XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer).reservation, .observed(.reserved))
+            XCTAssertEqual(lookups.withLock { $0 }, [binding.peer.userID, binding.peer.userID])
+            unknown.withLock { $0 = true }
+            XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer), .unavailable)
+        }
+    }
     func testEmptySlotAnswersUnavailableForEveryUID() throws {
         let reader = Status.Reader()
         for uid in [getuid(), getuid() + 1, 501, 502] {
