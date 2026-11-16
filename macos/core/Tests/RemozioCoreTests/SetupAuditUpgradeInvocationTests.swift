@@ -115,6 +115,12 @@ final class SetupAuditUpgradeInvocationTests: XCTestCase {
     }
     func testShutdownFinishesRetainedCleanupWithoutNewRightsOrConnections() throws {
         let h = try Harness(), owner = try h.owner()
+        func acquireProcess() throws -> SetupProcessLease {
+            try .openOwned(directory: ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        }
+        let processLease = try acquireProcess()
+        let placement = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
+        let shutdown = AdministrativeSetupShutdown(owner: owner, placement: placement, processLease: processLease)
         h.quiescenceValidationFails = true; h.quiescenceCloseFails = true
         var valid = true
         var invocation: SetupAuditUpgradeInvocation? = try begin(h, owner, rights: { if !valid { throw Refused() } })
@@ -127,14 +133,16 @@ final class SetupAuditUpgradeInvocationTests: XCTestCase {
         XCTAssertThrowsError(try h.installer.acquireShared())
         let closed = expectation(description: "Owner closed after retained cleanup")
         Task.detached {
-            do { try await owner.closeWhenIdle() } catch { XCTFail("Shutdown: \(error)") }
+            do { try await shutdown.close() } catch { XCTFail("Shutdown: \(error)") }
             closed.fulfill()
         }
         // Shutdown keeps retrying while cleanup fails. The exclusive Root activity token stays with the retained operation.
         Thread.sleep(forTimeInterval: 0.5)
         XCTAssertThrowsError(try h.installer.acquireShared())
+        XCTAssertThrowsError(try acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
         try XCTUnwrap(h.q).closeFails = false
         wait(for: [closed], timeout: 10)
+        let replacement = try acquireProcess(); replacement.close()
         XCTAssertTrue(owner.retryAuditUpgradeCleanup()); XCTAssertThrowsError(try owner.verifyCurrent())
         let update = try h.installer.acquireExclusive(); update.close()
         try h.machine { _ in () }

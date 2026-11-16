@@ -132,16 +132,22 @@ final class GatewayActivationAsyncOwnerTests: XCTestCase {
         let h = try Harness(), expected = try h.read(), gate = Gate(), started = expectation(description: "activation entered")
         h.hold(gate, started); let installer = try h.activity.open()
         let placement = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
-        let shutdown = AdministrativeSetupShutdown(owner: h.owner, placement: placement)
+        func acquireProcess() throws -> SetupProcessLease {
+            try .openOwned(directory: ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        }
+        let processLease = try acquireProcess()
+        let shutdown = AdministrativeSetupShutdown(owner: h.owner, placement: placement, processLease: processLease)
         let task = Task { try await h.owner.resumeGatewayActivation(callerUID: getuid(), expected: expected, settings: h.settings) }
         await fulfillment(of: [started], timeout: 5)
         XCTAssertThrowsError(try h.owner.close()) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
         let closed = Mutex(false)
         let closing = Task { try await shutdown.close(); closed.withLock { $0 = true } }; closing.cancel(); await Task.yield()
         XCTAssertFalse(closed.withLock { $0 }); XCTAssertNoThrow(try placement.validate())
+        XCTAssertThrowsError(try acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
         XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
         await gate.release(); _ = try? await task.value; try await closing.value
         XCTAssertTrue(closed.withLock { $0 }); XCTAssertThrowsError(try placement.validate())
+        let replacement = try acquireProcess(); replacement.close()
         let update = try installer.acquireExclusive(); update.close()
     }
     func testRetainedSettingsCannotChangeBeforeTheBackendRunsAgain() async throws {

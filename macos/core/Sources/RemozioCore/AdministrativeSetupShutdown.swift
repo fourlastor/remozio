@@ -6,10 +6,13 @@ final class AdministrativeSetupShutdown: @unchecked Sendable {
     private let lock = NSLock()
     private let owner: SetupAccountOwner
     private let placement: ReleaseDestinationLease
+    private let processLease: SetupProcessLease
     private var closed = false
-    init(owner: SetupAccountOwner, placement: ReleaseDestinationLease) { self.owner = owner; self.placement = placement }
+    init(owner: SetupAccountOwner, placement: ReleaseDestinationLease, processLease: SetupProcessLease) {
+        self.owner = owner; self.placement = placement; self.processLease = processLease
+    }
     func close() async throws {
         try await owner.closeWhenIdle()
-        lock.withLock { if !closed { placement.close(); closed = true } }
+        lock.withLock { if !closed { placement.close(); processLease.close(); closed = true } }
     }
 }

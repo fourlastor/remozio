@@ -171,7 +171,11 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         let h = try Harness(), expected = try h.read(), gate = Gate(), started = expectation(description: "backend entered")
         h.hold(gate, started)
         let placement = try ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid())
-        let shutdown = AdministrativeSetupShutdown(owner: h.owner, placement: placement), installer = try h.activity.open()
+        func acquireProcess() throws -> SetupProcessLease {
+            try .openOwned(directory: ReleaseDestinationLease(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        }
+        let processLease = try acquireProcess()
+        let shutdown = AdministrativeSetupShutdown(owner: h.owner, placement: placement, processLease: processLease), installer = try h.activity.open()
         let task = Task { try await h.owner.resumeGatewayJournal(callerUID: getuid(), expected: expected) }
         await fulfillment(of: [started], timeout: 5)
         // Synchronous close closes admission but must refuse to release active resources.
@@ -180,12 +184,14 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         let closing = Task { try await shutdown.close(); closed.withLock { $0 = true } }
         closing.cancel(); await Task.yield()
         XCTAssertFalse(closed.withLock { $0 }); XCTAssertNoThrow(try placement.validate())
+        XCTAssertThrowsError(try acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
         XCTAssertThrowsError(try installer.acquireExclusive()) { XCTAssertEqual($0 as? ReleaseActivityError, .busy) }
         XCTAssertThrowsError(try h.owner.gatewayProgress(callerUID: getuid()))
         await gate.release()
         do { _ = try await task.value; XCTFail() } catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
         try await closing.value
         XCTAssertTrue(closed.withLock { $0 }); XCTAssertThrowsError(try placement.validate())
+        let replacement = try acquireProcess(); replacement.close()
         let update = try installer.acquireExclusive(); update.close()
         let machine = try h.fixture.runtime.f.open(); defer { try? machine.close() }
         XCTAssertTrue(try machine.gatewayJournalPreparation(accountID: h.fixture.intent.accountID).initialized)
