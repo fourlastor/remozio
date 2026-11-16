@@ -130,9 +130,15 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
         XCTAssertEqual(f.endpoint.pendingOperations(), 0); XCTAssertTrue(f.budget.acquire()); f.budget.release()
         XCTAssertEqual(try f.admission.connectionReservations(), 0)
     }
-    func testClosedAdmissionRefusesTheProbe() throws {
-        let f = try Endpoint(); XCTAssertEqual(f.hello(), AuthorityMaintenanceChannelScope.protocolVersion)
-        f.admission.close(); XCTAssertNil(try f.probe()); XCTAssertEqual(f.invalidations.withLock { $0 }, 1)
+    func testClosedAdmissionRefusesTheProbe() async throws {
+        let f = try Endpoint(); defer { f.endpoint.close() }
+        XCTAssertEqual(f.hello(), AuthorityMaintenanceChannelScope.protocolVersion)
+        f.admission.close(); XCTAssertNil(try f.probe())
+        let limit = deadline
+        while f.invalidations.withLock({ $0 }) == 0 && ContinuousClock.now < limit {
+            try await ContinuousClock().sleep(until: min(limit, .now.advanced(by: .milliseconds(1))))
+        }
+        XCTAssertEqual(f.invalidations.withLock { $0 }, 1)
     }
 
     // MARK: Client
