@@ -53,6 +53,32 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     private func captured(_ status: Status) throws -> Status.Binding {
         guard case .observed(let binding) = status.binding else { throw Failure.work }; return binding
     }
+    private func withCapturePath(verifyRights: @escaping () throws -> Void = {}, afterCapture: @escaping () throws -> Void = {},
+        _ body: (Fixture, SetupAccountOwner, SetupRetainedCallerBinding, Invocation, XPCInvocationGuard) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (_, policy) = try values(f)
+            let connection = NSXPCConnection(machServiceName: AdministrativeSetupConfiguration.serviceName)
+            defer { connection.invalidate() }
+            let guardValue = XPCInvocationGuard(connection: connection, policy: policy)
+            let (binding, _) = try values(f, incarnation: guardValue.incarnation)
+            let inputs = try MachineUpdateRetainedSetupRuntimeInputs.capture(expected: binding.entry.runtime, journal: nil,
+                verifyCurrent: {}, readRelay: { _ in throw SharedSetupImportError.wrongScope })
+            let capture = try SetupAccountOwner.RetainedMaintenanceCapture.openOwned(binding: binding, inputs: inputs)
+            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: verifyRights,
+                ownedCapture: .init(invocation: guardValue, verifyPeer: { binding.peer }, binding: {
+                    try afterCapture(); return binding
+                }, maintenance: { try afterCapture(); return capture }))
+            defer { try? value.close() }
+            try body(f, owner, binding, value, guardValue)
+        }
+    }
+    private func window(_ f: Fixture, _ value: Invocation, _ guardValue: XPCInvocationGuard) throws -> RuntimeMaintenanceWindowRecord {
+        let expected = try value.maintenanceCapture(invocation: guardValue, candidate: f.candidate, purpose: .retainedRuntime)
+        let authorized = try value.authorizedMaintenanceWindow(invocation: guardValue, expected: expected,
+            purpose: .retainedRuntime, candidate: f.candidate, id: Data(repeating: 0xab, count: 16), revision: Data(repeating: 0xcd, count: 16))
+        return try .init(id: authorized.id, revision: authorized.revision, purpose: authorized.purpose, scope: authorized.scope,
+            phase: .needsOwnerRecovery, operation: .committed, service: .unknown, failure: .cleanupPending)
+    }
     func testReservedRecordStoresOnlyTheAuthenticatedOwnerUntilCapture() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let owner = try owner(f); defer { try? owner.close() }; let (binding, _) = try values(f)
@@ -60,6 +86,9 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             defer { reservation.record.abortConstruction() }
             let before = read(owner, binding)
             XCTAssertEqual(before.reservation, .observed(.reserved)); XCTAssertEqual(before.binding, .unavailable)
+            XCTAssertEqual(before.identity, .unavailable)
+            let recycled = LocalAccountIdentity(uid: binding.authorityOwner.uid, primaryGroupID: getgid(), directoryID: UUID())
+            XCTAssertEqual(owner.retainedInvocationStatus(authenticatedPeer: binding.peer, currentOwner: recycled).identity, .unavailable)
             XCTAssertEqual(before.cleanup, .observed(.noneRegistered)); XCTAssertEqual(before.operation, .unavailable)
             XCTAssertEqual(before.restoration, .unavailable); XCTAssertEqual(before.supervisor, .unavailable)
             for _ in 0..<20 { XCTAssertEqual(read(owner, binding), before) }
@@ -73,6 +102,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
             defer { try? value.close() }
             XCTAssertEqual(read(owner, binding).binding, .unavailable)
+            XCTAssertEqual(read(owner, binding).identity, .unavailable)
             try value.captureOwnedBinding(binding)
             let snapshot = read(owner, binding), actual = try captured(snapshot)
             XCTAssertEqual(actual.authority.ownerUID, binding.peer.userID)
@@ -196,30 +226,125 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
         }
     }
     func testMatchingDurableFactsAndBusySupervisorKeepTheCommittedOutcomeSeparate() throws {
-        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
-            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
-            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
-            defer { try? value.close() }; try value.captureOwnedBinding(binding)
-            let initial = read(owner, binding), observedRow = try row(captured(initial))
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let observedRow = try window(f, value, guardValue), initial = read(owner, binding)
+            XCTAssertEqual(initial.window, .unavailable); XCTAssertEqual(initial.operation, .unavailable)
             let status = initial.observing(observedRow).observing(supervisor: .busy)
             XCTAssertEqual(status.operation, .observed(.committed)); XCTAssertEqual(status.supervisor, .observed(.busy))
             XCTAssertEqual(status.restoration, .observed(.init(phase: .needsOwnerRecovery, service: .unknown, failure: .cleanupPending)))
-            guard case .observed(let window) = status.window else { return XCTFail("Missing observed row identity") }
-            XCTAssertEqual(window.id, observedRow.id); XCTAssertEqual(window.revision, observedRow.revision)
+            guard case .observed(let actual) = status.window else { return XCTFail("Missing observed row identity") }
+            XCTAssertEqual(actual.id, observedRow.id); XCTAssertEqual(actual.revision, observedRow.revision)
             XCTAssertEqual(read(owner, binding), initial)
         }
     }
     func testDifferentRowScopeClearsAllDurableFactsInsteadOfKeepingAnEarlierObservation() throws {
-        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
-            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
-            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
-            defer { try? value.close() }; try value.captureOwnedBinding(binding)
-            let initial = read(owner, binding), protectedBinding = try captured(initial)
-            let observed = initial.observing(try row(protectedBinding)), foreign = try row(protectedBinding, foreign: true)
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let actual = try window(f, value, guardValue), initial = read(owner, binding), protectedBinding = try captured(initial)
+            let observed = initial.observing(actual), foreign = try row(protectedBinding, foreign: true)
             let refused = observed.observing(foreign)
             XCTAssertEqual(refused.window, .unavailable); XCTAssertEqual(refused.operation, .unavailable)
             XCTAssertEqual(refused.restoration, .unavailable); XCTAssertEqual(refused.reservation, initial.reservation)
         }
+    }
+    func testCallerBindingPathPublishesOnlyAfterItsFinalRightsCheck() throws {
+        try withCapturePath { f, owner, binding, value, guardValue in
+            XCTAssertEqual(read(owner, binding).identity, .unavailable)
+            let actual = try value.callerBinding(invocation: guardValue, candidate: f.candidate)
+            XCTAssertEqual(actual.peer, binding.peer); XCTAssertEqual(actual.incarnation, binding.incarnation)
+            let status = read(owner, binding)
+            XCTAssertEqual(try captured(status), try Status.capturedBinding(binding))
+            guard case .observed = status.identity else { return XCTFail("Missing captured identity") }
+            let stale = try row(captured(status)), refused = status.observing(stale)
+            XCTAssertEqual(refused.window, .unavailable); XCTAssertEqual(refused.operation, .unavailable)
+            XCTAssertEqual(refused.restoration, .unavailable)
+        }
+    }
+    func testMaintenanceCapturePathBindsBeforeTheExactAuthorizedWindowIsObserved() throws {
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let capture = try value.maintenanceCapture(invocation: guardValue, candidate: f.candidate, purpose: .retainedRuntime)
+            XCTAssertEqual(capture.binding.incarnation, binding.incarnation)
+            let before = read(owner, binding)
+            XCTAssertEqual(try captured(before), try Status.capturedBinding(binding))
+            XCTAssertEqual(before.observing(try row(captured(before))).operation, .unavailable)
+            let actual = try window(f, value, guardValue)
+            XCTAssertEqual(read(owner, binding).observing(actual).operation, .observed(.committed))
+        }
+    }
+    func testFailedFinalRightsCheckNeverPublishesEitherCapturePath() throws {
+        for maintenance in [false, true] {
+            var valid = true
+            try withCapturePath(verifyRights: { if !valid { throw Failure.work } }, afterCapture: { valid = false }) {
+                f, owner, binding, value, guardValue in
+                if maintenance {
+                    XCTAssertThrowsError(try value.maintenanceCapture(invocation: guardValue, candidate: f.candidate, purpose: .retainedRuntime))
+                } else { XCTAssertThrowsError(try value.callerBinding(invocation: guardValue, candidate: f.candidate)) }
+                XCTAssertEqual(read(owner, binding).binding, .unavailable)
+                XCTAssertEqual(read(owner, binding).identity, .unavailable)
+                XCTAssertEqual(read(owner, binding).operation, .unavailable)
+            }
+        }
+    }
+    func testAnotherWindowForTheSameAccountsCannotSupplyAnOutcome() throws {
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let actual = try window(f, value, guardValue), initial = read(owner, binding), scope = actual.scope
+            let otherCandidate = try RuntimeMaintenanceWindowRecord.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: scope.authority, target: scope.target, releaseDigest: scope.releaseDigest, candidateDigest: Data(repeating: 0xe1, count: 32),
+                authorityPolicyDigest: scope.authorityPolicyDigest, operationDigest: scope.operationDigest, restorationDigest: scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            let rows = try [
+                RuntimeMaintenanceWindowRecord(id: Data(repeating: 0xe2, count: 16), revision: actual.revision, purpose: actual.purpose, scope: scope),
+                RuntimeMaintenanceWindowRecord(id: actual.id, revision: actual.revision, purpose: .retainedPolicy, scope: scope),
+                RuntimeMaintenanceWindowRecord(id: actual.id, revision: actual.revision, purpose: actual.purpose, scope: otherCandidate)]
+            for row in rows {
+                let refused = initial.observing(actual).observing(row)
+                XCTAssertEqual(refused.window, .unavailable); XCTAssertEqual(refused.operation, .unavailable)
+                XCTAssertEqual(refused.restoration, .unavailable)
+            }
+            XCTAssertEqual(initial.observing(actual).operation, .observed(.committed))
+        }
+    }
+    func testSameWindowWithALaterRevisionExposesTheActualRowOutcome() throws {
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let actual = try window(f, value, guardValue), initial = read(owner, binding)
+            let later = try RuntimeMaintenanceWindowRecord(id: actual.id, revision: Data(repeating: 0xe3, count: 16),
+                purpose: actual.purpose, scope: actual.scope, phase: .needsOwnerRecovery,
+                operation: .failed, service: .unknown, failure: .operationUncertain)
+            let observed = initial.observing(later)
+            XCTAssertEqual(observed.operation, .observed(.failed))
+            XCTAssertEqual(observed.restoration, .observed(.init(phase: .needsOwnerRecovery, service: .unknown, failure: .operationUncertain)))
+            guard case .observed(let window) = observed.window else { return XCTFail("Missing observed window") }
+            XCTAssertEqual(window.id, actual.id); XCTAssertEqual(window.revision, later.revision)
+            XCTAssertNotEqual(window.revision, actual.revision)
+        }
+    }
+    func testRunningWorkerDoesNotInventRegisteredCleanup() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
+            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            defer { try? value.close() }
+            XCTAssertEqual(read(owner, binding).worker, .observed(.idle))
+            try value.run(work: {
+                let status = read(owner, binding)
+                XCTAssertEqual(status.worker, .observed(.running)); XCTAssertEqual(status.cleanup, .observed(.noneRegistered))
+                XCTAssertEqual(status.operation, .unavailable)
+            }, reply: { _, _ in })
+            XCTAssertEqual(read(owner, binding).worker, .observed(.idle))
+            XCTAssertEqual(read(owner, binding).cleanup, .observed(.noneRegistered))
+        }
+    }
+    func testRecordReplacementDuringAReadReturnsUnavailable() throws {
+        let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
+        let account = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
+        let work = SetupOwnerAsyncWork(), replies = SetupOwnerAsyncWork(), reader = Status.Reader()
+        let first = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
+            admission: work.admit(), reply: replies.admit(), activity: nil)
+        let second = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
+            admission: SetupOwnerAsyncWork().admit(), reply: SetupOwnerAsyncWork().admit(), activity: nil)
+        defer { first.abortConstruction(); second.abortConstruction() }
+        reader.publish(first)
+        XCTAssertEqual(try reader.readOwned(authenticatedPeer: peer, currentOwner: account, afterSnapshot: { reader.publish(second) }), .unavailable)
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: account).reservation, .observed(.reserved))
     }
     func testReaderAndRecordContentionReturnUnavailableWithoutWaiting() throws {
         let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
@@ -278,28 +403,26 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
             let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
             let first = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
+            try first.captureOwnedBinding(binding)
             let old = read(owner, binding); try first.close()
             let second = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
-            defer { try? second.close() }; let new = read(owner, binding)
+            defer { try? second.close() }; try second.captureOwnedBinding(binding); let new = read(owner, binding)
             guard case .observed(let a) = old.identity, case .observed(let b) = new.identity else { return XCTFail("Missing identity") }
             XCTAssertEqual(a.incarnation, b.incarnation); XCTAssertNotEqual(a.reservationID, b.reservationID)
             XCTAssertEqual(new.reservation, .observed(.attached))
         }
     }
     func testStatusBindingWindowAndIdentityRedactDescriptionsDumpsAndMirrors() throws {
-        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
-            let owner = try owner(f); defer { try? owner.close() }; let (binding, policy) = try values(f)
-            let value = try Invocation.openOwned(owner: owner, binding: binding, policy: policy, verifyRights: {})
-            defer { try? value.close() }; try value.captureOwnedBinding(binding)
-            let initial = read(owner, binding), protectedBinding = try captured(initial)
-            let status = initial.observing(try row(protectedBinding))
+        try withCapturePath { f, owner, binding, value, guardValue in
+            let actual = try window(f, value, guardValue), initial = read(owner, binding), protectedBinding = try captured(initial)
+            let status = initial.observing(actual)
             var output = ""; dump(status, to: &output)
             XCTAssertEqual(String(describing: status), "SetupRetainedInvocationStatus(redacted)")
             XCTAssertEqual(String(reflecting: status), "SetupRetainedInvocationStatus(redacted)")
             XCTAssertTrue(Mirror(reflecting: status).children.isEmpty); XCTAssertTrue(Mirror(reflecting: protectedBinding).children.isEmpty)
             XCTAssertFalse(output.contains("accountID")); XCTAssertFalse(output.contains(binding.incarnation.uuidString))
-            if case .observed(let window) = status.window { XCTAssertTrue(Mirror(reflecting: window).children.isEmpty) }
-            if case .observed(let identity) = status.identity { XCTAssertTrue(Mirror(reflecting: identity).children.isEmpty) }
+            guard case .observed(let window) = status.window, case .observed(let identity) = status.identity else { return XCTFail("Missing captured identities") }
+            XCTAssertTrue(Mirror(reflecting: window).children.isEmpty); XCTAssertTrue(Mirror(reflecting: identity).children.isEmpty)
         }
     }
 }

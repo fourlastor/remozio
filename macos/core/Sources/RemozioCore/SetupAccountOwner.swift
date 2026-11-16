@@ -384,6 +384,12 @@ public final class SetupAccountOwner: @unchecked Sendable {
         fileprivate init(binding: SetupRetainedCallerBinding, inputs: MachineUpdateRetainedSetupRuntimeInputs) {
             self.binding = binding; self.inputs = inputs
         }
+        /// Ordinary-owner fixtures only. This captures metadata and cannot mint native rights or an XPC peer proof.
+        static func openOwned(binding: SetupRetainedCallerBinding, inputs: MachineUpdateRetainedSetupRuntimeInputs) throws -> Self {
+            try RuntimeMaintenanceOwnedControl.require()
+            try inputs.requireSource(binding.entry.runtime)
+            return .init(binding: binding, inputs: inputs)
+        }
     }
     func retainedMaintenanceCapture(invocation: XPCInvocationGuard, candidate: SignedReleaseEvidence,
         admission: SetupOwnerAsyncWork.Token) throws -> RetainedMaintenanceCapture {

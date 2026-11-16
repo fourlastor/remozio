@@ -13,6 +13,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable {
     private let authenticatedPeerUID: uid_t
     private let ownerUID = getuid()
     private var capturedBinding: SetupRetainedInvocationStatus.Binding?
+    private var capturedWindow: SetupRetainedInvocationStatus.Window?
     private let incarnation: UUID
     private let process = getpid()
     private let lock: NSLock
@@ -50,9 +51,10 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable {
         let cleanupState: SetupRetainedInvocationStatus.Fact<SetupRetainedInvocationStatus.Cleanup>
         if phase == .settled { cleanupState = .observed(.settled) }
         else if settling { cleanupState = .observed(.joining) }
-        else if worker || !cleanup.isEmpty { cleanupState = .observed(.pending) }
+        else if !cleanup.isEmpty { cleanupState = .observed(.pending) }
         else { cleanupState = .observed(.noneRegistered) }
-        return .reservation(observed, identity: .init(reservationID: statusID, incarnation: incarnation), binding: capturedBinding, cleanup: cleanupState)
+        return .reservation(observed, identity: .init(reservationID: statusID, incarnation: incarnation), binding: capturedBinding,
+            expectedWindow: capturedWindow, worker: worker ? .running : .idle, cleanup: cleanupState)
     }
     /// Store only a completed protected capture, never an unvalidated target hint or request UID.
     func bind(_ value: SetupRetainedCallerBinding, invocation owner: SetupRetainedInvocation) throws {
@@ -67,6 +69,18 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable {
             let binding = try SetupRetainedInvocationStatus.capturedBinding(value)
             guard capturedBinding == nil || capturedBinding == binding else { throw RuntimePreparationError.changedScope }
             capturedBinding = binding
+        }
+    }
+    /// Pins authorized metadata only. A matching row still needs a protected read before it supplies outcomes.
+    func bindWindow(_ window: RuntimeMaintenanceWindowRecord, invocation owner: SetupRetainedInvocation) throws {
+        defer { withExtendedLifetime(owner) {} }
+        guard getpid() == process else { throw AdministrativeSetupError.unavailable }
+        try lock.withLock {
+            try requireAttached(owner)
+            guard let capturedBinding, capturedBinding.matches(window.scope) else { throw RuntimePreparationError.changedScope }
+            let identity = SetupRetainedInvocationStatus.Window(window)
+            guard capturedWindow == nil || capturedWindow == identity else { throw RuntimePreparationError.changedScope }
+            capturedWindow = identity
         }
     }
     func state() throws -> State {

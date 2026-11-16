@@ -17,6 +17,14 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         deinit { close() }
     }
 
+    /// Ordinary-owner capture fixtures. The native guard and Root path never accept these callbacks.
+    struct OwnedCapture {
+        let invocation: XPCInvocationGuard
+        let verifyPeer: () throws -> XPCPeerCredentials
+        let binding: () throws -> SetupRetainedCallerBinding
+        let maintenance: () throws -> SetupAccountOwner.RetainedMaintenanceCapture
+    }
+    private let verifyPeer: (XPCInvocationGuard) throws -> XPCPeerCredentials
     let peer: XPCPeerCredentials
     private let capture: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding
     private let captureMaintenance: (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture
@@ -56,10 +64,10 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     /// Ordinary-owner controls cannot import Root rights. An alternate incarnation tests attachment refusal only.
     static func openOwned(owner: SetupAccountOwner, binding: SetupRetainedCallerBinding, policy: XPCPeerPolicy,
                           verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void = {},
-                          rejectedIncarnation: UUID? = nil) throws -> Self {
+                          rejectedIncarnation: UUID? = nil, ownedCapture: OwnedCapture? = nil) throws -> Self {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupAdministratorAuthorizationError.wrongProcess }
         return try begin(owner: owner, peer: binding.peer, incarnation: binding.incarnation, policy: policy,
-            verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation)
+            verifyRights: verifyRights, closeRights: closeRights, rejectedIncarnation: rejectedIncarnation, ownedCapture: ownedCapture)
     }
     /// Ordinary-owner fixtures supply a completed protected capture. Root cannot use this seam.
     func captureOwnedBinding(_ binding: SetupRetainedCallerBinding) throws {
@@ -71,7 +79,8 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     }
     private static func begin(owner: SetupAccountOwner, peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
         verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
-        rejectedIncarnation: UUID? = nil) throws -> Self {
+        rejectedIncarnation: UUID? = nil, ownedCapture: OwnedCapture? = nil) throws -> Self {
+        if ownedCapture != nil { try RuntimeMaintenanceOwnedControl.require() }
         let rights = RightsOwner(closeRights)
         do {
             if let rejectedIncarnation {
@@ -83,10 +92,19 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
                 try verifyRights(); try reservation.verify()
                 let value = Self(peer: peer, incarnation: rejectedIncarnation ?? incarnation, policy: policy,
                     verifyRights: verifyRights, closeRights: rights.close,
-                    verifyReservation: reservation.verify, reservation: reservation.record, capture: { invocation, candidate in
-                        try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
+                    verifyReservation: reservation.verify, reservation: reservation.record, verifyPeer: { actual in
+                        if let ownedCapture {
+                            try RuntimeMaintenanceOwnedControl.require()
+                            guard actual === ownedCapture.invocation else { throw XPCPeerPolicyError.wrongConnection }
+                            return try ownedCapture.verifyPeer()
+                        }
+                        return try actual.verifyInvocation()
+                    }, capture: { invocation, candidate in
+                        if let ownedCapture { try RuntimeMaintenanceOwnedControl.require(); return try ownedCapture.binding() }
+                        return try owner.retainedCallerBinding(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
                     }, captureMaintenance: { invocation, candidate in
-                        try owner.retainedMaintenanceCapture(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
+                        if let ownedCapture { try RuntimeMaintenanceOwnedControl.require(); return try ownedCapture.maintenance() }
+                        return try owner.retainedMaintenanceCapture(invocation: invocation, candidate: candidate, admission: reservation.record.admission)
                     }, recaptureMaintenance: { expected, transitions, capture, pair, candidate, current in
                         try owner.recaptureRetainedMaintenance(expected: expected, transitions: transitions, capture: capture,
                             pair: pair, candidate: candidate, admission: reservation.record.admission, current: current)
@@ -99,6 +117,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
     private init(peer: XPCPeerCredentials, incarnation: UUID, policy: XPCPeerPolicy,
                  verifyRights: @escaping () throws -> Void, closeRights: @escaping () -> Void,
                  verifyReservation: @escaping () throws -> Void, reservation: SetupRetainedInvocationReservation,
+                 verifyPeer: @escaping (XPCInvocationGuard) throws -> XPCPeerCredentials,
                  capture: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupRetainedCallerBinding,
                  captureMaintenance: @escaping (XPCInvocationGuard, SignedReleaseEvidence) throws -> SetupAccountOwner.RetainedMaintenanceCapture,
                  recaptureMaintenance: @escaping (SetupAccountOwner.RetainedMaintenanceCapture, [PreparationIntentStore.RuntimeMaintenanceTransition],
@@ -106,7 +125,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         self.peer = peer; self.incarnation = incarnation; acceptedPolicy = policy; self.capture = capture
         self.captureMaintenance = captureMaintenance; self.recaptureMaintenance = recaptureMaintenance
         self.verifyRights = verifyRights; self.closeRights = closeRights
-        self.verifyReservation = verifyReservation; self.reservation = reservation
+        self.verifyReservation = verifyReservation; self.reservation = reservation; self.verifyPeer = verifyPeer
     }
     func belongs(to reservation: SetupRetainedInvocationReservation) -> Bool {
         getpid() == processID && self.reservation === reservation
@@ -118,7 +137,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             guard !active, !invoked, invocation.incarnation == incarnation else { throw XPCPeerPolicyError.wrongConnection }
             active = true; defer { active = false }
             try validateLifetime()
-            guard try invocation.verifyInvocation() == peer else { throw XPCPeerPolicyError.wrongPeer }
+            guard try verifyPeer(invocation) == peer else { throw XPCPeerPolicyError.wrongPeer }
             let value = try capture(invocation, candidate)
             guard value.incarnation == incarnation, value.peer == peer else { throw XPCPeerPolicyError.wrongPeer }
             try validateLifetime(); try reservation.bind(value, invocation: self); return value
@@ -131,7 +150,7 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         return try lock.withLock {
             guard !active, !invoked, invocation.incarnation == incarnation else { throw XPCPeerPolicyError.wrongConnection }
             active = true; defer { active = false }; try validateLifetime()
-            guard try invocation.verifyInvocation() == peer else { throw XPCPeerPolicyError.wrongPeer }
+            guard try verifyPeer(invocation) == peer else { throw XPCPeerPolicyError.wrongPeer }
             let value = try captureMaintenance(invocation, candidate); try validateLifetime()
             try reservation.bind(value.binding, invocation: self); return value
         }
@@ -144,14 +163,17 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         return try lock.withLock {
             try validateLifetime()
-            guard !active, !invoked, invocation.incarnation == incarnation, try invocation.verifyInvocation() == peer,
+            guard !active, !invoked, invocation.incarnation == incarnation, try verifyPeer(invocation) == peer,
                   expected.binding.peer == peer, expected.binding.incarnation == incarnation else {
                 throw XPCPeerPolicyError.wrongPeer
             }
             let commitments = try RuntimeMaintenanceCommitments.capture(binding: expected.binding,
                 inputs: expected.inputs, candidate: candidate, purpose: purpose)
             try validateLifetime()
-            return try .init(id: id, revision: revision, purpose: purpose, scope: commitments.scope)
+            let window = try RuntimeMaintenanceWindowRecord(id: id, revision: revision, purpose: purpose, scope: commitments.scope)
+            try reservation.bind(expected.binding, invocation: self)
+            try reservation.bindWindow(window, invocation: self)
+            return window
         }
     }
     func recaptureMaintenance(expected: SetupAccountOwner.RetainedMaintenanceCapture,
