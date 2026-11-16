@@ -408,15 +408,19 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     /// slot has no owner to match: every UID, including the caller's own, reads unavailable rather than absent.
     func testStatusLaneCheckNeverWaitsAndNeverBorrowsTheReservationAdmission() throws {
         try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
-            let blocked = Mutex(false), drift = Mutex(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            let blocked = Mutex(false), drift = Mutex(false), leaseBusy = Mutex(false), entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
             let done = DispatchSemaphore(value: 0)
             let owner = try owner(f, verifyHost: { _ in
                 if drift.withLock({ $0 }) { throw AdministrativeSetupError.changedInstallation }
+                if leaseBusy.withLock({ $0 }) { throw JournalLeaseError.busy }
                 if blocked.withLock({ $0 }) { entered.signal(); _ = resume.wait(timeout: .now() + 3) }
             })
             defer { resume.signal(); _ = done.wait(timeout: .now() + 3); try? owner.close() }
             XCTAssertEqual(owner.statusLaneCheck(), .verified)
             drift.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .refused); drift.withLock { $0 = false }
+            // A busy writer lease is not drift: it only leaves the store-derived facts unavailable.
+            leaseBusy.withLock { $0 = true }; XCTAssertEqual(owner.statusLaneCheck(), .busy); leaseBusy.withLock { $0 = false }
+            XCTAssertEqual(owner.statusLaneCheck(), .verified)
             let (binding, _) = try values(f)
             let reservation = try owner.reserveRetainedInvocation(authenticatedPeer: binding.peer, incarnation: binding.incarnation)
             // The reservation holds the admission: the store is not read, so even drift cannot be observed here.

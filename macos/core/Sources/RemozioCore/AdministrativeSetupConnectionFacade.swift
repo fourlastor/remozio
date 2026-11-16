@@ -20,15 +20,31 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     private var current = State.undecided
     private var endpoint: (any SetupNormalEndpoint)?
     private var statusInFlight = false
+    private let now: () -> UInt64
+    private var lastCheck: UInt64?
+    /// Nanoseconds between store-backed installation checks on one status connection.
+    static let checkInterval: UInt64 = 5_000_000_000
 
     /// Fixtures inject every capability. The native listener passes the accepted invocation guard, its slot and the shared owner.
     init(verify: @escaping () throws -> XPCPeerCredentials, select: @escaping (SetupConnectionSlots.Mode) -> Bool,
          openNormal: @escaping (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint,
          status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus,
          check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
-         invalidate: @escaping () -> Void) {
+         now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, invalidate: @escaping () -> Void) {
         self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status
-        self.check = check; self.touch = touch; self.invalidate = invalidate
+        self.check = check; self.touch = touch; self.now = now; self.invalidate = invalidate
+    }
+    /// Runs the owner check when none ran on this connection or the last one is older than `checkInterval`.
+    /// Only drift or closure refuses; a busy owner or a held admission reuses no store result and is retried next time.
+    private func checkInstallation() -> Bool {
+        let time = now()
+        let due = lock.withLock { lastCheck.map { time &- $0 >= Self.checkInterval } ?? true }
+        guard due else { return true }
+        switch check() {
+        case .refused: return false
+        case .verified: lock.withLock { lastCheck = time }; return true
+        case .pinned, .busy: return true
+        }
     }
     var state: State { lock.withLock { current } }
 
@@ -56,9 +72,9 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         guard state == .undecided || state == .statusOnly, request.count <= SetupRetainedStatusWire.maximumRequestBytes else {
             close(); reply(nil); return
         }
-        // Installation and configuration drift are checked on every status call, without waiting for the owner.
-        let checked = check()
-        guard checked != .refused else { close(); reply(nil); return }
+        // Installation and configuration drift are checked when status is selected, then at most every
+        // `checkInterval` on this connection, so repeated status calls cannot keep mutations waiting on the owner lock.
+        guard checkInstallation() else { close(); reply(nil); return }
         let admitted = lock.withLock { () -> Bool in
             guard !statusInFlight else { return false }
             switch current {
@@ -76,9 +92,8 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         defer { lock.withLock { statusInFlight = false }; touch() }
         do {
             let decoded = try SetupRetainedStatusWire.Request.decode(request)
-            // A busy owner leaves freshness uncertain, so every fact is unavailable rather than read.
-            let value = checked == .busy ? SetupRetainedInvocationStatus.unavailable : status(peer)
-            let bytes = try SetupRetainedStatusWire.reply(decoded, value)
+            // Every check result answers with the in-memory projection only; nothing store-derived is reported.
+            let bytes = try SetupRetainedStatusWire.reply(decoded, status(peer))
             // Recheck the same peer and connection lifetime before the reply leaves.
             guard (try? verify()) == peer, lock.withLock({ current == .statusOnly }) else { close(); reply(nil); return }
             reply(bytes)

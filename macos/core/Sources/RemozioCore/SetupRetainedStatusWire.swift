@@ -43,6 +43,8 @@ enum SetupRetainedStatusWire {
     }
 
     /// Unavailable facts encode as null. A decoder never turns null into a terminal outcome.
+    /// The status lane reports only the in-memory projection, so fields 5 (window), 6 (operation), 7 (restoration) and
+    /// 10 (supervisor) are always null until a later cut adds a bounded durable read or a supervisor observation.
     static func reply(_ request: Request, _ status: SetupRetainedInvocationStatus) throws -> Data {
         func fact<V: Equatable & Sendable>(_ value: SetupRetainedInvocationStatus.Fact<V>, _ encode: (V) -> CBORValue) -> CBORValue {
             if case .observed(let observed) = value { return encode(observed) }

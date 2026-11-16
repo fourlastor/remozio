@@ -60,7 +60,8 @@ public enum AdministrativeSetupInterface {
 }
 
 /// One authenticated local app connection. A shared owner serializes every machine-store operation.
-/// The listener must enforce this peer policy, retain the connection and activate it only after construction succeeds.
+/// The listener exports `AdministrativeSetupConnectionFacade`, which builds this endpoint through `openNormal` on the first
+/// normal hello. The public initializer keeps the earlier direct export for fixtures and peers that build it themselves.
 public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetupMaintenanceXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let owner: SetupAccountOwner
