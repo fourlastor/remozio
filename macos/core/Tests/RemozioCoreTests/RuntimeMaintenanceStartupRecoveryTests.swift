@@ -741,7 +741,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
                     guard first else { return }
                     client.preconditionIsolated()
                     events.withLock { $0.append("phase") }
-                    let task = Task {
+                    let task = Task { @Sendable [client] in
                         await client.close()
                         events.withLock { $0.append("closed") }
                     }
