@@ -239,8 +239,10 @@ November 2026 the owner adopted the measured candidate for decision 5. Decisions
    launch experiment measured that this capability set is enough for every check
    except an outside reading of the frontend's personality, which the frontend
    reports itself. That capability can trace Root processes, so production also
-   needs confinement to the frontend peer, a separate experiment. The execution
-   identity stays open.
+   needs confinement to the frontend peer, a separate experiment. The
+   [monitor confinement experiment](experiments/linux-monitor-confinement.md)
+   prepares an AppArmor ptrace peer policy for it; its supervised run is pending.
+   The execution identity stays open.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would
    break `sudo` inside the command, and `ProtectSystem=` would make system paths

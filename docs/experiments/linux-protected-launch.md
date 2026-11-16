@@ -268,7 +268,8 @@ and the Linux host owner adopted the candidate for decision 5 on 15 November 202
 - **Monitor confinement.** `CAP_SYS_PTRACE` can trace Root processes. Before
   production the monitor needs confinement to the frontend peer (for example an
   AppArmor `ptrace (trace) peer=` rule) and a review of its IPC surface. That is a
-  separate experiment and a decision for the Linux host owner.
+  separate experiment ([monitor confinement](linux-monitor-confinement.md)) and a
+  decision for the Linux host owner.
 - **An outside reading of the personality.** The monitor relies on the value that
   the verified frontend reports. The `AT_SECURE` and dumpability results come from
   the kernel's own records.
