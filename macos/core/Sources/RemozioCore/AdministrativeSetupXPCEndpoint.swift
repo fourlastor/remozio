@@ -60,7 +60,8 @@ public enum AdministrativeSetupInterface {
 }
 
 /// One authenticated local app connection. A shared owner serializes every machine-store operation.
-/// The listener must enforce this peer policy, retain the connection and activate it only after construction succeeds.
+/// The listener exports `AdministrativeSetupConnectionFacade`, which builds this endpoint through `openNormal` on the first
+/// normal hello. The public initializer keeps the earlier direct export for fixtures and peers that build it themselves.
 public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetupMaintenanceXPCProtocol, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let owner: SetupAccountOwner
@@ -107,6 +108,18 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
         connection.exportedObject = self
         // Handler execution retires the context before the prior handler and endpoint close.
         try invocation.observeConnectionLifetime(onClose: { [weak self] in self?.close() })
+    }
+    /// Facade-owned endpoint. The facade has already checked credentials, configured and exported the connection,
+    /// and installed connection-lifetime handling. The normal lane keeps the existing construction checks.
+    static func openNormal(invocation: XPCInvocationGuard, owner: SetupAccountOwner, onHandshake: @escaping @Sendable () -> Void,
+                           close: @escaping @Sendable () -> Void) throws -> AdministrativeSetupXPCEndpoint {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        // Retained maintenance cleanup runs before normal owner admission. It never resumes an upgrade or starts services.
+        _ = owner.retryAuditUpgradeCleanup()
+        try owner.verifyCurrent()
+        return .init(owner: owner, verify: { try invocation.verifyInvocation().userID },
+            authorize: { try SetupAdministratorAuthorization.validate(externalForm: $0, invocation: invocation) },
+            invalidate: close, onHandshake: onHandshake, auditUpgradeOperations: try .native(owner: owner, invocation: invocation))
     }
     // Fixtures prove sequencing and scoped storage only. Product callers cannot inject authorization or invocation checks.
     init(owner: SetupAccountOwner, verify: @escaping () throws -> uid_t,

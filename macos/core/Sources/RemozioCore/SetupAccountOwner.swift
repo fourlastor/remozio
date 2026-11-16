@@ -317,9 +317,38 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
     /// Returns metadata only. A reserved record with no invocation is still constructing.
-    /// Library-only snapshot. The future status endpoint authenticates the peer and current account before calling it.
+    /// The caller supplies an authenticated peer and its current directory identity; the status lane uses the one-argument entry below.
     func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
         retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
+    enum StatusLaneCheck: Equatable, Sendable { case verified, pinned, busy, refused }
+    /// The installation and configuration check for a connection that selects status. It never waits:
+    /// - owner lock held by other work, or the store's writer lease busy: `busy`;
+    /// - admission held by a reservation: `pinned`. Reading the store would borrow that admission, which the status
+    ///   lane must never do (contract section 1.2), so only the release barrier and the open owner are checked;
+    /// - otherwise the same store-backed check as `verifyCurrent`: `verified`, or `refused` on drift or closure.
+    /// `busy` and `pinned` both answer with the in-memory projection only; nothing store-derived is reported.
+    func statusLaneCheck() -> StatusLaneCheck {
+        guard getpid() == processID else { return .refused }
+        guard lock.try() else { return .busy }
+        defer { lock.unlock() }
+        guard !closed, !closing else { return .refused }
+        do {
+            guard asynchronousWork.isIdle else { try releaseActivity?.validate(); return .pinned }
+            let activity = try releaseActivity?.acquireShared()
+            defer { activity?.close() }
+            _ = try machines.use { try currentInventory($0) }
+            try activity?.validate()
+            return .verified
+        } catch JournalLeaseError.busy {
+            return .busy
+        } catch { return .refused }
+    }
+    /// Status lane entry. The directory identity comes from the authenticated peer UID, never from the request.
+    /// Neither the owner lock nor the machine store is touched, so a held reservation or a busy writer cannot block it.
+    func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials) -> SetupRetainedInvocationStatus {
+        guard getpid() == processID, let currentOwner = try? lookupAccount(authenticatedPeer.userID) else { return .unavailable }
+        return retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
     }
     func retainedInvocationState() throws -> SetupRetainedInvocationReservation.State? {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }

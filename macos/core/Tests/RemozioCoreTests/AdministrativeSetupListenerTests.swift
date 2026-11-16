@@ -84,7 +84,7 @@ final class AdministrativeSetupListenerTests: XCTestCase {
             let machine = try store(root, initialize: true), inventory = try inventory(machine)
             _ = try begin(root, machine, inventory)
             let owner = try owner(root, machine: machine, release: inventory.releaseDigest); defer { try? owner.close() }
-            let registry = try AuthorityConnectionRegistry(maximum: 1, timeoutMilliseconds: 5000); try registry.start()
+            let registry = try SetupConnectionSlots(maximumConnections: 1, timeoutMilliseconds: 5000); try registry.start()
             let id = try XCTUnwrap(registry.reserve()), closes = Count()
             let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { getuid() }, authorize: { _ in },
                 invalidate: { closes.increment(); registry.remove(id) }, onHandshake: { registry.handshake(id) })
@@ -100,7 +100,7 @@ final class AdministrativeSetupListenerTests: XCTestCase {
         try fixture { root in
             let machine = try store(root, initialize: true), inventory = try inventory(machine)
             let owner = try owner(root, machine: machine, release: inventory.releaseDigest); defer { try? owner.close() }
-            let registry = try AuthorityConnectionRegistry(maximum: 1, timeoutMilliseconds: 100); try registry.start()
+            let registry = try SetupConnectionSlots(maximumConnections: 1, timeoutMilliseconds: 100); try registry.start()
             let id = try XCTUnwrap(registry.reserve()), closes = Count(), ended = expectation(description: "stalled setup connection closes")
             let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { getuid() }, authorize: { _ in }, invalidate: {
                 closes.increment(); registry.remove(id); ended.fulfill()
@@ -115,7 +115,7 @@ final class AdministrativeSetupListenerTests: XCTestCase {
         try fixture { root in
             let machine = try store(root, initialize: true), inventory = try inventory(machine)
             let owner = try owner(root, machine: machine, release: inventory.releaseDigest); defer { try? owner.close() }
-            let registry = try AuthorityConnectionRegistry(maximum: 1, timeoutMilliseconds: 5000); try registry.start()
+            let registry = try SetupConnectionSlots(maximumConnections: 1, timeoutMilliseconds: 5000); try registry.start()
             let id = try XCTUnwrap(registry.reserve()), ready = Count()
             let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { throw Interrupted() }, authorize: { _ in },
                 invalidate: { registry.remove(id) }, onHandshake: { ready.increment(); registry.handshake(id) })
@@ -128,7 +128,7 @@ final class AdministrativeSetupListenerTests: XCTestCase {
             let machine = try store(root, initialize: true), inventory = try inventory(machine)
             let expected = try begin(root, machine, inventory)
             let owner = try owner(root, machine: machine, release: inventory.releaseDigest); defer { try? owner.close() }
-            let registry = try AuthorityConnectionRegistry(maximum: 2, timeoutMilliseconds: 5000); try registry.start()
+            let registry = try SetupConnectionSlots(maximumConnections: 2, timeoutMilliseconds: 5000); try registry.start()
             let closes = Count()
             for _ in 0..<2 {
                 let id = try XCTUnwrap(registry.reserve())
@@ -150,6 +150,23 @@ final class AdministrativeSetupListenerTests: XCTestCase {
                 XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
             }
             XCTAssertNoThrow(try owner.verifyCurrent())
+        }
+    }
+    func testNormalLaneConstructionRequiresRootBeforeTouchingTheOwner() throws {
+        try fixture { root in
+            let machine = try store(root, initialize: true), inventory = try inventory(machine)
+            let verified = Count()
+            let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: inventory.releaseDigest, resume: { _, value in value },
+                verifyHost: { _ in verified.increment() })
+            defer { try? owner.close() }
+            let policy = try XPCPeerPolicy(teamID: "ABCDEFGHIJ", componentIdentifier: "dev.remozio.app",
+                approvedCodeDirectoryHashes: [Data(repeating: 4, count: 20)], expectedUserID: getuid())
+            let invocation = XPCInvocationGuard(connection: NSXPCConnection(), policy: policy), handshakes = Count(), closes = Count()
+            XCTAssertThrowsError(try AdministrativeSetupXPCEndpoint.openNormal(invocation: invocation, owner: owner,
+                onHandshake: { handshakes.increment() }, close: { closes.increment() })) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+            XCTAssertEqual(verified.value, 0); XCTAssertEqual(handshakes.value, 0); XCTAssertEqual(closes.value, 0)
         }
     }
 }

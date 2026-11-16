@@ -3,21 +3,22 @@ import Foundation
 
 private final class NativeAdministrativeSetupConnection: OwnedAuthorityConnection, @unchecked Sendable {
     private let connection: NSXPCConnection
-    private let endpoint: AdministrativeSetupXPCEndpoint
-    init(connection: NSXPCConnection, endpoint: AdministrativeSetupXPCEndpoint) {
-        self.connection = connection; self.endpoint = endpoint
+    private let facade: AdministrativeSetupConnectionFacade
+    init(connection: NSXPCConnection, facade: AdministrativeSetupConnectionFacade) {
+        self.connection = connection; self.facade = facade
     }
     func activate() { connection.activate() }
-    func close() { endpoint.close(); connection.invalidate() }
+    func close() { facade.close(); connection.invalidate() }
     deinit { connection.invalidate() }
 }
 
 /// Root local listener. The host must verify protected code placement and launchd registration independently.
 /// Each app connection uses its kernel UID. The shared setup owner checks account ownership on every operation.
+/// A connection first chooses a lane: status (bounded, never takes the owner lock) or a normal hello (builds the endpoint).
 public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelegate, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let listener: NSXPCListener
-    private let registry: AuthorityConnectionRegistry
+    private let registry: SetupConnectionSlots
     private let owner: SetupAccountOwner
     private let teamID: String
     private let appIdentifier: String
@@ -34,7 +35,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
         }
         let template = try XPCPeerPolicy(teamID: teamID, componentIdentifier: appIdentifier,
             approvedCodeDirectoryHashes: appHashes, expectedUserID: 0)
-        registry = try AuthorityConnectionRegistry(maximum: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
+        registry = try SetupConnectionSlots(maximumConnections: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         listener = NSXPCListener(machServiceName: serviceName)
         self.owner = owner; self.teamID = teamID; self.appIdentifier = appIdentifier; self.appHashes = appHashes
         super.init()
@@ -64,11 +65,33 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                 guard uid > 0, uid < UInt32.max else { throw AdministrativeSetupError.wrongAccount }
                 let policy = try XPCPeerPolicy(teamID: teamID, componentIdentifier: appIdentifier,
                     approvedCodeDirectoryHashes: appHashes, expectedUserID: uid)
-                let endpoint = try AdministrativeSetupXPCEndpoint(connection: connection, peerPolicy: policy, owner: owner,
-                    onHandshake: { [weak registry] in registry?.handshake(id) }, onClose: { [weak registry] in registry?.remove(id) })
-                let retained = NativeAdministrativeSetupConnection(connection: connection, endpoint: endpoint)
+                let facade = try Self.facade(connection: connection, policy: policy, owner: owner, registry: registry, id: id)
+                let retained = NativeAdministrativeSetupConnection(connection: connection, facade: facade)
                 return registry.install(retained, id: id)
             } catch { registry.remove(id); connection.invalidate(); return false }
         }
+    }
+    /// Accept-time work: real credentials, the lifetime observer and the facade only. No owner access, no store, no admission.
+    private static func facade(connection: NSXPCConnection, policy: XPCPeerPolicy, owner: SetupAccountOwner,
+                               registry: SetupConnectionSlots, id: UUID) throws -> AdministrativeSetupConnectionFacade {
+        _ = try policy.verifyCredentials(connection)
+        let invocation = XPCInvocationGuard(connection: connection, policy: policy)
+        let facade = AdministrativeSetupConnectionFacade(
+            verify: { try invocation.verifyInvocation() },
+            select: { [weak registry] in registry?.select($0, id: id) ?? false },
+            openNormal: { close in
+                try AdministrativeSetupXPCEndpoint.openNormal(invocation: invocation, owner: owner,
+                    onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
+            },
+            status: { [weak owner] in owner?.retainedInvocationStatus(authenticatedPeer: $0) ?? .unavailable },
+            check: { [weak owner] in owner?.statusLaneCheck() ?? .refused },
+            touch: { [weak registry] in registry?.touch(id) },
+            invalidate: { [weak connection, weak registry] in invocation.retireConnection(); connection?.invalidate(); registry?.remove(id) })
+        policy.configure(connection)
+        connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupServiceXPCProtocol.self)
+        connection.exportedObject = facade
+        // Handler execution retires the context before the prior handler and the facade close.
+        try invocation.observeConnectionLifetime(onClose: { [weak facade] in facade?.close() })
+        return facade
     }
 }
