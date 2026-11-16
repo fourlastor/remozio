@@ -208,7 +208,7 @@ def loaded_profiles():
 
 
 def sanitize_label(raw, tag):
-    text = raw.decode("ascii", "replace").strip() if isinstance(raw, bytes) else "not-measured"
+    text = raw.decode("ascii", "replace").strip("\0 \n") if isinstance(raw, bytes) else "not-measured"
     text = text.replace(tag, "<tag>") if tag else text
     return text if text in LABELS else "other"
 
@@ -414,6 +414,8 @@ class Run(PL.Run):
         self.group_name, self.monitor_name = f"rmzcg{self.tag}", f"rmzcm{self.tag}"
         self.tools = tools
         self.profiles, self.loaded, self.units = {}, [], []
+        # Set when a case could not confirm that all its processes ended: profiles then stay.
+        self.unreaped = False
         self.target_seconds = str(int(timeout) + 5)
 
     def path(self, *parts):
@@ -568,7 +570,14 @@ class Run(PL.Run):
                 return {"passed": False, "error_type": "ProfileRemovalFailed"}
         handler = {"monitor": self.monitor_case, "probe": self.probe_case, "userns": self.userns_case,
                    "absent": self.absent_case, "kill": self.kill_case}[spec["kind"]]
-        return handler(case, spec)
+        try:
+            result = handler(case, spec)
+        except BaseException:
+            self.unreaped = True  # the case did not report its processes as ended
+            raise
+        if result.get("cleanupReapedAllFixtureProcesses") is False:
+            self.unreaped = True
+        return result
 
     @staticmethod
     def _failed(error, clean, extra=None):
@@ -749,7 +758,10 @@ class Run(PL.Run):
             labels["probe"] = read_label(probe.pid, self.tag)
             time.sleep(1)  # the case deadline, shortened: the probe still waits for its go byte
             if probe.poll() is None:
-                os.killpg(probe.pid, signal.SIGKILL)
+                try:
+                    os.killpg(probe.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # it ended on its own between the poll and the kill: killedBySigkill stays false
                 killed = probe.wait(timeout=3) == -signal.SIGKILL
         except subprocess.TimeoutExpired:
             error = "TimeoutError"
@@ -783,9 +795,14 @@ class Run(PL.Run):
     def cleanup(self):
         """Units first, then profiles (every fixture process is already reaped: a removed
         profile does not keep its tasks confined), then the #728 files, user and group. Each
-        step runs even when an earlier one fails."""
+        step runs even when an earlier one fails, except one: while a unit or a fixture process
+        may still live, the profiles stay loaded (until reboot), so nothing that holds
+        CAP_SYS_PTRACE loses its confinement."""
         units = all([_succeeds(self.stop_unit, unit) for unit in self.units])
-        profiles = all([_succeeds(self.remove_profile, name) for name in self.loaded])
+        if units and not self.unreaped:
+            profiles = all([_succeeds(self.remove_profile, name) for name in self.loaded])
+        else:
+            profiles = not self.loaded
         state = super().cleanup()
         return {"transientUnitsStopped": units, "profilesRemoved": profiles, **state}
 
@@ -840,8 +857,9 @@ def measure(timeout=15):
             if not all(cleanup.values()):
                 sys.stderr.write(f"Disposable state not fully removed: inspect {PL.BASE_PARENT}/{BASE_PREFIX}*, the "
                                  "rmzcg*/rmzcm* system accounts, rmzmc-* transient units, and the rmzmc- profiles in "
-                                 "/sys/kernel/security/apparmor/profiles (remove each by writing its name to "
-                                 "/sys/kernel/security/apparmor/.remove).\n")
+                                 "/sys/kernel/security/apparmor/profiles. End every remaining fixture process and "
+                                 "rmzmc- unit first, then remove each profile by writing its name to "
+                                 "/sys/kernel/security/apparmor/.remove.\n")
     passed = (bool(setup) and all(setup.values()) and all(cleanup.values()) and set(cases) == set(CASES)
               and all(item["passed"] for item in cases.values()))
     return {"experiment": "linux-monitor-confinement-v1",

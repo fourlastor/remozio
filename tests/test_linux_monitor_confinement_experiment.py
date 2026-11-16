@@ -256,6 +256,11 @@ class LabelAndDenialTests(unittest.TestCase):
         self.assertEqual(EXPERIMENT.sanitize_label(b"rmzmc-monitor-ffffffff (enforce)\n", TAG), "other")
         self.assertEqual(EXPERIMENT.sanitize_label(None, TAG), "not-measured")
 
+    def test_labels_accept_the_kernel_nul_terminator(self):
+        self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG} (enforce)\0".encode(), TAG),
+                         EXPERIMENT.PROBE_LABEL)
+        self.assertEqual(EXPERIMENT.sanitize_label(b"unconfined\n\0", TAG), "unconfined")
+
     def test_loaded_profiles_parses_names_and_modes(self):
         listing = b"rmzmc-frontend-0123abcd (enforce)\n/usr/bin/man (complain)\nbroken line\n"
         with patch.object(EXPERIMENT, "LOADED_PROFILES", Mock(read_bytes=Mock(return_value=listing))):
@@ -364,16 +369,40 @@ class RunTests(unittest.TestCase):
                                             call.remove_profile("b"), call.state()])
         self.assertEqual(state, {"transientUnitsStopped": True, "profilesRemoved": True, "filesRemoved": True})
 
-    def test_cleanup_continues_after_failed_steps(self):
+    def test_cleanup_continues_after_a_failed_profile_removal(self):
         run = new_run()
         run.units, run.loaded = ["u.service"], ["a", "b"]
-        with patch.object(run, "stop_unit", side_effect=RuntimeError()), \
+        with patch.object(run, "stop_unit", return_value=True), \
              patch.object(run, "remove_profile", side_effect=[OSError(), True]) as remove, \
              patch.object(PL.Run, "cleanup", return_value={"filesRemoved": True}) as state:
             result = run.cleanup()
         self.assertEqual(remove.call_count, 2)
         state.assert_called_once_with()
+        self.assertEqual((result["transientUnitsStopped"], result["profilesRemoved"]), (True, False))
+
+    def test_cleanup_keeps_profiles_while_a_unit_may_still_run(self):
+        run = new_run()
+        run.units, run.loaded = ["u.service"], ["a"]
+        with patch.object(run, "stop_unit", side_effect=RuntimeError()), \
+             patch.object(run, "remove_profile") as remove, \
+             patch.object(PL.Run, "cleanup", return_value={"filesRemoved": True}) as state:
+            result = run.cleanup()
+        remove.assert_not_called()
+        state.assert_called_once_with()
         self.assertEqual((result["transientUnitsStopped"], result["profilesRemoved"]), (False, False))
+
+    def test_cleanup_keeps_profiles_after_a_case_left_a_process(self):
+        run = new_run()
+        run.loaded = ["a"]
+        with patch.object(run, "probe_case", return_value={"passed": False,
+                                                           "cleanupReapedAllFixtureProcesses": False}):
+            run.run_case("n1c")
+        self.assertTrue(run.unreaped)
+        with patch.object(run, "remove_profile") as remove, \
+             patch.object(PL.Run, "cleanup", return_value={"filesRemoved": True}):
+            result = run.cleanup()
+        remove.assert_not_called()
+        self.assertFalse(result["profilesRemoved"])
 
 
 @contextlib.contextmanager

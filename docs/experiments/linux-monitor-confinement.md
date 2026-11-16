@@ -234,6 +234,9 @@ result go here in this change.
 ## What this experiment does not establish
 
 - **The Root-instance limit** (N7c). A decision for the Linux host owner.
+- **The socket surface.** The `unix` rules carry no peer or address limit, so the
+  policy does not restrict which seqpacket sockets the monitor can use. The review
+  of the IPC surface that #728 defers still applies.
 - **A host with AppArmor off**, or another LSM. The runner refuses such a host; a
   production installer must refuse it too.
 - **The production refusal code.** A production monitor must read its own label and

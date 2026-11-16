@@ -89,6 +89,8 @@ static int finish(int code) {
 }
 
 static int parse_u64(const char *text, int base, unsigned long long *out) {
+    /* Digits only: strtoull would accept a sign or leading space and wrap. */
+    if (!*text || strspn(text, base == 16 ? "0123456789abcdef" : "0123456789") != strlen(text)) return -1;
     char *end = NULL;
     errno = 0;
     unsigned long long value = strtoull(text, &end, base);
@@ -266,10 +268,12 @@ static void probe_sleeper(const struct target *t) {
     /* Seize, then release: PTRACE_DETACH needs a ptrace-stop, so interrupt first. */
     int seized = ptrace(PTRACE_SEIZE, t->pid, 0, 0) == 0;
     role_field(t->role, "seize", seized ? "ok" : errname(errno));
+    /* Detach only from a stop; otherwise the probe's exit releases the tracee. */
     if (seized) {
         int wait_status = 0;
-        if (ptrace(PTRACE_INTERRUPT, t->pid, 0, 0) == 0) waitpid(t->pid, &wait_status, __WALL);
-        ptrace(PTRACE_DETACH, t->pid, 0, 0);
+        if (ptrace(PTRACE_INTERRUPT, t->pid, 0, 0) == 0 && waitpid(t->pid, &wait_status, __WALL) == t->pid &&
+            WIFSTOPPED(wait_status))
+            ptrace(PTRACE_DETACH, t->pid, 0, 0);
     }
 
     int mem = mem_open(t->pid);
@@ -461,8 +465,9 @@ static int run_userns_bind(int argc, char **argv) {
         snprintf(map, sizeof map, "0 %u 1\n", (unsigned)gid);
         if (!error) error = write_text("/proc/self/gid_map", map);
         field("uidMap", errname(error));
-        mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
-        mounted = mount(argv[3], argv[2], NULL, MS_BIND, NULL) == 0;
+        /* No bind unless the private remount worked, so nothing can propagate out. */
+        mounted = mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == 0 &&
+                  mount(argv[3], argv[2], NULL, MS_BIND, NULL) == 0;
         field("mount", mounted ? "ok" : errname(errno));
     } else {
         field("uidMap", "not-attempted");
