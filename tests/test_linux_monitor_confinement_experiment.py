@@ -361,7 +361,7 @@ class RunTests(unittest.TestCase):
         run = new_run()
         with tempfile.TemporaryDirectory() as directory:
             run.path = lambda name: os.path.join(directory, name)
-            run.tools = {"journalctl": "/bin/true"}
+            run.tools = {"journalctl": "/usr/bin/true"}  # present on Linux and macOS
             with patch.object(EXPERIMENT, "summarize_denials", return_value=[]):
                 self.assertEqual(run.denials(0), [])
             self.assertEqual(os.stat(os.path.join(directory, "journal")).st_mode & 0o777, 0o600)
