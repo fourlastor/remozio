@@ -110,7 +110,7 @@ private final class StartupHarness: @unchecked Sendable {
     }
     func open(afterProbePolicy: @escaping @Sendable (Row, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action = {
         try RuntimeMaintenanceStartupPolicy.afterProbe($0, sameIncarnation: $1)
-    }) throws -> RuntimeMaintenanceStartupRecovery {
+    }, supervisorWork: RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork? = nil) throws -> RuntimeMaintenanceStartupRecovery {
         try .openOwned(frame: frame(), release: f.candidate, admission: f.admission, directory: f.directory,
             accountBarrier: barrier, read: { try self.frame() }, persist: { next, previous in
                 try self.persistForRecovery(next, previous: previous)
@@ -122,7 +122,7 @@ private final class StartupHarness: @unchecked Sendable {
                 self.afterObservation?(); return self.witness
             }, observeOperation: { _ in self.classifications += 1; return self.classification }, register: {
                 self.beforeRegistration?(); self.registrations += 1; self.inspected = .matching(self.witness.processID)
-            }, afterProbePolicy: afterProbePolicy)
+            }, afterProbePolicy: afterProbePolicy, supervisorWork: supervisorWork)
     }
 
 }
@@ -184,6 +184,40 @@ private final class StartupDriver: AuthorityMaintenanceClientDriver, Sendable {
     }
 }
 
+private enum AutomaticSupervisorTestError: Error {
+    case phaseWaitExpired, phaseReleaseExpired, reentryWaitExpired
+    case workerReturnedBeforePhase(String)
+}
+private final class AutomaticSupervisorPhaseGate: @unchecked Sendable {
+    typealias Control = AuthorityMaintenanceXPCClient.OwnedSupervisorPhaseControl
+    let event = Mutex<Control.Event?>(nil)
+    let reentryDispatched = Mutex(false), reentryReturned = Mutex(false)
+    let workerResult = Mutex<Result<RuntimeMaintenanceWindowRecord, any Error>?>(nil)
+    private let deadline: ContinuousClock.Instant
+    private let resume = DispatchSemaphore(value: 0)
+    private let boundary: Control.Boundary
+    private let rpc: Control.RPC?
+    init(_ boundary: Control.Boundary, rpc: Control.RPC? = nil, until deadline: ContinuousClock.Instant) {
+        self.boundary = boundary; self.rpc = rpc; self.deadline = deadline
+    }
+    func control() throws -> Control {
+        try .init { event in
+            if event.boundary == .beforeRPCDispatch, self.event.withLock({ $0 }) != nil {
+                self.reentryDispatched.withLock { $0 = true }; return
+            }
+            guard event.boundary == self.boundary, event.rpc == self.rpc else { return }
+            let first = self.event.withLock { current in
+                guard current == nil else { return false }; current = event; return true
+            }
+            guard first else { return }
+            while self.resume.wait(timeout: .now() + .milliseconds(10)) != .success {
+                guard ContinuousClock.now < self.deadline else { throw AutomaticSupervisorTestError.phaseReleaseExpired }
+            }
+        }
+    }
+    func open() { resume.signal() }
+}
+
 final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
     private func withAsyncStartup(_ phase: RuntimeMaintenanceWindowRecord.Phase, epoch: UInt8 = 81,
         refuseProbe: Bool = false, failGate: Bool = false,
@@ -202,8 +236,8 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             try XCTUnwrap(result.withLock { $0 }).get()
         }
     }
-    private static func complete(_ h: StartupHarness, _ driver: StartupDriver, timeoutSeconds: Int = 25,
-        startup: RuntimeMaintenanceStartupRecovery? = nil,
+    private static func complete(_ h: StartupHarness, _ driver: StartupDriver, timeoutSeconds: Int? = nil,
+        startup: RuntimeMaintenanceStartupRecovery? = nil, until deadline: ContinuousClock.Instant? = nil,
         beforeOpen: @escaping @Sendable (AuthorityMaintenanceXPCClient) async -> Void = { _ in }) async throws -> RuntimeMaintenanceWindowRecord {
         let startup = try startup ?? h.open(), attempts = Mutex(0)
         return try await startup.runOwned(makeDriver: {
@@ -211,7 +245,8 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             return first ? driver : driver.fresh()
         }, capturePeer: { h.witness }, requirePeerLive: { peer in
             guard try !peer.hasExited() else { throw StartupTestError.expected }
-        }, beforeHealthyOpen: beforeOpen, until: .now.advanced(by: .seconds(timeoutSeconds)))
+        }, beforeHealthyOpen: beforeOpen,
+            until: deadline ?? .now.advanced(by: timeoutSeconds.map { Duration.seconds($0) } ?? restorationTestForwardDeadline))
     }
     private static func failed(_ h: StartupHarness, _ driver: StartupDriver,
         startup: RuntimeMaintenanceStartupRecovery? = nil, timeoutSeconds: Int = 5) async -> Error? {
@@ -762,6 +797,488 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
         }
     }
+    private static func automaticPhaseEvent(_ gate: AutomaticSupervisorPhaseGate,
+        until deadline: ContinuousClock.Instant) async throws -> AutomaticSupervisorPhaseGate.Control.Event {
+        while gate.event.withLock({ $0 }) == nil {
+            if let result = gate.workerResult.withLock({ $0 }) {
+                let outcome: String
+                switch result {
+                case .success: outcome = "returned without reaching the selected phase"
+                case .failure(let error): outcome = "failed before the selected phase: \(error)"
+                }
+                throw AutomaticSupervisorTestError.workerReturnedBeforePhase(outcome)
+            }
+            guard ContinuousClock.now < deadline else { throw AutomaticSupervisorTestError.phaseWaitExpired }
+            try await ContinuousClock().sleep(for: .milliseconds(1))
+        }
+        return try XCTUnwrap(gate.event.withLock { $0 })
+    }
+    private func supervisorReentry(_ boundary: AutomaticSupervisorPhaseGate.Control.Boundary,
+        rpc: AutomaticSupervisorPhaseGate.Control.RPC? = nil, close: Bool, secondRestore: Bool = false) throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
+            let gate = AutomaticSupervisorPhaseGate(boundary, rpc: rpc, until: deadline), cancellation = SetupAuditUpgradeCancellation()
+            defer { gate.open() }
+            defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
+            let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+                deadline: deadline, cancellation: cancellation)
+            let work = try RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork(phases: phases,
+                cancellation: cancellation, control: gate.control())
+            let startup = try h.open(supervisorWork: work)
+            let worker = Task { @Sendable [h, driver, startup, gate] in
+                do {
+                    let row = try await Self.complete(h, driver, startup: startup, until: deadline)
+                    gate.workerResult.withLock { $0 = .success(row) }; return row
+                } catch {
+                    gate.workerResult.withLock { $0 = .failure(error) }; throw error
+                }
+            }
+            let event = try await Self.automaticPhaseEvent(gate, until: deadline)
+            let before = driver.metrics.actions.withLock { $0 }
+            var reentry: Task<Void, Never>?
+            if close { await event.client.close() }
+            else {
+                let operation: @Sendable () async -> Void = {
+                    defer { gate.reentryReturned.withLock { $0 = true } }
+                    do {
+                        if secondRestore {
+                            let context = try XCTUnwrap(event.restoration)
+                            _ = try await event.client.restoreStartupHealthyOwned(context.proof, owner: context.owner,
+                                capturePeer: { h.witness }, requirePeerLive: { _ in }, until: deadline,
+                                persist: { try h.persistForRecovery($0, previous: $1) })
+                        } else {
+                            _ = try await event.client.observeIncarnationOwned(until: deadline)
+                        }
+                    } catch { }
+                }
+                let canReachRPC = boundary == .afterProbe || boundary == .openRequest || boundary == .gateAfter && !secondRestore
+                    || ((boundary == .beforeRPCVerify || boundary == .afterRPCVerify) && (rpc == .reopen || rpc == .gate)) && !secondRestore
+                if canReachRPC {
+                    reentry = Task { @Sendable [operation] in await operation() }
+                    while !gate.reentryDispatched.withLock({ $0 }) && !gate.reentryReturned.withLock({ $0 }) {
+                        guard ContinuousClock.now < deadline else { throw AutomaticSupervisorTestError.reentryWaitExpired }
+                        try await ContinuousClock().sleep(for: .milliseconds(1))
+                    }
+                } else { await operation() }
+            }
+            XCTAssertEqual(driver.metrics.actions.withLock { $0 }, before)
+            gate.open(); await reentry?.value
+            let outcome = await worker.result
+            let row = try XCTUnwrap(h.frame().window)
+            switch outcome {
+            case .success(let confirmed): XCTAssertEqual(confirmed.phase, .restored); XCTAssertEqual(row, confirmed)
+            case .failure: XCTAssertEqual(row.phase, .needsOwnerRecovery)
+            }
+            XCTAssertLessThanOrEqual(h.writes.filter { $0 == .reopenPending }.count, 1)
+            XCTAssertLessThanOrEqual(h.writes.filter { $0 == .restored }.count, 1)
+            XCTAssertEqual(h.writes.filter { $0 == .needsOwnerRecovery }.count, row.phase == .needsOwnerRecovery ? 1 : 0)
+            XCTAssertFalse(driver.metrics.actions.withLock { $0 }.contains { $0 == .arm || $0 == .cancel })
+            XCTAssertNoThrow(try cancellation.check())
+        }
+    }
+    private enum SupervisorReconnectReentry: Sendable { case close, observe, reconnect }
+    private func supervisorReconnectReentry(_ boundary: AutomaticSupervisorPhaseGate.Control.Boundary,
+        rpc: AutomaticSupervisorPhaseGate.Control.RPC? = nil, action: SupervisorReconnectReentry) throws {
+        try withAsyncStartup(.draining, epoch: 71) { h, driver in
+            let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
+            let gate = AutomaticSupervisorPhaseGate(boundary, rpc: rpc, until: deadline), cancellation = SetupAuditUpgradeCancellation()
+            defer { gate.open() }
+            defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
+            let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+                deadline: deadline, cancellation: cancellation)
+            let work = try RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork(phases: phases,
+                cancellation: cancellation, control: gate.control())
+            let startup = try h.open(supervisorWork: work)
+            let worker = Task { @Sendable [h, driver, startup, gate] in
+                do {
+                    let row = try await Self.complete(h, driver, startup: startup, until: deadline)
+                    gate.workerResult.withLock { $0 = .success(row) }; return row
+                } catch {
+                    gate.workerResult.withLock { $0 = .failure(error) }; throw error
+                }
+            }
+            let event = try await Self.automaticPhaseEvent(gate, until: deadline)
+            let before = driver.metrics.actions.withLock { $0 }
+            switch action {
+            case .close: await event.client.close()
+            case .observe: _ = try? await event.client.observeIncarnationOwned(until: deadline)
+            case .reconnect:
+                let context = try XCTUnwrap(event.reconnect)
+                _ = try? await event.client.cancelAndReopenStartupOwned(context.proof, custody: context.custody,
+                    until: deadline)
+            }
+            XCTAssertEqual(driver.metrics.actions.withLock { $0 }, before)
+            gate.open(); let outcome = await worker.result
+            let row = try XCTUnwrap(h.frame().window)
+            switch outcome {
+            case .success(let confirmed): XCTAssertEqual(confirmed, row); XCTAssertEqual(row.phase, .restored)
+            case .failure: XCTAssertEqual(row.phase, .needsOwnerRecovery)
+            }
+            XCTAssertEqual(row.operation, .notStarted)
+            XCTAssertLessThanOrEqual(h.writes.filter { $0 == .reopenPending }.count, 1)
+            XCTAssertLessThanOrEqual(h.writes.filter { $0 == .restored }.count, 1)
+            XCTAssertLessThanOrEqual(driver.metrics.actions.withLock { $0.filter { $0 == .reopen }.count }, 1)
+            XCTAssertFalse(driver.metrics.actions.withLock { $0 }.contains { $0 == .arm || $0 == .cancel })
+            XCTAssertNoThrow(try cancellation.check())
+        }
+    }
+    private func nativeDeadlineAfterWrite(_ phase: RuntimeMaintenanceWindowRecord.Phase) throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let expired = Mutex(false), cancellation = SetupAuditUpgradeCancellation(), deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
+            defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
+            let base = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+                deadline: deadline, cancellation: cancellation)
+            let trigger = try SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl(
+                phase: phase == .restoring ? .beforePending : phase == .reopenPending ? .beforeRestored : .afterRestored,
+                expired: { expired.withLock { $0 } })
+            let phases = try base.forOwnedAttempt(until: deadline, expiration: trigger)
+            let work = try RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork(phases: phases, cancellation: cancellation)
+            let startup = try h.open(supervisorWork: work)
+            h.afterWrite = { row in if row.phase == phase { expired.withLock { $0 = true } } }
+            let result: Result<RuntimeMaintenanceWindowRecord, any Error>
+            do { result = .success(try await Self.complete(h, driver, startup: startup, until: deadline)) }
+            catch { result = .failure(error) }
+            let row = try XCTUnwrap(h.frame().window)
+            XCTAssertTrue(expired.withLock { $0 }); XCTAssertNoThrow(try cancellation.check())
+            if phase == .restored {
+                guard case .success(let confirmed) = result else { return XCTFail("Confirmed restoration was lost") }
+                XCTAssertEqual(confirmed, row); XCTAssertEqual(row.phase, .restored)
+                XCTAssertFalse(h.writes.contains(.needsOwnerRecovery))
+            } else {
+                guard case .failure = result else { return XCTFail("Expired native work reported success") }
+                XCTAssertEqual(row.phase, .needsOwnerRecovery)
+                XCTAssertEqual(row.failure, phase == .restoring ? .healthFailed : .admissionUnconfirmed)
+                XCTAssertEqual(h.writes.filter { $0 == .needsOwnerRecovery }.count, 1)
+            }
+        }
+    }
+    func testSupervisorSameEpochReconnectReconnectValidationClose() throws {
+        try supervisorReconnectReentry(.reconnectValidation, action: .close)
+    }
+    func testSupervisorSameEpochReconnectReconnectValidationObserve() throws {
+        try supervisorReconnectReentry(.reconnectValidation, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectReconnectValidationReconnect() throws {
+        try supervisorReconnectReentry(.reconnectValidation, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectReconnectPendingClose() throws {
+        try supervisorReconnectReentry(.reconnectPending, action: .close)
+    }
+    func testSupervisorSameEpochReconnectReconnectPendingObserve() throws {
+        try supervisorReconnectReentry(.reconnectPending, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectReconnectPendingReconnect() throws {
+        try supervisorReconnectReentry(.reconnectPending, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectReconnectReleaseClose() throws {
+        try supervisorReconnectReentry(.reconnectRelease, action: .close)
+    }
+    func testSupervisorSameEpochReconnectReconnectReleaseObserve() throws {
+        try supervisorReconnectReentry(.reconnectRelease, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectReconnectReleaseReconnect() throws {
+        try supervisorReconnectReentry(.reconnectRelease, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectPersistRestoredClose() throws {
+        try supervisorReconnectReentry(.persistRestored, action: .close)
+    }
+    func testSupervisorSameEpochReconnectPersistRestoredObserve() throws {
+        try supervisorReconnectReentry(.persistRestored, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectPersistRestoredReconnect() throws {
+        try supervisorReconnectReentry(.persistRestored, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyReopenClose() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .reopen, action: .close)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyReopenObserve() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .reopen, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyReopenReconnect() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .reopen, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyReopenClose() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .reopen, action: .close)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyReopenObserve() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .reopen, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyReopenReconnect() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .reopen, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyGateClose() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .gate, action: .close)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyGateObserve() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .gate, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectBeforeRPCVerifyGateReconnect() throws {
+        try supervisorReconnectReentry(.beforeRPCVerify, rpc: .gate, action: .reconnect)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyGateClose() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .gate, action: .close)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyGateObserve() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .gate, action: .observe)
+    }
+    func testSupervisorSameEpochReconnectAfterRPCVerifyGateReconnect() throws {
+        try supervisorReconnectReentry(.afterRPCVerify, rpc: .gate, action: .reconnect)
+    }
+    func testSupervisorDeadlineAfterRestoringWritesTheNormalHealthFallback() throws {
+        try nativeDeadlineAfterWrite(.restoring)
+    }
+    func testSupervisorDeadlineAfterPendingWritesTheAdmissionFallback() throws {
+        try nativeDeadlineAfterWrite(.reopenPending)
+    }
+    func testSupervisorDeadlineAfterConfirmedRestoredKeepsTheConfirmedResult() throws {
+        try nativeDeadlineAfterWrite(.restored)
+    }
+    func testSupervisorTerminalCaptureAcceptsRestoredMetadataFromAnOlderRelease() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            let current = try await Self.complete(h, driver), scope = current.scope
+            let oldScope = try RuntimeMaintenanceWindowRecord.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: scope.authority, target: scope.target, releaseDigest: Data(repeating: 0xa1, count: 32),
+                candidateDigest: Data(repeating: 0xa2, count: 32), authorityPolicyDigest: scope.authorityPolicyDigest,
+                operationDigest: scope.operationDigest, restorationDigest: scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            let old = try RuntimeMaintenanceWindowRecord(id: current.id, revision: current.revision, purpose: current.purpose,
+                scope: oldScope, phase: .restored, operation: current.operation, service: current.service,
+                gate: current.gate, shutdownBinding: current.shutdownBinding)
+            let frame = RuntimeMaintenanceStartupFrame(source: try h.frame().source, window: old)
+            XCTAssertThrowsError(try RuntimeMaintenanceStartupFloor(frame: frame, release: h.f.candidate))
+            let writes = h.writes, actions = driver.metrics.actions.withLock { $0 }
+            let reported = try RuntimeMaintenanceStartupRecovery.terminalForSupervisorOwned(frame: frame, accountID: scope.authority.accountID)
+            let request = try SetupMaintenanceRecoverySupervisor.Request(accountID: scope.authority.accountID,
+                windowID: old.id, revision: Data(repeating: 0x29, count: 16))
+            XCTAssertNotEqual(request.revision, old.revision)
+            XCTAssertEqual(SetupMaintenanceRecoveryNativeAdapter.terminalObservation(reported, request: request), .phase(.restored))
+            XCTAssertEqual(reported, old); XCTAssertEqual(h.writes, writes)
+            XCTAssertEqual(driver.metrics.actions.withLock { $0 }, actions)
+        }
+    }
+    func testSupervisorTerminalCaptureRejectsAForeignAccount() throws {
+        try withAsyncStartup(.stopped) { h, driver in
+            _ = try await Self.complete(h, driver)
+            let frame = try h.frame()
+            XCTAssertThrowsError(try RuntimeMaintenanceStartupRecovery.terminalForSupervisorOwned(frame: frame,
+                accountID: Data(repeating: 0xef, count: 16))) { XCTAssertEqual($0 as? RuntimePreparationError, .changedScope) }
+        }
+    }
+    func testSupervisorCloseDuringAfterProbeFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.afterProbe, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterProbeFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.afterProbe, close: false)
+    }
+    func testSupervisorCloseDuringOpenRequestFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.openRequest, close: true)
+    }
+    func testSupervisorSecondOperationDuringOpenRequestFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.openRequest, close: false)
+    }
+    func testSupervisorCloseDuringVerifyBeforeOpenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.verifyBeforeOpen, close: true)
+    }
+    func testSupervisorSecondOperationDuringVerifyBeforeOpenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.verifyBeforeOpen, close: false)
+    }
+    func testSupervisorCloseDuringHealthyBindingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.healthyBinding, close: true)
+    }
+    func testSupervisorSecondOperationDuringHealthyBindingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.healthyBinding, close: false)
+    }
+    func testSupervisorCloseDuringValidateBeforePendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.validateBeforePending, close: true)
+    }
+    func testSupervisorSecondOperationDuringValidateBeforePendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.validateBeforePending, close: false)
+    }
+    func testSupervisorCloseDuringCapturePeerFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.capturePeer, close: true)
+    }
+    func testSupervisorSecondOperationDuringCapturePeerFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.capturePeer, close: false)
+    }
+    func testSupervisorCloseDuringPreparePendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.preparePending, close: true)
+    }
+    func testSupervisorSecondOperationDuringPreparePendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.preparePending, close: false)
+    }
+    func testSupervisorCloseDuringPersistPendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.persistPending, close: true)
+    }
+    func testSupervisorSecondOperationDuringPersistPendingFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.persistPending, close: false)
+    }
+    func testSupervisorCloseDuringReleaseDrainFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.releaseDrain, close: true)
+    }
+    func testSupervisorSecondOperationDuringReleaseDrainFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.releaseDrain, close: false)
+    }
+    func testSupervisorCloseDuringBeforeReopenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.beforeReopen, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeReopenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.beforeReopen, close: false)
+    }
+    func testSupervisorCloseDuringAfterReopenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.afterReopen, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterReopenFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.afterReopen, close: false)
+    }
+    func testSupervisorCloseDuringGateBeforeFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.gateBefore, close: true)
+    }
+    func testSupervisorSecondOperationDuringGateBeforeFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.gateBefore, close: false)
+    }
+    func testSupervisorCloseDuringGateAfterFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.gateAfter, close: true)
+    }
+    func testSupervisorSecondOperationDuringGateAfterFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.gateAfter, close: false)
+    }
+    func testSupervisorCloseDuringPeerBeforeRestoredFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.peerBeforeRestored, close: true)
+    }
+    func testSupervisorSecondOperationDuringPeerBeforeRestoredFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.peerBeforeRestored, close: false)
+    }
+    func testSupervisorCloseDuringPersistRestoredFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.persistRestored, close: true)
+    }
+    func testSupervisorSecondOperationDuringPersistRestoredFailsClosedWithoutDuplicateWrites() throws {
+        try supervisorReentry(.persistRestored, close: false)
+    }
+    func testSupervisorCloseDuringBeforeRPCVerifyHelloFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .hello, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeRPCVerifyHelloFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .hello, close: false)
+    }
+    func testSupervisorCloseDuringBeforeRPCVerifyIncarnationFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .incarnation, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeRPCVerifyIncarnationFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .incarnation, close: false)
+    }
+    func testSupervisorCloseDuringBeforeRPCVerifyOpenFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .open, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeRPCVerifyOpenFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .open, close: false)
+    }
+    func testSupervisorCloseDuringBeforeRPCVerifyReopenFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .reopen, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeRPCVerifyReopenFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .reopen, close: false)
+    }
+    func testSupervisorCloseDuringBeforeRPCVerifyGateFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .gate, close: true)
+    }
+    func testSupervisorSecondOperationDuringBeforeRPCVerifyGateFailsClosed() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .gate, close: false)
+    }
+    func testSupervisorCloseDuringAfterRPCVerifyHelloFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .hello, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterRPCVerifyHelloFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .hello, close: false)
+    }
+    func testSupervisorCloseDuringAfterRPCVerifyIncarnationFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .incarnation, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterRPCVerifyIncarnationFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .incarnation, close: false)
+    }
+    func testSupervisorCloseDuringAfterRPCVerifyOpenFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .open, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterRPCVerifyOpenFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .open, close: false)
+    }
+    func testSupervisorCloseDuringAfterRPCVerifyReopenFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .reopen, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterRPCVerifyReopenFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .reopen, close: false)
+    }
+    func testSupervisorCloseDuringAfterRPCVerifyGateFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .gate, close: true)
+    }
+    func testSupervisorSecondOperationDuringAfterRPCVerifyGateFailsClosed() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .gate, close: false)
+    }
+    func testSupervisorSecondRestoreDuringAfterProbeCannotDuplicateWrites() throws {
+        try supervisorReentry(.afterProbe, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringOpenRequestCannotDuplicateWrites() throws {
+        try supervisorReentry(.openRequest, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringVerifyBeforeOpenCannotDuplicateWrites() throws {
+        try supervisorReentry(.verifyBeforeOpen, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringHealthyBindingCannotDuplicateWrites() throws {
+        try supervisorReentry(.healthyBinding, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringValidateBeforePendingCannotDuplicateWrites() throws {
+        try supervisorReentry(.validateBeforePending, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringCapturePeerCannotDuplicateWrites() throws {
+        try supervisorReentry(.capturePeer, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringPreparePendingCannotDuplicateWrites() throws {
+        try supervisorReentry(.preparePending, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringPersistPendingCannotDuplicateWrites() throws {
+        try supervisorReentry(.persistPending, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringReleaseDrainCannotDuplicateWrites() throws {
+        try supervisorReentry(.releaseDrain, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringBeforeReopenCannotDuplicateWrites() throws {
+        try supervisorReentry(.beforeReopen, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringAfterReopenCannotDuplicateWrites() throws {
+        try supervisorReentry(.afterReopen, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringGateBeforeCannotDuplicateWrites() throws {
+        try supervisorReentry(.gateBefore, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringGateAfterCannotDuplicateWrites() throws {
+        try supervisorReentry(.gateAfter, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringPeerBeforeRestoredCannotDuplicateWrites() throws {
+        try supervisorReentry(.peerBeforeRestored, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringPersistRestoredCannotDuplicateWrites() throws {
+        try supervisorReentry(.persistRestored, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringBeforeRPCVerifyOpenCannotDuplicateWrites() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .open, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringBeforeRPCVerifyReopenCannotDuplicateWrites() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .reopen, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringBeforeRPCVerifyGateCannotDuplicateWrites() throws {
+        try supervisorReentry(.beforeRPCVerify, rpc: .gate, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringAfterRPCVerifyOpenCannotDuplicateWrites() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .open, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringAfterRPCVerifyReopenCannotDuplicateWrites() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .reopen, close: false, secondRestore: true)
+    }
+    func testSupervisorSecondRestoreDuringAfterRPCVerifyGateCannotDuplicateWrites() throws {
+        try supervisorReentry(.afterRPCVerify, rpc: .gate, close: false, secondRestore: true)
+    }
+
 }
 
 /// Owned transports and real writer receipts exercise the in-process origin.

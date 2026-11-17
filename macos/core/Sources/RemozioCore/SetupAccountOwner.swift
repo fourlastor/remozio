@@ -207,6 +207,56 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    final class MaintenanceRecoveryScope: @unchecked Sendable {
+        private let admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token
+        private let activity: ReleaseActivityToken?
+        fileprivate init(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
+            activity: ReleaseActivityToken?) {
+            self.admission = admission; self.reply = reply; self.activity = activity
+        }
+        func close() { activity?.close(); admission.close(); reply.close() }
+        deinit { close() }
+    }
+    enum MaintenanceRecoveryAdmissionError: Error { case busyBeforeOwner }
+    /// Reserves both admissions before the recovery driver can call the shared executor.
+    func acquireMaintenanceRecoveryScope(custody: AdministrativeSetupShutdown) throws -> MaintenanceRecoveryScope {
+        try lock.withLock {
+            guard getpid() == processID, !closing, !closed, custody.belongs(to: self) else {
+                throw AdministrativeSetupError.unavailable
+            }
+            guard restartRecovery == nil || restartRecovery?.isSettled == true,
+                  asynchronousWork.isIdle, setupReplyWork.isIdle else {
+                throw MaintenanceRecoveryAdmissionError.busyBeforeOwner
+            }
+            let reply = try setupReplyWork.admit()
+            do {
+                let admission = try asynchronousWork.admit()
+                do { return .init(admission: admission, reply: reply, activity: try releaseActivity?.acquireShared()) }
+                catch { admission.close(); throw error }
+            } catch { reply.close(); throw error }
+        }
+    }
+    func observeMaintenanceRecoveryExecutorOwned() throws -> SetupAuditUpgradeWorkExecutor.OwnedAttempts {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try auditUpgradeExecutor.observeAttemptsOwned()
+    }
+    final class MaintenanceRecoveryPhasePermit: @unchecked Sendable {
+        let executor: SetupAuditUpgradeWorkExecutor
+        fileprivate init(executor: SetupAuditUpgradeWorkExecutor) { self.executor = executor }
+    }
+    func maintenanceRecoveryPhases(until deadline: ContinuousClock.Instant? = nil,
+        cancellation: SetupAuditUpgradeCancellation? = nil,
+        validate: @escaping @Sendable () throws -> Void = {}) -> SetupRetainedInvocationReservation.RestorationPhases {
+        .maintenanceRecovery(permit: .init(executor: auditUpgradeExecutor), deadline: deadline,
+            cancellation: cancellation, validate: validate)
+    }
+    func closeMaintenanceRecoveryAdmission() {
+        lock.withLock {
+            guard getpid() == processID else { return }
+            closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission()
+        }
+    }
+
     /// Blocking maintenance uses the cancellation token of the authorization imported on the exported invocation.
     func performAuditUpgradeWork<Value: Sendable>(authorization: SetupAuditUpgradeAuthorization,
                                                  _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {

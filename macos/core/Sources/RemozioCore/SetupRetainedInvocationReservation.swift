@@ -311,11 +311,25 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
         private let executor: SetupAuditUpgradeWorkExecutor
         private let deadline: ContinuousClock.Instant?
+        private let cancellation: SetupAuditUpgradeCancellation?
+        private let validate: @Sendable () throws -> Void
         private let ownedExpiration: OwnedDeadlineControl?
         private let processID = getpid(), ownerUID = getuid()
         fileprivate init(executor: SetupAuditUpgradeWorkExecutor, deadline: ContinuousClock.Instant? = nil,
-            ownedExpiration: OwnedDeadlineControl? = nil) {
+            ownedExpiration: OwnedDeadlineControl? = nil, cancellation: SetupAuditUpgradeCancellation? = nil,
+            validate: @escaping @Sendable () throws -> Void = {}) {
             self.executor = executor; self.deadline = deadline; self.ownedExpiration = ownedExpiration
+            self.cancellation = cancellation; self.validate = validate
+        }
+        static func maintenanceRecovery(permit: SetupAccountOwner.MaintenanceRecoveryPhasePermit,
+            deadline: ContinuousClock.Instant?, cancellation: SetupAuditUpgradeCancellation?,
+            validate: @escaping @Sendable () throws -> Void) -> RestorationPhases {
+            .init(executor: permit.executor, deadline: deadline, cancellation: cancellation, validate: validate)
+        }
+        static func owned(executor: SetupAuditUpgradeWorkExecutor, deadline: ContinuousClock.Instant? = nil,
+            cancellation: SetupAuditUpgradeCancellation? = nil) throws -> RestorationPhases {
+            try RuntimeMaintenanceOwnedControl.require()
+            return .init(executor: executor, deadline: deadline, cancellation: cancellation)
         }
         /// The owner alone can issue this permit. Restart uses that owner's original executor.
         static func restart(permit: SetupAccountOwner.RestartPermit) -> RestorationPhases {
@@ -325,30 +339,49 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
         }
         func forAttempt(until deadline: ContinuousClock.Instant) throws -> RestorationPhases {
-            try requireProcess(); return .init(executor: executor, deadline: deadline)
+            try requireProcess(); return .init(executor: executor, deadline: deadline, cancellation: cancellation, validate: validate)
         }
         func forOwnedAttempt(until deadline: ContinuousClock.Instant,
             expiration: OwnedDeadlineControl) throws -> RestorationPhases {
             try RuntimeMaintenanceOwnedControl.require(); try requireProcess()
-            return .init(executor: executor, deadline: deadline, ownedExpiration: expiration)
+            return .init(executor: executor, deadline: deadline, ownedExpiration: expiration, cancellation: cancellation, validate: validate)
         }
-        private func admitted<Value: Sendable>(until deadline: ContinuousClock.Instant?,
+        private func requireDeadline(_ deadline: ContinuousClock.Instant?) throws {
+            if let deadline, ContinuousClock.now >= deadline {
+                if cancellation != nil { throw RuntimeMaintenanceStartupAttemptError.deadlineExpired }
+                throw CancellationError()
+            }
+        }
+        private func once<Value: Sendable>(until deadline: ContinuousClock.Instant?, cleanup: Bool,
+            _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+            try requireProcess(); try Task.checkCancellation()
+            let token = cleanup ? SetupAuditUpgradeCancellation() : cancellation ?? SetupAuditUpgradeCancellation()
+            let validate = self.validate, ownedExpiration = self.ownedExpiration
+            return try await executor.runRestorationPhase(cancellation: token) { _ in
+                if !cleanup { try validate() }
+                try self.requireDeadline(deadline)
+                if deadline != nil, ownedExpiration?.expired() == true {
+                    if self.cancellation != nil { throw RuntimeMaintenanceStartupAttemptError.deadlineExpired }
+                    throw CancellationError()
+                }
+                try token.check()
+                return try body()
+            }
+        }
+        private func admitted<Value: Sendable>(until deadline: ContinuousClock.Instant?, cleanup: Bool = false,
             _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
             while true {
-                try requireProcess(); try Task.checkCancellation()
-                if let deadline, ContinuousClock.now >= deadline { throw CancellationError() }
-                if deadline != nil, ownedExpiration?.expired() == true { throw CancellationError() }
-                let ownedExpiration = self.ownedExpiration
-                do {
-                    return try await executor.runRestorationPhase { _ in
-                        if let deadline, ContinuousClock.now >= deadline { throw CancellationError() }
-                        if deadline != nil, ownedExpiration?.expired() == true { throw CancellationError() }
-                        return try body()
-                    }
-                } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
+                do { return try await once(until: deadline, cleanup: cleanup, body) }
+                catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
+                    try Task.checkCancellation()
+                    try requireDeadline(deadline)
                     try await ContinuousClock().sleep(for: .milliseconds(25))
                 }
             }
+        }
+        /// Construction makes one admission attempt. A busy result proves that no body started.
+        func acquire<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+            try await once(until: deadline, cleanup: false, body)
         }
         func run<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
             try await admitted(until: deadline, body)
@@ -356,7 +389,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         /// Actual cleanup ignores caller cancellation and the attempt deadline. It never repeats a started body.
         func cleanup<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
             try requireProcess()
-            let cleanup = Task { try await self.admitted(until: nil, body) }
+            let cleanup = Task { try await self.admitted(until: nil, cleanup: true, body) }
             return try await cleanup.value
         }
         func closeActual(_ body: @escaping @Sendable () -> Void) async throws {

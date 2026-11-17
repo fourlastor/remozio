@@ -5,6 +5,19 @@ import Foundation
 protocol SetupMaintenanceRecoveryProcessCustody: AnyObject, Sendable {
     func validate() throws
     func closeAfterJoining() async
+    func validateForRecovery() async -> Bool
+    func closeAdmission()
+    func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult
+    func releaseAfterJoining()
+}
+extension SetupMaintenanceRecoveryProcessCustody {
+    // Existing ordinary-owner fixtures retain their synchronous validation and close hooks.
+    func validateForRecovery() async -> Bool { do { try validate(); return true } catch { return false } }
+    func closeAdmission() {}
+    func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+        await closeAfterJoining(); return .closed
+    }
+    func releaseAfterJoining() {}
 }
 
 /// Scheduling only. The owned factory cannot construct native recovery or authorize a store write.
@@ -69,13 +82,23 @@ actor SetupMaintenanceRecoverySupervisor {
         case claimed, closed, waiting(AsyncStream<Void>), finishing(Key, Task<Void, Never>)
     }
     private var slotWaiters: [AsyncStream<Void>.Continuation] = []
+    private var availabilityWaiters: [UUID: AsyncStream<Void>.Continuation] = [:]
+    private(set) var closureResult: AdministrativeSetupShutdown.RecoveryCloseResult?
     private var accepting = true, retired = false, joined = false
     private var closing: Task<Void, Never>?
+    private var retryingClosure = false
 
     static func openOwned(custody: any SetupMaintenanceRecoveryProcessCustody,
                           driver: Driver, timing: Timing = .continuous) throws -> SetupMaintenanceRecoverySupervisor {
         try RuntimeMaintenanceOwnedControl.require()
         return .init(custody: custody, driver: driver, timing: timing)
+    }
+    /// Construction validates the lease and retains its lifecycle binding until release.
+    /// M10d must retain this supervisor and close or retire it during explicit service shutdown.
+    static func openNative(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown) throws -> SetupMaintenanceRecoverySupervisor {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: owner, shutdown: shutdown)
+        return .init(custody: custody, driver: SetupMaintenanceRecoveryNativeAdapter.driver(owner: owner, custody: custody), timing: .continuous)
     }
     private init(custody: any SetupMaintenanceRecoveryProcessCustody, driver: Driver, timing: Timing) {
         self.custody = custody; runner = .init(custody: custody, driver: driver, timing: timing)
@@ -114,19 +137,62 @@ actor SetupMaintenanceRecoverySupervisor {
         entries[request.key] = .init(task: task)
         return true
     }
+    enum SchedulingResult: Equatable, Sendable {
+        case scheduled, duplicate, deadlineReached, cancelled, closed, retired, invalidProcess
+    }
+    /// Waits only for scheduling, capped at 120 seconds. The wait never acquires recovery custody.
+    func scheduleWhenAvailable(_ request: Request, until deadline: ContinuousClock.Instant) async -> SchedulingResult {
+        let expires = min(deadline, runner.timing.now().advanced(by: .seconds(120)))
+        while true {
+            guard currentProcess else { return .invalidProcess }
+            guard !retired else { return .retired }
+            guard accepting else { return .closed }
+            guard !Task.isCancelled else { return .cancelled }
+            guard runner.timing.now() < expires else { return .deadlineReached }
+            guard entries[request.key] == nil else { return .duplicate }
+            if await schedule(request) { return .scheduled }
+            guard currentProcess, accepting, !retired, !Task.isCancelled, entries[request.key] == nil else { continue }
+            guard let active, let entry = entries[active], !entry.finished else { continue }
+            let signal = AsyncStream<Void>.makeStream(), id = UUID()
+            availabilityWaiters[id] = signal.continuation
+            await Self.waitForAvailability(signal.stream, until: expires, timing: runner.timing)
+            availabilityWaiters.removeValue(forKey: id)?.finish()
+        }
+    }
+    private nonisolated static func waitForAvailability(_ signal: AsyncStream<Void>, until deadline: ContinuousClock.Instant,
+        timing: Timing) async {
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { for await _ in signal { break } }
+            group.addTask { try? await timing.sleep(deadline) }
+            _ = await group.next(); group.cancelAll()
+        }
+    }
     func observation(for key: Key) -> Observation? { entries[key]?.observation }
     var isClosed: Bool { joined }
-    var shouldExit: Bool { retired && joined }
+    var shouldExit: Bool { retired && joined && closureResult == .closed }
+    /// Explicit service shutdown. A pending close retains custody and can be retried by this caller.
     func close() async {
         guard currentProcess else { return }
+        let retry = joined
         startClosing()
         await closing?.value
+        if retry, joined, closureResult != .closed, !retryingClosure {
+            retryingClosure = true
+            closureResult = await custody.closeAfterJoiningResult()
+            retryingClosure = false
+        }
     }
     /// Retirement closes admission immediately. Exit becomes eligible only after every actual join.
     func retire() async {
         guard currentProcess else { return }
+        let retry = joined
         retired = true; startClosing()
         await closing?.value
+        if retry, joined, closureResult != .closed, !retryingClosure {
+            retryingClosure = true
+            closureResult = await custody.closeAfterJoiningResult()
+            retryingClosure = false
+        }
     }
     private func observe(_ key: Key, _ observation: Observation) { entries[key]?.observation = observation }
     private func releaseSlot(_ key: Key) {
@@ -144,6 +210,8 @@ actor SetupMaintenanceRecoverySupervisor {
     private func wakeSlotWaiters() {
         let pending = slotWaiters; slotWaiters = []
         for waiter in pending { waiter.finish() }
+        let available = availabilityWaiters; availabilityWaiters = [:]
+        for waiter in available.values { waiter.finish() }
     }
     private func finish(_ key: Key, _ observation: Observation) {
         entries[key]?.observation = observation; entries[key]?.finished = true
@@ -152,12 +220,12 @@ actor SetupMaintenanceRecoverySupervisor {
     }
     private func startClosing() {
         guard closing == nil else { return }
-        accepting = false; wakeSlotWaiters()
+        accepting = false; custody.closeAdmission(); wakeSlotWaiters()
         closing = Self.join(entries.values.map(\.task), custody: custody, finished: { [weak self] in
-            await self?.didJoin()
+            await self?.didJoin($0)
         })
     }
-    private func didJoin() { joined = true }
+    private func didJoin(_ result: AdministrativeSetupShutdown.RecoveryCloseResult?) { joined = true; closureResult = result }
     private nonisolated static func launch(runner: Runner, request: Request,
         observe: @escaping @Sendable (Observation) async -> Void,
         releaseSlot: @escaping @Sendable () async -> Void,
@@ -169,17 +237,18 @@ actor SetupMaintenanceRecoverySupervisor {
         }
     }
     private nonisolated static func join(_ tasks: [Task<Void, Never>], custody: any SetupMaintenanceRecoveryProcessCustody,
-        finished: @escaping @Sendable () async -> Void) -> Task<Void, Never> {
+        shutdown: Bool = true,
+        finished: @escaping @Sendable (AdministrativeSetupShutdown.RecoveryCloseResult?) async -> Void) -> Task<Void, Never> {
         for task in tasks { task.cancel() }
         return Task {
             for task in tasks { await task.value }
-            await custody.closeAfterJoining()
-            await finished()
+            if shutdown { await finished(await custody.closeAfterJoiningResult()) }
+            else { custody.releaseAfterJoining(); await finished(nil) }
         }
     }
     deinit {
         guard getpid() == processID, closing == nil else { return }
-        _ = Self.join(entries.values.map(\.task), custody: custody, finished: {})
+        _ = Self.join(entries.values.map(\.task), custody: custody, shutdown: false, finished: { _ in })
     }
 
     private struct Runner: Sendable {
@@ -187,7 +256,7 @@ actor SetupMaintenanceRecoverySupervisor {
         let driver: Driver
         let timing: Timing
         private enum OwnerResult: Sendable { case finished(Observation), unusedAtDeadline }
-        private func current() -> Bool { do { try custody.validate(); return true } catch { return false } }
+        private func current() async -> Bool { await custody.validateForRecovery() }
         private func validated(_ result: Observation) -> Observation {
             switch result {
             case .phase, .failed, .noWindow: return result
@@ -200,13 +269,13 @@ actor SetupMaintenanceRecoverySupervisor {
             do {
                 while true {
                     try Task.checkCancellation()
-                    guard current() else { return .retired }
+                    guard await current() else { return .retired }
                     let deadline = timing.now().advanced(by: .seconds(120))
                     var backoff: Duration = .milliseconds(250)
                     await observe(.recovering)
                     acquisition: while timing.now() < deadline {
                         try Task.checkCancellation()
-                        guard current() else { return .retired }
+                        guard await current() else { return .retired }
                         switch try await driver.acquire(request, deadline) {
                         case .terminal(let observation): return Task.isCancelled ? .cancelled : validated(observation)
                         case .owner(let owner):
@@ -226,7 +295,8 @@ actor SetupMaintenanceRecoverySupervisor {
                     guard await claimSlot() else { return .cancelled }
                 }
             } catch {
-                return Task.isCancelled || error is CancellationError ? .cancelled : .failed(.serviceUnavailable)
+                guard await current() else { return .retired }
+                return Task.isCancelled ? .cancelled : .failed(.serviceUnavailable)
             }
         }
         private func runOwner(_ owner: Owner, deadline: ContinuousClock.Instant,
@@ -240,7 +310,7 @@ actor SetupMaintenanceRecoverySupervisor {
             let result: Observation
             let unusedAtDeadline: Bool
             if Task.isCancelled { owner.cancel(); result = .cancelled; unusedAtDeadline = false }
-            else if !current() { owner.cancel(); result = .retired; unusedAtDeadline = false }
+            else if !(await current()) { owner.cancel(); result = .retired; unusedAtDeadline = false }
             else if timing.now() >= deadline { owner.cancel(); result = .busy; unusedAtDeadline = true }
             else {
                 unusedAtDeadline = false
@@ -248,7 +318,8 @@ actor SetupMaintenanceRecoverySupervisor {
                     try Task.checkCancellation()
                     result = validated(try await owner.run(deadline))
                 } catch {
-                    result = Task.isCancelled || error is CancellationError ? .cancelled : .failed(.serviceUnavailable)
+                    if !(await current()) { result = .retired }
+                    else { result = Task.isCancelled ? .cancelled : .failed(.serviceUnavailable) }
                 }
             }
             await observe(.joining)
@@ -256,7 +327,7 @@ actor SetupMaintenanceRecoverySupervisor {
             await cleanup.value
             if unusedAtDeadline {
                 if Task.isCancelled { return .finished(.cancelled) }
-                guard current() else { return .finished(.retired) }
+                guard await current() else { return .finished(.retired) }
                 return .unusedAtDeadline
             }
             return .finished(result)

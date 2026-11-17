@@ -7,9 +7,10 @@ final class RuntimeAuditUpgradeOperationTests: XCTestCase {
     private enum Failure: Error { case interrupted }
     final class Quiescence: RuntimeAuditCutoverQuiescence {
         var closeFails = false, validationFails = false
+        var beforeClose: (() throws -> Void)?
         func validateLifetime() throws {}
         func validateComplete() throws { if validationFails { throw Failure.interrupted } }
-        func close() throws { if closeFails { throw Failure.interrupted } }
+        func close() throws { try beforeClose?(); if closeFails { throw Failure.interrupted } }
     }
     final class Harness {
         let base: RuntimeAuditUpgradeCutoverTests.Fixture
