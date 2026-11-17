@@ -840,7 +840,9 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
         defer { admission.close(); directory.close() }
         let attempts = Mutex(0), h = self.h, driver = self.driver
         // A slow runner must never turn an expired forward deadline into the refusal or row that a test expects.
-        defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
+        // A test that passes an already expired deadline tests that refusal on purpose, so the check skips it.
+        let deadlineWasLive = ContinuousClock.now < deadline
+        defer { if deadlineWasLive { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") } }
         return try await RuntimeMaintenanceStartupRecovery.restoreExplicitOwned(joined: joined, processLease: processLease,
             frame: frame ?? h.frame(), release: h.f.candidate, admission: admission, directory: directory,
             accountBarrier: h.barrier, read: { try h.frame() }, persist: { try h.persistForRecovery($0, previous: $1) },
