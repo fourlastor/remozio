@@ -7,14 +7,32 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
     private let lock = NSLock()
     private let processID = getpid()
     private var running = false
+    private var ownedAttempts: OwnedAttempts?
+    final class OwnedAttempts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func countOwned() throws -> Int {
+            try RuntimeMaintenanceOwnedControl.require(); return lock.withLock { count }
+        }
+        fileprivate func record() throws {
+            try RuntimeMaintenanceOwnedControl.require(); lock.withLock { count += 1 }
+        }
+    }
+    func observeAttemptsOwned() throws -> OwnedAttempts {
+        try RuntimeMaintenanceOwnedControl.require()
+        return lock.withLock {
+            if let ownedAttempts { return ownedAttempts }
+            let probe = OwnedAttempts(); ownedAttempts = probe; return probe
+        }
+    }
     private let name: String
     init(name: String = "Remozio audit upgrade") { self.name = name }
 
     /// Only this executor can mint the retryable result, before it starts any body.
     final class BusyBeforeBody: Error, @unchecked Sendable { fileprivate init() {} }
-    func runRestorationPhase<Value: Sendable>(
+    func runRestorationPhase<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(),
         _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
-        try await execute(cancellation: .init(), busy: BusyBeforeBody(), body)
+        try await execute(cancellation: cancellation, busy: BusyBeforeBody(), body)
     }
     func run<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(),
                               _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
@@ -23,6 +41,8 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
     private func execute<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation, busy: any Error,
         _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        let probe = lock.withLock { ownedAttempts }
+        try probe?.record()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation(); try cancellation.check()
             return try await withCheckedThrowingContinuation { continuation in

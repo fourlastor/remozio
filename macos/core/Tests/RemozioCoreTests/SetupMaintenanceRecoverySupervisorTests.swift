@@ -20,17 +20,40 @@ private actor RecoverySupervisorGate {
 private final class RecoverySupervisorCustody: SetupMaintenanceRecoveryProcessCustody, @unchecked Sendable {
     let retired = Mutex(false), closeStarted = Mutex(0), closeFinished = Mutex(0)
     let closeWasCancelled = Mutex(false)
+    let closeAttempts = Mutex(0), disposalJoined = Mutex(0), admissionsClosed = Mutex(0)
+    let validationTaskContexts = Mutex<[Bool]>([])
+    private let closeOutcomes: Mutex<[AdministrativeSetupShutdown.RecoveryCloseResult]>
+    private let validationPhases: SetupRetainedInvocationReservation.RestorationPhases?
     let fixture: ReleaseActivityFixture?
     let token: ReleaseActivityToken?
     let releaseGate: RecoverySupervisorGate?
-    init(shared: Bool = false, releaseGate: RecoverySupervisorGate? = nil) throws {
+    init(shared: Bool = false, releaseGate: RecoverySupervisorGate? = nil,
+        closeOutcomes: [AdministrativeSetupShutdown.RecoveryCloseResult] = [],
+        validationPhases: SetupRetainedInvocationReservation.RestorationPhases? = nil) throws {
+        self.closeOutcomes = .init(closeOutcomes); self.validationPhases = validationPhases
         fixture = shared ? try ReleaseActivityFixture() : nil
         token = try fixture?.open().acquireShared()
         self.releaseGate = releaseGate
     }
     func validate() throws {
+        validationTaskContexts.withLock { $0.append(withUnsafeCurrentTask { $0 != nil }) }
         if retired.withLock({ $0 }) { throw JournalLeaseError.invalidated }
         try token?.validate()
+    }
+    func validateForRecovery() async -> Bool {
+        do {
+            if let validationPhases { try await validationPhases.cleanup { try self.validate() } }
+            else { try validate() }
+            return true
+        } catch { return false }
+    }
+    func closeAdmission() { admissionsClosed.withLock { $0 += 1 } }
+    func releaseAfterJoining() { disposalJoined.withLock { $0 += 1 } }
+    func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+        closeAttempts.withLock { $0 += 1 }
+        let planned: AdministrativeSetupShutdown.RecoveryCloseResult? = closeOutcomes.withLock { $0.isEmpty ? nil : $0.removeFirst() }
+        if let planned, planned != .closed { return planned }
+        await closeAfterJoining(); return .closed
     }
     func closeAfterJoining() async {
         closeStarted.withLock { $0 += 1 }
@@ -318,8 +341,13 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
         try await Self.eventually { entered.withLock { $0 } }; supervisor = nil
         try await Self.eventually { weak.value == nil && cancelled.withLock { $0 } }
         XCTAssertThrowsError(try installer.acquireExclusive()); XCTAssertEqual(custody.closeFinished.withLock { $0 }, 0)
-        await gate.open(); try await Self.eventually { custody.closeFinished.withLock { $0 } == 1 }
-        XCTAssertEqual(writes.withLock { $0 }, 0); let exclusive = try installer.acquireExclusive(); exclusive.close()
+        await gate.open(); try await Self.eventually { custody.disposalJoined.withLock { $0 } == 1 }
+        XCTAssertEqual(writes.withLock { $0 }, 0)
+        XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 0)
+        XCTAssertEqual(custody.closeFinished.withLock { $0 }, 0)
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        await custody.closeAfterJoining()
+        let exclusive = try installer.acquireExclusive(); exclusive.close()
     }
     func testExpiredUnusedOwnerJoinsThenRearmsWithFreshOwnerAndDeadline() async throws {
         let custody = try RecoverySupervisorCustody(shared: true), clock = RecoverySupervisorClock(passFirstRearm: true)
@@ -518,6 +546,179 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
         await otherJoin.open()
         try await Self.eventually { await supervisor.observation(for: first.key) == .noWindow }
         XCTAssertEqual(firstRuns.withLock { $0 }, 1); XCTAssertTrue(otherJoined.withLock { $0 })
+        await supervisor.close()
+    }
+
+    func testSpuriousAcquireCancellationIsAFailureWithoutRetry() async throws {
+        let custody = try RecoverySupervisorCustody(), calls = Mutex(0), clock = RecoverySupervisorClock()
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }; throw CancellationError()
+        }), timing: clock.timing)
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        try await Self.eventually { await supervisor.observation(for: request.key) == .failed(.serviceUnavailable) }
+        XCTAssertEqual(calls.withLock { $0 }, 1); XCTAssertTrue(clock.sleeps.isEmpty)
+        let exit = await supervisor.shouldExit; XCTAssertFalse(exit)
+        await supervisor.close()
+    }
+    func testSpuriousOwnerCancellationJoinsAndReportsFailure() async throws {
+        let custody = try RecoverySupervisorCustody(), joins = Mutex(0), runs = Mutex(0)
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            .owner(.init(run: { _ in runs.withLock { $0 += 1 }; throw CancellationError() },
+                join: { joins.withLock { $0 += 1 } }))
+        }))
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        try await Self.eventually { await supervisor.observation(for: request.key) == .failed(.serviceUnavailable) }
+        XCTAssertEqual(runs.withLock { $0 }, 1); XCTAssertEqual(joins.withLock { $0 }, 1)
+        XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 0)
+        await supervisor.close()
+    }
+    func testCustodyLossInAcquireErrorRetiresInsteadOfStrandingAdmission() async throws {
+        let custody = try RecoverySupervisorCustody(), calls = Mutex(0)
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }; custody.retired.withLock { $0 = true }
+            throw RecoverySupervisorPrivateFailure()
+        }))
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        try await Self.eventually { await supervisor.shouldExit }
+        let observation = await supervisor.observation(for: request.key)
+        XCTAssertEqual(observation, .retired); XCTAssertEqual(calls.withLock { $0 }, 1)
+        XCTAssertEqual(custody.admissionsClosed.withLock { $0 }, 1)
+        XCTAssertEqual(custody.closeFinished.withLock { $0 }, 1)
+    }
+    func testCustodyLossInOwnerErrorKeepsTheLeaseThroughTheActualJoin() async throws {
+        let custody = try RecoverySupervisorCustody(shared: true), gate = RecoverySupervisorGate(), joining = Mutex(false)
+        let installer = try XCTUnwrap(custody.fixture).open()
+        defer { Task { await gate.open() } }
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            .owner(.init(run: { _ in
+                custody.retired.withLock { $0 = true }; throw RecoverySupervisorPrivateFailure()
+            }, join: { joining.withLock { $0 = true }; await gate.wait() }))
+        }))
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        try await Self.eventually { joining.withLock { $0 } }
+        let before = await supervisor.shouldExit; XCTAssertFalse(before)
+        XCTAssertEqual(custody.closeFinished.withLock { $0 }, 0)
+        XCTAssertThrowsError(try installer.acquireExclusive())
+        await gate.open(); try await Self.eventually { await supervisor.shouldExit }
+        let observation = await supervisor.observation(for: request.key); XCTAssertEqual(observation, .retired)
+        let exclusive = try installer.acquireExclusive(); exclusive.close()
+    }
+    func testPendingAndFailedCloseRetainRealCustodyUntilOneExplicitRetry() async throws {
+        let outcomes: [AdministrativeSetupShutdown.RecoveryCloseResult] = [.pending, .failed]
+        for outcome in outcomes {
+            let custody = try RecoverySupervisorCustody(shared: true, closeOutcomes: [outcome, .closed])
+            let installer = try XCTUnwrap(custody.fixture).open()
+            let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+                XCTFail("Closing an idle supervisor must not acquire work"); return .terminal(.noWindow)
+            }))
+            await supervisor.retire()
+            let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+            XCTAssertEqual(result, outcome); XCTAssertFalse(exit)
+            XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 1)
+            XCTAssertEqual(custody.closeFinished.withLock { $0 }, 0)
+            XCTAssertThrowsError(try installer.acquireExclusive())
+            await Task.yield(); XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 1)
+            await supervisor.retire()
+            let completed = await supervisor.closureResult, canExit = await supervisor.shouldExit
+            XCTAssertEqual(completed, .closed); XCTAssertTrue(canExit)
+            XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 2)
+            XCTAssertEqual(custody.closeFinished.withLock { $0 }, 1)
+            let exclusive = try installer.acquireExclusive(); exclusive.close()
+        }
+    }
+    func testCustodyValidationUsesTheSuppliedBlockingPhaseRunner() async throws {
+        let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
+        let custody = try RecoverySupervisorCustody(validationPhases: phases)
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        try await Self.eventually { await supervisor.observation(for: request.key) == .noWindow }
+        let contexts = custody.validationTaskContexts.withLock { $0 }
+        XCTAssertFalse(contexts.isEmpty); XCTAssertTrue(contexts.allSatisfy { !$0 })
+        await supervisor.close()
+    }
+    func testScheduleWaitUsesTheInjectedClockAndCapsTheDeadlineWithoutAcquiring() async throws {
+        let custody = try RecoverySupervisorCustody(), clock = RecoverySupervisorClock(), gate = RecoverySupervisorGate()
+        let entered = Mutex(false), calls = Mutex(0)
+        defer { Task { await gate.open() } }
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }
+            return .owner(.init(run: { _ in entered.withLock { $0 = true }; await gate.wait(); return .noWindow }, join: {}))
+        }), timing: clock.timing)
+        _ = await supervisor.schedule(try Self.request()); try await Self.eventually { entered.withLock { $0 } }
+        let next = try Self.request(5)
+        let result = await supervisor.scheduleWhenAvailable(next, until: clock.epoch.advanced(by: .seconds(600)))
+        XCTAssertEqual(result, .deadlineReached); XCTAssertEqual(clock.now, clock.epoch.advanced(by: .seconds(120)))
+        XCTAssertEqual(clock.sleeps, [.seconds(120)]); XCTAssertEqual(calls.withLock { $0 }, 1)
+        let observation = await supervisor.observation(for: next.key); XCTAssertNil(observation)
+        await gate.open(); await supervisor.close()
+    }
+    func testCancelledScheduleWaitAcquiresNothingAndDoesNotChangeTheActiveWorker() async throws {
+        let custody = try RecoverySupervisorCustody(), clock = RecoverySupervisorClock(), gate = RecoverySupervisorGate()
+        let entered = Mutex(false), sleeping = Mutex(false), calls = Mutex(0)
+        defer { Task { await gate.open() } }
+        let timing = Supervisor.Timing(now: { clock.now }, sleep: { _ in
+            sleeping.withLock { $0 = true }; try await ContinuousClock().sleep(for: .seconds(60))
+        })
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }
+            return .owner(.init(run: { _ in entered.withLock { $0 = true }; await gate.wait(); return .noWindow }, join: {}))
+        }), timing: timing)
+        _ = await supervisor.schedule(try Self.request()); try await Self.eventually { entered.withLock { $0 } }
+        let next = try Self.request(5), deadline = clock.epoch.advanced(by: .seconds(120))
+        let waiting = Task { @Sendable [supervisor, next, deadline] in await supervisor.scheduleWhenAvailable(next, until: deadline) }
+        try await Self.eventually { sleeping.withLock { $0 } }; waiting.cancel()
+        let result = await waiting.value; XCTAssertEqual(result, .cancelled)
+        XCTAssertEqual(calls.withLock { $0 }, 1); let observation = await supervisor.observation(for: next.key); XCTAssertNil(observation)
+        await gate.open(); await supervisor.close()
+    }
+    func testCloseAndRetireWakeTheScheduleWaitWithoutAnotherAcquisition() async throws {
+        for retirement in [false, true] {
+            let custody = try RecoverySupervisorCustody(), clock = RecoverySupervisorClock(), gate = RecoverySupervisorGate()
+            let entered = Mutex(false), sleeping = Mutex(false), calls = Mutex(0)
+            defer { Task { await gate.open() } }
+            let timing = Supervisor.Timing(now: { clock.now }, sleep: { _ in
+                sleeping.withLock { $0 = true }; try await ContinuousClock().sleep(for: .seconds(60))
+            })
+            let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+                calls.withLock { $0 += 1 }
+                return .owner(.init(run: { _ in entered.withLock { $0 = true }; await gate.wait(); return .noWindow }, join: {}))
+            }), timing: timing)
+            _ = await supervisor.schedule(try Self.request()); try await Self.eventually { entered.withLock { $0 } }
+            let next = try Self.request(5), deadline = clock.epoch.advanced(by: .seconds(120))
+            let waiting = Task { @Sendable [supervisor, next, deadline] in await supervisor.scheduleWhenAvailable(next, until: deadline) }
+            try await Self.eventually { sleeping.withLock { $0 } }
+            let closing = Task { @Sendable [supervisor, retirement] in
+                if retirement { await supervisor.retire() } else { await supervisor.close() }
+            }
+            let result = await waiting.value; XCTAssertEqual(result, retirement ? .retired : .closed)
+            XCTAssertEqual(calls.withLock { $0 }, 1)
+            await gate.open(); await closing.value
+        }
+    }
+    func testConcurrentScheduleWaitersRefuseTheSameKeyAfterTheActiveJoin() async throws {
+        let custody = try RecoverySupervisorCustody(), clock = RecoverySupervisorClock(), gate = RecoverySupervisorGate()
+        let entered = Mutex(false), sleeps = Mutex(0), calls = Mutex(0)
+        defer { Task { await gate.open() } }
+        let timing = Supervisor.Timing(now: { clock.now }, sleep: { _ in
+            sleeps.withLock { $0 += 1 }; try await ContinuousClock().sleep(for: .seconds(60))
+        })
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            let count = calls.withLock { $0 += 1; return $0 }
+            if count == 1 {
+                return .owner(.init(run: { _ in entered.withLock { $0 = true }; await gate.wait(); return .noWindow }, join: {}))
+            }
+            return .terminal(.noWindow)
+        }), timing: timing)
+        _ = await supervisor.schedule(try Self.request()); try await Self.eventually { entered.withLock { $0 } }
+        let next = try Self.request(5), deadline = clock.epoch.advanced(by: .seconds(120))
+        let first = Task { @Sendable [supervisor, next, deadline] in await supervisor.scheduleWhenAvailable(next, until: deadline) }
+        let second = Task { @Sendable [supervisor, next, deadline] in await supervisor.scheduleWhenAvailable(next, until: deadline) }
+        try await Self.eventually { sleeps.withLock { $0 } == 2 }; await gate.open()
+        let firstResult = await first.value, secondResult = await second.value
+        let results = [firstResult, secondResult]
+        XCTAssertEqual(results.filter { $0 == .scheduled }.count, 1)
+        XCTAssertEqual(results.filter { $0 == .duplicate }.count, 1)
+        try await Self.eventually { calls.withLock { $0 } == 2 }
         await supervisor.close()
     }
 

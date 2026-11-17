@@ -136,11 +136,15 @@ actor AuthorityMaintenanceXPCClient {
     private enum State { case new, greeted, open, armed, closed }
     private let driver: any AuthorityMaintenanceClientDriver, context: Request
     private let verify: @Sendable () throws -> Void, timeout: Duration, interval: Duration
+    private let recoveryPhases: SetupRetainedInvocationReservation.RestorationPhases?
+    private let ownedSupervisorControl: OwnedSupervisorPhaseControl?
+    private var ownedSupervisorContext: OwnedSupervisorPhaseControl.RestorationContext?
+    private var ownedSupervisorReconnectContext: OwnedSupervisorPhaseControl.ReconnectContext?
     fileprivate nonisolated let lifetime = MaintenanceClientLifetime()
     private var state = State.new, busy = false, cleanupUsed = false, binding: AuthorityMaintenanceBinding?
     private var pending: (UUID, CheckedContinuation<AuthorityMaintenanceClientReply, Error>)?, timer: Task<Void, Never>?
     init(context: AuthorityMaintenanceChannelRequest, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry,
-         release: SignedReleaseEvidence) throws {
+         release: SignedReleaseEvidence, recoveryPhases: SetupRetainedInvocationReservation.RestorationPhases? = nil) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try AuthorityMaintenanceChannelScope.validate(release, authority: authority, setup: setup)
         let policy = try XPCPeerPolicy(teamID: authority.teamID, componentIdentifier: authority.identifier,
@@ -156,20 +160,27 @@ actor AuthorityMaintenanceXPCClient {
             try DynamicCodeValidation.validateSelf(requirement: selfPolicy.requirement + " and info[\"RemozioSecurityGeneration\"] = \"\(setup.installedGeneration)\"")
         }
         try verify(); guard context.action == .open else { throw RuntimePreparationError.invalidRecord }
-        self.context = context; self.verify = verify; timeout = .seconds(5); interval = .milliseconds(250)
+        self.context = context; self.verify = verify; self.recoveryPhases = recoveryPhases; ownedSupervisorControl = nil
+        timeout = .seconds(5); interval = .milliseconds(250)
         driver = try NativeMaintenanceClient(accountID: context.accountID, policy: policy)
     }
     private init(context: Request, driver: any AuthorityMaintenanceClientDriver, timeout: Duration, interval: Duration,
-                 verify: @escaping @Sendable () throws -> Void) { self.context = context; self.driver = driver; self.timeout = timeout; self.interval = interval; self.verify = verify }
+        verify: @escaping @Sendable () throws -> Void,
+        recoveryPhases: SetupRetainedInvocationReservation.RestorationPhases?, ownedSupervisorControl: OwnedSupervisorPhaseControl?) {
+        self.context = context; self.driver = driver; self.timeout = timeout; self.interval = interval; self.verify = verify
+        self.recoveryPhases = recoveryPhases; self.ownedSupervisorControl = ownedSupervisorControl
+    }
     static func openOwned(context: AuthorityMaintenanceChannelRequest, driver: any AuthorityMaintenanceClientDriver,
         timeoutMilliseconds: UInt64 = 5000, intervalMilliseconds: UInt64 = 250,
-        verify: @escaping @Sendable () throws -> Void = {}) throws -> AuthorityMaintenanceXPCClient {
+        verify: @escaping @Sendable () throws -> Void = {},
+        recoveryPhases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
+        ownedSupervisorControl: OwnedSupervisorPhaseControl? = nil) throws -> AuthorityMaintenanceXPCClient {
         guard getuid() > 0, getuid() == geteuid(), context.action == .open,
               (1...60_000).contains(timeoutMilliseconds), (1...1000).contains(intervalMilliseconds) else { throw JournalLeaseError.unsafeMetadata }
         let pid = getpid(), uid = getuid()
         return .init(context: context, driver: driver, timeout: .milliseconds(timeoutMilliseconds), interval: .milliseconds(intervalMilliseconds), verify: {
             guard getpid() == pid, getuid() == uid, geteuid() == uid else { throw JournalLeaseError.invalidated }; try verify()
-        })
+        }, recoveryPhases: recoveryPhases, ownedSupervisorControl: ownedSupervisorControl)
     }
     deinit { lifetime.close(); timer?.cancel(); driver.close() }
     func start(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
@@ -393,7 +404,8 @@ actor AuthorityMaintenanceXPCClient {
             let q = try Request(action: .open, accountID: context.accountID, attemptID: context.attemptID,
                 revision: pending.revision, installationID: context.installationID, gate: context.gate,
                 binding: nil, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
-            let recovery = AuthorityMaintenanceXPCClient(context: q, driver: try makeDriver(), timeout: timeout, interval: interval, verify: verify)
+            let recovery = AuthorityMaintenanceXPCClient(context: q, driver: try makeDriver(), timeout: timeout, interval: interval,
+                verify: verify, recoveryPhases: nil, ownedSupervisorControl: nil)
             // This joined task is independent of the cancelled operation. All three RPCs keep the caller's cleanup deadline.
             let readback = try await Task { try await recovery.reopenSaved(target, until: deadline) }.value
             guard readback.hold == .released, readback.admission == .available else { throw RuntimePreparationError.changedScope }
@@ -443,7 +455,7 @@ actor AuthorityMaintenanceXPCClient {
         phases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
         until deadline: ContinuousClock.Instant) async throws -> CleanupRecord.GateReadback {
         while ContinuousClock.now < deadline {
-            if let phases { try await restorationPhase(phases, state: .open, binding: binding, requirePeerLive) }
+            if let phases { try await restorationPhase(phases, state: .open, binding: binding, boundary: .gateBefore, requirePeerLive) }
             else { try requirePeerLive() }
             let q = try AuthorityMaintenanceGateRequest(accountID: context.accountID, attemptID: context.attemptID,
                 revision: revision, installationID: context.installationID, gate: context.gate,
@@ -451,7 +463,7 @@ actor AuthorityMaintenanceXPCClient {
             guard case .bytes(let bytes) = try await invoke(nil, gate: q, until: deadline), let bytes else {
                 throw AuthorityMaintenanceClientError.needsOwnerRecovery
             }
-            if let phases { try await phases.run(requirePeerLive) }
+            if let phases { try await phases.run(controlled(.gateAfter, requirePeerLive)) }
             else { try requirePeerLive() }
             let result = try AuthorityMaintenanceGateResponse.decode(bytes, expected: q).readback(expectedIncarnation: incarnation)
             guard result.hold == .released else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
@@ -561,7 +573,7 @@ actor AuthorityMaintenanceXPCClient {
                 try beforePending()
                 let candidateDriver = try makeDriver()
                 let candidate = AuthorityMaintenanceXPCClient(context: context, driver: candidateDriver,
-                    timeout: timeout, interval: interval, verify: verify)
+                    timeout: timeout, interval: interval, verify: verify, recoveryPhases: nil, ownedSupervisorControl: nil)
                 let response: Response
                 do { response = try await candidate.start(until: deadline) }
                 catch {
@@ -608,6 +620,40 @@ actor AuthorityMaintenanceXPCClient {
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
     }
+    struct OwnedSupervisorPhaseControl: Sendable {
+        enum Boundary: String, CaseIterable, Sendable {
+            case afterProbe, openRequest, verifyBeforeOpen, healthyBinding, validateBeforePending, capturePeer
+            case preparePending, persistPending, releaseDrain, beforeReopen, afterReopen, gateBefore, gateAfter
+            case peerBeforeRestored, persistRestored, reconnectValidation, reconnectPending, reconnectRelease
+            case beforeRPCDispatch, beforeRPCVerify, afterRPCVerify
+        }
+        enum RPC: String, CaseIterable, Sendable { case hello, incarnation, open, reopen, gate, other }
+        struct RestorationContext: Sendable {
+            let proof: AuthorityMaintenanceIncarnationProof, owner: RuntimeMaintenanceRestoration
+        }
+        struct ReconnectContext: Sendable {
+            let proof: AuthorityMaintenanceIncarnationProof, custody: RuntimeMaintenanceStartupRecovery.Custody
+        }
+        struct Event: Sendable {
+            let boundary: Boundary, rpc: RPC?, client: AuthorityMaintenanceXPCClient
+            let restoration: RestorationContext?, reconnect: ReconnectContext?
+        }
+        private let body: @Sendable (Event) throws -> Void
+        init(_ body: @escaping @Sendable (Event) throws -> Void) throws {
+            try RuntimeMaintenanceOwnedControl.require(); self.body = body
+        }
+        fileprivate func visit(_ boundary: Boundary, rpc: RPC? = nil, client: AuthorityMaintenanceXPCClient,
+            restoration: RestorationContext? = nil, reconnect: ReconnectContext? = nil) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try body(.init(boundary: boundary, rpc: rpc, client: client, restoration: restoration, reconnect: reconnect))
+        }
+    }
+    private func controlled<Value: Sendable>(_ boundary: OwnedSupervisorPhaseControl.Boundary,
+        rpc: OwnedSupervisorPhaseControl.RPC? = nil,
+        _ body: @escaping @Sendable () throws -> Value) -> @Sendable () throws -> Value {
+        let control = ownedSupervisorControl, restoration = ownedSupervisorContext, reconnect = ownedSupervisorReconnectContext
+        return { try control?.visit(boundary, rpc: rpc, client: self, restoration: restoration, reconnect: reconnect); return try body() }
+    }
     struct OwnedRestorationPhaseControl: Sendable {
         enum Boundary: Int, CaseIterable, Equatable, Sendable { case beforePending, pendingWrite, drainRelease }
         enum Scope: Sendable {
@@ -628,17 +674,20 @@ actor AuthorityMaintenanceXPCClient {
             try body(.init(boundary: boundary, client: client, proof: proof, scope: scope))
         }
     }
-    /// Only explicit phases suspend. The automatic path executes each body directly on this actor.
+    /// Only a supplied phase runner suspends. The path without it executes each body directly on this actor.
     private func restorationPhase<Value: Sendable>(_ phases: SetupRetainedInvocationReservation.RestorationPhases,
         state expected: State, binding expectedBinding: AuthorityMaintenanceBinding?,
+        boundary: OwnedSupervisorPhaseControl.Boundary? = nil,
         _ body: @escaping @Sendable () throws -> Value) async throws -> Value {
         try Task.checkCancellation()
         guard cleanupUsed, !busy, state == expected, binding == expectedBinding, lifetime.ifActive() else {
             throw AuthorityMaintenanceClientError.needsOwnerRecovery
         }
         busy = true; defer { busy = false }
-        let lifetime = self.lifetime
+        let lifetime = self.lifetime, control = ownedSupervisorControl, restoration = ownedSupervisorContext,
+            reconnect = ownedSupervisorReconnectContext
         let result = try await phases.run {
+            if let boundary { try control?.visit(boundary, client: self, restoration: restoration, reconnect: reconnect) }
             guard lifetime.ifActive() else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
             return try body()
         }
@@ -686,13 +735,16 @@ actor AuthorityMaintenanceXPCClient {
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
         phases: SetupRetainedInvocationReservation.RestorationPhases?,
         ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
-        if let phases { try await phases.run { afterProbe() } }
+        let installedContext = ownedSupervisorControl != nil && ownedSupervisorContext == nil
+        if installedContext { ownedSupervisorContext = .init(proof: proof, owner: owner) }
+        defer { if installedContext { ownedSupervisorContext = nil } }
+        if let phases { try await phases.run(controlled(.afterProbe) { afterProbe() }) }
         else { afterProbe() }
         try Task.checkCancellation()
         let expectedContext = context
         do {
             let actualContext: AuthorityMaintenanceChannelRequest
-            if let phases { actualContext = try await phases.run { try owner.openRequest(challenge: expectedContext.challenge) } }
+            if let phases { actualContext = try await phases.run(controlled(.openRequest) { try owner.openRequest(challenge: expectedContext.challenge) }) }
             else { actualContext = try owner.openRequest(challenge: expectedContext.challenge) }
             guard actualContext == expectedContext else {
                 throw RuntimePreparationError.changedScope
@@ -721,18 +773,18 @@ actor AuthorityMaintenanceXPCClient {
             do { try proof.requireObserved(by: self) }
             catch { throw RuntimeMaintenanceStartupAttemptError.beforePending }
             let check = verify
-            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil) { try check() } }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .verifyBeforeOpen) { try check() } }
             else { try check() }
             let opened = try await startObserved(proof, stopped: stopped, until: deadline)
             guard opened.outcome == .applied else { throw RuntimeMaintenanceStartupAttemptError.beforePending }
-            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding) { try owner.requireHealthyBinding(opened.binding) } }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .healthyBinding) { try owner.requireHealthyBinding(opened.binding) } }
             else { try owner.requireHealthyBinding(opened.binding) }
             try proof.requireObserved(by: self)
             let validate: @Sendable () throws -> Void = {
                 try ownedPhaseControl?.visit(.beforePending, client: self, proof: proof, scope: .healthy(owner))
                 try owner.validateBeforePending()
             }
-            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, validate) }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .validateBeforePending, validate) }
             else { try validate() }
             let peer: MaintenanceStartupPeer
             do {
@@ -740,7 +792,7 @@ actor AuthorityMaintenanceXPCClient {
                     let peer = MaintenanceStartupPeer(try capturePeer(), check: requirePeerLive)
                     try peer.requireLive(); try peer.accept(owner); return peer
                 }
-                if let phases { peer = try await restorationPhase(phases, state: .open, binding: opened.binding, capture) }
+                if let phases { peer = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .capturePeer, capture) }
                 else { peer = try capture() }
             } catch {
                 throw RuntimeMaintenanceStartupFailure(
@@ -751,7 +803,7 @@ actor AuthorityMaintenanceXPCClient {
                 return try owner.pendingRecord(binding: opened.binding)
             }
             let pending: CleanupRecord
-            if let phases { pending = try await restorationPhase(phases, state: .open, binding: opened.binding, preparePending) }
+            if let phases { pending = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .preparePending, preparePending) }
             else { pending = try preparePending() }
             pendingWriteOwned = true
             try pending.requireReplacing(window)
@@ -762,7 +814,7 @@ actor AuthorityMaintenanceXPCClient {
                 try ownedPhaseControl?.visit(.pendingWrite, client: self, proof: proof, scope: .healthy(owner))
                 return committed
             }
-            if let phases { committed = try await restorationPhase(phases, state: .open, binding: opened.binding, write) }
+            if let phases { committed = try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .persistPending, write) }
             else { committed = try write() }
             guard committed == pending else { throw PreparationStoreError.staleRevision }
             current = pending; attemptedCommit = false
@@ -772,17 +824,17 @@ actor AuthorityMaintenanceXPCClient {
                 try ownedPhaseControl?.visit(.drainRelease, client: self, proof: proof, scope: .healthy(owner))
                 try releaseDrain(pending)
             }
-            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, release) }
+            if let phases { try await restorationPhase(phases, state: .open, binding: opened.binding, boundary: .releaseDrain, release) }
             else { try release() }
             let readback = try await reopenHealthyCandidate(opened.binding, pending: pending, stopped: stopped,
                 requirePeerLive: requireLive, phases: phases, until: deadline)
-            if let phases { try await phases.run(requireLive) }
+            if let phases { try await phases.run(controlled(.peerBeforeRestored, requireLive)) }
             else { try requireLive() }
             let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
                 scope: pending.scope, phase: .restored, operation: pending.operation, service: .healthy, gate: readback)
             try restored.requireReplacing(pending); attemptedCommit = true
             let confirmed: CleanupRecord
-            if let phases { confirmed = try await phases.run { try persist(restored, pending) } }
+            if let phases { confirmed = try await phases.run(controlled(.persistRestored) { try persist(restored, pending) }) }
             else { confirmed = try persist(restored, pending) }
             guard confirmed == restored else { throw PreparationStoreError.staleRevision }
             return restored
@@ -806,7 +858,8 @@ actor AuthorityMaintenanceXPCClient {
         }
     }
     func cancelAndReopenStartupNative(_ proof: AuthorityMaintenanceIncarnationProof,
-        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord {
+        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant,
+        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil) async throws -> CleanupRecord {
         guard getuid() == 0, geteuid() == 0, driver is NativeMaintenanceClient, custody.native else { throw JournalLeaseError.rootRequired }
         let receipts = MaintenanceHealthyPendingReceipt()
         return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
@@ -815,15 +868,16 @@ actor AuthorityMaintenanceXPCClient {
             }, persist: { next, previous in
                 let receipt = try custody.persistNative(next, previous: previous)
                 if next.phase == .reopenPending { try receipts.store(receipt) }; return receipt.record
-            })
+            }, phases: phases)
     }
     func cancelAndReopenStartupOwned(_ proof: AuthorityMaintenanceIncarnationProof,
-        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant) async throws -> CleanupRecord {
+        custody: RuntimeMaintenanceStartupRecovery.Custody, until deadline: ContinuousClock.Instant,
+        phases: SetupRetainedInvocationReservation.RestorationPhases? = nil) async throws -> CleanupRecord {
         try RuntimeMaintenanceOwnedControl.require()
         guard !custody.native else { throw JournalLeaseError.unsafeMetadata }
         return try await cancelAndReopenStartup(proof, custody: custody, until: deadline,
             releaseDrain: { pending, _ in try custody.releaseOwnedCleanupDrain(after: pending) },
-            persist: { try custody.persistOwned($0, previous: $1) })
+            persist: { try custody.persistOwned($0, previous: $1) }, phases: phases)
     }
     /// The capability comes only from the explicit dispatcher after its needsOwnerRecovery → restoring write.
     func cancelAndReopenExplicitNative(_ proof: AuthorityMaintenanceIncarnationProof,
@@ -860,12 +914,15 @@ actor AuthorityMaintenanceXPCClient {
         releaseDrain: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> Void,
         persist: @escaping @Sendable (CleanupRecord, CleanupRecord) throws -> CleanupRecord,
         explicit: RuntimeMaintenanceStartupRecovery.ExplicitReconnect? = nil,
+        phases nativePhases: SetupRetainedInvocationReservation.RestorationPhases? = nil,
         ownedPhaseControl: OwnedRestorationPhaseControl? = nil) async throws -> CleanupRecord {
         try Task.checkCancellation()
         guard state == .greeted, !cleanupUsed, !busy else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        cleanupUsed = true; defer { finish() }
+        cleanupUsed = true
+        if ownedSupervisorControl != nil { ownedSupervisorReconnectContext = .init(proof: proof, custody: custody) }
+        defer { ownedSupervisorReconnectContext = nil; finish() }
         let window = custody.current
-        let phases = explicit?.phases
+        let phases = explicit?.phases ?? nativePhases
         let explicitWindow: CleanupRecord?
         if let explicit { explicitWindow = try await explicit.phases.run { try explicit.consume() } }
         else { explicitWindow = nil }
@@ -884,7 +941,7 @@ actor AuthorityMaintenanceXPCClient {
                 if let explicit { try ownedPhaseControl?.visit(.beforePending, client: self, proof: proof, scope: .reconnect(explicit)) }
                 try custody.requireCleanup(window)
             }
-            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, validate) }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectValidation, validate) }
             else { try validate() }
             let pending = try CleanupRecord(id: window.id, revision: context.revision, purpose: window.purpose,
                 scope: window.scope, phase: .reopenPending, shutdownBinding: target)
@@ -895,7 +952,7 @@ actor AuthorityMaintenanceXPCClient {
                 if let explicit { try ownedPhaseControl?.visit(.pendingWrite, client: self, proof: proof, scope: .reconnect(explicit)) }
                 return committed
             }
-            if let phases { committed = try await restorationPhase(phases, state: .greeted, binding: nil, write) }
+            if let phases { committed = try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectPending, write) }
             else { committed = try write() }
             guard committed == pending else { throw PreparationStoreError.staleRevision }
             current = pending; attemptedCommit = false
@@ -904,14 +961,14 @@ actor AuthorityMaintenanceXPCClient {
                 if let explicit { try ownedPhaseControl?.visit(.drainRelease, client: self, proof: proof, scope: .reconnect(explicit)) }
                 try releaseDrain(pending, window)
             }
-            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, release) }
+            if let phases { try await restorationPhase(phases, state: .greeted, binding: nil, boundary: .reconnectRelease, release) }
             else { try release() }
             let readback = try await reopenSavedObserved(proof, target: target, until: deadline)
             let restored = try CleanupRecord(id: pending.id, revision: AccountPreparationIntent.randomID(), purpose: pending.purpose,
                 scope: pending.scope, phase: .restored, gate: readback)
             try restored.requireReplacing(pending); attemptedCommit = true
             let confirmed: CleanupRecord
-            if let phases { confirmed = try await phases.run { try persist(restored, pending) } }
+            if let phases { confirmed = try await phases.run(controlled(.persistRestored) { try persist(restored, pending) }) }
             else { confirmed = try persist(restored, pending) }
             guard confirmed == restored else { throw PreparationStoreError.staleRevision }
             return restored
@@ -937,14 +994,14 @@ actor AuthorityMaintenanceXPCClient {
         guard state == .open, binding == candidate, pending.phase == .reopenPending,
               candidate.incarnation != stopped.incarnation else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         defer { finish() }
-        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, requirePeerLive) }
+        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, boundary: .beforeReopen, requirePeerLive) }
         else { try requirePeerLive() }
         let q = try Request(action: .reopen, accountID: context.accountID, attemptID: context.attemptID,
             revision: pending.revision, installationID: context.installationID, gate: context.gate,
             binding: candidate, challenge: AccountPreparationIntent.randomID() + AccountPreparationIntent.randomID())
         guard case .bytes(let bytes) = try await invoke(q, until: deadline), let bytes,
               try Response.decode(bytes, expected: q).outcome == .applied else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
-        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, requirePeerLive) }
+        if let phases { try await restorationPhase(phases, state: .open, binding: candidate, boundary: .afterReopen, requirePeerLive) }
         else { try requirePeerLive() }
         return try await readReleasedGate(stopped, revision: pending.revision,
             incarnation: candidate.incarnation, requirePeerLive: requirePeerLive, phases: phases, until: deadline)
@@ -970,9 +1027,26 @@ actor AuthorityMaintenanceXPCClient {
             return response
         } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
+    private func ownedRPCKind(_ request: Request?, gate: AuthorityMaintenanceGateRequest?,
+        incarnation: AuthorityMaintenanceIncarnationRequest?) -> OwnedSupervisorPhaseControl.RPC {
+        if gate != nil { return .gate }
+        if incarnation != nil { return .incarnation }
+        guard let request else { return .hello }
+        switch request.action { case .open: return .open; case .reopen: return .reopen; default: return .other }
+    }
     private func invoke(_ q: Request?, gate: AuthorityMaintenanceGateRequest? = nil, incarnation: AuthorityMaintenanceIncarnationRequest? = nil,
                         until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceClientReply {
-        do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        do {
+            try Task.checkCancellation()
+            if let recoveryPhases {
+                let expectedState = state, expectedBinding = binding, verify = self.verify
+                let kind = ownedRPCKind(q, gate: gate, incarnation: incarnation)
+                try ownedSupervisorControl?.visit(.beforeRPCDispatch, rpc: kind, client: self,
+                    restoration: ownedSupervisorContext, reconnect: ownedSupervisorReconnectContext)
+                try await recoveryPhases.run(controlled(.beforeRPCVerify, rpc: kind, verify))
+                guard state == expectedState, binding == expectedBinding else { throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+            } else { try verify() }
+        } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         guard state != .closed, lifetime.ifActive(), ContinuousClock.now < deadline else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         let id = UUID(), end = min(deadline, .now.advanced(by: timeout)), payload = try q?.encoded ?? gate?.encoded ?? incarnation?.encoded
         let value: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {
@@ -994,7 +1068,13 @@ actor AuthorityMaintenanceXPCClient {
                 }) else { finish(); return }
             }
         } onCancel: { [weak self, lifetime, driver] in lifetime.close(); driver.close(); Task { await self?.close() } }
-        do { try Task.checkCancellation(); try verify() } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
+        do {
+            try Task.checkCancellation()
+            if let recoveryPhases {
+                let verify = self.verify, kind = ownedRPCKind(q, gate: gate, incarnation: incarnation)
+                try await recoveryPhases.run(controlled(.afterRPCVerify, rpc: kind, verify))
+            } else { try verify() }
+        } catch { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         guard lifetime.reply(id) != nil else { finish(); throw AuthorityMaintenanceClientError.needsOwnerRecovery }
         if !lifetime.ifActive() { finish(preservingReply: true) }; return value
     }
