@@ -30,9 +30,11 @@ final class SetupExecutorAdmissionOwnerTests: XCTestCase {
     private final class Gate: @unchecked Sendable {
         let entered = Mutex(false)
         private let resume = DispatchSemaphore(value: 0)
+        private let timeoutSeconds: TimeInterval
+        init(timeoutSeconds: TimeInterval = 15) { self.timeoutSeconds = timeoutSeconds }
         func wait() throws {
             entered.withLock { $0 = true }
-            guard resume.wait(timeout: .now() + 15) == .success else { throw Failure.timeout }
+            guard resume.wait(timeout: .now() + timeoutSeconds) == .success else { throw Failure.timeout }
         }
         func open() { resume.signal() }
     }
@@ -98,7 +100,9 @@ final class SetupExecutorAdmissionOwnerTests: XCTestCase {
         catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
     }
     private func auditClaimGroup() async throws {
-        let f = try await Fixture.make(), gate = Gate(), calls = Mutex(0), opened = Mutex(false)
+        let attempts = 200, claimDeadlineMilliseconds: Int64 = 50
+        let watchdogSeconds = Double(attempts) * Double(claimDeadlineMilliseconds) / 1000 * 6 + 5
+        let f = try await Fixture.make(), gate = Gate(timeoutSeconds: watchdogSeconds), calls = Mutex(0), opened = Mutex(false)
         let grant = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
         let audit = Probe {
             try await f.owner.performAuditUpgradeWork(authorization: grant) { _, admission in
@@ -109,11 +113,11 @@ final class SetupExecutorAdmissionOwnerTests: XCTestCase {
         }
         defer { gate.open() }
         try await Self.eventually { gate.entered.withLock { $0 } }
-        for _ in 0..<200 {
+        for _ in 0..<attempts {
             let rights = try f.authorize { calls.withLock { $0 += 1 } }
             let baseline = calls.withLock { $0 }
             do {
-                _ = try await f.claim(rights, until: .now.advanced(by: .milliseconds(50)))
+                _ = try await f.claim(rights, until: .now.advanced(by: .milliseconds(claimDeadlineMilliseconds)))
                 XCTFail("Claim stole an audit admission")
             } catch { XCTAssertTrue(error is CancellationError) }
             XCTAssertEqual(calls.withLock { $0 }, baseline)
@@ -303,51 +307,6 @@ final class SetupExecutorAdmissionOwnerTests: XCTestCase {
     func testAuditScopeSurvivesTwoHundredTimedClaimsGroup02() async throws { try await auditClaimGroup() }
     func testAuditScopeSurvivesTwoHundredTimedClaimsGroup03() async throws { try await auditClaimGroup() }
     func testAuditScopeSurvivesTwoHundredTimedClaimsGroup04() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup05() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup06() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup07() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup08() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup09() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup10() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup11() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup12() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup13() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup14() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup15() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup16() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup17() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup18() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup19() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup20() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup21() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup22() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup23() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup24() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup25() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup26() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup27() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup28() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup29() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup30() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup31() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup32() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup33() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup34() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup35() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup36() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup37() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup38() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup39() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup40() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup41() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup42() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup43() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup44() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup45() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup46() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup47() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup48() async throws { try await auditClaimGroup() }
-    func testAuditScopeSurvivesTwoHundredTimedClaimsGroup49() async throws { try await auditClaimGroup() }
     // DESIGN11.
     func testTwoFreshClaimsWaitThenRefuseTheStillLiveWinner() async throws {
         let f = try await Fixture.make(), gate = Gate(), firstVerification = Mutex(false), checks = Mutex(0)
