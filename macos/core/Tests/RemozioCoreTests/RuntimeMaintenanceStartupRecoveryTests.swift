@@ -2055,12 +2055,16 @@ final class RuntimeMaintenanceRestartRestorationTests: XCTestCase {
     }
     private static func restore(_ f: ExplicitStartupFixture, _ claim: Claim,
         frame: RuntimeMaintenanceStartupFrame? = nil,
-        deadline: ContinuousClock.Instant = .now.advanced(by: .seconds(25)),
+        deadline: ContinuousClock.Instant = .now.advanced(by: restorationTestForwardDeadline),
         expiry: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
         beforeCustody: @escaping @Sendable () async throws -> Void = {}) async throws -> Row {
         let (directory, admission) = try f.resources()
         defer { admission.close(); directory.close() }
         let attempts = Mutex(0), h = f.h, driver = f.driver
+        // A test that passes an already expired deadline tests that refusal on purpose; every other restore must end
+        // before its forward deadline, so a slow runner cannot turn an expired deadline into the expected result.
+        let deadlineWasLive = ContinuousClock.now < deadline
+        defer { if deadlineWasLive { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") } }
         return try await RuntimeMaintenanceStartupRecovery.restoreRestartOwned(claim: claim,
             frame: frame ?? h.frame(), release: h.f.candidate, admission: admission, directory: directory,
             accountBarrier: h.barrier, read: { try h.frame() }, persist: { try h.persistForRecovery($0, previous: $1) },
