@@ -785,7 +785,7 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
     let rightsLive = ExplicitStartupRights()
     var invocation: SetupRetainedInvocation?
     var claim: SetupRetainedOrphanClaim?
-    init(_ f: RuntimeMaintenanceWriterFixture, epoch: UInt8 = 81) throws {
+    init(_ f: RuntimeMaintenanceWriterFixture, epoch: UInt8 = 81, reserveInProcess: Bool = true) throws {
         h = try StartupHarness(f); activity = try ReleaseActivityFixture()
         let source = try f.machine().stableRuntimeSource(candidate: f.candidate)
         let target = try XCTUnwrap(source.preparations.first { $0.accountID == f.target.accountID })
@@ -793,8 +793,10 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
             targetOwner: .init(uid: target.ownerUID, primaryGroupID: getgid(), directoryID: target.directoryID), activity: activity)
         processLease = try .openOwned(directory: .init(anchor: activity.root.path, relativeDirectory: "Machine", owner: getuid()))
         driver = .init(epoch: Data(repeating: epoch, count: 16), barrier: h.barrier)
-        invocation = try retained.invocation()
-        try retained.window(XCTUnwrap(invocation), id: h.initial.id, revision: h.initial.revision)
+        if reserveInProcess {
+            invocation = try retained.invocation()
+            try retained.window(XCTUnwrap(invocation), id: h.initial.id, revision: h.initial.revision)
+        }
     }
     func seed(_ origin: Row.Phase, failure: Row.Failure = .cleanupPending,
         retainReceipt: Bool = false) throws {
@@ -1995,4 +1997,753 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.retained.assertHeld()
         }
     }
+    func testForeignInProcessWindowKeepsTheOriginalChangedScopeErrorBeforePhaseChecks() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let joined = try await f.join(), frame = try f.h.frame()
+            let row = try XCTUnwrap(frame.window)
+            let foreign = try Row(id: Data(repeating: 0xd9, count: 16), revision: row.revision, purpose: row.purpose, scope: row.scope)
+            do {
+                _ = try await f.restore(joined, frame: .init(source: frame.source, window: foreign))
+                XCTFail("Expected changedScope for the foreign window")
+            } catch RuntimePreparationError.changedScope {} catch { XCTFail("Wrong error: \(error)") }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            f.retained.assertHeld()
+        }
+    }
+
+}
+
+
+private final class RestartShutdownProbe: Sendable {
+    private let closed = Mutex(false)
+    func didClose() { closed.withLock { $0 = true } }
+    var isClosed: Bool { closed.withLock { $0 } }
+}
+
+/// Restart uses real owned SQLite writers and account locks. Native peer identity and launchd remain unqualified.
+final class RuntimeMaintenanceRestartRestorationTests: XCTestCase {
+    typealias Row = RuntimeMaintenanceWindowRecord
+    typealias Claim = SetupRestartRecovery.Claim
+    private func withFixture(epoch: UInt8 = 81,
+        _ body: @escaping @Sendable (ExplicitStartupFixture) async throws -> Void) throws {
+        try MachineUpdateReplacementTests.withMaintenanceWriterFixture { material in
+            let fixture = try ExplicitStartupFixture(material, epoch: epoch, reserveInProcess: false)
+            defer {
+                fixture.h.beforeWrite = nil; fixture.h.afterWrite = nil; fixture.h.verifyOverride = nil
+                fixture.h.afterObservation = nil; fixture.h.inspectOverride = nil
+                fixture.driver.onExchange.withLock { $0 = nil }; fixture.driver.onProbe.withLock { $0 = nil }
+            }
+            let result = Mutex<Result<Void, any Error>?>(nil), done = DispatchSemaphore(value: 0)
+            Task {
+                do { try await body(fixture); result.withLock { $0 = .success(()) } }
+                catch { result.withLock { $0 = .failure(error) } }
+                done.signal()
+            }
+            guard done.wait(timeout: .now() + 50) == .success else { return XCTFail("Restart restoration did not return") }
+            try XCTUnwrap(result.withLock { $0 }).get()
+        }
+    }
+    private static func claim(_ f: ExplicitStartupFixture,
+        authorization: SetupRetainedRecoveryAuthorization? = nil, accountID: Data? = nil,
+        processLease: SetupProcessLease? = nil) async throws -> Claim {
+        let live = f.rightsLive
+        let rights = try authorization ?? f.retained.authorize(verify: {
+            guard live.value.withLock({ $0 }) else { throw StartupTestError.expected }
+        })
+        return try await .openOwned(owner: f.retained.owner, authorization: rights, processLease: processLease ?? f.processLease,
+            accountID: accountID ?? f.h.initial.scope.authority.accountID, until: .now.advanced(by: .seconds(5)))
+    }
+    private static func restore(_ f: ExplicitStartupFixture, _ claim: Claim,
+        frame: RuntimeMaintenanceStartupFrame? = nil,
+        deadline: ContinuousClock.Instant = .now.advanced(by: restorationTestForwardDeadline),
+        expiry: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
+        beforeCustody: @escaping @Sendable () async throws -> Void = {}) async throws -> Row {
+        let (directory, admission) = try f.resources()
+        defer { admission.close(); directory.close() }
+        let attempts = Mutex(0), h = f.h, driver = f.driver
+        // A test that passes an already expired deadline tests that refusal on purpose; every other restore must end
+        // before its forward deadline, so a slow runner cannot turn an expired deadline into the expected result.
+        let deadlineWasLive = ContinuousClock.now < deadline
+        defer { if deadlineWasLive { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") } }
+        return try await RuntimeMaintenanceStartupRecovery.restoreRestartOwned(claim: claim,
+            frame: frame ?? h.frame(), release: h.f.candidate, admission: admission, directory: directory,
+            accountBarrier: h.barrier, read: { try h.frame() }, persist: { try h.persistForRecovery($0, previous: $1) },
+            verify: { try h.verifyCurrent() }, inspect: { _ in try h.inspectOverride?() ?? h.inspected },
+            observe: { _, _, pid in
+                h.observations += 1
+                guard !h.rejectCode, pid == h.witness.processID else { throw StartupTestError.expected }
+                h.afterObservation?(); return h.witness
+            }, register: {
+                h.beforeRegistration?(); h.registrations += 1; h.inspected = .matching(h.witness.processID)
+            }, makeDriver: { attempts.withLock { $0 += 1; return $0 == 1 } ? driver : driver.fresh() },
+            capturePeer: { h.witness }, requirePeerLive: {
+                guard try !$0.hasExited() else { throw StartupTestError.expected }
+            }, ownedDeadline: expiry, beforeCustody: beforeCustody, until: deadline)
+    }
+    private static func refuses<T>(_ body: () async throws -> T) async {
+        do { _ = try await body(); XCTFail("Expected restart refusal") } catch {}
+    }
+    private static func available(_ f: ExplicitStartupFixture) throws {
+        try f.retained.owner.verifyCurrent()
+        let reply = try f.retained.owner.acquireSetupReplyAdmission(); reply.close()
+        let activity = try f.retained.installer.acquireExclusive(); activity.close()
+    }
+    private static func releasedAndClosed(_ f: ExplicitStartupFixture) async throws {
+        try available(f); try await f.retained.owner.closeWhenIdle()
+    }
+
+    func testAbandonBeforeStartingReleasesBothAdmissionsAndActivityAndAllowsShutdown() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f); f.retained.assertHeld(); claim.abandon()
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testRightsCheckedExitBeforeStartingReleasesTheIdleSlot() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertTrue(released)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testFreshRightsAndAccountReadsUseTheOriginalLargeStackExecutor() throws {
+        try withFixture { f in
+            let stack = Mutex<Int>(0), checks = Mutex(0)
+            let rights = try f.retained.authorize(verify: {
+                checks.withLock { $0 += 1 }; stack.withLock { $0 = pthread_get_stacksize_np(pthread_self()) }
+            })
+            let claim = try await Self.claim(f, authorization: rights)
+            XCTAssertGreaterThan(checks.withLock { $0 }, 1)
+            XCTAssertGreaterThanOrEqual(stack.withLock { $0 }, SetupAuditUpgradeWorkExecutor.stackBytes)
+            claim.abandon(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testWrongAccountRefusesBeforeCreatingASlot() throws {
+        try withFixture { f in
+            await Self.refuses { try await Self.claim(f, accountID: Data(repeating: 0x33, count: 16)) }
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testRecycledDirectoryIdentityRefusesBeforeCreatingASlot() throws {
+        try withFixture { f in
+            let a = f.retained.binding.authorityOwner
+            let recycled = LocalAccountIdentity(uid: a.uid, primaryGroupID: a.primaryGroupID, directoryID: UUID())
+            let rights = try f.retained.authorize(identity: recycled)
+            await Self.refuses { try await Self.claim(f, authorization: rights) }
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testAnotherAuthenticatedUserCannotTakeAsAccountOrExistingSlot() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f), b = f.retained.binding.targetOwner
+            let peer = XPCPeerCredentials(processID: getpid(), userID: b.uid, auditSessionID: 1)
+            let wrong = try f.retained.authorize(peer: peer, identity: b)
+            await Self.refuses { try await Self.claim(f, authorization: wrong) }
+            f.retained.assertHeld(); claim.abandon(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testLiveInProcessRecordRefusesTheRestartOrigin() throws {
+        try withFixture { f in
+            f.invocation = try f.retained.invocation()
+            await Self.refuses { try await Self.claim(f) }
+            f.retained.assertHeld(); try XCTUnwrap(f.invocation).close(); f.invocation = nil
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testSettledInProcessRecordCanRestoreItsNeedsOwnerRecoveryWindow() throws {
+        try withFixture { f in
+            f.invocation = try f.retained.invocation()
+            try f.retained.window(XCTUnwrap(f.invocation), id: f.h.initial.id, revision: f.h.initial.revision)
+            try f.seed(.stopped); try XCTUnwrap(f.invocation).close(); f.invocation = nil
+            XCTAssertEqual(try f.retained.owner.retainedInvocationState(), .settled)
+            let claim = try await Self.claim(f), restored = try await Self.restore(f, claim)
+            XCTAssertEqual(restored.phase, .restored); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testASecondRestartClaimAndANormalReservationCannotEnterTheHeldSlot() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f)
+            await Self.refuses { try await Self.claim(f) }
+            XCTAssertThrowsError(try f.retained.invocation())
+            f.retained.assertHeld(); claim.abandon(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testClosedProcessLeaseRefusesBeforeCreatingASlot() throws {
+        try withFixture { f in
+            f.processLease.close(); await Self.refuses { try await Self.claim(f) }
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testNativeFactoryRefusesOwnedRightsAndNeverOpensCustody() throws {
+        try withFixture { f in
+            let rights = try f.retained.authorize()
+            await Self.refuses {
+                try await Claim.openNative(owner: f.retained.owner, authorization: rights, processLease: f.processLease,
+                    accountID: f.h.initial.scope.authority.accountID, until: .now.advanced(by: .seconds(3)))
+            }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testAnUnregisteredOwnedPermitCannotForgeTheOwnerSlotOrReleaseProof() throws {
+        try withFixture { f in
+            try f.seed(.stopped)
+            let rights = try f.retained.authorize()
+            let claim = try await f.retained.owner.unregisteredRestartOwned(authorization: rights, processLease: f.processLease,
+                accountID: f.h.initial.scope.authority.accountID)
+            XCTAssertThrowsError(try claim.requireCurrentAuthorization())
+            await Self.refuses { try await Self.restore(f, claim) }
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            claim.abandon(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testUnboundWindowRefusalAutomaticallyReleasesTheSlotAndAllowsShutdown() throws {
+        try withFixture { f in
+            try f.h.seed(.authorized); let claim = try await Self.claim(f)
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testRepairRequiredWindowRefusalAutomaticallyReleasesTheSlotAndAllowsShutdown() throws {
+        try withFixture { f in
+            try f.seed(.stopped, failure: .repairRequired); let claim = try await Self.claim(f)
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testMissingWindowRefusalAutomaticallyReleasesBeforeCreatingATask() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f), frame = try f.h.frame()
+            await Self.refuses { try await Self.restore(f, claim, frame: frame) }
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testExpiredDeadlineBeforeCustodyAutomaticallyReleasesAndAllowsShutdown() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            await Self.refuses { try await Self.restore(f, claim, deadline: .now.advanced(by: .seconds(-1))) }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testSameIncarnationRefusalHasARightsCheckedExitWithoutWritingTheWindow() throws {
+        try withFixture(epoch: 71) { f in
+            try f.seed(.needsOwnerRecovery); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(try f.h.frame().window, original); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.probes.withLock { $0 }, 1)
+            XCTAssertTrue(f.driver.metrics.actions.withLock { $0 }.isEmpty); f.retained.assertHeld()
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertTrue(released); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testExpiredRightsCannotReleaseAfterTheSameIncarnationProbe() throws {
+        try withFixture(epoch: 71) { f in
+            try f.seed(.needsOwnerRecovery); let claim = try await Self.claim(f)
+            await Self.refuses { try await Self.restore(f, claim) }
+            f.rightsLive.value.withLock { $0 = false }
+            await Self.refuses { try await claim.releaseWithoutRestoration() }; f.retained.assertHeld()
+            claim.abandon(); f.rightsLive.value.withLock { $0 = true }
+            let fresh = try await Self.claim(f)
+            let released = try await fresh.releaseWithoutRestoration(); XCTAssertTrue(released); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testConfirmedCompletionCanBeAdoptedByAFreshClaimWhileTheOwnerCloses() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.afterWrite = { row in if row.phase == .restored { f.rightsLive.value.withLock { $0 = false } } }
+            await Self.refuses { try await Self.restore(f, claim) }; f.retained.assertHeld()
+            let calls = f.driver.metrics.actions.withLock { $0 }
+            let done = Mutex(false)
+            let closing = Task { try await f.retained.owner.closeWhenIdle(); done.withLock { $0 = true } }
+            // close() synchronously closes admission, even when its retained work prevents an immediate close.
+            XCTAssertThrowsError(try f.retained.owner.close()); XCTAssertFalse(done.withLock { $0 })
+            claim.abandon(); f.h.afterWrite = nil; f.rightsLive.value.withLock { $0 = true }
+            let adopter = try await Self.claim(f)
+            let row = try await adopter.finishRecordedRestoration()
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, calls)
+            try await closing.value; XCTAssertTrue(done.withLock { $0 })
+            let exclusive = try f.retained.installer.acquireExclusive(); exclusive.close()
+        }
+    }
+    func testClosingOwnerRefusesANewStoppedAttemptWithoutAnyWriteOrRpc() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            // Closing starts before restoration can install a task. The stopped origin would otherwise restore.
+            XCTAssertThrowsError(try f.retained.owner.close())
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            XCTAssertEqual(f.driver.metrics.probes.withLock { $0 }, 0)
+            XCTAssertTrue(f.driver.metrics.actions.withLock { $0 }.isEmpty)
+            try await f.retained.owner.closeWhenIdle()
+            await Self.refuses { try await Self.claim(f) }
+        }
+    }
+    func testUnsettledCompletionRefusesANewAttemptAndRequiresFreshReadbackBeforeRelease() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.afterWrite = { row in if row.phase == .restored { f.rightsLive.value.withLock { $0 = false } } }
+            await Self.refuses { try await Self.restore(f, claim) }; claim.abandon()
+            f.h.afterWrite = nil; f.rightsLive.value.withLock { $0 = true }
+            let adopter = try await Self.claim(f), calls = f.driver.metrics.actions.withLock { $0 }
+            await Self.refuses { try await Self.restore(f, adopter) }
+            let released = try await adopter.releaseWithoutRestoration(); XCTAssertFalse(released); f.retained.assertHeld()
+            f.h.postCommitScopeFailure = true
+            await Self.refuses { try await adopter.finishRecordedRestoration() }; f.retained.assertHeld()
+            f.h.postCommitScopeFailure = false
+            _ = try await adopter.finishRecordedRestoration()
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, calls); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testLiveWriterAndCancelledWaiterKeepBothAdmissionsUntilActualReturn() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
+            defer { resume.signal() }
+            f.h.beforeWrite = { row in if row.phase == .restoring { entered.signal(); _ = resume.wait(timeout: .now() + 10) } }
+            let restoring = Task { try await Self.restore(f, claim) }
+            XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+            restoring.cancel(); claim.abandon(); f.retained.assertHeld()
+            resume.signal(); await Self.refuses { try await restoring.value }
+            f.h.beforeWrite = nil
+            let fresh = try await Self.claim(f)
+            let released = try await fresh.releaseWithoutRestoration(); XCTAssertTrue(released); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testBusyAccountDrainClosesTheRefusedAttemptWithoutRpcOrAWriter() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), drain = try f.h.barrier.beginDrain()
+            defer { drain.close() }
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            drain.close(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testRestartCapabilityDescriptionsAndMirrorsRedactAllIdentity() throws {
+        try withFixture { f in
+            let claim = try await Self.claim(f)
+            XCTAssertEqual(String(describing: claim), "SetupRestartRecoveryClaim(redacted)")
+            XCTAssertEqual(String(reflecting: claim), "SetupRestartRecoveryClaim(redacted)")
+            XCTAssertTrue(Mirror(reflecting: claim).children.isEmpty)
+            var dumped = ""; dump(claim, to: &dumped)
+            XCTAssertFalse(dumped.contains(f.h.initial.id.base64EncodedString()))
+            claim.abandon(); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testHealthyRestartPreservesTheOperationAndWriterOrderCase0() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            let row = try await Self.restore(f, claim)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.operation, original.operation)
+            XCTAssertEqual(row.gate?.hold, .released); XCTAssertEqual(row.gate?.admission, .available)
+            XCTAssertEqual(f.h.committedRows.map(\.phase), [.restoring, .reopenPending, .restored])
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(f.h.classifications, 0); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testHealthyRestartPreservesTheOperationAndWriterOrderCase1() throws {
+        try withFixture { f in
+            try f.seed(.executing); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            let row = try await Self.restore(f, claim)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.operation, original.operation)
+            XCTAssertEqual(row.gate?.hold, .released); XCTAssertEqual(row.gate?.admission, .available)
+            XCTAssertEqual(f.h.committedRows.map(\.phase), [.restoring, .reopenPending, .restored])
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(f.h.classifications, 0); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testHealthyRestartPreservesTheOperationAndWriterOrderCase2() throws {
+        try withFixture { f in
+            try f.seed(.workSettled); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            let row = try await Self.restore(f, claim)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.operation, original.operation)
+            XCTAssertEqual(row.gate?.hold, .released); XCTAssertEqual(row.gate?.admission, .available)
+            XCTAssertEqual(f.h.committedRows.map(\.phase), [.restoring, .reopenPending, .restored])
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(f.h.classifications, 0); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testHealthyRestartPreservesTheOperationAndWriterOrderCase3() throws {
+        try withFixture { f in
+            try f.seed(.reopenPending); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            let row = try await Self.restore(f, claim)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.operation, original.operation)
+            XCTAssertEqual(row.gate?.hold, .released); XCTAssertEqual(row.gate?.admission, .available)
+            XCTAssertEqual(f.h.committedRows.map(\.phase), [.restoring, .reopenPending, .restored])
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(f.h.classifications, 0); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testHealthyRestartPreservesTheOperationAndWriterOrderCase4() throws {
+        try withFixture { f in
+            try f.seed(.needsOwnerRecovery); let original = try XCTUnwrap(f.h.frame().window), claim = try await Self.claim(f)
+            let row = try await Self.restore(f, claim)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.operation, original.operation)
+            XCTAssertEqual(row.gate?.hold, .released); XCTAssertEqual(row.gate?.admission, .available)
+            XCTAssertEqual(f.h.committedRows.map(\.phase), [.restoring, .reopenPending, .restored])
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            XCTAssertEqual(f.h.classifications, 0); try await Self.releasedAndClosed(f)
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase0() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .restoring; f.h.commitBeforeFailure = false
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .restoring)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase1() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .restoring; f.h.commitBeforeFailure = true
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .restoring)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase2() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .reopenPending; f.h.commitBeforeFailure = false
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .reopenPending)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase3() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .reopenPending; f.h.commitBeforeFailure = true
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .reopenPending)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase4() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .restored; f.h.commitBeforeFailure = false
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .restored)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testUncertainWriterNeverAllowsReleaseOrCompletionCase5() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .restored; f.h.commitBeforeFailure = true
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes.last, .restored)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await claim.finishRecordedRestoration() }
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+        }
+    }
+    func testControlledDeadlineAfterTheConfirmedWriterUsesItsActualPhaseCase0() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), trigger = ExplicitDeadlineTrigger()
+            let expiry = try SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl(
+                phase: .beforePending, expired: { trigger.expired })
+            f.h.afterWrite = { row in if row.phase == .restoring { trigger.expire() } }
+            await Self.refuses { try await Self.restore(f, claim, expiry: expiry) }
+            let row = try XCTUnwrap(f.h.frame().window)
+            XCTAssertEqual(row.phase, .needsOwnerRecovery)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertTrue(released)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testControlledDeadlineAfterTheConfirmedWriterUsesItsActualPhaseCase1() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), trigger = ExplicitDeadlineTrigger()
+            let expiry = try SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl(
+                phase: .beforeRestored, expired: { trigger.expired })
+            f.h.afterWrite = { row in if row.phase == .reopenPending { trigger.expire() } }
+            await Self.refuses { try await Self.restore(f, claim, expiry: expiry) }
+            let row = try XCTUnwrap(f.h.frame().window)
+            XCTAssertEqual(row.phase, .needsOwnerRecovery)
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertTrue(released)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testControlledDeadlineAfterTheConfirmedWriterUsesItsActualPhaseCase2() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), trigger = ExplicitDeadlineTrigger()
+            let expiry = try SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl(
+                phase: .afterRestored, expired: { trigger.expired })
+            f.h.afterWrite = { row in if row.phase == .restored { trigger.expire() } }
+            let restored = try await Self.restore(f, claim, expiry: expiry)
+            let row = try XCTUnwrap(f.h.frame().window)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(restored, row)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testForeignProtectedFrameRefusesWithoutWriterOrRpcCase0() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), frame = try f.h.frame()
+            let row = try XCTUnwrap(frame.window), scope = row.scope
+            let changedScope = try Row.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: 0 == 0 ? scope.target : scope.authority, target: 0 == 0 ? scope.authority : scope.target,
+                releaseDigest: scope.releaseDigest, candidateDigest: scope.candidateDigest,
+                authorityPolicyDigest: scope.authorityPolicyDigest, operationDigest: scope.operationDigest,
+                restorationDigest: 0 == 3 ? Data(repeating: 0x77, count: 32) : scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            // Pin the actual first window so a replacement cannot silently select another scope.
+            try await claim.restorationPhases().run { try claim.capture(row) }
+            let changed = try Row(id: 0 == 2 ? Data(repeating: 0x78, count: 16) : row.id,
+                revision: row.revision, purpose: 0 == 1 ? .retainedPolicy : row.purpose, scope: changedScope,
+                phase: row.phase, operation: row.operation, service: row.service, failure: row.failure,
+                shutdownBinding: 0 == 0 || 0 == 2 ? nil : row.shutdownBinding)
+            await Self.refuses { try await Self.restore(f, claim, frame: .init(source: frame.source, window: changed)) }
+            XCTAssertEqual(try f.h.frame().window, row); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testForeignProtectedFrameRefusesWithoutWriterOrRpcCase1() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), frame = try f.h.frame()
+            let row = try XCTUnwrap(frame.window), scope = row.scope
+            let changedScope = try Row.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: 1 == 0 ? scope.target : scope.authority, target: 1 == 0 ? scope.authority : scope.target,
+                releaseDigest: scope.releaseDigest, candidateDigest: scope.candidateDigest,
+                authorityPolicyDigest: scope.authorityPolicyDigest, operationDigest: scope.operationDigest,
+                restorationDigest: 1 == 3 ? Data(repeating: 0x77, count: 32) : scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            // Pin the actual first window so a replacement cannot silently select another scope.
+            try await claim.restorationPhases().run { try claim.capture(row) }
+            let changed = try Row(id: 1 == 2 ? Data(repeating: 0x78, count: 16) : row.id,
+                revision: row.revision, purpose: 1 == 1 ? .retainedPolicy : row.purpose, scope: changedScope,
+                phase: row.phase, operation: row.operation, service: row.service, failure: row.failure,
+                shutdownBinding: 1 == 0 || 1 == 2 ? nil : row.shutdownBinding)
+            await Self.refuses { try await Self.restore(f, claim, frame: .init(source: frame.source, window: changed)) }
+            XCTAssertEqual(try f.h.frame().window, row); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testForeignProtectedFrameRefusesWithoutWriterOrRpcCase2() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), frame = try f.h.frame()
+            let row = try XCTUnwrap(frame.window), scope = row.scope
+            let changedScope = try Row.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: 2 == 0 ? scope.target : scope.authority, target: 2 == 0 ? scope.authority : scope.target,
+                releaseDigest: scope.releaseDigest, candidateDigest: scope.candidateDigest,
+                authorityPolicyDigest: scope.authorityPolicyDigest, operationDigest: scope.operationDigest,
+                restorationDigest: 2 == 3 ? Data(repeating: 0x77, count: 32) : scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            // Pin the actual first window so a replacement cannot silently select another scope.
+            try await claim.restorationPhases().run { try claim.capture(row) }
+            let changed = try Row(id: 2 == 2 ? Data(repeating: 0x78, count: 16) : row.id,
+                revision: row.revision, purpose: 2 == 1 ? .retainedPolicy : row.purpose, scope: changedScope,
+                phase: row.phase, operation: row.operation, service: row.service, failure: row.failure,
+                shutdownBinding: 2 == 0 || 2 == 2 ? nil : row.shutdownBinding)
+            await Self.refuses { try await Self.restore(f, claim, frame: .init(source: frame.source, window: changed)) }
+            XCTAssertEqual(try f.h.frame().window, row); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testForeignProtectedFrameRefusesWithoutWriterOrRpcCase3() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), frame = try f.h.frame()
+            let row = try XCTUnwrap(frame.window), scope = row.scope
+            let changedScope = try Row.Scope(macID: scope.macID, installationID: scope.installationID,
+                authority: 3 == 0 ? scope.target : scope.authority, target: 3 == 0 ? scope.authority : scope.target,
+                releaseDigest: scope.releaseDigest, candidateDigest: scope.candidateDigest,
+                authorityPolicyDigest: scope.authorityPolicyDigest, operationDigest: scope.operationDigest,
+                restorationDigest: 3 == 3 ? Data(repeating: 0x77, count: 32) : scope.restorationDigest,
+                mutationFootprintDigest: scope.mutationFootprintDigest, authorityGrantDigest: scope.authorityGrantDigest,
+                targetConsentDigest: scope.targetConsentDigest, administratorIntentDigest: scope.administratorIntentDigest)
+            // Pin the actual first window so a replacement cannot silently select another scope.
+            try await claim.restorationPhases().run { try claim.capture(row) }
+            let changed = try Row(id: 3 == 2 ? Data(repeating: 0x78, count: 16) : row.id,
+                revision: row.revision, purpose: 3 == 1 ? .retainedPolicy : row.purpose, scope: changedScope,
+                phase: row.phase, operation: row.operation, service: row.service, failure: row.failure,
+                shutdownBinding: 3 == 0 || 3 == 2 ? nil : row.shutdownBinding)
+            await Self.refuses { try await Self.restore(f, claim, frame: .init(source: frame.source, window: changed)) }
+            XCTAssertEqual(try f.h.frame().window, row); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+
+    func testACapturedTargetAccountAlsoExcludesTheLiveInProcessRecord() throws {
+        try withFixture { f in
+            f.invocation = try f.retained.invocation()
+            let b = f.retained.binding.targetOwner
+            let peer = XPCPeerCredentials(processID: getpid(), userID: b.uid, auditSessionID: 1)
+            let rights = try f.retained.authorize(peer: peer, identity: b)
+            await Self.refuses { try await Self.claim(f, authorization: rights, accountID: f.h.initial.scope.target.accountID) }
+            f.retained.assertHeld(); try XCTUnwrap(f.invocation).close(); f.invocation = nil
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testConfirmedHostDriftCanReleaseOnlyAfterActualFailureCleanupClosesCustody() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failScopeAfterPhase = .restoring
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(f.h.writes, [.restoring, .needsOwnerRecovery]); f.retained.assertHeld()
+            f.h.postCommitScopeFailure = false
+            let released = try await claim.releaseWithoutRestoration(); XCTAssertTrue(released)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testAFreshClaimCanRetryAKnownFailedRestorationWithoutReplayingAnOperation() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.rejectCode = true; await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(try f.h.frame().window?.phase, .needsOwnerRecovery); f.retained.assertHeld()
+            claim.abandon(); f.h.rejectCode = false
+            let fresh = try await Self.claim(f), row = try await Self.restore(f, fresh)
+            XCTAssertEqual(row.phase, .restored); XCTAssertEqual(f.h.classifications, 0)
+            XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, [.open, .reopen])
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testAnUncertainWriterStillRefusesAFreshClaimsSafeExit() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.failPhase = .restoring; f.h.commitBeforeFailure = true
+            await Self.refuses { try await Self.restore(f, claim) }; claim.abandon()
+            let fresh = try await Self.claim(f)
+            let released = try await fresh.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await Self.restore(f, fresh) }
+            XCTAssertEqual(f.h.writes, [.restoring]); f.retained.assertHeld()
+        }
+    }
+
+    func testARealRecoveryRowChangedAfterPinReleasesTheRefusedSlotAndAllowsShutdown() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f), original = try XCTUnwrap(f.h.frame().window)
+            try await claim.restorationPhases().run { try claim.capture(original) }
+            let changed = try RuntimeMaintenanceStartupPolicy.row(original, phase: .needsOwnerRecovery,
+                service: original.service, failure: .repairRequired)
+            _ = try f.h.write(changed, previous: original)
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(try f.h.frame().window, changed); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+
+    func testAnOldAbandonedAttemptCannotReleaseANewerClaimantsIdleSlot() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let old = try await Self.claim(f)
+            let (latch, release) = AsyncStream<Void>.makeStream()
+            let entered = DispatchSemaphore(value: 0)
+            defer { release.finish() }
+            let failing = Task {
+                try await Self.restore(f, old, beforeCustody: {
+                    entered.signal()
+                    for await _ in latch { break }
+                    throw StartupTestError.expected
+                })
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+            old.abandon(); f.retained.assertHeld()
+            let current = try await Self.claim(f)
+            release.yield(()); release.finish()
+            await Self.refuses { try await failing.value }
+            old.abandon(); await old.releaseRefusedAttemptIfSafe()
+            f.retained.assertHeld(); XCTAssertTrue(f.h.writes.isEmpty)
+            XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            let released = try await current.releaseWithoutRestoration(); XCTAssertTrue(released)
+            try await Self.releasedAndClosed(f)
+        }
+    }
+    func testAnAbandonedSuccessorLetsTheRefusedActualAttemptReleaseAndFinishShutdown() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let old = try await Self.claim(f)
+            let (latch, release) = AsyncStream<Void>.makeStream()
+            let entered = DispatchSemaphore(value: 0), closed = RestartShutdownProbe()
+            defer { release.finish() }
+            let failing = Task { @Sendable [f, latch, entered, old] in
+                try await Self.restore(f, old, beforeCustody: { @Sendable [latch, entered] in
+                    entered.signal()
+                    for await _ in latch { break }
+                    throw StartupTestError.expected
+                })
+            }
+            XCTAssertEqual(entered.wait(timeout: .now() + 5), .success)
+            old.abandon()
+            let successor = try await Self.claim(f)
+            successor.abandon(); f.retained.assertHeld()
+            let closing = Task { @Sendable [f, closed] in try await f.retained.owner.closeWhenIdle(); closed.didClose() }
+            XCTAssertThrowsError(try f.retained.owner.close())
+            XCTAssertFalse(closed.isClosed)
+            release.yield(()); release.finish()
+            await Self.refuses { try await failing.value }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !closed.isClosed {
+                guard ContinuousClock.now < deadline else {
+                    closing.cancel(); return XCTFail("The abandoned restart slot stranded shutdown")
+                }
+                try await ContinuousClock().sleep(for: .milliseconds(1))
+            }
+            try await closing.value
+            XCTAssertTrue(f.h.writes.isEmpty); XCTAssertEqual(f.driver.metrics.hellos.withLock { $0 }, 0)
+            XCTAssertTrue(f.driver.metrics.actions.withLock { $0 }.isEmpty)
+            let exclusive = try f.retained.installer.acquireExclusive(); exclusive.close()
+        }
+    }
+    func testConfirmedActiveRowCannotReleaseWhenTheFailureWriterNeverStartsCase0() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.afterWrite = { row in if row.phase == .restoring { f.processLease.close() } }
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(try f.h.frame().window?.phase, .restoring)
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+            claim.abandon(); f.h.afterWrite = nil
+            // The new owned lease makes the exit's own identity check valid again.
+            // The last confirmed active row must still prevent admission release.
+            let replacement = try SetupProcessLease.openOwned(directory: .init(anchor: f.activity.root.path,
+                relativeDirectory: "Machine", owner: getuid()))
+            defer { replacement.close() }
+            let current = try await Self.claim(f, processLease: replacement)
+            let writes = f.h.writes, calls = f.driver.metrics.actions.withLock { $0 }
+            let released = try await current.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await Self.restore(f, current) }
+            XCTAssertEqual(f.h.writes, writes); XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, calls)
+            f.retained.assertHeld()
+        }
+    }
+    func testConfirmedActiveRowCannotReleaseWhenTheFailureWriterNeverStartsCase1() throws {
+        try withFixture { f in
+            try f.seed(.stopped); let claim = try await Self.claim(f)
+            f.h.afterWrite = { row in if row.phase == .reopenPending { f.processLease.close() } }
+            await Self.refuses { try await Self.restore(f, claim) }
+            XCTAssertEqual(try f.h.frame().window?.phase, .reopenPending)
+            XCTAssertFalse(f.h.writes.contains(.needsOwnerRecovery)); f.retained.assertHeld()
+            claim.abandon(); f.h.afterWrite = nil
+            // The new owned lease makes the exit's own identity check valid again.
+            // The last confirmed active row must still prevent admission release.
+            let replacement = try SetupProcessLease.openOwned(directory: .init(anchor: f.activity.root.path,
+                relativeDirectory: "Machine", owner: getuid()))
+            defer { replacement.close() }
+            let current = try await Self.claim(f, processLease: replacement)
+            let writes = f.h.writes, calls = f.driver.metrics.actions.withLock { $0 }
+            let released = try await current.releaseWithoutRestoration(); XCTAssertFalse(released)
+            await Self.refuses { try await Self.restore(f, current) }
+            XCTAssertEqual(f.h.writes, writes); XCTAssertEqual(f.driver.metrics.actions.withLock { $0 }, calls)
+            f.retained.assertHeld()
+        }
+    }
+
 }

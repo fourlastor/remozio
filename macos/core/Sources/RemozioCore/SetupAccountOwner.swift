@@ -63,6 +63,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let setupReplyWork = SetupOwnerAsyncWork()
     private let retainedStatus = SetupRetainedInvocationStatus.Reader()
     private var retainedInvocationReservation: SetupRetainedInvocationReservation?
+    private var restartRecovery: SetupRestartRecovery?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
@@ -324,7 +325,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     enum StatusLaneCheck: Equatable, Sendable { case verified, pinned, busy, refused }
     /// The installation and configuration check for a connection that selects status. It never waits:
     /// - owner lock held by other work, or the store's writer lease busy: `busy`;
-    /// - admission held by a reservation: `pinned`. Reading the store would borrow that admission, which the status
+    /// - admission held by a reservation or restart slot: `pinned`. Reading the store would borrow that admission, which the status
     ///   lane must never do (contract section 1.2), so only the release barrier and the open owner are checked;
     /// - otherwise the same store-backed check as `verifyCurrent`: `verified`, or `refused` on drift or closure.
     /// `busy` and `pinned` both answer with the in-memory projection only; nothing store-derived is reported.
@@ -361,7 +362,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                                                                verify: () throws -> Void) {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
-            guard !closed, !closing,
+            guard !closed, !closing, restartRecovery == nil || restartRecovery?.isSettled == true,
                   try retainedInvocationReservation == nil || retainedInvocationReservation?.state() == .settled else {
                 throw AdministrativeSetupError.unavailable
             }
@@ -381,6 +382,98 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     }
                 })
             } catch { admission.close(); reply.close(); throw error }
+        }
+    }
+    /// Only the owner can mint a permit. It binds the real slot and the original executor without injected checks.
+    final class RestartPermit: @unchecked Sendable {
+        private weak var owner: SetupAccountOwner?
+        let accountID: Data, accountOwner: LocalAccountIdentity, native: Bool
+        let admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token
+        let activity: ReleaseActivityToken?, executor: SetupAuditUpgradeWorkExecutor
+        fileprivate init(owner: SetupAccountOwner, accountID: Data, accountOwner: LocalAccountIdentity, native: Bool,
+            admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token, activity: ReleaseActivityToken?,
+            executor: SetupAuditUpgradeWorkExecutor) {
+            self.owner = owner; self.accountID = accountID; self.accountOwner = accountOwner; self.native = native
+            self.admission = admission; self.reply = reply; self.activity = activity; self.executor = executor
+        }
+        func requireOwner(_ record: SetupRestartRecovery, windowID: Data?, starting: Bool = false) throws {
+            guard let owner else { throw AdministrativeSetupError.unavailable }
+            try owner.verifyRestartSlot(record, windowID: windowID, starting: starting)
+        }
+    }
+    private func verifyRestartSlot(_ record: SetupRestartRecovery, windowID: Data?, starting: Bool) throws {
+        try lock.withLock {
+            guard getpid() == processID, !closed, !starting || !closing, restartRecovery === record,
+                  asynchronousWork.permits(record.admission), setupReplyWork.permits(record.reply),
+                  try retainedInvocationReservation?.excludesRestart(accountID: record.accountID,
+                    owner: record.accountOwner, windowID: windowID) != true else { throw AdministrativeSetupError.unavailable }
+        }
+    }
+    /// Blocking authentication and account reads stay on this owner's original executor.
+    func claimRestartRecovery(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
+        accountID: Data, native: Bool, until deadline: ContinuousClock.Instant) async throws -> SetupRestartRecovery.Claim {
+        do {
+            while true {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else { throw CancellationError() }
+                do {
+                    return try await auditUpgradeExecutor.runRestorationPhase { _ in
+                        try self.claimRestartRecoveryBlocking(authorization: authorization, processLease: processLease,
+                            accountID: accountID, native: native)
+                    }
+                } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
+                    try await ContinuousClock().sleep(for: .milliseconds(25))
+                }
+            }
+        } catch { authorization.close(); throw error }
+    }
+    private func claimRestartRecoveryBlocking(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
+        accountID: Data, native: Bool) throws -> SetupRestartRecovery.Claim {
+        if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
+        else { try RuntimeMaintenanceOwnedControl.require() }
+        try processLease.validate(); try authorization.takeForClaim()
+        let (claim, retired) = try lock.withLock {
+            guard getpid() == processID, !closed, accountID.count == 16 else { throw AdministrativeSetupError.unavailable }
+            guard try retainedInvocationReservation?.excludesRestart(accountID: accountID,
+                owner: authorization.currentOwner, windowID: nil) != true else { throw AdministrativeSetupError.unavailable }
+            if let restartRecovery, !restartRecovery.isSettled {
+                // Reclaim reenters this owner's NSRecursiveLock. It cannot use a nonrecursive owner lock.
+                // Shutdown permits adoption and a safe exit, but the slot refuses starting another attempt.
+                return (try SetupRestartRecovery.reclaim(restartRecovery, authorization: authorization,
+                    processLease: processLease, accountID: accountID, native: native), Optional<SetupRestartRecovery>.none)
+            }
+            guard !closing, asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
+            try machines.use { machine in
+                _ = try currentInventory(machine)
+                guard let account = try machine.accountPreparation(ownerUID: authorization.peer.userID),
+                      account.accountID == accountID else { throw AdministrativeSetupError.wrongAccount }
+                try LocalAccountDirectory.validateOwnership(authorization.currentOwner, uid: account.ownerUID, directoryID: account.directoryID)
+            }
+            let reply = try setupReplyWork.admit()
+            let admission: SetupOwnerAsyncWork.Token
+            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            do {
+                let permit = RestartPermit(owner: self, accountID: accountID, accountOwner: authorization.currentOwner, native: native,
+                    admission: admission, reply: reply, activity: try releaseActivity?.acquireShared(), executor: auditUpgradeExecutor)
+                let created = try SetupRestartRecovery.reserve(permit: permit, authorization: authorization, processLease: processLease)
+                let retired = restartRecovery; restartRecovery = created.record
+                return (created.claim, retired)
+            } catch { admission.close(); reply.close(); throw error }
+        }
+        // An old completion can own cleanup objects. Release them outside the owner lock.
+        withExtendedLifetime(retired) {}
+        return claim
+    }
+    /// Owned-only negative fixture. The unregistered permit cannot pass the fixed owner-slot check.
+    func unregisteredRestartOwned(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
+        accountID: Data) async throws -> SetupRestartRecovery.Claim {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try await auditUpgradeExecutor.runRestorationPhase { _ in
+            try authorization.takeForClaim()
+            let admission = try SetupOwnerAsyncWork().admit(), reply = try SetupOwnerAsyncWork().admit()
+            let permit = RestartPermit(owner: self, accountID: accountID, accountOwner: authorization.currentOwner, native: false,
+                admission: admission, reply: reply, activity: nil, executor: self.auditUpgradeExecutor)
+            return try SetupRestartRecovery.reserve(permit: permit, authorization: authorization, processLease: processLease).claim
         }
     }
     /// Recovery observes the retained record. Closing admission does not prevent cleanup of that same record.

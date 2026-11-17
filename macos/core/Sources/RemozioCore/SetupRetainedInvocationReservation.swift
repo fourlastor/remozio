@@ -141,6 +141,15 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             savedTargetRecoveryTransition = receipt
         }
     }
+    /// A live in-process record needs its Joined origin. A settled record no longer has that origin.
+    func excludesRestart(accountID: Data, owner: LocalAccountIdentity, windowID: Data?) throws -> Bool {
+        guard getpid() == process, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        return lock.withLock {
+            phase != .settled && (authenticatedPeerUID == owner.uid
+                || capturedBinding?.authority.accountID == accountID || capturedBinding?.target.accountID == accountID
+                || (windowID != nil && capturedWindow?.id == windowID))
+        }
+    }
     func state() throws -> State {
         guard getpid() == process else { throw AdministrativeSetupError.unavailable }
         return lock.withLock { currentState() }
@@ -308,6 +317,10 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             ownedExpiration: OwnedDeadlineControl? = nil) {
             self.executor = executor; self.deadline = deadline; self.ownedExpiration = ownedExpiration
         }
+        /// The owner alone can issue this permit. Restart uses that owner's original executor.
+        static func restart(permit: SetupAccountOwner.RestartPermit) -> RestorationPhases {
+            .init(executor: permit.executor)
+        }
         private func requireProcess() throws {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
         }
@@ -363,6 +376,13 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             self.id = id
             task = Task { await start.wait(); return try await body(id) }
         }
+        /// The private start barrier is shared only through an owner-issued restart permit.
+        static func restart(permit: SetupAccountOwner.RestartPermit,
+            body: @escaping @Sendable (UUID) async throws -> Completion) -> (work: RestorationWork, open: @Sendable () -> Void) {
+            let barrier = RestorationStart()
+            let work = RestorationWork(id: UUID(), start: barrier, body: body)
+            return (work, { barrier.open() })
+        }
         func value() async throws -> Completion {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
             let result = await task.result
@@ -372,11 +392,11 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             }
             return try result.get()
         }
-        fileprivate var actualReturnObserved: Bool {
+        var actualReturnObserved: Bool {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { return false }
             return lock.withLock { returned }
         }
-        fileprivate var holdsUnsettledCompletion: Bool { lock.withLock { completed } }
+        var holdsUnsettledCompletion: Bool { lock.withLock { completed } }
         var description: String { "SetupRetainedRestorationWork(redacted)" }
         var debugDescription: String { description }
         var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
