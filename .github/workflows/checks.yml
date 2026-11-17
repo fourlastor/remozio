@@ -292,7 +292,9 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.mac_core == 'true') }}
     runs-on: macos-26
-    timeout-minutes: 60
+    # The full suite took 54 to 58 minutes on main in November 2026, close to the old 60-minute limit. 90 minutes
+    # leaves room for new tests and slow runners; a hung test still ends the job.
+    timeout-minutes: 90
     # The full suite, and a large pull request selection, run six class shards on two runners: three concurrent
     # xctest processes on each runner's three CPUs. Both runners build the same tests and compute the same partition,
     # and part N runs shards 3(N-1) to 3(N-1)+2. A small pull request selection runs three shards on one runner.
