@@ -31,7 +31,7 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
         }
     }
     func testSharedPhaseBodiesUseTheOriginalEightMiBStackWithoutASwiftTask() async throws {
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor())
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
         let running = try await phases.run { Self.frame() }
         let cleanup = try await phases.cleanup { Self.frame() }
         let acquisition = try await phases.acquire { Self.frame() }
@@ -42,13 +42,13 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
         XCTAssertTrue(withUnsafeCurrentTask { $0 != nil })
     }
     func testAsyncProbeRemainsOnItsTaskBetweenBlockingPhases() async throws {
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor()), probe = RecoveryPhaseAsyncProbe()
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor()), probe = RecoveryPhaseAsyncProbe()
         let before = await probe.hasCurrentTask(); XCTAssertTrue(before)
         let body = try await phases.run { Self.frame() }; XCTAssertFalse(body.hasTask)
         let after = await probe.hasCurrentTask(); XCTAssertTrue(after)
     }
     func testOccupiedExecutorReturnsTypedBusyWithoutStartingTheSecondBody() async throws {
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor())
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
         let started = RecoveryPhaseValue(false), bodyWrites = Mutex(0), resume = DispatchSemaphore(value: 0)
         let first = Task { @Sendable [phases, started, resume] in
             try await phases.run {
@@ -67,7 +67,7 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
     }
     func testCancellationReachesTheWorkTokenInsideTheRunningThreadBeforeAWrite() async throws {
         let cancellation = SetupAuditUpgradeCancellation()
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor(), cancellation: cancellation)
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(), cancellation: cancellation)
         let started = RecoveryPhaseValue(false), bodyHasTask = RecoveryPhaseValue<Bool?>(nil), writes = RecoveryPhaseValue(0), resume = DispatchSemaphore(value: 0)
         let work = Task { @Sendable [phases, cancellation, started, bodyHasTask, writes, resume] in
             try await phases.run {
@@ -91,7 +91,7 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
     }
     func testCleanupIgnoresTheCancelledWorkTokenAndClosesExactlyOnce() async throws {
         let cancellation = SetupAuditUpgradeCancellation(), writes = Mutex(0), closes = Mutex(0)
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor(), cancellation: cancellation)
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(), cancellation: cancellation)
         cancellation.cancel()
         do { try await phases.run { writes.withLock { $0 += 1 } }; XCTFail("Cancelled work entered its body") }
         catch { XCTAssertTrue(error is CancellationError) }
@@ -99,7 +99,7 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
         XCTAssertEqual(writes.withLock { $0 }, 0); XCTAssertEqual(closes.withLock { $0 }, 1)
     }
     func testExpiredAcquisitionNeverStartsItsBody() async throws {
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor(), deadline: .now.advanced(by: .milliseconds(-1)))
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(), deadline: .now.advanced(by: .milliseconds(-1)))
         let starts = Mutex(0)
         do { try await phases.acquire { starts.withLock { $0 += 1 } }; XCTFail("An expired attempt started") }
         catch { XCTAssertTrue(error is CancellationError) }
@@ -107,7 +107,7 @@ final class SetupMaintenanceRecoveryPhasesTests: XCTestCase {
     }
     func testNativeDeadlineHasADistinctErrorAndDoesNotCancelTheWorkToken() async throws {
         let cancellation = SetupAuditUpgradeCancellation(), writes = Mutex(0)
-        let phases = try Phases.owned(executor: SetupAuditUpgradeWorkExecutor(), deadline: .now.advanced(by: .milliseconds(-1)),
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(), deadline: .now.advanced(by: .milliseconds(-1)),
             cancellation: cancellation)
         do { try await phases.acquire { writes.withLock { $0 += 1 } }; XCTFail("Expired native work entered its body") }
         catch { XCTAssertEqual(error as? RuntimeMaintenanceStartupAttemptError, .deadlineExpired) }

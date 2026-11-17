@@ -627,7 +627,7 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
         }
     }
     func testCustodyValidationUsesTheSuppliedBlockingPhaseRunner() async throws {
-        let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
+        let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
         let custody = try RecoverySupervisorCustody(validationPhases: phases)
         let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
         let request = try Self.request(); _ = await supervisor.schedule(request)

@@ -7,11 +7,16 @@ import XCTest
 private enum RecoveryScopeTestFailure: Error { case timeout }
 private final class RecoveryScopeHarness: @unchecked Sendable {
     let activity: ReleaseActivityFixture
+    let account: AccountPreparationIntent
+    let identity: LocalAccountIdentity
     let owner: SetupAccountOwner
     let placement: ReleaseDestinationLease
     let processLease: SetupProcessLease
     let shutdown: AdministrativeSetupShutdown
     init(_ fixture: RetainedMaterialWriterFixture) throws {
+        identity = fixture.owner
+        account = try XCTUnwrap(fixture.machine().accountPreparation(ownerUID: fixture.owner.uid))
+        XCTAssertEqual(account.accountID, fixture.material.services.accountID)
         activity = try ReleaseActivityFixture()
         owner = try .init(machine: fixture.machine(), expectedReleaseDigest: InstallationInventory.digest(fixture.candidate),
             resume: { _, value in value }, releaseActivity: activity.open())
@@ -21,6 +26,15 @@ private final class RecoveryScopeHarness: @unchecked Sendable {
     }
     func acquireProcess() throws -> SetupProcessLease {
         try .openOwned(directory: .init(anchor: activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+    }
+}
+
+private final class RecoveryScopeForeignOwner: @unchecked Sendable {
+    let harness: RuntimeAuditUpgradeOperationTests.Harness
+    let owner: SetupAccountOwner
+    init() throws {
+        harness = try .init()
+        owner = try harness.owner()
     }
 }
 
@@ -100,7 +114,7 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
         try withScope { h in
             let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
             let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
-            let phases = h.owner.maintenanceRecoveryPhases(), entered = RecoveryScopeBoolean(), resume = DispatchSemaphore(value: 0)
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope), entered = RecoveryScopeBoolean(), resume = DispatchSemaphore(value: 0)
             let work = Task { @Sendable [phases, entered, resume] in
                 try await phases.acquire {
                     entered.value.withLock { $0 = true }
@@ -260,8 +274,8 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
         defer { gate.resume.signal(); custody.releaseAfterJoining(); grant.close(); try? owner.close(); placement.close(); lease.close() }
         try runAsync { @Sendable [owner, custody, grant, gate, count, attempts, lease] in
             let actual = Task { @Sendable [owner, grant, gate] in
-                try await owner.performAuditUpgradeWork(authorization: grant) { token in
-                    let scope = try owner.acquireAuditUpgradeScope(authorization: grant)
+                try await owner.performAuditUpgradeWork(authorization: grant) { token, admission in
+                    let scope = try owner.acquireAuditUpgradeScope(authorization: grant, admission: admission)
                     do {
                         try scope.validateLifetime(); gate.entered.withLock { $0 = true }
                         guard gate.resume.wait(timeout: .now() + 20) == .success else { throw RecoveryScopeTestFailure.timeout }
@@ -318,6 +332,176 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
                 XCTAssertTrue(try joined.releaseIfWindowFree())
                 let closed = await custody.closeAfterJoiningResult(); XCTAssertEqual(closed, .closed)
             }
+        }
+    }
+
+    func testRecoveryPermitRefusesAScopeFromAnotherOwner() throws {
+        try withScope { h in
+            let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+            defer { scope.close(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let other = try await SetupExecutorAdmissionTestFixture.make { try RecoveryScopeForeignOwner() }
+            defer { try? other.owner.close() }
+            XCTAssertThrowsError(try other.owner.maintenanceRecoveryPhases(scope: scope))
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope)
+            try await phases.acquire { XCTAssertGreaterThanOrEqual(pthread_get_stacksize_np(pthread_self()), SetupAuditUpgradeWorkExecutor.stackBytes) }
+        }
+    }
+    func testClosedRecoveryScopeCannotMintOrStartEarlierPhases() throws {
+        try withScope { h in
+            let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+            defer { scope.close(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope), writes = RecoveryScopeCounter()
+            let attempts = try h.owner.observeMaintenanceRecoveryExecutorOwned()
+            scope.close()
+            XCTAssertThrowsError(try h.owner.maintenanceRecoveryPhases(scope: scope))
+            for operation in 0..<4 {
+                do {
+                    if operation == 0 { try await phases.acquire { writes.value.withLock { $0 += 1 } } }
+                    else if operation == 1 { try await phases.run { writes.value.withLock { $0 += 1 } } }
+                    else if operation == 2 { try await phases.cleanup { writes.value.withLock { $0 += 1 } } }
+                    else { try await phases.closeActual { writes.value.withLock { $0 += 1 } } }
+                    XCTFail("A closed scope entered its executor")
+                } catch { XCTAssertEqual(error as? JournalLeaseError, .invalidated) }
+            }
+            XCTAssertEqual(writes.value.withLock { $0 }, 0); XCTAssertEqual(try attempts.countOwned(), 0)
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
+        }
+    }
+    func testScopeCloseKeepsAdmissionAndActivityUntilActualPhaseReturn() throws {
+        try withScope { h in
+            let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope), gate = RecoveryScopeGate()
+            let work = Task {
+                try await phases.run {
+                    gate.entered.withLock { $0 = true }
+                    guard gate.resume.wait(timeout: .now() + 10) == .success else { throw RecoveryScopeTestFailure.timeout }
+                }
+            }
+            defer { gate.resume.signal(); scope.close(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            try await Self.eventually { gate.entered.withLock { $0 } }
+            scope.close()
+            XCTAssertThrowsError(try h.owner.verifyCurrent()); XCTAssertThrowsError(try h.owner.acquireSetupReplyAdmission())
+            XCTAssertThrowsError(try h.activity.open().acquireExclusive())
+            gate.resume.signal(); try await work.value
+            try h.owner.verifyCurrent(); let reply = try h.owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
+        }
+    }
+    func testClaimRefusesHeldScopeThenWaitsForReleasedScopesRunningPhase() throws {
+        try withScope { h in
+            let account = h.account, identity = h.identity
+            let peer = XPCPeerCredentials(processID: getpid(), userID: identity.uid, auditSessionID: 1), checks = RecoveryScopeCounter()
+            let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope), gate = RecoveryScopeGate()
+            defer { gate.resume.signal(); scope.close(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let rights = try SetupRetainedRecoveryAuthorization.openOwned(peer: peer, currentOwner: identity, incarnation: UUID(),
+                verifyRights: { checks.value.withLock { $0 += 1 } })
+            let baseline = checks.value.withLock { $0 }, start = ContinuousClock.now
+            do {
+                _ = try await SetupRestartRecovery.Claim.openOwned(owner: h.owner, authorization: rights,
+                    processLease: h.processLease, accountID: account.accountID, until: .now.advanced(by: .seconds(5)))
+                XCTFail("A durable scope allowed another claim")
+            } catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+            XCTAssertLessThan(start.duration(to: .now), .milliseconds(100)); XCTAssertEqual(checks.value.withLock { $0 }, baseline)
+            let work = Task {
+                try await phases.run {
+                    gate.entered.withLock { $0 = true }
+                    guard gate.resume.wait(timeout: .now() + 10) == .success else { throw RecoveryScopeTestFailure.timeout }
+                }
+            }
+            try await Self.eventually { gate.entered.withLock { $0 } }; scope.close()
+            let freshRights = try SetupRetainedRecoveryAuthorization.openOwned(peer: peer, currentOwner: identity, incarnation: UUID(),
+                verifyRights: { checks.value.withLock { $0 += 1 } })
+            let before = checks.value.withLock { $0 }, returned = RecoveryScopeBoolean()
+            let claim = Task {
+                let value = try await SetupRestartRecovery.Claim.openOwned(owner: h.owner, authorization: freshRights,
+                    processLease: h.processLease, accountID: account.accountID, until: .now.advanced(by: .seconds(5)))
+                returned.value.withLock { $0 = true }; return value
+            }
+            try await ContinuousClock().sleep(for: .milliseconds(100))
+            XCTAssertFalse(returned.value.withLock { $0 }); XCTAssertEqual(checks.value.withLock { $0 }, before)
+            gate.resume.signal(); try await work.value
+            let actual = try await claim.value; actual.abandon(); try h.owner.verifyCurrent()
+        }
+    }
+    func testFinalCustodyCloseStaysPendingUntilClosedScopesLastPhaseReturns() throws {
+        try withScope { h in
+            let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
+            let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+            let phases = try h.owner.maintenanceRecoveryPhases(scope: scope), gate = RecoveryScopeGate()
+            let work = Task {
+                try await phases.run {
+                    gate.entered.withLock { $0 = true }
+                    guard gate.resume.wait(timeout: .now() + 10) == .success else { throw RecoveryScopeTestFailure.timeout }
+                }
+            }
+            defer { gate.resume.signal(); scope.close(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
+            try await Self.eventually { gate.entered.withLock { $0 } }; scope.close()
+            let pending = await custody.closeAfterJoiningResult(); XCTAssertEqual(pending, .pending)
+            XCTAssertNoThrow(try h.processLease.validate()); XCTAssertNoThrow(try h.placement.validate())
+            XCTAssertThrowsError(try h.activity.open().acquireExclusive())
+            gate.resume.signal(); try await work.value
+            let closed = await custody.closeAfterJoiningResult(); XCTAssertEqual(closed, .closed)
+            XCTAssertThrowsError(try h.processLease.validate()); XCTAssertThrowsError(try h.placement.validate())
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
+            custody.releaseAfterJoining()
+        }
+    }
+
+    func testAdapterTerminalPathClosesItsRetainedScopeAfterActualBodyReturn() throws {
+        try withScope { h in
+            let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
+            let retained = Mutex<SetupAccountOwner.MaintenanceRecoveryScope?>(nil), calls = RecoveryScopeCounter()
+            defer { retained.withLock { $0?.close() }; custody.releaseAfterJoining(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let control = try SetupMaintenanceRecoveryNativeAdapter.OwnedAcquisitionControl(beforeMint: { scope in
+                retained.withLock { $0 = scope }
+            }, observe: { _ in
+                XCTAssertEqual(h.owner.statusLaneCheck(), .pinned)
+                XCTAssertThrowsError(try h.activity.open().acquireExclusive())
+                calls.value.withLock { $0 += 1 }; return .noWindow
+            })
+            let driver = try SetupMaintenanceRecoveryNativeAdapter.driverOwned(owner: h.owner, custody: custody, control: control)
+            let result = try await driver.acquire(Self.retryRequest(), .now.advanced(by: .seconds(5)))
+            guard case .terminal(.noWindow) = result else { return XCTFail("Expected terminal fixture observation") }
+            XCTAssertEqual(calls.value.withLock { $0 }, 1); XCTAssertNotNil(retained.withLock { $0 })
+            try h.owner.verifyCurrent(); let reply = try h.owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
+        }
+    }
+    func testAdapterBodyErrorExplicitlyClosesItsRetainedScope() throws {
+        try withScope { h in
+            let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
+            let retained = Mutex<SetupAccountOwner.MaintenanceRecoveryScope?>(nil), calls = RecoveryScopeCounter()
+            defer { retained.withLock { $0?.close() }; custody.releaseAfterJoining(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let control = try SetupMaintenanceRecoveryNativeAdapter.OwnedAcquisitionControl(beforeMint: { scope in
+                retained.withLock { $0 = scope }
+            }, observe: { _ in
+                XCTAssertEqual(h.owner.statusLaneCheck(), .pinned)
+                calls.value.withLock { $0 += 1 }; throw RecoveryScopeTestFailure.timeout
+            })
+            let driver = try SetupMaintenanceRecoveryNativeAdapter.driverOwned(owner: h.owner, custody: custody, control: control)
+            do { _ = try await driver.acquire(Self.retryRequest(), .now.advanced(by: .seconds(5))); XCTFail("Expected fixture body error") }
+            catch { XCTAssertTrue(error is RecoveryScopeTestFailure) }
+            XCTAssertEqual(calls.value.withLock { $0 }, 1); XCTAssertNotNil(retained.withLock { $0 })
+            try h.owner.verifyCurrent(); let reply = try h.owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
+        }
+    }
+    func testAdapterMintErrorClosesScopeWithoutEnteringTheExecutor() throws {
+        try withScope { h in
+            let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
+            let retained = Mutex<SetupAccountOwner.MaintenanceRecoveryScope?>(nil), calls = RecoveryScopeCounter()
+            let attempts = try h.owner.observeMaintenanceRecoveryExecutorOwned()
+            defer { retained.withLock { $0?.close() }; custody.releaseAfterJoining(); try? h.owner.close(); h.placement.close(); h.processLease.close() }
+            let control = try SetupMaintenanceRecoveryNativeAdapter.OwnedAcquisitionControl(beforeMint: { scope in
+                retained.withLock { $0 = scope }; scope.close()
+            }, observe: { _ in calls.value.withLock { $0 += 1 }; return .noWindow })
+            let driver = try SetupMaintenanceRecoveryNativeAdapter.driverOwned(owner: h.owner, custody: custody, control: control)
+            do { _ = try await driver.acquire(Self.retryRequest(), .now.advanced(by: .seconds(5))); XCTFail("A closed scope minted phases") }
+            catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+            XCTAssertEqual(calls.value.withLock { $0 }, 0); XCTAssertEqual(try attempts.countOwned(), 0)
+            try h.owner.verifyCurrent(); let reply = try h.owner.acquireSetupReplyAdmission(); reply.close()
+            let exclusive = try h.activity.open().acquireExclusive(); exclusive.close()
         }
     }
 

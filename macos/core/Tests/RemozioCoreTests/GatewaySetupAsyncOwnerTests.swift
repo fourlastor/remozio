@@ -215,4 +215,32 @@ final class GatewaySetupAsyncOwnerTests: XCTestCase, @unchecked Sendable {
         catch { XCTAssertEqual(error as? JournalLeaseError, .rootRequired) }
         XCTAssertFalse(FileManager.default.fileExists(atPath: path))
     }
+    func testClaimRefusesAsyncOnlyJournalAdmissionAfterLastExecutorHolderClosed() async throws {
+        let h = try await SetupExecutorAdmissionTestFixture.make { try Harness() }
+        let ended = Mutex<SetupAccountOwner.ExecutorAdmission?>(nil)
+        let grant = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
+        try await h.owner.performAuditUpgradeWork(authorization: grant) { _, admission in ended.withLock { $0 = admission } }
+        XCTAssertNotNil(ended.withLock { $0 })
+        let expected = try h.read(), gate = Gate(), entered = expectation(description: "Async journal owns only its work token")
+        h.backend.state.withLock { $0.beforeOpenGate = gate; $0.beforeOpenStarted = entered }
+        let process = try SetupProcessLease.openOwned(directory: .init(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        defer { process.close(); Task { await gate.release() } }
+        let operation = Task { try await h.owner.resumeGatewayJournal(callerUID: getuid(), expected: expected) }
+        await fulfillment(of: [entered], timeout: 5)
+        let reply = try h.owner.acquireSetupReplyAdmission(); reply.close()
+        let identity = h.fixture.runtime.f.identity, checks = Mutex(0)
+        let rights = try SetupRetainedRecoveryAuthorization.openOwned(
+            peer: .init(processID: getpid(), userID: identity.uid, auditSessionID: 1), currentOwner: identity,
+            incarnation: UUID(), verifyRights: { checks.withLock { $0 += 1 } })
+        let baseline = checks.withLock { $0 }, start = ContinuousClock.now
+        do {
+            _ = try await SetupRestartRecovery.Claim.openOwned(owner: h.owner, authorization: rights, processLease: process,
+                accountID: h.fixture.runtime.account.accountID, until: .now.advanced(by: .seconds(5)))
+            XCTFail("An async-only holder was treated as the old executor run")
+        } catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+        XCTAssertLessThan(start.duration(to: .now), .milliseconds(100)); XCTAssertEqual(checks.withLock { $0 }, baseline)
+        await gate.release(); let result = try await operation.value; XCTAssertTrue(result.progress.journalInitialized)
+        try h.owner.verifyCurrent(); withExtendedLifetime(ended) {}
+    }
+
 }

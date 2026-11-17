@@ -9,6 +9,14 @@ import XCTest
 final class SetupAuditUpgradeInvocationTests: XCTestCase {
     typealias Harness = RuntimeAuditUpgradeOperationTests.Harness
     private struct Refused: Error {}
+    private final class NativeRefusalFixture: @unchecked Sendable {
+        let harness: Harness
+        let owner: SetupAccountOwner
+        init() throws {
+            harness = try .init()
+            owner = try harness.owner()
+        }
+    }
     private func progress(_ owner: SetupAccountOwner) throws -> SetupAuditUpgradeProgress {
         try XCTUnwrap(owner.auditUpgradeProgress(callerUID: getuid()))
     }
@@ -183,12 +191,18 @@ final class SetupAuditUpgradeInvocationTests: XCTestCase {
         XCTAssertThrowsError(try invocation.run { _ in XCTFail("Duplicate reply") })
         XCTAssertThrowsError(try owner.verifyCurrent()); try invocation.close(); try owner.verifyCurrent()
     }
-    func testNativeFactoryRefusesOrdinaryIdentityAndLeavesAuthorizationWithCaller() throws {
+    func testNativeFactoryRefusesOrdinaryIdentityAndLeavesAuthorizationWithCaller() async throws {
         guard getuid() > 0 else { throw XCTSkip("Ordinary owner") }
-        let h = try Harness(), owner = try h.owner(); defer { try? owner.close() }
+        let retained = try await SetupExecutorAdmissionTestFixture.make { try NativeRefusalFixture() }
+        let owner = retained.owner; defer { try? owner.close() }
         let grant = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {}); defer { grant.close() }
-        XCTAssertThrowsError(try SetupAuditUpgradeInvocation.open(owner: owner, expected: progress(owner), authorization: grant)) {
-            XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+        let expected = try progress(owner)
+        try await owner.performAuditUpgradeWork(authorization: grant) { _, admission in
+            XCTAssertThrowsError(try SetupAuditUpgradeInvocation.open(owner: owner, expected: expected,
+                authorization: grant, admission: admission)) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+            try grant.validate()
         }
         try grant.validate(); try owner.verifyCurrent()
     }

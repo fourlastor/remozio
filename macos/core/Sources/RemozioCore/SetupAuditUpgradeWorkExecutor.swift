@@ -30,26 +30,29 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
 
     /// Only this executor can mint the retryable result, before it starts any body.
     final class BusyBeforeBody: Error, @unchecked Sendable { fileprivate init() {} }
+    /// The hook runs once after the body returns, or before a refusal resumes the caller.
     func runRestorationPhase<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(),
+        afterReturn: (@Sendable () -> Void)? = nil,
         _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
-        try await execute(cancellation: cancellation, busy: BusyBeforeBody(), body)
+        try await execute(cancellation: cancellation, busy: BusyBeforeBody(), afterReturn: afterReturn ?? {}, body)
     }
-    func run<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(),
+    func run<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation = .init(), afterReturn: (@Sendable () -> Void)? = nil,
                               _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
-        try await execute(cancellation: cancellation, busy: AdministrativeSetupError.unavailable, body)
+        try await execute(cancellation: cancellation, busy: AdministrativeSetupError.unavailable, afterReturn: afterReturn ?? {}, body)
     }
     private func execute<Value: Sendable>(cancellation: SetupAuditUpgradeCancellation, busy: any Error,
+        afterReturn: @escaping @Sendable () -> Void,
         _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
-        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        guard getpid() == processID else { afterReturn(); throw AdministrativeSetupError.unavailable }
         let probe = lock.withLock { ownedAttempts }
-        try probe?.record()
+        do { try probe?.record() } catch { afterReturn(); throw error }
         return try await withTaskCancellationHandler {
-            try Task.checkCancellation(); try cancellation.check()
+            do { try Task.checkCancellation(); try cancellation.check() } catch { afterReturn(); throw error }
             return try await withCheckedThrowingContinuation { continuation in
                 let admitted = lock.withLock { () -> Bool in
                     guard !running else { return false }; running = true; return true
                 }
-                guard admitted else { continuation.resume(throwing: busy); return }
+                guard admitted else { afterReturn(); continuation.resume(throwing: busy); return }
                 let thread = Thread { [self, cancellation] in
                     let result: Result<Value, any Error> = Result {
                         try cancellation.check()
@@ -57,6 +60,7 @@ final class SetupAuditUpgradeWorkExecutor: @unchecked Sendable {
                         return try body(cancellation)
                     }
                     lock.withLock { running = false }
+                    afterReturn()
                     continuation.resume(with: result)
                 }
                 thread.name = self.name

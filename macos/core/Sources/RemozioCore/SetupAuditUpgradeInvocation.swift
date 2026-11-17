@@ -10,21 +10,26 @@ final class SetupAuditUpgradeInvocation: @unchecked Sendable {
     private var active = false, invoked = false, retired = false, closed = false
 
     /// Authorization must be imported on the authenticated exported invocation before task dispatch.
+    /// `admission` is the value that `SetupAccountOwner.performAuditUpgradeWork` passed to the executor body.
     static func open(owner: SetupAccountOwner, expected: SetupAuditUpgradeProgress,
-                     authorization: SetupAuditUpgradeAuthorization) throws -> Self {
+                     authorization: SetupAuditUpgradeAuthorization, admission: SetupAccountOwner.ExecutorAdmission) throws -> Self {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        return try begin(owner: owner, expected: expected, authorization: authorization, openOperation: RuntimeAuditUpgradeOperation.open)
+        return try begin(owner: owner, expected: expected, authorization: authorization, admission: admission,
+            openOperation: RuntimeAuditUpgradeOperation.open)
     }
+    /// Without `admission`, an Owned-only standalone scope is used. That path runs on no executor.
     static func openOwned(owner: SetupAccountOwner, expected: SetupAuditUpgradeProgress,
-                          authorization: SetupAuditUpgradeAuthorization,
+                          authorization: SetupAuditUpgradeAuthorization, admission: SetupAccountOwner.ExecutorAdmission? = nil,
                           openOperation: (SetupAuditUpgradeScope) throws -> RuntimeAuditUpgradeOperation) throws -> Self {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return try begin(owner: owner, expected: expected, authorization: authorization, openOperation: openOperation)
+        return try begin(owner: owner, expected: expected, authorization: authorization, admission: admission, openOperation: openOperation)
     }
     private static func begin(owner: SetupAccountOwner, expected: SetupAuditUpgradeProgress,
-                              authorization: SetupAuditUpgradeAuthorization,
+                              authorization: SetupAuditUpgradeAuthorization, admission: SetupAccountOwner.ExecutorAdmission?,
                               openOperation: (SetupAuditUpgradeScope) throws -> RuntimeAuditUpgradeOperation) throws -> Self {
-        let scope = try owner.acquireAuditUpgradeScope(authorization: authorization)
+        let scope: SetupAuditUpgradeScope
+        if let admission { scope = try owner.acquireAuditUpgradeScope(authorization: authorization, admission: admission) }
+        else { scope = try owner.acquireAuditUpgradeScope(authorization: authorization) }
         do {
             let current = try scope.withMachine { machine in
                 try SetupAuditUpgradeProgress.capture(machine: machine, account: scope.account,

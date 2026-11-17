@@ -28,7 +28,11 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
     // A long-lived invocation must start a new generation instead of resetting these facts.
     private static let maximumOwners = 128
 
-    init(executor: SetupAuditUpgradeWorkExecutor?) { self.executor = executor }
+    /// The owning reservation's admission. Synchronous cleanup runs on the executor under a worker hold on it.
+    private let hold: SetupAccountOwner.ExecutorAdmission?
+    init(executor: SetupAuditUpgradeWorkExecutor?, hold: SetupAccountOwner.ExecutorAdmission? = nil) {
+        self.executor = executor; self.hold = hold
+    }
     /// Latch before returning maintenance inputs or window metadata, and before consuming a recapture chain.
     /// A capture without a durable row stays held until restart. Never clear this conservative fact.
     func windowMayBeWritten() throws {
@@ -134,8 +138,10 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
             do {
                 await ledger.waitForInvocationCleanup()
                 try await ledger.joinWorkers()
-                guard let executor = ledger.executor else { throw AdministrativeSetupError.unavailable }
-                try await executor.run { _ in try ledger.closeSynchronousCleanup() }
+                // No executor body runs without the reservation's admission.
+                guard let executor = ledger.executor, let hold = ledger.hold else { throw AdministrativeSetupError.unavailable }
+                do { try await hold.run(on: executor) { _ in try ledger.closeSynchronousCleanup() } }
+                catch is SetupAccountOwner.ExecutorAdmission.Released { throw JournalLeaseError.invalidated }
                 try ledger.lock.withLock {
                     guard ledger.activeLoans.isEmpty, ledger.deinitReturned,
                           ledger.workersJoined.count == ledger.workers.count,

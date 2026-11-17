@@ -85,17 +85,38 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
     }
 
+    struct OwnedAcquisitionControl: Sendable {
+        let beforeMint: @Sendable (SetupAccountOwner.MaintenanceRecoveryScope) -> Void
+        let observe: @Sendable (Supervisor.Request) throws -> Supervisor.Observation
+        init(beforeMint: @escaping @Sendable (SetupAccountOwner.MaintenanceRecoveryScope) -> Void = { _ in },
+            observe: @escaping @Sendable (Supervisor.Request) throws -> Supervisor.Observation) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            self.beforeMint = beforeMint; self.observe = observe
+        }
+    }
     static func driver(owner: SetupAccountOwner, custody: Custody) -> Supervisor.Driver {
+        makeDriver(owner: owner, custody: custody, owned: nil)
+    }
+    static func driverOwned(owner: SetupAccountOwner, custody: Custody,
+        control: OwnedAcquisitionControl) throws -> Supervisor.Driver {
+        try RuntimeMaintenanceOwnedControl.require()
+        return makeDriver(owner: owner, custody: custody, owned: control)
+    }
+    private static func makeDriver(owner: SetupAccountOwner, custody: Custody,
+        owned: OwnedAcquisitionControl?) -> Supervisor.Driver {
         .init(acquire: { request, deadline in
             do {
+                if owned != nil { try RuntimeMaintenanceOwnedControl.require() }
                 try custody.validate()
                 let scope = try owner.acquireMaintenanceRecoveryScope(custody: custody.shutdown)
                 let cancellation = SetupAuditUpgradeCancellation()
-                let phases = owner.maintenanceRecoveryPhases(until: deadline, cancellation: cancellation,
-                    validate: { try custody.validate() })
                 do {
+                    owned?.beforeMint(scope)
+                    let phases = try owner.maintenanceRecoveryPhases(scope: scope, until: deadline, cancellation: cancellation,
+                        validate: { try custody.validate() })
                     let acquisition: Supervisor.Acquisition = try await phases.acquire {
                         guard ContinuousClock.now < deadline else { throw OpeningDeadline.expired }
+                        if let owned { return .terminal(try owned.observe(request)) }
                         switch try RuntimeMaintenanceStartupRecovery.openForSupervisor(accountID: request.key.accountID,
                             phases: phases, cancellation: cancellation, validate: { try custody.validate() }) {
                         case .terminal(let row):

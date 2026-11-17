@@ -64,6 +64,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let retainedStatus = SetupRetainedInvocationStatus.Reader()
     private var retainedInvocationReservation: SetupRetainedInvocationReservation?
     private var restartRecovery: SetupRestartRecovery?
+    /// The holder that took the current admission tokens. A restart claim waits only while it is an executor run.
+    private weak var admissionHolder: ExecutorAdmission?
+    /// Owned-only test observer for the moment a hold decides to release. Root cannot set it.
+    private var ownedHoldEndObserver: (@Sendable () -> Void)?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
@@ -208,17 +212,15 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
 
     final class MaintenanceRecoveryScope: @unchecked Sendable {
-        private let admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token
-        private let activity: ReleaseActivityToken?
-        fileprivate init(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
-            activity: ReleaseActivityToken?) {
-            self.admission = admission; self.reply = reply; self.activity = activity
-        }
-        func close() { activity?.close(); admission.close(); reply.close() }
+        private weak var owner: SetupAccountOwner?
+        fileprivate let held: ExecutorAdmission
+        fileprivate init(owner: SetupAccountOwner, held: ExecutorAdmission) { self.owner = owner; self.held = held }
+        fileprivate func belongs(to owner: SetupAccountOwner) -> Bool { self.owner === owner }
+        func close() { held.releaseRecord() }
         deinit { close() }
     }
     enum MaintenanceRecoveryAdmissionError: Error { case busyBeforeOwner }
-    /// Reserves both admissions before the recovery driver can call the shared executor.
+    /// Reserves admission and activity before a recovery phase can enter the executor.
     func acquireMaintenanceRecoveryScope(custody: AdministrativeSetupShutdown) throws -> MaintenanceRecoveryScope {
         try lock.withLock {
             guard getpid() == processID, !closing, !closed, custody.belongs(to: self) else {
@@ -231,8 +233,12 @@ public final class SetupAccountOwner: @unchecked Sendable {
             let reply = try setupReplyWork.admit()
             do {
                 let admission = try asynchronousWork.admit()
-                do { return .init(admission: admission, reply: reply, activity: try releaseActivity?.acquireShared()) }
-                catch { admission.close(); throw error }
+                do {
+                    let held = ExecutorAdmission.durable(admission: admission, reply: reply,
+                        activity: try releaseActivity?.acquireShared(), endObserver: ownedHoldEndObserver)
+                    admissionHolder = held
+                    return .init(owner: self, held: held)
+                } catch { admission.close(); throw error }
             } catch { reply.close(); throw error }
         }
     }
@@ -242,13 +248,23 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     final class MaintenanceRecoveryPhasePermit: @unchecked Sendable {
         let executor: SetupAuditUpgradeWorkExecutor
-        fileprivate init(executor: SetupAuditUpgradeWorkExecutor) { self.executor = executor }
+        let held: ExecutorAdmission
+        fileprivate init(executor: SetupAuditUpgradeWorkExecutor, held: ExecutorAdmission) {
+            self.executor = executor; self.held = held
+        }
     }
-    func maintenanceRecoveryPhases(until deadline: ContinuousClock.Instant? = nil,
+    /// A permit retains the held scope's admission. Each phase checks that the hold is still live before entry.
+    func maintenanceRecoveryPhases(scope: MaintenanceRecoveryScope, until deadline: ContinuousClock.Instant? = nil,
         cancellation: SetupAuditUpgradeCancellation? = nil,
-        validate: @escaping @Sendable () throws -> Void = {}) -> SetupRetainedInvocationReservation.RestorationPhases {
-        .maintenanceRecovery(permit: .init(executor: auditUpgradeExecutor), deadline: deadline,
-            cancellation: cancellation, validate: validate)
+        validate: @escaping @Sendable () throws -> Void = {}) throws -> SetupRetainedInvocationReservation.RestorationPhases {
+        try lock.withLock {
+            guard getpid() == processID, scope.belongs(to: self), asynchronousWork.permits(scope.held.admission),
+                  setupReplyWork.permits(scope.held.reply), scope.held.recordIsHeld else {
+                throw AdministrativeSetupError.unavailable
+            }
+            return .maintenanceRecovery(permit: .init(executor: auditUpgradeExecutor, held: scope.held),
+                deadline: deadline, cancellation: cancellation, validate: validate)
+        }
     }
     func closeMaintenanceRecoveryAdmission() {
         lock.withLock {
@@ -257,11 +273,213 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
+    /// The two Setup admission tokens of one holder, its shared release activity, and the holds that keep them open.
+    /// Each executor run adds a worker hold before the executor starts and ends it after the body has returned.
+    /// One scope, or one durable record (restart record, retained reservation), can add one more hold.
+    /// The tokens and the activity close only when no hold is left. So no executor body runs after they closed,
+    /// and `closeWhenIdle` cannot see idle admission while a body still runs.
+    final class ExecutorAdmission: @unchecked Sendable, CustomStringConvertible, CustomReflectable {
+        /// Thrown only when a hold is asked for after the record released, or after every hold ended. Callers map it.
+        struct Released: Error { fileprivate init() {} }
+        let admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token
+        private let lock = NSLock()
+        private var workers = 0, scope = false, adopted = false, closed = false
+        private var record: Bool
+        private let ownedFixture: Bool
+        private var activity: ReleaseActivityToken?
+        private var closeWaiters: [ReleaseWaiter] = [], releaseDone = false
+        /// Owned-only test observer. It runs after the close decision and before the release, outside this lock. It can
+        /// only delay or record. It must not take owner, record or invocation locks.
+        private let endObserver: (@Sendable () -> Void)?
+        var description: String { "SetupExecutorAdmission(redacted)" }
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+        private init(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token, record: Bool,
+            activity: ReleaseActivityToken?, endObserver: (@Sendable () -> Void)?, ownedFixture: Bool = false) {
+            self.admission = admission; self.reply = reply; self.record = record; self.activity = activity
+            self.endObserver = endObserver; self.ownedFixture = ownedFixture
+        }
+        /// The owner adds the first worker hold under its lock before anyone else can see this value.
+        fileprivate static func forExecutorRun(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
+            endObserver: (@Sendable () -> Void)?) -> ExecutorAdmission {
+            .init(admission: admission, reply: reply, record: false, activity: nil, endObserver: endObserver)
+        }
+        /// A durable record holds these tokens and its activity from creation. Only that record calls `releaseRecord()`.
+        fileprivate static func durable(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
+            activity: ReleaseActivityToken?, endObserver: (@Sendable () -> Void)?) -> ExecutorAdmission {
+            .init(admission: admission, reply: reply, record: true, activity: activity, endObserver: endObserver)
+        }
+        /// Owned-only. A record built directly by a test, on tokens that are not the owner's, gets its hold here.
+        static func durableOwned(admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
+            activity: ReleaseActivityToken?) throws -> ExecutorAdmission {
+            try RuntimeMaintenanceOwnedControl.require()
+            try admission.requireOwnedFixture(); try reply.requireOwnedFixture()
+            return .init(admission: admission, reply: reply, record: true, activity: activity, endObserver: nil, ownedFixture: true)
+        }
+        fileprivate var recordIsHeld: Bool { lock.withLock { record && !closed } }
+        /// A real record's hold cannot be used to construct an Owned phase fixture.
+        func requireFreshOwnedPhaseFixture() throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try lock.withLock {
+                guard ownedFixture, record, !closed, workers == 0, !scope else { throw AdministrativeSetupError.unavailable }
+            }
+        }
+        /// Adds one worker hold for an audit run or a fresh claim. The returned closure ends it, once.
+        fileprivate func beginWorker() throws -> @Sendable () -> Void { try addWorker(requireRecord: false) }
+        /// Adds one worker hold for a phase or a reclaim of a durable record. Refuses once the record released,
+        /// so no phase can join a released record and keep its tokens after the releasing caller returned.
+        fileprivate func beginPhase() throws -> @Sendable () -> Void { try addWorker(requireRecord: true) }
+        private func addWorker(requireRecord: Bool) throws -> @Sendable () -> Void {
+            try lock.withLock {
+                guard !closed, !requireRecord || record else { throw Released() }
+                workers += 1
+            }
+            let once = Once()
+            return { [self] in if once.take() { end { $0.workers -= 1 } } }
+        }
+        /// One scope, once, while a worker runs and no record owns the tokens.
+        fileprivate func adoptForScope() throws {
+            try lock.withLock {
+                guard !closed, workers > 0, !adopted, !record else { throw AdministrativeSetupError.unavailable }
+                adopted = true; scope = true
+            }
+        }
+        /// A new restart record now owns these tokens and its activity. It releases them with `releaseRecord()`.
+        fileprivate func transferToRecord(activity: ReleaseActivityToken?) throws {
+            try lock.withLock {
+                guard !closed, workers > 0, !adopted, !record else { throw AdministrativeSetupError.unavailable }
+                record = true; self.activity = activity
+            }
+        }
+        /// True while only executor runs hold the tokens, or while the last hold has ended and the release is
+        /// in progress. Nothing can reopen the tokens of a closed value, so both cases end on their own.
+        fileprivate var isTransientOrEnding: Bool { lock.withLock { closed || (!record && workers > 0) } }
+        fileprivate func endScope() { end { $0.scope = false } }
+        /// The record's release. A running executor body keeps the tokens until it returns.
+        func releaseRecord() { markRecordReleased()() }
+        /// Mark under the record lock. Always invoke the returned closure after releasing that lock.
+        /// Dropping the result retains the tokens and activity and leaves release waiters pending.
+        func markRecordReleased() -> @Sendable () -> Void { prepareEnd { $0.record = false } }
+        /// After the record released, waits until every other running body has returned and the release is done.
+        /// Returns at once while the record still holds the value. Also returns at once when the calling task is
+        /// cancelled or `deadline` passes. A waiter never ends a hold or closes anything; the release continues and
+        /// completes when the last real hold ends.
+        func waitForReleaseAfterRecord(until deadline: ContinuousClock.Instant?) async {
+            let waiter = ReleaseWaiter()
+            let registered = lock.withLock { () -> Bool in
+                if record || releaseDone { return false }
+                closeWaiters.append(waiter); return true
+            }
+            guard registered else { return }
+            let timer = deadline.map { deadline in
+                Task { try? await ContinuousClock().sleep(until: deadline); waiter.finish() }
+            }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    if !waiter.install(continuation) { continuation.resume() }
+                }
+            } onCancel: { waiter.finish() }
+            timer?.cancel()
+            lock.withLock { closeWaiters.removeAll { $0 === waiter } }
+        }
+        /// Runs one restoration phase under a new phase hold. `BusyBeforeBody` keeps its meaning. Throws `Released`.
+        func runRestorationPhase<Value: Sendable>(on executor: SetupAuditUpgradeWorkExecutor,
+            cancellation: SetupAuditUpgradeCancellation = .init(),
+            _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+            let endWorker = try beginPhase()
+            return try await executor.runRestorationPhase(cancellation: cancellation, afterReturn: endWorker, body)
+        }
+        /// Runs one blocking body under a new phase hold. A busy executor is `unavailable`, as before. Throws `Released`.
+        func run<Value: Sendable>(on executor: SetupAuditUpgradeWorkExecutor,
+            _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+            let endWorker = try beginPhase()
+            return try await executor.run(afterReturn: endWorker, body)
+        }
+        private func end(_ change: (ExecutorAdmission) -> Void) { prepareEnd(change)() }
+        private func prepareEnd(_ change: (ExecutorAdmission) -> Void) -> @Sendable () -> Void {
+            let last = lock.withLock { () -> (activity: ReleaseActivityToken?, close: Bool) in
+                guard !closed else { return (nil, false) }
+                change(self)
+                guard workers == 0, !scope, !record else { return (nil, false) }
+                closed = true; let activity = self.activity; self.activity = nil; return (activity, true)
+            }
+            guard last.close else { return {} }
+            let once = Once()
+            return { [self] in
+                guard once.take() else { return }
+                endObserver?()
+                // The activity closes first, so idle admission always means no activity is left. Never under this lock.
+                last.activity?.close(); admission.close(); reply.close()
+                let waiters = lock.withLock { () -> [ReleaseWaiter] in
+                    releaseDone = true; let waiters = closeWaiters; closeWaiters = []; return waiters
+                }
+                for waiter in waiters { waiter.finish() }
+            }
+        }
+        /// One waiter. Release, cancellation or the deadline finishes it, whichever comes first, exactly once.
+        private final class ReleaseWaiter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<Void, Never>?, done = false
+            /// False when the waiter already finished; the caller then resumes at once.
+            func install(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+                lock.withLock { if done { return false }; self.continuation = continuation; return true }
+            }
+            func finish() {
+                let pending = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                    if done { return nil }; done = true; let pending = continuation; continuation = nil; return pending
+                }
+                pending?.resume()
+            }
+        }
+        private final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var taken = false
+            func take() -> Bool { lock.withLock { if taken { return false }; taken = true; return true } }
+        }
+    }
+    /// Takes both admissions together with one worker hold. Callers hand `endWorker` to the executor at once.
+    private func admitExecutorWork() throws -> (held: ExecutorAdmission, endWorker: @Sendable () -> Void) {
+        try lock.withLock {
+            guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
+            let reply = try setupReplyWork.admit()
+            let admission: SetupOwnerAsyncWork.Token
+            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            let held = ExecutorAdmission.forExecutorRun(admission: admission, reply: reply, endObserver: ownedHoldEndObserver)
+            let endWorker = try held.beginWorker()
+            admissionHolder = held
+            return (held, endWorker)
+        }
+    }
+    /// True when every held Setup admission belongs to executor runs only, or to a holder whose release is in
+    /// progress. Durable records, scopes kept by failed cleanup, and other setup work return false.
+    private func admissionHeldByExecutorRunsOnly() -> Bool {
+        guard let holder = admissionHolder, holder.isTransientOrEnding else { return false }
+        return (asynchronousWork.isIdle || asynchronousWork.permits(holder.admission))
+            && (setupReplyWork.isIdle || setupReplyWork.permits(holder.reply))
+    }
+
     /// Blocking maintenance uses the cancellation token of the authorization imported on the exported invocation.
+    /// Both Setup admissions are taken before the executor starts. The body receives them for its single scope.
     func performAuditUpgradeWork<Value: Sendable>(authorization: SetupAuditUpgradeAuthorization,
-                                                 _ body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Value) async throws -> Value {
+        _ body: @escaping @Sendable (SetupAuditUpgradeCancellation, ExecutorAdmission) throws -> Value) async throws -> Value {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
-        return try await auditUpgradeExecutor.run(cancellation: authorization.cancellationToken, body)
+        try Task.checkCancellation(); try authorization.cancellationToken.check()
+        let (held, endWorker) = try admitExecutorWork()
+        return try await auditUpgradeExecutor.run(cancellation: authorization.cancellationToken,
+            afterReturn: endWorker) { try body($0, held) }
+    }
+    /// Owned-only fixture. It is a transient executor run like an audit: it takes both Setup admissions and a
+    /// worker hold before the executor starts, and keeps them until the body returns. Root refuses it.
+    func occupyExecutorOwned<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
+        try RuntimeMaintenanceOwnedControl.require()
+        guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
+        let (_, endWorker) = try admitExecutorWork()
+        return try await auditUpgradeExecutor.run(afterReturn: endWorker) { _ in try body() }
+    }
+    /// Owned-only. Calls `observer` each time a hold made by this owner has decided to release, before the activity
+    /// and tokens close. The observer can only delay or record; it cannot change a result. Root refuses it.
+    func observeHoldEndOwned(_ observer: (@Sendable () -> Void)?) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        lock.withLock { ownedHoldEndObserver = observer }
     }
 
     /// The endpoint transfers failed cleanup here before releasing its invocation reference.
@@ -297,14 +515,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
 
     /// The exported endpoint must mint this authorization on its authenticated invocation, before task dispatch.
     /// Recovery checks the account independently; normal setup continues to enforce its startup fence.
-    func acquireAuditUpgradeScope(authorization: SetupAuditUpgradeAuthorization) throws -> SetupAuditUpgradeScope {
+    /// The scope adopts the admissions that `performAuditUpgradeWork` took before its executor started.
+    func acquireAuditUpgradeScope(authorization: SetupAuditUpgradeAuthorization,
+                                  admission held: ExecutorAdmission) throws -> SetupAuditUpgradeScope {
         guard getpid() == processID else { throw AdministrativeSetupError.unavailable }
         return try lock.withLock {
-            guard !closed, !closing, getpid() == processID, asynchronousWork.isIdle else { throw AdministrativeSetupError.unavailable }
+            guard !closed, !closing, getpid() == processID, asynchronousWork.permits(held.admission),
+                  setupReplyWork.permits(held.reply) else { throw AdministrativeSetupError.unavailable }
             try authorization.validate()
-            let reply = try setupReplyWork.admit()
-            let admission: SetupOwnerAsyncWork.Token
-            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            try held.adoptForScope()
+            let admission = held.admission, reply = held.reply
             do {
                 let values = try machines.use { machine -> (AccountPreparationIntent, InstallationInventory, AuthorityInitializationIntent) in
                     let inventory = try currentInventory(machine)
@@ -350,9 +570,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
                                 try verify(); try body(machine); try verify()
                             }
                         }
-                    }, closeAdmission: { admission.close(); reply.close() })
-            } catch { admission.close(); reply.close(); throw error }
+                    }, closeAdmission: { held.endScope() })
+            } catch { held.endScope(); throw error }
         }
+    }
+    /// Owned-only fixture for scope tests that use no executor. The scope is the only hold. Root refuses it.
+    func acquireAuditUpgradeScope(authorization: SetupAuditUpgradeAuthorization) throws -> SetupAuditUpgradeScope {
+        try RuntimeMaintenanceOwnedControl.require()
+        let (held, endWorker) = try admitExecutorWork()
+        defer { endWorker() }
+        return try acquireAuditUpgradeScope(authorization: authorization, admission: held)
     }
 
     private func withMachine<Value>(admission: SetupOwnerAsyncWork.Token? = nil,
@@ -420,9 +647,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
             let admission: SetupOwnerAsyncWork.Token
             do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
             do {
+                let activity = try releaseActivity?.acquireShared()
                 let record = try SetupRetainedInvocationReservation(authenticatedPeer: authenticatedPeer, incarnation: incarnation, admission: admission, reply: reply,
-                    activity: try releaseActivity?.acquireShared(), authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor)
-                retainedInvocationReservation = record; retainedStatus.publish(record)
+                    activity: activity, authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor,
+                    hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver))
+                retainedInvocationReservation = record; admissionHolder = record.hold; retainedStatus.publish(record)
                 return (record, {
                     try self.lock.withLock {
                         guard self.retainedInvocationReservation === record, !self.closed, !self.closing,
@@ -439,12 +668,14 @@ public final class SetupAccountOwner: @unchecked Sendable {
         private weak var owner: SetupAccountOwner?
         let accountID: Data, accountOwner: LocalAccountIdentity, native: Bool
         let admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token
+        /// Owns both tokens. The record releases them through this value, never by closing a token.
+        let hold: ExecutorAdmission
         let activity: ReleaseActivityToken?, executor: SetupAuditUpgradeWorkExecutor
         fileprivate init(owner: SetupAccountOwner, accountID: Data, accountOwner: LocalAccountIdentity, native: Bool,
-            admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token, activity: ReleaseActivityToken?,
-            executor: SetupAuditUpgradeWorkExecutor) {
+            hold: ExecutorAdmission, activity: ReleaseActivityToken?, executor: SetupAuditUpgradeWorkExecutor) {
             self.owner = owner; self.accountID = accountID; self.accountOwner = accountOwner; self.native = native
-            self.admission = admission; self.reply = reply; self.activity = activity; self.executor = executor
+            self.admission = hold.admission; self.reply = hold.reply; self.hold = hold
+            self.activity = activity; self.executor = executor
         }
         func requireOwner(_ record: SetupRestartRecovery, windowID: Data?, starting: Bool = false) throws {
             guard let owner else { throw AdministrativeSetupError.unavailable }
@@ -459,56 +690,102 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     owner: record.accountOwner, windowID: windowID) != true else { throw AdministrativeSetupError.unavailable }
         }
     }
+    /// How a restart claim may enter the shared executor. Each entry holds a worker hold before the executor starts.
+    /// A fresh claim holds new admissions. A reclaim adds a worker hold to the unsettled record's admissions.
+    private enum RestartEntry: Sendable {
+        case fresh(ExecutorAdmission, endWorker: @Sendable () -> Void)
+        case reclaim(SetupRestartRecovery, endWorker: @Sendable () -> Void)
+        /// Only executor runs hold the admission. Nothing was taken.
+        case waitForExecutorRun
+    }
+    /// The entry check found that the borrowed record settled before the body used it. Nothing was consumed.
+    private struct RestartEntryChanged: Error {}
+    private func admitRestartEntry(accountID: Data, native: Bool) throws -> RestartEntry {
+        if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
+        else { try RuntimeMaintenanceOwnedControl.require() }
+        return try lock.withLock {
+            guard getpid() == processID, !closed, accountID.count == 16 else { throw AdministrativeSetupError.unavailable }
+            // The worker hold is added under the owner lock. A concurrent abandon() cannot close the tokens under it.
+            if let restartRecovery, !restartRecovery.isSettled, let endWorker = try? restartRecovery.hold.beginPhase() {
+                return .reclaim(restartRecovery, endWorker: endWorker)
+            }
+            guard !closing else { throw AdministrativeSetupError.unavailable }
+            if !asynchronousWork.isIdle || !setupReplyWork.isIdle {
+                // A live retained reservation, an unsettled restart record or other setup work is durable: refuse.
+                guard admissionHeldByExecutorRunsOnly() else { throw AdministrativeSetupError.unavailable }
+                return .waitForExecutorRun
+            }
+            let (held, endWorker) = try admitExecutorWork()
+            return .fresh(held, endWorker: endWorker)
+        }
+    }
     /// Blocking authentication and account reads stay on this owner's original executor.
+    /// The Setup admission is taken before the executor starts. A durable holder is refused at once.
+    /// An executor run (for example an audit) is waited for, like a busy executor, until the deadline.
     func claimRestartRecovery(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
         accountID: Data, native: Bool, until deadline: ContinuousClock.Instant) async throws -> SetupRestartRecovery.Claim {
         do {
             while true {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { throw CancellationError() }
+                let entry = try admitRestartEntry(accountID: accountID, native: native)
+                let afterReturn: @Sendable () -> Void
+                switch entry {
+                case .waitForExecutorRun:
+                    try await ContinuousClock().sleep(for: .milliseconds(25)); continue
+                case .fresh(_, let endWorker), .reclaim(_, let endWorker): afterReturn = endWorker
+                }
                 do {
-                    return try await auditUpgradeExecutor.runRestorationPhase { _ in
+                    return try await auditUpgradeExecutor.runRestorationPhase(afterReturn: afterReturn) { _ in
                         try self.claimRestartRecoveryBlocking(authorization: authorization, processLease: processLease,
-                            accountID: accountID, native: native)
+                            accountID: accountID, native: native, entry: entry)
                     }
                 } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
                     try await ContinuousClock().sleep(for: .milliseconds(25))
-                }
+                } catch is RestartEntryChanged {}
             }
         } catch { authorization.close(); throw error }
     }
     private func claimRestartRecoveryBlocking(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
-        accountID: Data, native: Bool) throws -> SetupRestartRecovery.Claim {
+        accountID: Data, native: Bool, entry: RestartEntry) throws -> SetupRestartRecovery.Claim {
         if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
         else { try RuntimeMaintenanceOwnedControl.require() }
-        try processLease.validate(); try authorization.takeForClaim()
+        try processLease.validate()
+        if case .reclaim(let record, _) = entry {
+            guard lock.withLock({ restartRecovery === record && !record.isSettled }) else { throw RestartEntryChanged() }
+        }
+        try authorization.takeForClaim()
         let (claim, retired) = try lock.withLock {
             guard getpid() == processID, !closed, accountID.count == 16 else { throw AdministrativeSetupError.unavailable }
             guard try retainedInvocationReservation?.excludesRestart(accountID: accountID,
                 owner: authorization.currentOwner, windowID: nil) != true else { throw AdministrativeSetupError.unavailable }
-            if let restartRecovery, !restartRecovery.isSettled {
+            switch entry {
+            case .waitForExecutorRun: throw AdministrativeSetupError.unavailable
+            case .reclaim(let record, _):
+                // The record settled after the entry check. Its admission no longer covers a fresh claim.
+                guard restartRecovery === record, !record.isSettled else { throw AdministrativeSetupError.unavailable }
                 // Reclaim reenters this owner's NSRecursiveLock. It cannot use a nonrecursive owner lock.
                 // Shutdown permits adoption and a safe exit, but the slot refuses starting another attempt.
-                return (try SetupRestartRecovery.reclaim(restartRecovery, authorization: authorization,
+                return (try SetupRestartRecovery.reclaim(record, authorization: authorization,
                     processLease: processLease, accountID: accountID, native: native), Optional<SetupRestartRecovery>.none)
-            }
-            guard !closing, asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
-            try machines.use { machine in
-                _ = try currentInventory(machine)
-                guard let account = try machine.accountPreparation(ownerUID: authorization.peer.userID),
-                      account.accountID == accountID else { throw AdministrativeSetupError.wrongAccount }
-                try LocalAccountDirectory.validateOwnership(authorization.currentOwner, uid: account.ownerUID, directoryID: account.directoryID)
-            }
-            let reply = try setupReplyWork.admit()
-            let admission: SetupOwnerAsyncWork.Token
-            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
-            do {
+            case .fresh(let held, _):
+                guard !closing, restartRecovery?.isSettled != false, asynchronousWork.permits(held.admission),
+                      setupReplyWork.permits(held.reply) else { throw AdministrativeSetupError.unavailable }
+                try machines.use { machine in
+                    _ = try currentInventory(machine)
+                    guard let account = try machine.accountPreparation(ownerUID: authorization.peer.userID),
+                          account.accountID == accountID else { throw AdministrativeSetupError.wrongAccount }
+                    try LocalAccountDirectory.validateOwnership(authorization.currentOwner, uid: account.ownerUID, directoryID: account.directoryID)
+                }
+                // On failure the worker hold still closes both tokens after this body returns.
+                let activity = try releaseActivity?.acquireShared()
                 let permit = RestartPermit(owner: self, accountID: accountID, accountOwner: authorization.currentOwner, native: native,
-                    admission: admission, reply: reply, activity: try releaseActivity?.acquireShared(), executor: auditUpgradeExecutor)
+                    hold: held, activity: activity, executor: auditUpgradeExecutor)
                 let created = try SetupRestartRecovery.reserve(permit: permit, authorization: authorization, processLease: processLease)
+                try held.transferToRecord(activity: activity)
                 let retired = restartRecovery; restartRecovery = created.record
                 return (created.claim, retired)
-            } catch { admission.close(); reply.close(); throw error }
+            }
         }
         // An old completion can own cleanup objects. Release them outside the owner lock.
         withExtendedLifetime(retired) {}
@@ -522,7 +799,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
             try authorization.takeForClaim()
             let admission = try SetupOwnerAsyncWork().admit(), reply = try SetupOwnerAsyncWork().admit()
             let permit = RestartPermit(owner: self, accountID: accountID, accountOwner: authorization.currentOwner, native: false,
-                admission: admission, reply: reply, activity: nil, executor: self.auditUpgradeExecutor)
+                hold: .durable(admission: admission, reply: reply, activity: nil, endObserver: nil), activity: nil,
+                executor: self.auditUpgradeExecutor)
             return try SetupRestartRecovery.reserve(permit: permit, authorization: authorization, processLease: processLease).claim
         }
     }

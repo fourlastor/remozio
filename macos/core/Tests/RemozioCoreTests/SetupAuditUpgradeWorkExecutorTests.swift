@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -72,9 +73,9 @@ final class SetupAuditUpgradeWorkExecutorTests: XCTestCase {
         let done = expectation(description: "Cancelled worker settled")
         let task = Task.detached {
             do {
-                try await owner.performAuditUpgradeWork(authorization: grant) { token in
+                try await owner.performAuditUpgradeWork(authorization: grant) { token, admission in
                     XCTAssertTrue(token === cancellation); XCTAssertFalse(Task.isCancelled)
-                    let scope = try owner.acquireAuditUpgradeScope(authorization: grant)
+                    let scope = try owner.acquireAuditUpgradeScope(authorization: grant, admission: admission)
                     defer { do { try scope.close() } catch { XCTFail("Cleanup: \(error)") } }
                     started.fulfill()
                     guard gate.wait(timeout: .now() + 15) == .success else { throw Refused() }
@@ -88,4 +89,44 @@ final class SetupAuditUpgradeWorkExecutorTests: XCTestCase {
         wait(for: [started], timeout: 5); task.cancel(); gate.signal(); wait(for: [done], timeout: 5)
         XCTAssertThrowsError(try grant.validate()); try owner.verifyCurrent(); try h.machine { _ in () }
     }
+    func testAfterReturnRunsOnceOnSuccessErrorCancellationAndBusyRefusal() throws {
+        try asynchronous {
+            let executor = SetupAuditUpgradeWorkExecutor(), ended = Mutex(0)
+            let after: @Sendable () -> Void = { ended.withLock { $0 += 1 } }
+            let value = try await executor.run(afterReturn: after) { _ in XCTAssertEqual(ended.withLock { $0 }, 0); return 7 }
+            XCTAssertEqual(value, 7); XCTAssertEqual(ended.withLock { $0 }, 1)
+            do { try await executor.run(afterReturn: after) { _ in throw Refused() }; XCTFail("Expected worker failure") }
+            catch is Refused {}
+            XCTAssertEqual(ended.withLock { $0 }, 2)
+            let cancelled = SetupAuditUpgradeCancellation(); cancelled.cancel()
+            do { try await executor.run(cancellation: cancelled, afterReturn: after) { _ in XCTFail("Cancelled body") }; XCTFail("Expected cancellation") }
+            catch is CancellationError {}
+            XCTAssertEqual(ended.withLock { $0 }, 3)
+            let entered = Mutex(false), resume = DispatchSemaphore(value: 0)
+            let actual = Task {
+                try await executor.run(afterReturn: after) { token in
+                    entered.withLock { $0 = true }
+                    guard resume.wait(timeout: .now() + 10) == .success else { throw Refused() }
+                    try token.check()
+                }
+            }
+            defer { resume.signal() }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while !entered.withLock({ $0 }) {
+                guard ContinuousClock.now < deadline else { throw Refused() }
+                try await ContinuousClock().sleep(for: .milliseconds(1))
+            }
+            do { try await executor.run(afterReturn: after) { _ in XCTFail("Busy audit body") }; XCTFail("Expected busy audit") }
+            catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+            XCTAssertEqual(ended.withLock { $0 }, 4)
+            do { try await executor.runRestorationPhase(afterReturn: after) { _ in XCTFail("Busy phase body") }; XCTFail("Expected busy phase") }
+            catch { XCTAssertTrue(error is SetupAuditUpgradeWorkExecutor.BusyBeforeBody) }
+            XCTAssertEqual(ended.withLock { $0 }, 5)
+            actual.cancel(); XCTAssertEqual(ended.withLock { $0 }, 5)
+            resume.signal()
+            do { try await actual.value; XCTFail("Cancelled worker returned success") } catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertEqual(ended.withLock { $0 }, 6)
+        }
+    }
+
 }

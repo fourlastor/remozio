@@ -13,6 +13,8 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     enum State: Equatable { case reserved, attached, orphan, recovering, settled }
     let admission: SetupOwnerAsyncWork.Token
     private let reply: SetupOwnerAsyncWork.Token
+    /// Owns both tokens and the activity. Release goes through this value, so a running phase body keeps them until it returns.
+    let hold: SetupAccountOwner.ExecutorAdmission
     private let activity: ReleaseActivityToken?
     private let statusID = UUID()
     private let authenticatedPeerUID: uid_t
@@ -39,14 +41,19 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     /// An injected status lock is an ordinary-owner test seam. Root cannot inject this lock.
     init(authenticatedPeer: XPCPeerCredentials, incarnation: UUID, admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
          activity: ReleaseActivityToken?, ownedStatusLock: NSLock? = nil, authenticatedOwner: LocalAccountIdentity,
-         recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil) throws {
+         recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil, hold: SetupAccountOwner.ExecutorAdmission? = nil) throws {
         guard authenticatedPeer.processID > 0, authenticatedPeer.userID > 0, authenticatedPeer.userID < UInt32.max else {
             throw XPCPeerPolicyError.wrongPeer
         }
         if ownedStatusLock != nil { try RuntimeMaintenanceOwnedControl.require() }
         guard authenticatedOwner.uid == authenticatedPeer.userID else { throw XPCPeerPolicyError.wrongPeer }
         self.authenticatedOwner = authenticatedOwner; self.recoveryExecutor = recoveryExecutor
-        recovery = .init(executor: recoveryExecutor)
+        // The owner passes the hold it made for these tokens. Without one, only an Owned test can build a record.
+        let recordHold: SetupAccountOwner.ExecutorAdmission
+        if let hold { recordHold = hold }
+        else { recordHold = try SetupAccountOwner.ExecutorAdmission.durableOwned(admission: admission, reply: reply, activity: activity) }
+        guard recordHold.admission === admission, recordHold.reply === reply else { throw AdministrativeSetupError.unavailable }
+        self.hold = recordHold; recovery = .init(executor: recoveryExecutor, hold: recordHold)
         lock = ownedStatusLock ?? NSLock()
         authenticatedPeerUID = authenticatedPeer.userID
         self.incarnation = incarnation; self.admission = admission; self.reply = reply; self.activity = activity
@@ -228,10 +235,12 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     /// Construction has no worker or native loan. Only its exact reserved record can take this exit.
     func abortConstruction() {
         guard getpid() == process else { return }
-        lock.withLock {
-            guard phase == .reserved else { return }
-            phase = .settled; activity?.close(); admission.close(); reply.close()
+        let release = lock.withLock { () -> (@Sendable () -> Void)? in
+            guard phase == .reserved else { return nil }
+            phase = .settled
+            return hold.markRecordReleased()
         }
+        release?()
     }
     /// The synchronous worker has returned through all scoped loans. Each retained cleanup must also return successfully.
     func settle(_ value: SetupRetainedInvocation, finalCleanup: () -> Void = {}) throws {
@@ -245,9 +254,11 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         defer { lock.withLock { settling = false } }
         try recovery.closeSynchronousCleanup()
         finalCleanup(); recovery.invocationCleanupReturned()
-        lock.withLock {
-            phase = .settled; activity?.close(); admission.close(); reply.close()
+        let release = lock.withLock {
+            phase = .settled
+            return hold.markRecordReleased()
         }
+        release()
     }
     /// This target is private metadata from the actual record. Fresh rights still authorize the separate claim.
     func recoveryTarget(authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedOrphanClaim.Target {
@@ -288,13 +299,16 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     }
     private func releaseWindowFree(seal: UUID, claim: UUID) throws -> Bool {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
-        return try lock.withLock {
+        let release = try lock.withLock { () throws -> (@Sendable () -> Void)? in
             try requireRecovery(seal: seal, claim: claim)
             let evidence = try recovery.requireJoined()
-            guard capturedWindow == nil, evidence.windowWriteNeverPossible else { return false }
-            phase = .settled; activity?.close(); admission.close(); reply.close()
-            return true
+            guard capturedWindow == nil, evidence.windowWriteNeverPossible else { return nil }
+            phase = .settled
+            return hold.markRecordReleased()
         }
+        guard let release else { return false }
+        release()
+        return true
     }
     /// Uses the original owner's executor. This capability never creates another worker executor.
     final class RestorationPhases: @unchecked Sendable {
@@ -310,41 +324,42 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             }
         }
         private let executor: SetupAuditUpgradeWorkExecutor
+        private let hold: SetupAccountOwner.ExecutorAdmission
         private let deadline: ContinuousClock.Instant?
         private let cancellation: SetupAuditUpgradeCancellation?
         private let validate: @Sendable () throws -> Void
         private let ownedExpiration: OwnedDeadlineControl?
         private let processID = getpid(), ownerUID = getuid()
-        fileprivate init(executor: SetupAuditUpgradeWorkExecutor, deadline: ContinuousClock.Instant? = nil,
+        fileprivate init(executor: SetupAuditUpgradeWorkExecutor, hold: SetupAccountOwner.ExecutorAdmission, deadline: ContinuousClock.Instant? = nil,
             ownedExpiration: OwnedDeadlineControl? = nil, cancellation: SetupAuditUpgradeCancellation? = nil,
             validate: @escaping @Sendable () throws -> Void = {}) {
-            self.executor = executor; self.deadline = deadline; self.ownedExpiration = ownedExpiration
+            self.executor = executor; self.hold = hold; self.deadline = deadline; self.ownedExpiration = ownedExpiration
             self.cancellation = cancellation; self.validate = validate
         }
         static func maintenanceRecovery(permit: SetupAccountOwner.MaintenanceRecoveryPhasePermit,
             deadline: ContinuousClock.Instant?, cancellation: SetupAuditUpgradeCancellation?,
             validate: @escaping @Sendable () throws -> Void) -> RestorationPhases {
-            .init(executor: permit.executor, deadline: deadline, cancellation: cancellation, validate: validate)
+            .init(executor: permit.executor, hold: permit.held, deadline: deadline, cancellation: cancellation, validate: validate)
         }
-        static func owned(executor: SetupAuditUpgradeWorkExecutor, deadline: ContinuousClock.Instant? = nil,
+        static func owned(executor: SetupAuditUpgradeWorkExecutor, hold: SetupAccountOwner.ExecutorAdmission, deadline: ContinuousClock.Instant? = nil,
             cancellation: SetupAuditUpgradeCancellation? = nil) throws -> RestorationPhases {
-            try RuntimeMaintenanceOwnedControl.require()
-            return .init(executor: executor, deadline: deadline, cancellation: cancellation)
+            try hold.requireFreshOwnedPhaseFixture()
+            return .init(executor: executor, hold: hold, deadline: deadline, cancellation: cancellation)
         }
         /// The owner alone can issue this permit. Restart uses that owner's original executor.
         static func restart(permit: SetupAccountOwner.RestartPermit) -> RestorationPhases {
-            .init(executor: permit.executor)
+            .init(executor: permit.executor, hold: permit.hold)
         }
         private func requireProcess() throws {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
         }
         func forAttempt(until deadline: ContinuousClock.Instant) throws -> RestorationPhases {
-            try requireProcess(); return .init(executor: executor, deadline: deadline, cancellation: cancellation, validate: validate)
+            try requireProcess(); return .init(executor: executor, hold: hold, deadline: deadline, cancellation: cancellation, validate: validate)
         }
         func forOwnedAttempt(until deadline: ContinuousClock.Instant,
             expiration: OwnedDeadlineControl) throws -> RestorationPhases {
             try RuntimeMaintenanceOwnedControl.require(); try requireProcess()
-            return .init(executor: executor, deadline: deadline, ownedExpiration: expiration, cancellation: cancellation, validate: validate)
+            return .init(executor: executor, hold: hold, deadline: deadline, ownedExpiration: expiration, cancellation: cancellation, validate: validate)
         }
         private func requireDeadline(_ deadline: ContinuousClock.Instant?) throws {
             if let deadline, ContinuousClock.now >= deadline {
@@ -357,7 +372,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             try requireProcess(); try Task.checkCancellation()
             let token = cleanup ? SetupAuditUpgradeCancellation() : cancellation ?? SetupAuditUpgradeCancellation()
             let validate = self.validate, ownedExpiration = self.ownedExpiration
-            return try await executor.runRestorationPhase(cancellation: token) { _ in
+            return try await hold.runRestorationPhase(on: executor, cancellation: token) { _ in
                 if !cleanup { try validate() }
                 try self.requireDeadline(deadline)
                 if deadline != nil, ownedExpiration?.expired() == true {
@@ -381,17 +396,45 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
         /// Construction makes one admission attempt. A busy result proves that no body started.
         func acquire<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
-            try await once(until: deadline, cleanup: false, body)
+            try await afterRelease(until: deadline, released: { throw JournalLeaseError.invalidated }) {
+                try await self.once(until: self.deadline, cleanup: false, body)
+            }
         }
         func run<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
-            try await admitted(until: deadline, body)
+            try await afterRelease(until: deadline, released: { throw JournalLeaseError.invalidated }) {
+                try await self.admitted(until: self.deadline, body)
+            }
         }
         /// Actual cleanup ignores caller cancellation and the attempt deadline. It never repeats a started body.
         func cleanup<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
             try requireProcess()
             let cleanup = Task { try await self.admitted(until: nil, cleanup: true, body) }
-            return try await cleanup.value
+            return try await afterRelease(until: nil, released: { throw JournalLeaseError.invalidated }) {
+                try await cleanup.value
+            }
         }
+        /// No body starts when the record has released its admission.
+        func cleanupUnlessReleased<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value? {
+            try requireProcess()
+            let cleanup = Task { try await self.admitted(until: nil, cleanup: true, body) }
+            return try await afterRelease(until: nil, released: { nil }) {
+                let value = try await cleanup.value
+                return Optional.some(value)
+            }
+        }
+        private func afterRelease<Value>(until deadline: ContinuousClock.Instant?, released: () throws -> Value,
+            _ operation: () async throws -> Value) async throws -> Value {
+            let result: Result<Value, any Error>
+            do { result = .success(try await operation()) }
+            catch is SetupAccountOwner.ExecutorAdmission.Released {
+                await hold.waitForReleaseAfterRecord(until: deadline)
+                return try released()
+            }
+            catch { result = .failure(error) }
+            await hold.waitForReleaseAfterRecord(until: deadline)
+            return try result.get()
+        }
+        /// Records cannot release while their restoration work still owns custody.
         func closeActual(_ body: @escaping @Sendable () -> Void) async throws {
             try await cleanup { body() }
         }
@@ -512,7 +555,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     private func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,
         work: RestorationWork, seal: UUID, claim: UUID) throws {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
-        try lock.withLock {
+        let release = try lock.withLock {
             try requireRecovery(seal: seal, claim: claim)
             _ = try recovery.requireJoined()
             guard restorationWork === work, work.actualReturnObserved, completed.workID == work.id else {
@@ -523,8 +566,10 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                   completed.window.gate?.admission == .available else { throw RuntimePreparationError.changedScope }
             try activity?.validate()
             restorationJoined = true
-            phase = .settled; activity?.close(); admission.close(); reply.close()
+            phase = .settled
+            return hold.markRecordReleased()
         }
+        release()
     }
     /// Only this record can mint a token for its sealed generation. The token grants no restoration or body replay.
     final class RecoveryToken: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -553,7 +598,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             return try record.lock.withLock {
                 try record.requireRecovery(seal: seal, claim: claim)
                 guard let executor = record.recoveryExecutor else { throw AdministrativeSetupError.unavailable }
-                return .init(executor: executor)
+                return .init(executor: executor, hold: record.hold)
             }
         }
         func requireSavedTargetReconnect(_ row: RuntimeMaintenanceWindowRecord) throws {

@@ -26,8 +26,8 @@ final class AuditUpgradeAnonymousXPCTests: XCTestCase {
                           form.count == MemoryLayout<AuthorizationExternalForm>.size else { throw Refused() }
                     state.withLock { $0.imports += 1; $0.importsHadCurrentConnection = $0.importsHadCurrentConnection && NSXPCConnection.current() === connection }
                     return try .openOwned(callerUID: connection.effectiveUserIdentifier, verifyRights: {})
-                }, openInvocation: { [self] expected, grant in
-                    try .openOwned(owner: owner, expected: expected, authorization: grant, openOperation: harness.operation(scope:))
+                }, openInvocation: { [self] expected, grant, admission in
+                    try .openOwned(owner: owner, expected: expected, authorization: grant, admission: admission, openOperation: harness.operation(scope:))
                 })
                 let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { [weak connection] in
                     guard let connection, NSXPCConnection.current() === connection,
