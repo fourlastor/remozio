@@ -229,7 +229,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
                     XCTAssertTrue(h.writes.isEmpty)
                     drivers.withLock { $0.last }?.invalidate()
                 }
-            }, until: .now.advanced(by: .seconds(35)))
+            }, until: .now.advanced(by: restorationTestForwardDeadline))
             let all = drivers.withLock { $0 }
             XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 3)
             XCTAssertTrue(all.allSatisfy { $0.closed.withLock { $0 } })
@@ -249,7 +249,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
                 // This synchronous hook runs on the client actor before its greeted guard.
                 // The callback invalidates the lifetime while finish remains queued on that actor.
                 if probes.withLock({ $0 += 1; return $0 == 1 }) { drivers.withLock { $0.last }?.invalidate() }
-            }, until: .now.advanced(by: .seconds(35)))
+            }, until: .now.advanced(by: restorationTestForwardDeadline))
             let all = drivers.withLock { $0 }
             XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 2)
             XCTAssertTrue(all[0].closed.withLock { $0 }); XCTAssertTrue(all[0].metrics.actions.withLock { $0 }.isEmpty)
@@ -407,7 +407,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             }, capturePeer: { captures.withLock { $0 += 1 }; return h.witness }, requirePeerLive: { _ in },
             beforeHealthyOpen: { client in
                 if attempts.withLock({ $0 += 1; return $0 == 1 }) { await client.close() }
-            }, until: .now.advanced(by: .seconds(30)))
+            }, until: .now.advanced(by: restorationTestForwardDeadline))
             let all = drivers.withLock { $0 }
             XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 2)
             XCTAssertFalse(all[0] === all[1]); XCTAssertTrue(all[0].metrics.actions.withLock { $0 }.isEmpty)
@@ -442,7 +442,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
                 let first = drivers.withLock { $0.isEmpty }
                 let d = StartupDriver(epoch: Data(repeating: 81, count: 16), barrier: h.barrier, notReadyOpen: first)
                 drivers.withLock { $0.append(d) }; return d
-            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, until: .now.advanced(by: .seconds(30)))
+            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, until: .now.advanced(by: restorationTestForwardDeadline))
             let all = drivers.withLock { $0 }
             XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 2); XCTAssertFalse(all[0] === all[1])
             XCTAssertEqual(all.flatMap { $0.metrics.actions.withLock { $0 } }, [.open, .open, .reopen])
@@ -672,7 +672,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
                     } }
                 }
                 drivers.withLock { $0.append(driver) }; return driver
-            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, until: .now.advanced(by: .seconds(30)))
+            }, capturePeer: { h.witness }, requirePeerLive: { _ in }, until: .now.advanced(by: restorationTestForwardDeadline))
             let all = drivers.withLock { $0 }
             XCTAssertEqual(row.phase, .restored); XCTAssertEqual(all.count, 4)
             XCTAssertTrue(all.prefix(3).allSatisfy { $0.closed.withLock { $0 } && $0.metrics.actions.withLock { $0 }.isEmpty })
@@ -721,7 +721,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             }, requirePeerLive: { _ in isolated("requirePeerLive") }, beforeHealthyOpen: { client in
                 clientCell.withLock { $0 = client }
             }, afterProbe: { isolated("afterProbe") }, ownedPhaseControl: control,
-                until: .now.advanced(by: .seconds(25)))
+                until: .now.advanced(by: restorationTestForwardDeadline))
             XCTAssertEqual(row.phase, .restored)
             XCTAssertEqual(seen.withLock { $0 }, Set(["afterProbe", "capturePeer", "requirePeerLive", "pending", "restored", "releaseDrain"]))
         }
@@ -830,7 +830,7 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
             directory: .init(anchor: anchor, relativeDirectory: "machine", owner: getuid()), expected: machine)
         return (directory, admission)
     }
-    func restore(_ joined: Joined, until deadline: ContinuousClock.Instant = .now.advanced(by: explicitRestorationForwardDeadline),
+    func restore(_ joined: Joined, until deadline: ContinuousClock.Instant = .now.advanced(by: restorationTestForwardDeadline),
         frame: RuntimeMaintenanceStartupFrame? = nil,
         ownedDeadline: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
         phaseControl: AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl? = nil,
@@ -862,10 +862,10 @@ private final class ExplicitStartupFixture: @unchecked Sendable {
     deinit { claim?.abandon(); processLease.close() }
 }
 
-/// Forward deadline for explicit restoration tests. A restore takes about 14 s on the review Mac and up to about
-/// 30 s on a busy CI runner. The production deadline is 120 s. Tests that end the deadline on purpose use
+/// Forward deadline for restoration tests that must reach `restored`. A restore takes about 14 s on the review Mac
+/// and up to about 30 s on a busy CI runner, and a test with client retries runs it more than once. The production deadline is 120 s. Tests that end the deadline on purpose use
 /// `OwnedDeadlineControl`, which only shortens this bound.
-let explicitRestorationForwardDeadline: Duration = .seconds(90)
+let restorationTestForwardDeadline: Duration = .seconds(90)
 
 private final class ExplicitActorPhaseGate: @unchecked Sendable {
     typealias Control = AuthorityMaintenanceXPCClient.OwnedRestorationPhaseControl
@@ -920,7 +920,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
     private static func automatic(_ f: ExplicitStartupFixture, epoch: UInt8 = 81) async throws -> Row {
         let h = f.h, driver = StartupDriver(epoch: Data(repeating: epoch, count: 16), barrier: h.barrier)
         let recovery = try h.open()
-        let deadline = ContinuousClock.now.advanced(by: explicitRestorationForwardDeadline)
+        let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
         do {
             return try await recovery.runOwned(makeDriver: { driver.fresh() }, capturePeer: { h.witness }, requirePeerLive: { _ in },
                 until: deadline)
@@ -946,7 +946,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
         let reconnect = action == .secondReconnect
         try withFixture(epoch: reconnect ? 71 : 81) { f in
             try f.seed(reconnect ? .needsOwnerRecovery : .stopped, retainReceipt: reconnect)
-            let joined = try await f.join(), deadline = ContinuousClock.now.advanced(by: explicitRestorationForwardDeadline)
+            let joined = try await f.join(), deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
             let gate = ExplicitActorPhaseGate(until: deadline)
             let control = try ExplicitActorPhaseGate.Control { event in
                 if event.boundary == boundary { try gate.stop(event) }
@@ -1256,7 +1256,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
         try withFixture { f in
             try f.seed(.needsOwnerRecovery)
             let original = try XCTUnwrap(f.h.frame().window), joined = try await f.join()
-            let deadline = ContinuousClock.now.advanced(by: explicitRestorationForwardDeadline)
+            let deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
             do {
                 let row = try await f.restore(joined, until: deadline)
                 XCTAssertEqual(row.phase, .restored); XCTAssertEqual(row.service, .healthy)
@@ -1922,7 +1922,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.h.afterWrite = { row in
                 if row.phase == .restoring { reached.withLock { $0 = row.phase }; trigger.expire() }
             }
-            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: explicitRestorationForwardDeadline), ownedDeadline: control) }
+            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: restorationTestForwardDeadline), ownedDeadline: control) }
             let row = try XCTUnwrap(f.h.frame().window)
             XCTAssertEqual(row.phase, .needsOwnerRecovery)
             XCTAssertEqual(row.failure, .healthFailed); f.retained.assertHeld()
@@ -1939,7 +1939,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.h.afterWrite = { row in
                 if row.phase == .reopenPending { reached.withLock { $0 = row.phase }; trigger.expire() }
             }
-            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: explicitRestorationForwardDeadline), ownedDeadline: control) }
+            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: restorationTestForwardDeadline), ownedDeadline: control) }
             let row = try XCTUnwrap(f.h.frame().window)
             XCTAssertEqual(row.phase, .needsOwnerRecovery)
             XCTAssertEqual(row.failure, .admissionUnconfirmed); f.retained.assertHeld()
@@ -1956,7 +1956,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.h.afterWrite = { row in
                 if row.phase == .restored { reached.withLock { $0 = row.phase }; trigger.expire() }
             }
-            let row = try await f.restore(joined, until: .now.advanced(by: explicitRestorationForwardDeadline), ownedDeadline: control)
+            let row = try await f.restore(joined, until: .now.advanced(by: restorationTestForwardDeadline), ownedDeadline: control)
             XCTAssertEqual(row.phase, .restored); try f.retained.assertReleased()
             XCTAssertEqual(reached.withLock { $0 }, .restored)
             XCTAssertTrue(f.h.committedRows.contains { $0.phase == .restored })
@@ -1971,7 +1971,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
             f.h.afterWrite = { row in
                 if row.phase == .restoring { reached.withLock { $0 = row.phase }; trigger.expire() }
             }
-            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: explicitRestorationForwardDeadline), ownedDeadline: control) }
+            await Self.refuses { try await f.restore(joined, until: .now.advanced(by: restorationTestForwardDeadline), ownedDeadline: control) }
             let row = try XCTUnwrap(f.h.frame().window)
             XCTAssertEqual(reached.withLock { $0 }, .restoring)
             XCTAssertTrue(f.h.committedRows.contains { $0.phase == .restoring })
