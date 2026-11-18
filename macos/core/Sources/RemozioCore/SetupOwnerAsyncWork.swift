@@ -14,6 +14,20 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
         return .init(ownedFixture: true)
     }
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var availabilityWaiters: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// A notification grants no admission. Cancellation removes the subscriber; the lifecycle retains its 60-second fallback.
+    func availability() -> AsyncStream<Void> {
+        let signal = AsyncStream<Void>.makeStream(), id = UUID()
+        signal.continuation.onTermination = { [weak self] _ in self?.removeAvailability(id) }
+        let idle = lock.withLock {
+            if active == nil { return true }
+            if availabilityWaiters.count < 64 { availabilityWaiters[id] = signal.continuation }
+            return false
+        }
+        if idle { signal.continuation.finish() }
+        return signal.stream
+    }
+    private func removeAvailability(_ id: UUID) { _ = lock.withLock { availabilityWaiters.removeValue(forKey: id) } }
 
     func admit() throws -> Token {
         try lock.withLock {
@@ -37,11 +51,13 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
         }
     }
     private func finish(_ id: UUID) {
-        let completed: [CheckedContinuation<Void, Never>] = lock.withLock {
-            guard active == id else { return [] }; active = nil
-            let completed = waiters; waiters = []; return completed
+        let (completed, available): ([CheckedContinuation<Void, Never>], [AsyncStream<Void>.Continuation]) = lock.withLock {
+            guard active == id else { return ([], []) }; active = nil
+            let completed = waiters, available = Array(availabilityWaiters.values)
+            waiters = []; availabilityWaiters = [:]; return (completed, available)
         }
         for continuation in completed { continuation.resume() }
+        for continuation in available { continuation.finish() }
     }
     final class Token: @unchecked Sendable {
         private let lock = NSLock()

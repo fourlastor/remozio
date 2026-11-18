@@ -669,4 +669,45 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "fork") else { preconditionFailure("fork unavailable") }
         return unsafeBitCast(symbol, to: (@convention(c) () -> pid_t).self)
     }()
+
+    func testOrphanSignalsCanReenterStatusAndNeverSettleAdmission() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try self.withFrame { f in
+                let signals = Mutex(0), peer = f.binding.peer, identity = f.binding.authorityOwner
+                try f.owner.installMaintenanceRecoverySignal { [weak owner = f.owner] in
+                    signals.withLock { $0 += 1 }
+                    guard let owner else { XCTFail("The record must retain its owner during this fixture"); return }
+                    XCTAssertEqual(try? owner.retainedInvocationState(), .orphan)
+                    _ = owner.retainedInvocationStatus(authenticatedPeer: peer, currentOwner: identity)
+                }
+                var invocation: Invocation? = try f.invocation(captured: false)
+                try f.lose(&invocation)
+                XCTAssertEqual(signals.withLock { $0 }, 2); f.assertHeld()
+                let completed = try self.joined(f.claim()); XCTAssertTrue(try completed.releaseIfWindowFree())
+                try f.assertReleased(); XCTAssertEqual(signals.withLock { $0 }, 2)
+            }
+        }
+    }
+    func testCleanupSignalFollowsTheActualInvocationCleanupReturn() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try self.withFrame { f in
+                let signals = Mutex(0), closing = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0), returned = DispatchSemaphore(value: 0)
+                let deadline = DispatchTime.now() + Double(120) / 4
+                try f.owner.installMaintenanceRecoverySignal { signals.withLock { $0 += 1 } }
+                let cell = InvocationCell()
+                cell.value = try f.invocation(captured: false, closeRights: {
+                    closing.signal(); XCTAssertEqual(release.wait(timeout: deadline), .success)
+                })
+                let thread = Thread { cell.value = nil; returned.signal() }
+                thread.stackSize = SetupAuditUpgradeWorkExecutor.stackBytes; thread.start()
+                XCTAssertEqual(closing.wait(timeout: deadline), .success)
+                XCTAssertEqual(signals.withLock { $0 }, 1); f.assertHeld()
+                release.signal(); XCTAssertEqual(returned.wait(timeout: deadline), .success)
+                XCTAssertEqual(signals.withLock { $0 }, 2); f.assertHeld()
+                let completed = try self.joined(f.claim()); XCTAssertTrue(try completed.releaseIfWindowFree())
+                try f.assertReleased()
+            }
+        }
+    }
+
 }

@@ -68,6 +68,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private weak var admissionHolder: ExecutorAdmission?
     /// Owned-only test observer for the moment a hold decides to release. Root cannot set it.
     private var ownedHoldEndObserver: (@Sendable () -> Void)?
+    private var recoverySignal: (@Sendable () -> Void)?
     private let auditUpgradeCleanup = SetupAuditUpgradeCleanupOwner()
     private let auditUpgradeExecutor = SetupAuditUpgradeWorkExecutor()
     private let gatewayJournalOperation: GatewaySetupJournalOperations?
@@ -241,6 +242,43 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 } catch { admission.close(); throw error }
             } catch { reply.close(); throw error }
         }
+    }
+    func installMaintenanceRecoverySignal(_ signal: @escaping @Sendable () -> Void) throws {
+        try lock.withLock {
+            guard getpid() == processID, !closed, !closing, recoverySignal == nil else { throw AdministrativeSetupError.unavailable }
+            recoverySignal = signal
+        }
+    }
+    // Invocation deinit can reach this owner lock. Owner-locked code must not drop its last invocation reference.
+    // The record releases its lock before this callback. Invoke the external signal after releasing the owner lock.
+    private func signalMaintenanceRecovery() { lock.withLock { recoverySignal }?() }
+    func maintenanceRecoveryAvailability() -> AsyncStream<Void> {
+        lock.withLock {
+            if !asynchronousWork.isIdle { return asynchronousWork.availability() }
+            return setupReplyWork.availability()
+        }
+    }
+    /// Only the lifecycle calls discovery. Its own admission closes after the checked executor has actually returned.
+    func discoverMaintenanceRecovery(custody: AdministrativeSetupShutdown, candidate: SignedReleaseEvidence,
+        checkedHost: AdministrativeSetupLifecycle.HostCheck) async throws
+        -> [RuntimeMaintenanceWindowRecord] {
+        let scope = try acquireMaintenanceRecoveryScope(custody: custody)
+        defer { scope.close() }
+        let phases = try maintenanceRecoveryPhases(scope: scope, validate: { try custody.validateRecoveryCustody() })
+        return try await phases.run {
+            try self.withMachine(admission: scope.held.admission) { machine in
+                _ = try self.currentInventory(machine, checkedHost: checkedHost)
+                let rows = try machine.runtimeMaintenanceStartupWindows(candidate: candidate)
+                guard rows.count <= 64 else { throw PreparationStoreError.corruptRecord }
+                _ = try self.currentInventory(machine, checkedHost: checkedHost)
+                return rows
+            }
+        }
+    }
+    func publishMaintenanceRecovery(_ row: RuntimeMaintenanceWindowRecord) { retainedStatus.publishRecovery(row) }
+    func publishMaintenanceRecovery(request: SetupMaintenanceRecoverySupervisor.Request,
+        observation: SetupMaintenanceRecoverySupervisor.Observation) {
+        retainedStatus.publishRecovery(request: request, observation: observation)
     }
     func observeMaintenanceRecoveryExecutorOwned() throws -> SetupAuditUpgradeWorkExecutor.OwnedAttempts {
         try RuntimeMaintenanceOwnedControl.require()
@@ -650,7 +688,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 let activity = try releaseActivity?.acquireShared()
                 let record = try SetupRetainedInvocationReservation(authenticatedPeer: authenticatedPeer, incarnation: incarnation, admission: admission, reply: reply,
                     activity: activity, authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor,
-                    hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver))
+                    hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver),
+                    recoverySignal: { [weak self] in self?.signalMaintenanceRecovery() })
                 retainedInvocationReservation = record; admissionHolder = record.hold; retainedStatus.publish(record)
                 return (record, {
                     try self.lock.withLock {
@@ -2634,10 +2673,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
         return .init(descriptor: descriptor, codePolicy: codePolicy, capabilities: .init(contracts: [contract: []]),
             allowedContracts: [contract], installCommandReplay: true)
     }
-    private func currentInventory(_ machine: PreparationIntentStore) throws -> InstallationInventory {
+    private func currentInventory(_ machine: PreparationIntentStore, checkedHost: AdministrativeSetupLifecycle.HostCheck? = nil) throws -> InstallationInventory {
         try releaseActivity?.validate()
         guard !closed, let inventory = try machine.inventory() else { throw AdministrativeSetupError.unavailable }
-        try verifyHost(inventory)
+        if let checkedHost { try checkedHost.verifyInventory(inventory) }
+        else { try verifyHost(inventory) }
         guard inventory.installationID == installationID, inventory.releaseDigest == expectedReleaseDigest else {
             throw AdministrativeSetupError.changedInstallation
         }

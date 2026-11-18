@@ -3,10 +3,11 @@ import Foundation
 import RemozioProtocol
 import SQLite3
 import Security
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
-final class AdministrativeSetupListenerTests: XCTestCase {
+final class AdministrativeSetupListenerTests: XCTestCase, @unchecked Sendable {
     private struct Interrupted: Error {}
     private let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), epoch = Data(repeating: 3, count: 16)
     private var limits: CBORLimits { get throws { try .init(maxBytes: 16384, maxDepth: 8, maxItems: 512) } }
@@ -169,4 +170,52 @@ final class AdministrativeSetupListenerTests: XCTestCase {
             XCTAssertEqual(verified.value, 0); XCTAssertEqual(handshakes.value, 0); XCTAssertEqual(closes.value, 0)
         }
     }
+
+    func testPendingStartupRoutingReportsBusyAndRefusesCustodyDrift() {
+        let changed = Mutex(false)
+        let routing = AdministrativeSetupLifecycle.Routing(validateStartup: {
+            if changed.withLock({ $0 }) { throw JournalLeaseError.invalidated }
+        })
+        XCTAssertEqual(routing.checkStatus(), .busy); XCTAssertFalse(routing.allowsNormal)
+        changed.withLock { $0 = true }; XCTAssertEqual(routing.checkStatus(), .refused)
+        XCTAssertThrowsError(try routing.normalOwner())
+    }
+    func testServingRoutingRequiresTheRealOwnerVerification() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try self.fixture { root in
+                let machine = try self.store(root, initialize: true), inventory = try self.inventory(machine)
+                let verified = Count()
+                let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: inventory.releaseDigest,
+                    resume: { _, value in value }, verifyHost: { _ in verified.increment() })
+                defer { try? owner.close() }
+                let routing = try AdministrativeSetupLifecycle.Routing.verifiedOwner(owner)
+                XCTAssertTrue(routing.allowsNormal); XCTAssertTrue(try routing.normalOwner() === owner)
+                XCTAssertEqual(routing.checkStatus(), .verified); XCTAssertGreaterThan(verified.value, 0)
+            }
+        }
+    }
+    func testRetirementCannotRebindRoutingToItsVerifiedOwner() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try self.fixture { root in
+                let machine = try self.store(root, initialize: true), inventory = try self.inventory(machine)
+                let owner = try self.owner(root, machine: machine, release: inventory.releaseDigest)
+                defer { try? owner.close() }
+                let routing = try AdministrativeSetupLifecycle.Routing.verifiedOwner(owner)
+                routing.move(to: .retiring); routing.move(to: .serving)
+                XCTAssertFalse(routing.allowsNormal); XCTAssertThrowsError(try routing.normalOwner())
+                XCTAssertThrowsError(try routing.install(owner)); XCTAssertEqual(routing.checkStatus(), .busy)
+            }
+        }
+    }
+    func testVerifiedStartupListenerStillRefusesAnOrdinaryOwnerBeforeNativeConstruction() throws {
+        guard getuid() != 0, geteuid() != 0 else { throw XCTSkip("Ordinary-owner fixture") }
+        let checks = Mutex(0), routing = AdministrativeSetupLifecycle.Routing(validateStartup: {})
+        XCTAssertThrowsError(try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
+            teamID: "ABCDEFGHIJ", appIdentifier: "dev.sebastiano.remozio.macos", appHashes: [Data(repeating: 4, count: 20)],
+            routing: routing, validateStartup: { checks.withLock { $0 += 1 } })) {
+                XCTAssertEqual($0 as? JournalLeaseError, .rootRequired)
+            }
+        XCTAssertEqual(checks.withLock { $0 }, 0)
+    }
+
 }

@@ -5948,6 +5948,20 @@ public final class PreparationIntentStore {
         }
     }
 
+    /// Captures bounded recovery rows in one protected read. It opens no account journal and grants no recovery authority.
+    func runtimeMaintenanceStartupWindows(candidate: SignedReleaseEvidence) throws -> [RuntimeMaintenanceWindowRecord] {
+        try transaction(write: false) {
+            try identity(macID)
+            let schema = try scalar("PRAGMA user_version")
+            if schema < RuntimeMaintenanceWindowStorage.schemaVersion {
+                guard schema >= 2, let inventory = try loadInventoryRecord() else { throw PreparationStoreError.corruptRecord }
+                try inventory.compareRelease(candidate)
+                return []
+            }
+            return try loadStableMachineUpdateFrame(candidate: candidate).maintenanceWindows
+        }
+    }
+
     /// Reads current protected metadata in one transaction. This value grants no startup custody.
     func runtimeMaintenanceStartupFrame(accountID: Data, candidate: SignedReleaseEvidence)
         throws -> RuntimeMaintenanceStartupFrame {

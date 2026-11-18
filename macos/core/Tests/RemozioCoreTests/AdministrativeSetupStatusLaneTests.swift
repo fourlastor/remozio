@@ -90,6 +90,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let recorder = Recorder()
         let source = Mutex<Status>(.unavailable)
         let checks = Mutex(SetupAccountOwner.StatusLaneCheck.verified), touches = Mutex(0)
+        let dispatchAllowed = Mutex(true), closeWhileOpening = Mutex(false)
         let clock = Mutex<UInt64>(1)
         lazy var facade = Facade(
             verify: { [unowned self] in
@@ -100,7 +101,11 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
                 self.selections.withLock { $0.append(mode) }
                 return mode == .statusOnly ? self.statusAllowed.withLock { $0 } : self.normalAllowed.withLock { $0 }
             },
-            openNormal: { [unowned self] _ in self.opens.withLock { $0 += 1 }; return self.recorder },
+            openNormal: { [unowned self] _ in
+                self.opens.withLock { $0 += 1 }
+                if self.closeWhileOpening.withLock({ $0 }) { self.dispatchAllowed.withLock { $0 = false } }
+                return self.recorder
+            },
             status: { [unowned self] value in
                 self.statusReads.withLock { $0 += 1 }
                 XCTAssertEqual(value, self.peer)
@@ -109,6 +114,7 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
             check: { [unowned self] in self.checks.withLock { $0 } },
             touch: { [unowned self] in self.touches.withLock { $0 += 1 } },
             now: { [unowned self] in self.clock.withLock { $0 } },
+            normalAllowed: { [unowned self] in self.dispatchAllowed.withLock { $0 } },
             invalidate: { [unowned self] in self.invalidations.withLock { $0 += 1 } })
     }
 
@@ -501,4 +507,66 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         manual.elapse(); XCTAssertNil(slots.mode(active))
         XCTAssertEqual(slots.mode(ready), .normal)
     }
+
+    func testStartupGateRefusesEveryHelloAndDisposesAnEndpointIfItClosesDuringOpen() {
+        for name in Self.hellos {
+            for closesDuringOpen in [false, true] {
+                let h = Harness()
+                if closesDuringOpen { h.closeWhileOpening.withLock { $0 = true } }
+                else { h.dispatchAllowed.withLock { $0 = false } }
+                let result = Self.selectors[name]!(h.facade)
+                XCTAssertFalse(result.0, name); XCTAssertTrue(result.1, name)
+                XCTAssertEqual(h.opens.withLock { $0 }, closesDuringOpen ? 1 : 0)
+                XCTAssertTrue(h.recorder.calls.withLock { $0.isEmpty })
+                XCTAssertEqual(h.recorder.closes.withLock { $0 }, closesDuringOpen ? 1 : 0)
+                XCTAssertEqual(h.facade.state, .closed)
+            }
+        }
+    }
+    func testRetirementGateRefusesEveryNormalSelectorAfterHandshake() {
+        for (name, call) in Self.selectors {
+            let h = Harness(); XCTAssertTrue(Self.selectors["helloWithReply:"]!(h.facade).0)
+            h.dispatchAllowed.withLock { $0 = false }
+            let result = call(h.facade)
+            XCTAssertFalse(result.0, name); XCTAssertTrue(result.1, name)
+            XCTAssertEqual(h.recorder.calls.withLock { $0 }, ["helloWithReply:"])
+            XCTAssertEqual(h.recorder.closes.withLock { $0 }, 1)
+            XCTAssertEqual(h.invalidations.withLock { $0 }, 1)
+        }
+    }
+    func testPublishedRecoveryFactsKeepUIDDirectoryWindowAndNonblockingReadChecks() throws {
+        let row = try setupLifecycleRecoveryRowOwned(), lock = NSLock()
+        let reader = try Status.Reader.openOwned(statusLock: lock)
+        reader.publishRecovery(row)
+        let owner = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(),
+            directoryID: UUID(uuid: (2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2)))
+        let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
+        let captured = reader.read(authenticatedPeer: peer, currentOwner: owner)
+        XCTAssertEqual(captured.window, .observed(.init(row))); XCTAssertEqual(captured.reservation, .unavailable)
+        let foreign = XPCPeerCredentials(processID: getpid(), userID: getuid() + 1, auditSessionID: 1)
+        XCTAssertEqual(reader.read(authenticatedPeer: foreign, currentOwner: owner), .unavailable)
+        let replaced = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: replaced), .unavailable)
+        let wrong = try SetupMaintenanceRecoverySupervisor.Request(accountID: row.scope.authority.accountID,
+            windowID: Data(repeating: 99, count: 16), revision: row.revision)
+        reader.publishRecovery(request: wrong, observation: .busy)
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner).supervisor, .unavailable)
+        let right = try SetupMaintenanceRecoverySupervisor.Request(accountID: row.scope.authority.accountID,
+            windowID: row.id, revision: row.revision)
+        reader.publishRecovery(request: right, observation: .busy)
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner).supervisor, .observed(.busy))
+        reader.publishRecovery(row)
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner).supervisor, .observed(.busy))
+        lock.lock(); let busy = reader.read(authenticatedPeer: peer, currentOwner: owner); lock.unlock()
+        XCTAssertEqual(busy, .unavailable); reader.close()
+        XCTAssertEqual(reader.read(authenticatedPeer: peer, currentOwner: owner), .unavailable)
+    }
+    func testStatusLaneStillRepliesWithPendingFactsWhenNormalDispatchIsClosed() throws {
+        let h = Harness(); h.dispatchAllowed.withLock { $0 = false }; h.checks.withLock { $0 = .busy }
+        let response = try XCTUnwrap(status(h.facade, request()))
+        XCTAssertNotNil(response); XCTAssertEqual(h.facade.state, .statusOnly)
+        XCTAssertEqual(h.opens.withLock { $0 }, 0); XCTAssertEqual(h.statusReads.withLock { $0 }, 1)
+        XCTAssertTrue(h.recorder.calls.withLock { $0.isEmpty })
+    }
+
 }

@@ -19,15 +19,25 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
     private let lock = NSRecursiveLock()
     private let listener: NSXPCListener
     private let registry: SetupConnectionSlots
-    private let owner: SetupAccountOwner
+    private let routing: AdministrativeSetupLifecycle.Routing
+    private let validateStartup: @Sendable () throws -> Void
     private let teamID: String
     private let appIdentifier: String
     private let appHashes: Set<Data>
     private var running = false
     private var closed = false
 
-    public init(serviceName: String, teamID: String, appIdentifier: String, appHashes: Set<Data>, owner: SetupAccountOwner,
+    public convenience init(serviceName: String, teamID: String, appIdentifier: String, appHashes: Set<Data>, owner: SetupAccountOwner,
                 maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let routing = try AdministrativeSetupLifecycle.Routing.verifiedOwner(owner)
+        try self.init(serviceName: serviceName, teamID: teamID, appIdentifier: appIdentifier, appHashes: appHashes,
+            routing: routing, validateStartup: { try owner.verifyCurrent() },
+            maximumConnections: maximumConnections, handshakeTimeoutMilliseconds: handshakeTimeoutMilliseconds)
+    }
+    init(serviceName: String, teamID: String, appIdentifier: String, appHashes: Set<Data>,
+        routing: AdministrativeSetupLifecycle.Routing, validateStartup: @escaping @Sendable () throws -> Void,
+        maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
@@ -37,7 +47,8 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
             approvedCodeDirectoryHashes: appHashes, expectedUserID: 0)
         registry = try SetupConnectionSlots(maximumConnections: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         listener = NSXPCListener(machServiceName: serviceName)
-        self.owner = owner; self.teamID = teamID; self.appIdentifier = appIdentifier; self.appHashes = appHashes
+        self.routing = routing; self.validateStartup = validateStartup
+        self.teamID = teamID; self.appIdentifier = appIdentifier; self.appHashes = appHashes
         super.init()
         template.configure(listener)
         listener.delegate = self
@@ -47,7 +58,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         try lock.withLock {
             guard !running, !closed else { throw AdministrativeSetupError.unavailable }
-            try owner.verifyCurrent()
+            try validateStartup()
             try registry.start(); running = true; listener.activate()
         }
     }
@@ -65,14 +76,14 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                 guard uid > 0, uid < UInt32.max else { throw AdministrativeSetupError.wrongAccount }
                 let policy = try XPCPeerPolicy(teamID: teamID, componentIdentifier: appIdentifier,
                     approvedCodeDirectoryHashes: appHashes, expectedUserID: uid)
-                let facade = try Self.facade(connection: connection, policy: policy, owner: owner, registry: registry, id: id)
+                let facade = try Self.facade(connection: connection, policy: policy, routing: routing, registry: registry, id: id)
                 let retained = NativeAdministrativeSetupConnection(connection: connection, facade: facade)
                 return registry.install(retained, id: id)
             } catch { registry.remove(id); connection.invalidate(); return false }
         }
     }
     /// Accept-time work: real credentials, the lifetime observer and the facade only. No owner access, no store, no admission.
-    private static func facade(connection: NSXPCConnection, policy: XPCPeerPolicy, owner: SetupAccountOwner,
+    private static func facade(connection: NSXPCConnection, policy: XPCPeerPolicy, routing: AdministrativeSetupLifecycle.Routing,
                                registry: SetupConnectionSlots, id: UUID) throws -> AdministrativeSetupConnectionFacade {
         _ = try policy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: policy)
@@ -80,12 +91,13 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
             verify: { try invocation.verifyInvocation() },
             select: { [weak registry] in registry?.select($0, id: id) ?? false },
             openNormal: { close in
-                try AdministrativeSetupXPCEndpoint.openNormal(invocation: invocation, owner: owner,
+                try AdministrativeSetupXPCEndpoint.openNormal(invocation: invocation, owner: routing.normalOwner(),
                     onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
             },
-            status: { [weak owner] in owner?.retainedInvocationStatus(authenticatedPeer: $0) ?? .unavailable },
-            check: { [weak owner] in owner?.statusLaneCheck() ?? .refused },
+            status: { routing.status($0) },
+            check: { routing.checkStatus() },
             touch: { [weak registry] in registry?.touch(id) },
+            normalAllowed: { routing.allowsNormal },
             invalidate: { [weak connection, weak registry] in invocation.retireConnection(); connection?.invalidate(); registry?.remove(id) })
         policy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupServiceXPCProtocol.self)

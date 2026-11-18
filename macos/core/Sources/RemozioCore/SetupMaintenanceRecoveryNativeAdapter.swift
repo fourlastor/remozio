@@ -14,7 +14,8 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
     }
 
-    final class Custody: SetupMaintenanceRecoveryProcessCustody, @unchecked Sendable {
+    final class Custody: SetupMaintenanceRecoveryProcessCustody, CustomReflectable, @unchecked Sendable {
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
         let shutdown: AdministrativeSetupShutdown
         private struct PendingOwner: Sendable {
             let owner: any Sendable
@@ -22,11 +23,26 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
         private let lock = NSLock()
         private let closeWait: Duration
+        private let closeBody: @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult
+        private let releaseBody: @Sendable () -> Void
         private var pendingOwners: [UUID: PendingOwner] = [:]
         private var closing: (id: UUID, task: Task<AdministrativeSetupShutdown.RecoveryCloseResult, Never>)?
-        init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, ownedCloseWait: OwnedCloseWait? = nil) throws {
-            if ownedCloseWait != nil { try RuntimeMaintenanceOwnedControl.require() }
-            closeWait = ownedCloseWait?.maximum ?? .seconds(5)
+        convenience init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, ownedCloseWait: OwnedCloseWait? = nil) throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            try self.init(owner: owner, shutdown: shutdown, closeWait: ownedCloseWait?.maximum ?? .seconds(5),
+                closeBody: { (try? shutdown.closeAfterRecoveryJoinedOwned()) ?? .failed },
+                releaseBody: { try? shutdown.releaseRecoverySupervisorOwned() })
+        }
+        fileprivate convenience init(nativeOwner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown,
+            closeBody: @escaping @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult,
+            releaseBody: @escaping @Sendable () -> Void) throws {
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try self.init(owner: nativeOwner, shutdown: shutdown, closeWait: .seconds(5), closeBody: closeBody, releaseBody: releaseBody)
+        }
+        private init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, closeWait: Duration,
+            closeBody: @escaping @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult,
+            releaseBody: @escaping @Sendable () -> Void) throws {
+            self.closeWait = closeWait; self.closeBody = closeBody; self.releaseBody = releaseBody
             guard shutdown.belongs(to: owner) else { throw RuntimePreparationError.changedScope }
             try shutdown.validateRecoveryCustody()
             try shutdown.reserveRecoverySupervisor()
@@ -51,8 +67,10 @@ enum SetupMaintenanceRecoveryNativeAdapter {
             // It cannot use the work executor without taking admission from the closing owner.
             let attempt = lock.withLock {
                 if let closing { return closing }
-                let shutdown = self.shutdown, id = UUID()
-                let task = Task { shutdown.closeAfterRecoveryJoined() }
+                let closeBody = self.closeBody, id = UUID()
+                // Final close may overlap a cancelled startup host check. A live recovery scope makes owner.close refuse;
+                // after closure, the host check observes an invalid lease. Neither path can reopen dispatch.
+                let task = Task { closeBody() }
                 let attempt = (id: id, task: task); closing = attempt; return attempt
             }
             let result = await Self.boundedClose(attempt.task, until: .now.advanced(by: closeWait))
@@ -81,7 +99,7 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
         func releaseAfterJoining() {
             guard lock.withLock({ pendingOwners.isEmpty && closing == nil }) else { return }
-            shutdown.releaseRecoverySupervisorAfterJoining()
+            releaseBody()
         }
     }
 
@@ -94,21 +112,58 @@ enum SetupMaintenanceRecoveryNativeAdapter {
             self.beforeMint = beforeMint; self.observe = observe
         }
     }
+    private final class WorkCustody: SetupMaintenanceRecoveryWorkCustody, CustomReflectable, @unchecked Sendable {
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+        private let custody: Custody
+        init(_ custody: Custody) { self.custody = custody }
+        func validate() throws { try custody.validate() }
+        func validateForRecovery() async -> Bool { await custody.validateForRecovery() }
+        func acquireScope(owner: SetupAccountOwner) throws -> SetupAccountOwner.MaintenanceRecoveryScope {
+            try owner.acquireMaintenanceRecoveryScope(custody: custody.shutdown)
+        }
+        func retain(_ owner: any Sendable, id: UUID) { custody.retain(owner, id: id) }
+        func joined(_ id: UUID) { custody.joined(id) }
+        func cleanupFailed(_ id: UUID) { custody.cleanupFailed(id) }
+    }
+    private final class FinalClose: SetupMaintenanceRecoveryFinalClose, CustomReflectable, @unchecked Sendable {
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+        private let custody: Custody
+        init(_ custody: Custody) { self.custody = custody }
+        func closeAdmission() { custody.closeAdmission() }
+        func closeAfterJoining() async { await custody.closeAfterJoining() }
+        func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+            await custody.closeAfterJoiningResult()
+        }
+        func releaseAfterJoining() { custody.releaseAfterJoining() }
+    }
+    static func supervisor(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown,
+        closeAfterJoining: @escaping @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult,
+        releaseAfterJoining: @escaping @Sendable () -> Void) throws -> Supervisor {
+        let retained = try Custody(nativeOwner: owner, shutdown: shutdown,
+            closeBody: closeAfterJoining, releaseBody: releaseAfterJoining), work = WorkCustody(retained)
+        return try Supervisor(nativeWork: work, finalClose: FinalClose(retained),
+            driver: makeDriver(owner: owner, custody: work, owned: nil),
+            publish: { request, observation in owner.publishMaintenanceRecovery(request: request, observation: observation) })
+    }
     static func driver(owner: SetupAccountOwner, custody: Custody) -> Supervisor.Driver {
-        makeDriver(owner: owner, custody: custody, owned: nil)
+        let driver = makeDriver(owner: owner, custody: WorkCustody(custody), owned: nil)
+        return .init(acquire: { request, deadline in
+            try RuntimeMaintenanceOwnedControl.require()
+            return try await driver.acquire(request, deadline)
+        })
     }
     static func driverOwned(owner: SetupAccountOwner, custody: Custody,
         control: OwnedAcquisitionControl) throws -> Supervisor.Driver {
         try RuntimeMaintenanceOwnedControl.require()
-        return makeDriver(owner: owner, custody: custody, owned: control)
+        return makeDriver(owner: owner, custody: WorkCustody(custody), owned: control)
     }
-    private static func makeDriver(owner: SetupAccountOwner, custody: Custody,
+    private static func makeDriver(owner: SetupAccountOwner, custody: WorkCustody,
         owned: OwnedAcquisitionControl?) -> Supervisor.Driver {
         .init(acquire: { request, deadline in
             do {
                 if owned != nil { try RuntimeMaintenanceOwnedControl.require() }
                 try custody.validate()
-                let scope = try owner.acquireMaintenanceRecoveryScope(custody: custody.shutdown)
+                let scope = try custody.acquireScope(owner: owner)
                 let cancellation = SetupAuditUpgradeCancellation()
                 do {
                     owned?.beforeMint(scope)
@@ -120,6 +175,7 @@ enum SetupMaintenanceRecoveryNativeAdapter {
                         switch try RuntimeMaintenanceStartupRecovery.openForSupervisor(accountID: request.key.accountID,
                             phases: phases, cancellation: cancellation, validate: { try custody.validate() }) {
                         case .terminal(let row):
+                            if let row { owner.publishMaintenanceRecovery(row) }
                             return .terminal(terminalObservation(row, request: request))
                         case .owner(let recovery):
                             let row = recovery.window
@@ -130,7 +186,8 @@ enum SetupMaintenanceRecoveryNativeAdapter {
                             let id = UUID()
                             let held = NativeOwner(recovery: recovery, scope: scope, phases: phases, cancellation: cancellation,
                                 joined: { [weak custody] in custody?.joined(id) },
-                                failed: { [weak custody] in custody?.cleanupFailed(id) })
+                                failed: { [weak custody] in custody?.cleanupFailed(id) },
+                                publish: { owner.publishMaintenanceRecovery($0) })
                             custody.retain(held, id: id)
                             return .owner(.init(run: { try await held.run(until: $0) },
                                 cancel: { held.cancel() }, join: { await held.join() }))
@@ -165,12 +222,14 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         private let cancellation: SetupAuditUpgradeCancellation
         private let didJoin: @Sendable () -> Void
         private let didFailCleanup: @Sendable () -> Void
+        private let publish: @Sendable (RuntimeMaintenanceWindowRecord) -> Void
         private var task: Task<RuntimeMaintenanceWindowRecord, any Error>?
         private var cancelled = false, started = false, joined = false
         init(recovery: RuntimeMaintenanceStartupRecovery, scope: SetupAccountOwner.MaintenanceRecoveryScope,
             phases: SetupRetainedInvocationReservation.RestorationPhases, cancellation: SetupAuditUpgradeCancellation,
-            joined: @escaping @Sendable () -> Void, failed: @escaping @Sendable () -> Void) {
-            self.recovery = recovery; self.scope = scope; self.phases = phases; self.cancellation = cancellation; didJoin = joined; didFailCleanup = failed
+            joined: @escaping @Sendable () -> Void, failed: @escaping @Sendable () -> Void,
+            publish: @escaping @Sendable (RuntimeMaintenanceWindowRecord) -> Void) {
+            self.recovery = recovery; self.scope = scope; self.phases = phases; self.cancellation = cancellation; didJoin = joined; didFailCleanup = failed; self.publish = publish
         }
         func run(until deadline: ContinuousClock.Instant) async throws -> Supervisor.Observation {
             let actual = try lock.withLock {
@@ -181,7 +240,9 @@ enum SetupMaintenanceRecoveryNativeAdapter {
                 let actual = Task { try await recovery.runNative(until: deadline) }
                 task = actual; return actual
             }
-            return .phase(try await actual.value.phase)
+            let row = try await actual.value
+            publish(row)
+            return .phase(row.phase)
         }
         /// Marks cancellation only. It never closes resources or waits for an executor body.
         func cancel() {
