@@ -156,6 +156,8 @@ jobs:
             > "$RUNNER_TEMP/remozio-native-tpm-report.json"
       - name: Retain sanitized native TPM simulator evidence
         if: always()
+        # A failed upload loses only these logs, not a test result, so it must not fail the job.
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-tpm-simulator-${{ github.run_attempt }}
@@ -214,6 +216,7 @@ jobs:
           key: ${{ steps.build-cache-key.outputs.key }}
       - name: Retain cache validation and native build logs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mac-build-cache-${{ github.run_attempt }}
@@ -345,6 +348,7 @@ jobs:
             -- --triple arm64-apple-macosx26.0 -Xswiftc -O
       - name: Retain shard logs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mac-core-shards-${{ matrix.part }}-${{ github.run_attempt }}
@@ -429,6 +433,7 @@ jobs:
           key: ${{ steps.build-cache-key.outputs.key }}
       - name: Retain cache smoke logs
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mac-cache-smoke-${{ github.run_attempt }}
