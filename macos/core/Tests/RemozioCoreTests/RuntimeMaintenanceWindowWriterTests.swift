@@ -428,4 +428,41 @@ final class RuntimeMaintenanceWindowWriterTests: XCTestCase {
         }
     }
 
+
+    func testStartupDiscoveryReadsValidatedWindowsWithoutWriting() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try MachineUpdateReplacementTests.withMaintenanceWriterFixture { f in
+                let source = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+                XCTAssertEqual(source.schemaVersion, 28)
+                XCTAssertEqual(try f.machine().runtimeMaintenanceStartupWindows(candidate: f.candidate), [])
+                let row = try maintenanceValue(scope: maintenanceScope(mac: source.inventory.macID,
+                    installation: source.inventory.installationID, authority: f.authority, target: f.target,
+                    release: source.inventory.releaseDigest))
+                _ = try f.machine().writeRuntimeMaintenanceWindow(row, replacing: nil, expected: source,
+                    candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: nil)
+                let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+                var commits = 0; try f.reopen { commits += 1 }
+                XCTAssertEqual(try f.machine().runtimeMaintenanceStartupWindows(candidate: f.candidate), [row])
+                XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+                XCTAssertEqual(commits, 0)
+            }
+        }
+    }
+    func testStartupDiscoveryRejectsAMalformedWindowWithoutSkippingIt() async throws {
+        try await SetupExecutorAdmissionTestFixture.make {
+            try MachineUpdateReplacementTests.withMaintenanceWriterFixture { f in
+                let source = try f.machine().stableMachineUpdateSnapshot(candidate: f.candidate)
+                let row = try maintenanceValue(scope: maintenanceScope(mac: source.inventory.macID,
+                    installation: source.inventory.installationID, authority: f.authority, target: f.target,
+                    release: source.inventory.releaseDigest))
+                _ = try f.machine().writeRuntimeMaintenanceWindow(row, replacing: nil, expected: source,
+                    candidate: f.candidate, directory: f.directory, admission: f.admission, accountDrain: nil)
+                try f.edit(["UPDATE runtime_maintenance_windows_v1 SET record=X'00'"])
+                let before = try runtimeMaintenanceFixtureRows(f.databasePath)
+                XCTAssertThrowsError(try f.machine().runtimeMaintenanceStartupWindows(candidate: f.candidate))
+                XCTAssertEqual(try runtimeMaintenanceFixtureRows(f.databasePath), before)
+            }
+        }
+    }
+
 }

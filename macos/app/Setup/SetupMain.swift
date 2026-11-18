@@ -4,12 +4,16 @@ import RemozioCore
 
 @main
 struct SetupMain {
+    // Exit 0 reports successful one-shot setup or actual orderly service closure.
     static func main() async {
+        // Exit 64 reports invalid command usage.
         guard CommandLine.arguments.count == 3,
               ["--configuration", "--bootstrap-installation", "--prepare-package", "--inspect-package", "--ensure-app-entry"].contains(CommandLine.arguments[1]) else {
             fail("Usage: RemozioSetup --configuration /absolute/protected/setup.cbor | --bootstrap-installation PUBLISHER_TEAM_ID | --prepare-package|--inspect-package|--ensure-app-entry PINNED_PROFILE", code: EX_USAGE)
         }
+        // Exit 77 refuses a caller outside the Root account.
         guard getuid() == 0, geteuid() == 0 else { fail("Setup startup requires the Root account.", code: EX_NOPERM) }
+        // Exit 78 reports configuration or startup failure.
         if ["--prepare-package", "--inspect-package", "--ensure-app-entry"].contains(CommandLine.arguments[1]) {
             do {
                 let profile = try PackageBootstrapProfile(argument: CommandLine.arguments[2])
@@ -43,9 +47,15 @@ struct SetupMain {
     private static func run(path: String) async throws {
         let service = try AdministrativeSetupService.open(configurationPath: path)
         do {
-            try Task.checkCancellation(); try service.start()
-            FileHandle.standardError.write(Data("Local setup service started. This does not indicate approval service health.\n".utf8))
-            while true { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(250)) }
+            try Task.checkCancellation()
+            try service.start(terminate: { code in
+                // Exit 75 is a recovery-deadline crash. It does not prove closure or release the durable drain.
+                fail("Setup recovery did not join before its retirement deadline.", code: code)
+            })
+            FileHandle.standardError.write(Data("Local setup status is available. Recovery can still keep normal requests pending.\n".utf8))
+            await withTaskCancellationHandler {
+                await service.waitUntilStopped()
+            } onCancel: { service.requestRetirement() }
         } catch {
             let failure = error
             try await service.close()

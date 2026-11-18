@@ -13,6 +13,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     private let verify: () throws -> XPCPeerCredentials
     private let select: (SetupConnectionSlots.Mode) -> Bool
     private let openNormal: (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint
+    private let normalAllowed: () -> Bool
     private let status: (XPCPeerCredentials) -> SetupRetainedInvocationStatus
     private let check: () -> SetupAccountOwner.StatusLaneCheck
     private let touch: () -> Void
@@ -30,9 +31,10 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
          openNormal: @escaping (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint,
          status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus,
          check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
-         now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, invalidate: @escaping () -> Void) {
+         now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, normalAllowed: @escaping () -> Bool = { true },
+         invalidate: @escaping () -> Void) {
         self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status
-        self.check = check; self.touch = touch; self.now = now; self.invalidate = invalidate
+        self.check = check; self.touch = touch; self.now = now; self.normalAllowed = normalAllowed; self.invalidate = invalidate
     }
     /// Runs the owner check when none ran on this connection or the last one is older than `checkInterval`.
     /// Only drift or closure refuses; a busy owner or a held admission reuses no store result and is retried next time.
@@ -105,7 +107,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     /// A supported hello on an undecided connection is the only path that builds the mutation endpoint.
     private func hello(_ forward: (any SetupNormalEndpoint) -> Void, refuse: () -> Void) {
         // Prove the peer on the exported call stack before the owner is touched. The endpoint checks again per call.
-        guard (try? verify()) != nil else { close(); refuse(); return }
+        guard (try? verify()) != nil, normalAllowed() else { close(); refuse(); return }
         let decision = lock.withLock { () -> (open: Bool, existing: (any SetupNormalEndpoint)?) in
             switch current {
             case .undecided:
@@ -121,7 +123,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         let opened: any SetupNormalEndpoint
         do { opened = try openNormal({ [weak self] in self?.close() }) } catch { close(); refuse(); return }
         let installed = lock.withLock { () -> Bool in
-            guard current == .openingNormal else { return false }
+            guard current == .openingNormal, normalAllowed() else { return false }
             current = .normal; endpoint = opened
             return true
         }
@@ -130,6 +132,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     }
     /// Every other normal selector requires the endpoint that only a successful normal hello can create.
     private func normal(_ forward: (any SetupNormalEndpoint) -> Void, refuse: () -> Void) {
+        guard normalAllowed() else { close(); refuse(); return }
         let value = lock.withLock { current == .normal ? endpoint : nil }
         guard let value else { close(); refuse(); return }
         forward(value)

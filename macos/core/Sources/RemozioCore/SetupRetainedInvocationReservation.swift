@@ -21,6 +21,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     private let authenticatedOwner: LocalAccountIdentity
     private let recovery: SetupRetainedRecoveryLedger
     private let recoveryExecutor: SetupAuditUpgradeWorkExecutor?
+    private let recoverySignal: (@Sendable () -> Void)?
     private var recoverySeal: UUID?, recoveryClaimID: UUID?
     private var recoveryClaimLive = false
     private var restorationWork: RestorationWork?
@@ -41,13 +42,14 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     /// An injected status lock is an ordinary-owner test seam. Root cannot inject this lock.
     init(authenticatedPeer: XPCPeerCredentials, incarnation: UUID, admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
          activity: ReleaseActivityToken?, ownedStatusLock: NSLock? = nil, authenticatedOwner: LocalAccountIdentity,
-         recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil, hold: SetupAccountOwner.ExecutorAdmission? = nil) throws {
+         recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil, hold: SetupAccountOwner.ExecutorAdmission? = nil,
+         recoverySignal: (@Sendable () -> Void)? = nil) throws {
         guard authenticatedPeer.processID > 0, authenticatedPeer.userID > 0, authenticatedPeer.userID < UInt32.max else {
             throw XPCPeerPolicyError.wrongPeer
         }
         if ownedStatusLock != nil { try RuntimeMaintenanceOwnedControl.require() }
         guard authenticatedOwner.uid == authenticatedPeer.userID else { throw XPCPeerPolicyError.wrongPeer }
-        self.authenticatedOwner = authenticatedOwner; self.recoveryExecutor = recoveryExecutor
+        self.authenticatedOwner = authenticatedOwner; self.recoveryExecutor = recoveryExecutor; self.recoverySignal = recoverySignal
         // The owner passes the hold it made for these tokens. Without one, only an Owned test can build a record.
         let recordHold: SetupAccountOwner.ExecutorAdmission
         if let hold { recordHold = hold }
@@ -165,15 +167,19 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     /// A deinit notification avoids taking the last strong invocation reference on the bounded status read path.
     func invocationDidDeinit(_ id: ObjectIdentifier, incarnation: UUID) -> Bool {
         guard getpid() == process else { return false }
-        return lock.withLock {
+        let changed = lock.withLock {
             guard invocationID == id, self.incarnation == incarnation, phase == .attached else { return false }
             phase = .orphan; return true
         }
+        // This deinit callback can acquire owner.lock. Never invoke it while the record lock is held.
+        // Owner-locked code must not drop the last invocation reference.
+        if changed { recoverySignal?() }
+        return changed
     }
     func invocationCleanupReturned(_ id: ObjectIdentifier, incarnation: UUID) {
         guard getpid() == process else { return }
         let exact = lock.withLock { invocationID == id && self.incarnation == incarnation && (phase == .orphan || phase == .recovering) }
-        if exact { recovery.invocationCleanupReturned() }
+        if exact { recovery.invocationCleanupReturned(); recoverySignal?() }
     }
     func attach(_ value: SetupRetainedInvocation) throws {
         defer { withExtendedLifetime(value) {} }
@@ -570,6 +576,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             return hold.markRecordReleased()
         }
         release()
+        recoverySignal?()
     }
     /// Only this record can mint a token for its sealed generation. The token grants no restoration or body replay.
     final class RecoveryToken: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {

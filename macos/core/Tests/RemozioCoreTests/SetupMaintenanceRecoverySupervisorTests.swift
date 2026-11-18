@@ -722,4 +722,51 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
         await supervisor.close()
     }
 
+
+    func testIdleValidationAcquiresNoWorkerAndStartsNoClose() async throws {
+        let custody = try RecoverySupervisorCustody(), calls = Mutex(0)
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }; return .terminal(.noWindow)
+        }))
+        let first = await supervisor.validateIdleCustody(), second = await supervisor.validateIdleCustody()
+        XCTAssertTrue(first); XCTAssertTrue(second); XCTAssertEqual(calls.withLock { $0 }, 0)
+        XCTAssertEqual(custody.admissionsClosed.withLock { $0 }, 0); XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 0)
+        await supervisor.close()
+    }
+    func testIdleValidationFailureDoesNotReplaceTheCompletedObservation() async throws {
+        let custody = try RecoverySupervisorCustody(), request = try Self.request()
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
+        _ = await supervisor.schedule(request); await supervisor.waitForInitialAttempt(request.key)
+        custody.retired.withLock { $0 = true }
+        let valid = await supervisor.validateIdleCustody(), before = await supervisor.observation(for: request.key)
+        XCTAssertFalse(valid); XCTAssertEqual(before, .noWindow)
+        XCTAssertEqual(custody.admissionsClosed.withLock { $0 }, 0)
+        await supervisor.retire(); let after = await supervisor.observation(for: request.key); XCTAssertEqual(after, .noWindow)
+    }
+    func testInitialAttemptWaitJoinsTheActualWorker() async throws {
+        let custody = try RecoverySupervisorCustody(), gate = RecoverySupervisorGate(), joining = Mutex(false), returned = Mutex(false)
+        defer { Task { await gate.open() } }
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            .owner(.init(run: { _ in .noWindow }, join: { joining.withLock { $0 = true }; await gate.wait() }))
+        }))
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        let waiter = Task { await supervisor.waitForInitialAttempt(request.key); returned.withLock { $0 = true } }
+        try await Self.eventually { joining.withLock { $0 } }
+        XCTAssertFalse(returned.withLock { $0 }); await gate.open(); await waiter.value
+        XCTAssertTrue(returned.withLock { $0 }); await supervisor.close()
+    }
+    func testBusyInitialAttemptSettlesBeforeTheExistingRearmDelay() async throws {
+        let custody = try RecoverySupervisorCustody(), clock = RecoverySupervisorClock(), calls = Mutex(0)
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            calls.withLock { $0 += 1 }; return .busyBeforeOwner
+        }), timing: clock.timing)
+        let request = try Self.request(); _ = await supervisor.schedule(request)
+        await supervisor.waitForInitialAttempt(request.key)
+        let observation = await supervisor.observation(for: request.key)
+        XCTAssertEqual(observation, .busy); XCTAssertGreaterThan(calls.withLock { $0 }, 0)
+        try await Self.eventually { clock.rearms == 1 }
+        XCTAssertEqual(clock.rearms, 1); XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 0)
+        await supervisor.close()
+    }
+
 }

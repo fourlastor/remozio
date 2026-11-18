@@ -2,14 +2,18 @@ import Darwin
 import Foundation
 
 /// The lifecycle owner joins its remaining work before releasing the process custody.
-protocol SetupMaintenanceRecoveryProcessCustody: AnyObject, Sendable {
+protocol SetupMaintenanceRecoveryWorkCustody: AnyObject, Sendable {
     func validate() throws
-    func closeAfterJoining() async
     func validateForRecovery() async -> Bool
+}
+protocol SetupMaintenanceRecoveryFinalClose: AnyObject, Sendable {
+    func closeAfterJoining() async
     func closeAdmission()
     func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult
     func releaseAfterJoining()
 }
+/// The combined interface remains an Owned fixture adapter. Native work receives the separate work interface.
+protocol SetupMaintenanceRecoveryProcessCustody: SetupMaintenanceRecoveryWorkCustody, SetupMaintenanceRecoveryFinalClose {}
 extension SetupMaintenanceRecoveryProcessCustody {
     // Existing ordinary-owner fixtures retain their synchronous validation and close hooks.
     func validateForRecovery() async -> Bool { do { try validate(); return true } catch { return false } }
@@ -70,11 +74,15 @@ actor SetupMaintenanceRecoverySupervisor {
     }
     private struct Entry: Sendable {
         let task: Task<Void, Never>
+        let request: Request
         var observation: Observation = .recovering
         var finished = false
     }
     private let processID = getpid(), ownerUID = getuid()
-    private let custody: any SetupMaintenanceRecoveryProcessCustody
+    private let custody: any SetupMaintenanceRecoveryWorkCustody
+    private let finalClose: any SetupMaintenanceRecoveryFinalClose
+    private let publish: @Sendable (Request, Observation) -> Void
+    private var initialWaiters: [UUID: AsyncStream<Void>.Continuation] = [:]
     private let runner: Runner
     private var entries: [Key: Entry] = [:]
     private var active: Key?
@@ -97,11 +105,34 @@ actor SetupMaintenanceRecoverySupervisor {
     /// M10d must retain this supervisor and close or retire it during explicit service shutdown.
     static func openNative(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown) throws -> SetupMaintenanceRecoverySupervisor {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: owner, shutdown: shutdown)
-        return .init(custody: custody, driver: SetupMaintenanceRecoveryNativeAdapter.driver(owner: owner, custody: custody), timing: .continuous)
+        return try shutdown.recoverySupervisor(owner: owner)
     }
     private init(custody: any SetupMaintenanceRecoveryProcessCustody, driver: Driver, timing: Timing) {
-        self.custody = custody; runner = .init(custody: custody, driver: driver, timing: timing)
+        self.custody = custody; finalClose = custody; publish = { _, _ in }
+        runner = .init(custody: custody, driver: driver, timing: timing)
+    }
+    init(nativeWork: any SetupMaintenanceRecoveryWorkCustody, finalClose: any SetupMaintenanceRecoveryFinalClose,
+        driver: Driver, publish: @escaping @Sendable (Request, Observation) -> Void) throws {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        custody = nativeWork; self.finalClose = finalClose; self.publish = publish
+        runner = .init(custody: nativeWork, driver: driver, timing: .continuous)
+    }
+    /// Does not acquire Setup admission. Completed observations cannot substitute for this custody check.
+    func validateIdleCustody() async -> Bool {
+        guard currentProcess else { return false }
+        return await custody.validateForRecovery()
+    }
+    /// A busy attempt settles only after its actual owner joins and yields the active slot.
+    func waitForInitialAttempt(_ key: Key) async {
+        while currentProcess, let entry = entries[key] {
+            if entry.finished { await entry.task.value; return }
+            if entry.observation == .busy && active != key { return }
+            let id = UUID(), signal = AsyncStream<Void>.makeStream()
+            initialWaiters[id] = signal.continuation
+            for await _ in signal.stream { break }
+            initialWaiters.removeValue(forKey: id)?.finish()
+            if Task.isCancelled { return }
+        }
     }
     private var currentProcess: Bool { getpid() == processID && getuid() == ownerUID && geteuid() == ownerUID }
 
@@ -134,7 +165,7 @@ actor SetupMaintenanceRecoverySupervisor {
         }, finish: { [weak self] observation in
             await self?.finish(request.key, observation)
         })
-        entries[request.key] = .init(task: task)
+        entries[request.key] = .init(task: task, request: request)
         return true
     }
     enum SchedulingResult: Equatable, Sendable {
@@ -178,7 +209,7 @@ actor SetupMaintenanceRecoverySupervisor {
         await closing?.value
         if retry, joined, closureResult != .closed, !retryingClosure {
             retryingClosure = true
-            closureResult = await custody.closeAfterJoiningResult()
+            closureResult = await finalClose.closeAfterJoiningResult()
             retryingClosure = false
         }
     }
@@ -190,14 +221,22 @@ actor SetupMaintenanceRecoverySupervisor {
         await closing?.value
         if retry, joined, closureResult != .closed, !retryingClosure {
             retryingClosure = true
-            closureResult = await custody.closeAfterJoiningResult()
+            closureResult = await finalClose.closeAfterJoiningResult()
             retryingClosure = false
         }
     }
-    private func observe(_ key: Key, _ observation: Observation) { entries[key]?.observation = observation }
+    private func observe(_ key: Key, _ observation: Observation) {
+        entries[key]?.observation = observation
+        if let request = entries[key]?.request { publish(request, observation) }
+        wakeInitialWaiters()
+    }
+    private func wakeInitialWaiters() {
+        let waiters = initialWaiters; initialWaiters = [:]
+        for waiter in waiters.values { waiter.finish() }
+    }
     private func releaseSlot(_ key: Key) {
         guard active == key else { return }
-        active = nil; wakeSlotWaiters()
+        active = nil; wakeSlotWaiters(); wakeInitialWaiters()
     }
     private func claimSlot(_ key: Key) -> SlotClaim {
         guard currentProcess, accepting, !retired else { return .closed }
@@ -214,14 +253,15 @@ actor SetupMaintenanceRecoverySupervisor {
         for waiter in available.values { waiter.finish() }
     }
     private func finish(_ key: Key, _ observation: Observation) {
-        entries[key]?.observation = observation; entries[key]?.finished = true
+        observe(key, observation); entries[key]?.finished = true
+        wakeInitialWaiters()
         wakeSlotWaiters()
         if observation == .retired { retired = true; startClosing() }
     }
     private func startClosing() {
         guard closing == nil else { return }
-        accepting = false; custody.closeAdmission(); wakeSlotWaiters()
-        closing = Self.join(entries.values.map(\.task), custody: custody, finished: { [weak self] in
+        accepting = false; finalClose.closeAdmission(); wakeSlotWaiters(); wakeInitialWaiters()
+        closing = Self.join(entries.values.map(\.task), custody: finalClose, finished: { [weak self] in
             await self?.didJoin($0)
         })
     }
@@ -236,7 +276,7 @@ actor SetupMaintenanceRecoverySupervisor {
             await finish(result)
         }
     }
-    private nonisolated static func join(_ tasks: [Task<Void, Never>], custody: any SetupMaintenanceRecoveryProcessCustody,
+    private nonisolated static func join(_ tasks: [Task<Void, Never>], custody: any SetupMaintenanceRecoveryFinalClose,
         shutdown: Bool = true,
         finished: @escaping @Sendable (AdministrativeSetupShutdown.RecoveryCloseResult?) async -> Void) -> Task<Void, Never> {
         for task in tasks { task.cancel() }
@@ -248,11 +288,11 @@ actor SetupMaintenanceRecoverySupervisor {
     }
     deinit {
         guard getpid() == processID, closing == nil else { return }
-        _ = Self.join(entries.values.map(\.task), custody: custody, shutdown: false, finished: { _ in })
+        _ = Self.join(entries.values.map(\.task), custody: finalClose, shutdown: false, finished: { _ in })
     }
 
     private struct Runner: Sendable {
-        let custody: any SetupMaintenanceRecoveryProcessCustody
+        let custody: any SetupMaintenanceRecoveryWorkCustody
         let driver: Driver
         let timing: Timing
         private enum OwnerResult: Sendable { case finished(Observation), unusedAtDeadline }

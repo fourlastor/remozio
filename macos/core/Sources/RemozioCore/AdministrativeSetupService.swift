@@ -79,69 +79,75 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
     }
 }
 
-/// Owns the protected release lease, machine store and local listener. It creates no service registration or network socket.
-public final class AdministrativeSetupService {
-    private let owner: SetupAccountOwner
-    private let listener: AdministrativeSetupXPCListener
-    private let shutdown: AdministrativeSetupShutdown
-    private var closed = false
-
-    public static func open(configurationPath: String) throws -> AdministrativeSetupService {
-        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-        guard configurationPath == AdministrativeSetupConfiguration.startupPath else { throw AdministrativeSetupServiceError.invalidConfiguration }
-        let configuration = try AdministrativeSetupConfiguration.load(path: configurationPath)
-        let app = configuration.codePolicy.entries.first(where: { $0.role == .app })!
-        let host = configuration.codePolicy.entries.first(where: { $0.role == .setupController })!
-        let requirement = try XPCPeerPolicy(teamID: host.teamID, componentIdentifier: host.identifier,
-            approvedCodeDirectoryHashes: [host.codeDirectoryHash], expectedUserID: 0).requirement
-            + " and info[\"RemozioSecurityGeneration\"] = \"\(host.installedGeneration)\""
-        try DynamicCodeValidation.validateSelf(requirement: requirement)
-        let path = try DynamicCodeValidation.selfPath(), suffix = "/" + AdministrativeSetupConfiguration.executablePath
-        guard path.hasSuffix(suffix) else { throw AdministrativeSetupServiceError.wrongExecutable }
-        let bundle = URL(fileURLWithPath: String(path.dropLast(suffix.count)))
-        let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
-        var processLease: SetupProcessLease?
-        var machine: PreparationIntentStore?
-        var owner: SetupAccountOwner?
-        do {
-            let activity = try ReleaseActivityBarrier.open(machineDirectory: configuration.machineDirectory)
-            let startup = try activity.acquireShared()
-            defer { startup.close() }
+/// Owns verified host custody before the store-backed owner exists.
+public final class AdministrativeSetupService: @unchecked Sendable {
+    private final class Host: @unchecked Sendable {
+        let configurationPath: String, configuration: AdministrativeSetupConfiguration
+        let requirement: String, path: String, bundle: URL
+        let placement: ReleaseDestinationLease, processLease: SetupProcessLease
+        let activity: ReleaseActivityBarrier, release: SignedReleaseEvidence
+        let nativeMode: GatewaySettingsNativeSupport.Mode
+        let shutdown: AdministrativeSetupShutdown
+        let executor = SetupAuditUpgradeWorkExecutor(name: "Remozio setup startup")
+        private var preparedOwner: SetupAccountOwner?
+        init(configurationPath: String, configuration: AdministrativeSetupConfiguration, requirement: String,
+            path: String, bundle: URL, placement: ReleaseDestinationLease, processLease: SetupProcessLease,
+            activity: ReleaseActivityBarrier, release: SignedReleaseEvidence, nativeMode: GatewaySettingsNativeSupport.Mode) {
+            self.configurationPath = configurationPath; self.configuration = configuration; self.requirement = requirement
+            self.path = path; self.bundle = bundle; self.placement = placement; self.processLease = processLease
+            self.activity = activity; self.release = release; self.nativeMode = nativeMode
+            shutdown = .init(placement: placement, processLease: processLease)
+        }
+        func validateStartup() throws { _ = try checkedStartup() }
+        // Before an owner exists these checks and the first store read have no activity token, as on main.
+        // A concurrent release change can refuse startup; the lifecycle then retires for a fresh process.
+        private func checkedStartup() throws -> SignedReleaseEvidence {
+            try processLease.validate()
+            guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
+                throw AdministrativeSetupServiceError.changedConfiguration
+            }
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-            let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-            try configuration.validate(release: release)
-            let instance = try SetupProcessLease.acquire()
-            processLease = instance
-            let nativeMode = try GatewaySettingsNativeSupport.mode(release: release, policy: configuration.codePolicy)
+            let app = configuration.codePolicy.entries.first { $0.role == .app }!
+            let current = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+            try configuration.validate(release: current)
+            try DynamicCodeValidation.validateSelf(requirement: requirement)
+            guard try DynamicCodeValidation.selfPath() == path else { throw AdministrativeSetupServiceError.wrongExecutable }
+            try placement.validate()
+            return current
+        }
+        func verifyHost(_ inventory: InstallationInventory) throws {
+            let inspected = try checkedStartup()
+            try verifyInventoryHost(inventory, release: inspected)
+        }
+        func checkHost() throws -> AdministrativeSetupLifecycle.HostCheck {
+            let inspected = try checkedStartup()
+            return .init(verifyInventory: { inventory in
+                do { try self.verifyInventoryHost(inventory, release: inspected) }
+                catch { throw AdministrativeSetupServiceError.wrongRelease }
+            })
+        }
+        private func verifyInventoryHost(_ inventory: InstallationInventory, release: SignedReleaseEvidence) throws {
+            guard inventory.bundlePath == bundle.path else { throw AdministrativeSetupServiceError.wrongRelease }
+            try configuration.validate(inventory: inventory, release: release)
+            let declaration = inventory.services.first { $0.role == .setupController && $0.accountID == nil && $0.label == AdministrativeSetupConfiguration.serviceName }!
+            let component = release.manifest.components.first { $0.role == .setupController }!
+            let manifest = try InstallationServiceManifest(declaration: declaration, component: component,
+                configurationPath: configurationPath, userName: "root", arguments: [component.relativePath, "--configuration", configurationPath],
+                machServices: [AdministrativeSetupConfiguration.serviceName], runAtLoad: true, keepAlive: true)
+            let plist = bundle.appendingPathComponent("Contents/Library/LaunchDaemons/" + AdministrativeSetupConfiguration.plistName)
+            try manifest.validate(ProtectedServiceConfiguration.readPublic(path: plist.path), inventory: inventory, release: release)
+        }
+        private func makeOwner(checkedHost: AdministrativeSetupLifecycle.HostCheck) throws -> SetupAccountOwner {
+            let configuration = self.configuration, release = self.release, activity = self.activity
+            let nativeMode = self.nativeMode
             let store = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
-            machine = store
-            guard let inventory = try store.loadInventory(), inventory.bundlePath == bundle.path else {
-                throw AdministrativeSetupServiceError.wrongRelease
-            }
-            func verifyHost(_ inventory: InstallationInventory) throws {
-                try instance.validate()
-                guard inventory.bundlePath == bundle.path else { throw AdministrativeSetupServiceError.wrongRelease }
-                guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-                guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
-                    throw AdministrativeSetupServiceError.changedConfiguration
-                }
-                _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-                let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-                try configuration.validate(inventory: inventory, release: release)
-                try DynamicCodeValidation.validateSelf(requirement: requirement)
-                guard try DynamicCodeValidation.selfPath() == path else { throw AdministrativeSetupServiceError.wrongExecutable }
-                let declaration = inventory.services.first(where: { $0.role == .setupController && $0.accountID == nil && $0.label == AdministrativeSetupConfiguration.serviceName })!
-                let component = release.manifest.components.first(where: { $0.role == .setupController })!
-                let manifest = try InstallationServiceManifest(declaration: declaration, component: component,
-                    configurationPath: configurationPath, userName: "root", arguments: [component.relativePath, "--configuration", configurationPath],
-                    machServices: [AdministrativeSetupConfiguration.serviceName], runAtLoad: true, keepAlive: true)
-                let plist = bundle.appendingPathComponent("Contents/Library/LaunchDaemons/" + AdministrativeSetupConfiguration.plistName)
-                try manifest.validate(ProtectedServiceConfiguration.readPublic(path: plist.path), inventory: inventory, release: release)
-                try placement.validate()
-            }
-            try verifyHost(inventory)
-            try store.close(); machine = nil
-            let next = try SetupAccountOwner(openMachine: {
+            do {
+                guard let inventory = try store.loadInventory() else { throw PreparationStoreError.notFound }
+                try checkedHost.verifyInventory(inventory); try store.close()
+            } catch { try? store.close(); throw error }
+            let verifyHost: (InstallationInventory) throws -> Void = { try self.verifyHost($0) }
+            return try SetupAccountOwner(openMachine: {
                 try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
             }, expectedReleaseDigest: configuration.releaseDigest,
                 resume: { try AuthorityAccountInitialization.resume(machine: $0, expected: $1) }, verifyHost: verifyHost,
@@ -159,26 +165,123 @@ public final class AdministrativeSetupService {
                     ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil,
                 importedGatewayOperation: nativeMode == .native
                     ? .native(machineDirectory: configuration.machineDirectory, macID: configuration.macID) : nil)
-            owner = next
-            let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
-                teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], owner: next,
-                maximumConnections: configuration.maximumConnections, handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds)
-            return .init(owner: next, listener: listener, placement: placement, processLease: instance)
-        } catch { try? owner?.close(); if owner == nil { try? machine?.close() }; placement.close(); processLease?.close(); throw error }
-    }
 
-    private init(owner: SetupAccountOwner, listener: AdministrativeSetupXPCListener, placement: ReleaseDestinationLease,
-                 processLease: SetupProcessLease) {
-        self.owner = owner; self.listener = listener; shutdown = .init(owner: owner, placement: placement, processLease: processLease)
+        }
+        func prepare(checkedHost: AdministrativeSetupLifecycle.HostCheck, signal: @escaping @Sendable () -> Void) async throws -> AdministrativeSetupLifecycle.Runtime {
+            try await executor.run { _ in
+                let owner: SetupAccountOwner
+                if let prepared = self.preparedOwner { owner = prepared }
+                else {
+                    owner = try self.makeOwner(checkedHost: checkedHost)
+                    try self.shutdown.bind(owner)
+                    self.preparedOwner = owner
+                    try owner.installMaintenanceRecoverySignal(signal)
+                }
+                return try .native(owner: owner, shutdown: self.shutdown, candidate: self.release)
+            }
+        }
     }
-    public func start() throws { guard !closed else { throw AdministrativeSetupError.unavailable }; try listener.start() }
+    private final class Signal: @unchecked Sendable {
+        private let lock = NSLock()
+        private weak var lifecycle: AdministrativeSetupLifecycle?
+        func bind(_ lifecycle: AdministrativeSetupLifecycle) { lock.withLock { self.lifecycle = lifecycle } }
+        func notify() {
+            if let lifecycle = lock.withLock({ lifecycle }) { Task { await lifecycle.requestDiscovery() } }
+        }
+    }
+    private let lock = NSLock()
+    private let host: Host
+    private let listener: AdministrativeSetupXPCListener
+    private let routing: AdministrativeSetupLifecycle.Routing
+    private let signal = Signal()
+    private var lifecycle: AdministrativeSetupLifecycle?
+
+    /// The startup hold ends before a pending lifecycle can block an existing exclusive cutover.
+    private static func startupSequence<Verified, Value>(_ activity: ReleaseActivityBarrier,
+        verify: () throws -> Verified, makePending: (Verified) throws -> Value) throws -> Value {
+        let startup = try activity.acquireShared()
+        defer { startup.close() }
+        let verified = try verify()
+        return try makePending(verified)
+    }
+    /// Runs the same startup ownership sequence with ordinary fixtures. It cannot run Root checks or a native listener.
+    static func openOwnedStartup<Verified, Value>(_ activity: ReleaseActivityBarrier,
+        verify: () throws -> Verified, makePending: (Verified) throws -> Value) throws -> Value {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try startupSequence(activity, verify: verify, makePending: makePending)
+    }
+    public static func open(configurationPath: String) throws -> AdministrativeSetupService {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        guard configurationPath == AdministrativeSetupConfiguration.startupPath else { throw AdministrativeSetupServiceError.invalidConfiguration }
+        let configuration = try AdministrativeSetupConfiguration.load(path: configurationPath)
+        let app = configuration.codePolicy.entries.first { $0.role == .app }!
+        let component = configuration.codePolicy.entries.first { $0.role == .setupController }!
+        let requirement = try XPCPeerPolicy(teamID: component.teamID, componentIdentifier: component.identifier,
+            approvedCodeDirectoryHashes: [component.codeDirectoryHash], expectedUserID: 0).requirement
+            + " and info[\"RemozioSecurityGeneration\"] = \"\(component.installedGeneration)\""
+        try DynamicCodeValidation.validateSelf(requirement: requirement)
+        let path = try DynamicCodeValidation.selfPath(), suffix = "/" + AdministrativeSetupConfiguration.executablePath
+        guard path.hasSuffix(suffix) else { throw AdministrativeSetupServiceError.wrongExecutable }
+        let bundle = URL(fileURLWithPath: String(path.dropLast(suffix.count)))
+        let placement = try ReleaseDestinationLease.acquire(path: bundle.deletingLastPathComponent().path)
+        var processLease: SetupProcessLease?
+        do {
+            let activity = try ReleaseActivityBarrier.open(machineDirectory: configuration.machineDirectory)
+            return try startupSequence(activity, verify: {
+                _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
+                let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+                try configuration.validate(release: release)
+                // Select once from the fixed verified release, before the listener can start. Failure exits through startup code78.
+                let nativeMode = try GatewaySettingsNativeSupport.mode(release: release, policy: configuration.codePolicy)
+                let instance = try SetupProcessLease.acquire(); processLease = instance
+                let host = Host(configurationPath: configurationPath, configuration: configuration, requirement: requirement,
+                    path: path, bundle: bundle, placement: placement, processLease: instance, activity: activity, release: release, nativeMode: nativeMode)
+                try host.validateStartup()
+                return host
+            }, makePending: { host in
+                let routing = AdministrativeSetupLifecycle.Routing(validateStartup: { try host.shutdown.validateRecoveryCustody() })
+                let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
+                    teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], routing: routing,
+                    validateStartup: { try host.validateStartup() }, maximumConnections: configuration.maximumConnections,
+                    handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds)
+                return AdministrativeSetupService(host: host, listener: listener, routing: routing)
+            })
+        } catch { placement.close(); processLease?.close(); throw error }
+    }
+    private init(host: Host, listener: AdministrativeSetupXPCListener, routing: AdministrativeSetupLifecycle.Routing) {
+        self.host = host; self.listener = listener; self.routing = routing
+    }
+    public func start(terminate: @escaping @Sendable (Int32) -> Void = { exit($0) }) throws {
+        try lock.withLock {
+            guard lifecycle == nil else { throw AdministrativeSetupError.unavailable }
+            let host = self.host, listener = self.listener, signal = self.signal
+            let lifecycle = try AdministrativeSetupLifecycle.native(routing: routing,
+                validateStartup: { try host.shutdown.validateRecoveryCustody() },
+                validateHost: { try await host.executor.run { _ in try host.checkHost() } },
+                prepare: { try await host.prepare(checkedHost: $0, signal: { signal.notify() }) },
+                closeWithoutRuntime: { try await host.shutdown.close() },
+                stopListener: { listener.close() }, terminate: terminate)
+            self.lifecycle = lifecycle; signal.bind(lifecycle)
+            try listener.start()
+            Task { await lifecycle.start() }
+        }
+    }
+    public func requestRetirement() {
+        if let lifecycle = lock.withLock({ lifecycle }) { Task { await lifecycle.requestRetirement() } }
+    }
+    public func waitUntilStopped() async {
+        if let lifecycle = lock.withLock({ lifecycle }) { await lifecycle.waitUntilStopped() }
+    }
     public func close() async throws {
-        guard !closed else { return }
-        listener.close(); try await shutdown.close(); closed = true
+        if let lifecycle = lock.withLock({ lifecycle }) { await lifecycle.close() }
+        else { listener.close(); try await host.shutdown.close() }
     }
     deinit {
-        listener.close()
-        let pending = shutdown
-        Task { try? await pending.close() }
+        if let lifecycle { Task { await lifecycle.requestRetirement() } }
+        else {
+            listener.close()
+            let shutdown = host.shutdown
+            Task { try? await shutdown.close() }
+        }
     }
 }
