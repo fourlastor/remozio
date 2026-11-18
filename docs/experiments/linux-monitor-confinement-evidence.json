@@ -1,0 +1,531 @@
+{
+  "apparmor": {
+    "afUnixMediation": true,
+    "lsm": "lockdown,capability,landlock,yama,apparmor,ima,evm",
+    "parserVersion": "5.0.0~alpha1",
+    "postNnpSubset": true,
+    "ptraceMask": [
+      "read",
+      "trace"
+    ],
+    "signalMediation": true
+  },
+  "build": {
+    "frontend": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-static",
+      "-no-pie"
+    ],
+    "monitor": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-static"
+    ],
+    "probe": [
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-static"
+    ]
+  },
+  "cases": {
+    "c1": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "probe": "unconfined",
+        "sleeper": "unconfined"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "exec": "ok",
+        "fileCreate": "ok",
+        "inetSocket": "ok",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok",
+        "sleeper.getfdCopyIsPipe": "yes",
+        "sleeper.mapsRead": "ok",
+        "sleeper.memOpen": "EACCES",
+        "sleeper.memRead": "not-attempted",
+        "sleeper.pidfdGetfd": "ok",
+        "sleeper.pidfdOpen": "ok",
+        "sleeper.seize": "ok",
+        "sleeper.statusRead": "ok",
+        "sleeper.vmRead": "match"
+      }
+    },
+    "c2": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "probe": "unconfined",
+        "sleeper": "unconfined"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "ptrace-only",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "ptrace-only",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "exec": "ok",
+        "fileCreate": "ok",
+        "inetSocket": "ok",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "not-requested",
+        "sleeper.getfdCopyIsPipe": "yes",
+        "sleeper.mapsRead": "ok",
+        "sleeper.memOpen": "EACCES",
+        "sleeper.memRead": "not-attempted",
+        "sleeper.pidfdGetfd": "ok",
+        "sleeper.pidfdOpen": "ok",
+        "sleeper.seize": "ok",
+        "sleeper.statusRead": "ok",
+        "sleeper.vmRead": "match"
+      },
+      "unitStoppedAndCgroupEmpty": true
+    },
+    "f1": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "probe": "rmzmc-complain-<tag> (complain)",
+        "sleeper": "unconfined"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok",
+        "sleeper.getfdCopyIsPipe": "yes",
+        "sleeper.mapsRead": "ok",
+        "sleeper.memOpen": "EACCES",
+        "sleeper.memRead": "not-attempted",
+        "sleeper.pidfdGetfd": "ok",
+        "sleeper.pidfdOpen": "ok",
+        "sleeper.seize": "ok",
+        "sleeper.statusRead": "ok",
+        "sleeper.vmRead": "match"
+      }
+    },
+    "f2": {
+      "aaExecExit": "nonzero",
+      "cleanupReapedAllFixtureProcesses": true,
+      "passed": true,
+      "probeOutput": "none"
+    },
+    "f3": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "frontendExit": "rejected",
+      "labels": {
+        "frontend": "unconfined",
+        "monitor": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "no",
+        "descriptorsExact": "no",
+        "exeIsCurrentInstalledImage": "no",
+        "fdDirectoryListing": "not-attempted",
+        "frontendAppArmor": "not-attempted",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "no",
+        "mapsAllowed": "no",
+        "monitorAppArmor": "confined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "no",
+        "notDumpable": "no",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "no",
+        "pidfdAssociated": "no",
+        "seccompFilterMode": "no",
+        "seize": "EACCES",
+        "signalsReset": "no",
+        "singleSeccompFilter": "no",
+        "singleThread": "no",
+        "statusGidRolesExact": "no",
+        "stopHeld": "no",
+        "tracerIsMonitor": "no",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "k1": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "killedBySigkill": true,
+      "labels": {
+        "probe": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "passed": true
+    },
+    "n1c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "frontend": "rmzmc-frontend-<tag> (enforce)",
+        "probe": "rmzmc-monitor-<tag> (enforce)",
+        "sleeper": "unconfined"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "frontend.detach": "ok",
+        "frontend.interrupt": "yes",
+        "frontend.memOpen": "EACCES",
+        "frontend.seize": "ok",
+        "frontend.vmRead": "match",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok",
+        "sleeper.getfdCopyIsPipe": "not-attempted",
+        "sleeper.mapsRead": "EACCES",
+        "sleeper.memOpen": "EACCES",
+        "sleeper.memRead": "not-attempted",
+        "sleeper.pidfdGetfd": "EPERM",
+        "sleeper.pidfdOpen": "ok",
+        "sleeper.seize": "EACCES",
+        "sleeper.statusRead": "ok",
+        "sleeper.vmRead": "EPERM"
+      }
+    },
+    "n2c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "frontend": "rmzmc-frontend-<tag> (enforce)",
+        "probe": "stack(probe+unconfined) (enforce)",
+        "sleeper": "unconfined"
+      },
+      "mismatches": [
+        "label.probe",
+        "probe.frontend.detach",
+        "probe.frontend.interrupt",
+        "probe.frontend.seize",
+        "probe.frontend.vmRead"
+      ],
+      "passed": false,
+      "probe": {
+        "capsAmbient": "ptrace-only",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "ptrace-only",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "exec": "EACCES",
+        "fileCreate": "EACCES",
+        "frontend.detach": "not-attempted",
+        "frontend.interrupt": "not-attempted",
+        "frontend.memOpen": "EACCES",
+        "frontend.seize": "EACCES",
+        "frontend.vmRead": "EPERM",
+        "inetSocket": "EACCES",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "not-requested",
+        "sleeper.getfdCopyIsPipe": "not-attempted",
+        "sleeper.mapsRead": "EACCES",
+        "sleeper.memOpen": "EACCES",
+        "sleeper.memRead": "not-attempted",
+        "sleeper.pidfdGetfd": "EPERM",
+        "sleeper.pidfdOpen": "ok",
+        "sleeper.seize": "EACCES",
+        "sleeper.statusRead": "ok",
+        "sleeper.vmRead": "EPERM"
+      },
+      "unitStoppedAndCgroupEmpty": true
+    },
+    "n3c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "copy": "unconfined",
+        "operator": "unconfined",
+        "probe": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "copy.detach": "not-attempted",
+        "copy.interrupt": "not-attempted",
+        "copy.memOpen": "EACCES",
+        "copy.seize": "EACCES",
+        "copy.vmRead": "EPERM",
+        "credentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "operator.getfdCopyIsPipe": "not-attempted",
+        "operator.mapsRead": "EACCES",
+        "operator.memOpen": "EACCES",
+        "operator.memRead": "not-attempted",
+        "operator.pidfdGetfd": "EPERM",
+        "operator.pidfdOpen": "ok",
+        "operator.seize": "EACCES",
+        "operator.statusRead": "ok",
+        "operator.vmRead": "EPERM",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok"
+      }
+    },
+    "n4c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "probe": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "exec": "EACCES",
+        "fileCreate": "EACCES",
+        "inetSocket": "EACCES",
+        "noNewPrivs": "yes",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok"
+      }
+    },
+    "n5c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "frontendExit": "rejected",
+      "labels": {
+        "frontend": "unconfined",
+        "monitor": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "monitor": {
+        "accepted": "no",
+        "atSecure": "no",
+        "descriptorsExact": "no",
+        "exeIsCurrentInstalledImage": "no",
+        "fdDirectoryListing": "not-attempted",
+        "frontendAppArmor": "not-attempted",
+        "groupsExcludeFrontendGroup": "no",
+        "helloReceived": "yes",
+        "hostNamespaces": "no",
+        "mapsAllowed": "no",
+        "monitorAppArmor": "confined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "no",
+        "notDumpable": "no",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "no",
+        "pidfdAssociated": "no",
+        "seccompFilterMode": "no",
+        "seize": "EACCES",
+        "signalsReset": "no",
+        "singleSeccompFilter": "no",
+        "singleThread": "no",
+        "statusGidRolesExact": "no",
+        "stopHeld": "no",
+        "tracerIsMonitor": "no",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    },
+    "n6c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "helper": {
+        "mount": "EACCES",
+        "uidMap": "EACCES",
+        "userns": "ok"
+      },
+      "passed": true
+    },
+    "n7c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "labels": {
+        "probe": "rmzmc-monitor-<tag> (enforce)",
+        "root": "rmzmc-frontend-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "passed": true,
+      "probe": {
+        "capsAmbient": "none",
+        "capsBounding": "ptrace-only",
+        "capsEffective": "ptrace-only",
+        "capsInheritable": "none",
+        "capsPermitted": "ptrace-only",
+        "credentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "root.detach": "ok",
+        "root.interrupt": "yes",
+        "root.memOpen": "EACCES",
+        "root.seize": "ok",
+        "root.vmRead": "match",
+        "rootRegain": "EPERM",
+        "selfDrop": "ok"
+      }
+    },
+    "p1c": {
+      "cleanupReapedAllFixtureProcesses": true,
+      "frontendExit": "accepted",
+      "labels": {
+        "frontend": "rmzmc-frontend-<tag> (enforce)",
+        "monitor": "rmzmc-monitor-<tag> (enforce)"
+      },
+      "mismatches": [],
+      "monitor": {
+        "accepted": "yes",
+        "atSecure": "yes",
+        "descriptorsExact": "yes",
+        "exeIsCurrentInstalledImage": "yes",
+        "fdDirectoryListing": "EACCES",
+        "frontendAppArmor": "confined",
+        "groupsExcludeFrontendGroup": "yes",
+        "helloReceived": "yes",
+        "hostNamespaces": "yes",
+        "mapsAllowed": "yes",
+        "monitorAppArmor": "confined",
+        "monitorCredentialsExact": "yes",
+        "noNewPrivs": "yes",
+        "notDumpable": "yes",
+        "peerCredEffectiveGidIsGroup": "yes",
+        "peerPidfd": "ok",
+        "personalityCleared": "yes",
+        "pidfdAssociated": "yes",
+        "seccompFilterMode": "yes",
+        "seize": "ok",
+        "signalsReset": "yes",
+        "singleSeccompFilter": "yes",
+        "singleThread": "yes",
+        "statusGidRolesExact": "yes",
+        "stopHeld": "yes",
+        "tracerIsMonitor": "yes",
+        "verdictSent": "yes"
+      },
+      "passed": true
+    }
+  },
+  "cleanup": {
+    "filesRemoved": true,
+    "frontendGroupRemoved": true,
+    "monitorUserRemoved": true,
+    "profilesRemoved": true,
+    "transientUnitsStopped": true
+  },
+  "denials": [
+    {
+      "class": "ptrace",
+      "count": 1,
+      "mask": "read",
+      "operation": "ptrace",
+      "peer": "unconfined",
+      "profile": "monitor",
+      "result": "DENIED",
+      "signal": "none",
+      "target": "none"
+    },
+    {
+      "class": "ptrace",
+      "count": 3,
+      "mask": "trace",
+      "operation": "ptrace",
+      "peer": "unconfined",
+      "profile": "monitor",
+      "result": "DENIED",
+      "signal": "none",
+      "target": "none"
+    },
+    {
+      "class": "ptrace",
+      "count": 1,
+      "mask": "trace",
+      "operation": "ptrace",
+      "peer": "unconfined",
+      "profile": "probe",
+      "result": "DENIED",
+      "signal": "none",
+      "target": "none"
+    }
+  ],
+  "experiment": "linux-monitor-confinement-v1",
+  "host": {
+    "architecture": "x86_64",
+    "kernelVersion": "6.17.0-41",
+    "os": "Linux",
+    "osRelease": {
+      "id": "ubuntu",
+      "versionId": "25.10"
+    },
+    "pythonVersion": "3.13.7",
+    "runsAsRoot": true,
+    "settings": {
+      "apparmorEnabled": true,
+      "apparmorRestrictUnprivilegedUserns": 1,
+      "protectedHardlinks": 1,
+      "ptraceScope": 1,
+      "suidDumpable": 2,
+      "unprivilegedUsernsClone": 1
+    }
+  },
+  "installedImageSha256": "941f15c9d94ced79e73b460f03195fc685335b3122ec6b7923ef62182a0add18",
+  "limits": [
+    "C measurement fixtures, not the production frontend or monitor",
+    "the policy confines by program, not by user: any instance of the installed frontend, a Root one included, carries the frontend label (n7c)",
+    "procfs entries that are not ptrace-checked (status, most of stat) stay readable",
+    "one host, one kernel, one AppArmor version; a host with AppArmor off is not measured",
+    "no production refusal code, installed units, stopped handoff or executor"
+  ],
+  "measuredAtUTC": "2026-11-18T13:58:19.102600+00:00",
+  "passed": false,
+  "productionAdmission": false,
+  "setup": {
+    "fixturesStaticNonPie": true,
+    "frontendGroupHasNoMembers": true,
+    "installedImageExact": true,
+    "noAccountUsesFrontendGroupAsPrimary": true,
+    "operatorOutsideFrontendGroup": true,
+    "profilesLoadedInExpectedMode": true
+  },
+  "sources": {
+    "experiments/linux-monitor-confinement/probe.c": "6d6a90d05fb98a70be637cc23f8233ccf86e658facd485776b0d87d662d3d570",
+    "experiments/linux-monitor-confinement/profiles.in": "02225651c2ce4b458c5ad8312f89d158d292e864aa5a38fa9e31bca0d66a66cc",
+    "experiments/linux-protected-launch/frontend.c": "11888209c4bcdb47a2256c7c6d38d3db3d76b264b67edcf740c30d9154f63173",
+    "experiments/linux-protected-launch/monitor.c": "818895cbed4c188422ba0d67105d0641b43107791fb768ae7eb53f871c83b54b",
+    "scripts/run-linux-caller-experiment.py": "d5065cf8910b6d65d983b1e86a143564b6ccf32020ec7d06c8ad7bc10039ae12",
+    "scripts/run-linux-monitor-confinement-experiment.py": "b36a66504fd8f23548c7ef33d8de80b595cc5ac8702faafc65d76e0051bbea15",
+    "scripts/run-linux-protected-launch-experiment.py": "1cc0896ece28a04ff464dda4e1a666050a49f3e4d8f5dcaa664f41fba7c3b89d"
+  },
+  "supervised": true,
+  "trustedCode": false
+}

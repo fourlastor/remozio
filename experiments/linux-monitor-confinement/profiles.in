@@ -1,0 +1,86 @@
+# Remozio monitor-confinement experiment: AppArmor profile templates.
+#
+# The runner renders this file once per run. @@TAG@@ becomes a random 8-hex tag and @@BASE@@
+# the run's root-owned directory. It loads each profile into the kernel only
+# (apparmor_parser -a -K: no cache, nothing under /etc/apparmor.d) and removes each one by
+# name at the end. No profile includes an abstraction; every rule the fixtures need is here.
+#
+# The abi line pins the 4.0 feature set. Without it the parser falls back to its default
+# feature set, and on the measured host it then warns "network rules not enforced".
+abi <abi/4.0>,
+
+# The installed frontend, attached by its exact installed path. Peer rules name the labels
+# that may trace it; the unconfined runner and user may only stop it.
+profile rmzmc-frontend-@@TAG@@ @@BASE@@/run/remozio flags=(enforce) {
+  @@BASE@@/run/remozio mr,
+  # The command socket is a pathname socket: AppArmor mediates it through file rules.
+  @@BASE@@/s/*.sock rw,
+  unix (create, connect, send, receive, getattr, getopt, shutdown) type=seqpacket,
+  ptrace (readby, tracedby) peer=rmzmc-monitor-@@TAG@@,
+  ptrace (readby, tracedby) peer=rmzmc-probe-@@TAG@@,
+  signal (receive) peer=rmzmc-monitor-@@TAG@@,
+  signal (receive) peer=rmzmc-probe-@@TAG@@,
+  signal (receive) set=(kill, term, int, hup) peer=unconfined,
+  signal (send, receive) peer=rmzmc-frontend-@@TAG@@,
+}
+
+# Launch shape A: the unchanged #728 monitor, started with aa-exec. setuid, setgid and setpcap
+# serve its self-drop only; afterwards its bounding set holds CAP_SYS_PTRACE alone. The shape A
+# probe runs under this profile too.
+profile rmzmc-monitor-@@TAG@@ flags=(enforce) {
+  capability sys_ptrace,
+  capability setuid,
+  capability setgid,
+  capability setpcap,
+  ptrace (read, trace) peer=rmzmc-frontend-@@TAG@@,
+  signal (send) peer=rmzmc-frontend-@@TAG@@,
+  signal (receive) set=(kill, term) peer=unconfined,
+  signal (send, receive) peer=rmzmc-monitor-@@TAG@@,
+  unix (accept, receive, send, getattr, getopt, shutdown) type=seqpacket,
+  deny network inet,
+  deny network inet6,
+  # Images: map, never execute (no x rule anywhere, so no exec after the start).
+  @@BASE@@/run/monitor mr,
+  @@BASE@@/run/probe mr,
+  # The monitor opens the frontend image through /proc/<pid>/exe and stats the installed path.
+  @@BASE@@/run/remozio r,
+  # The inherited listener and the accepted connection: a pathname socket in a root-owned
+  # directory, so this rule cannot create a file.
+  @@BASE@@/s/*.sock rw,
+  # The self-drop reads the last capability number.
+  /proc/sys/kernel/cap_last_cap r,
+  # Own and peer procfs entries. Access to another process's maps, attr, ns, exe and stack
+  # fields is ptrace-checked, so the ptrace rule above limits it to the frontend label.
+  # status and stat are readable for every process, as for every user. environ: the monitor
+  # only stats it (notDumpable), and AppArmor mediates getattr. No rule for mem (the monitor
+  # reads memory with process_vm_readv) and none for fd (the monitor requires that listing
+  # refused).
+  /proc/[1-9]*/ r,
+  /proc/[1-9]*/{status,stat,maps,environ} r,
+  /proc/[1-9]*/attr/{apparmor/,}current r,
+  /proc/[1-9]*/ns/* r,
+  /proc/[1-9]*/fdinfo/* r,
+}
+
+# Launch shape B: the probe in a transient systemd service with ambient CAP_SYS_PTRACE. The
+# monitor profile without the self-drop capabilities.
+profile rmzmc-probe-@@TAG@@ flags=(enforce) {
+  capability sys_ptrace,
+  ptrace (read, trace) peer=rmzmc-frontend-@@TAG@@,
+  signal (send) peer=rmzmc-frontend-@@TAG@@,
+  signal (receive) set=(kill, term) peer=unconfined,
+  signal (send, receive) peer=rmzmc-probe-@@TAG@@,
+  unix (accept, receive, send, getattr, getopt, shutdown) type=seqpacket,
+  deny network inet,
+  deny network inet6,
+  @@BASE@@/run/monitor mr,
+  @@BASE@@/run/probe mr,
+  @@BASE@@/run/remozio r,
+  @@BASE@@/s/*.sock rw,
+  /proc/sys/kernel/cap_last_cap r,
+  /proc/[1-9]*/ r,
+  /proc/[1-9]*/{status,stat,maps,environ} r,
+  /proc/[1-9]*/attr/{apparmor/,}current r,
+  /proc/[1-9]*/ns/* r,
+  /proc/[1-9]*/fdinfo/* r,
+}
