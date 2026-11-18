@@ -114,7 +114,9 @@ Differences from the reviewed plan, found while writing the policy:
   `NoNewPrivileges=yes`, `AppArmorProfile=rmzmc-probe-<tag>`, `RuntimeMaxSec=`,
   `--collect`. This is the shape a production unit would use. AppArmor allows a
   transition from an unconfined label under `no_new_privs`; if the unit still does
-  not start, N2c records it and fails.
+  not start, N2c records it and fails. The runner publishes a stacked label as
+  `stack(<parts>) (<mode>)`, where each part is a role of this experiment,
+  `unconfined` or `other`.
 
 ## Run
 
@@ -211,11 +213,11 @@ prints one JSON object of closed-vocabulary values.
 | Runner | Case | Required result |
 | --- | --- | --- |
 | `p1c` | The #728 monitor, shape A, admits the installed frontend | Accepted. Every #728 monitor check passes; the monitor is confined, the frontend has the frontend label |
-| `n1c` | Shape A probe against a Root sleeper and the installed frontend | Sleeper: seize, `process_vm_readv` and `pidfd_getfd` refused with `EPERM`. Frontend: seized, stopped, marker read, detached |
+| `n1c` | Shape A probe against a Root sleeper and the installed frontend | Sleeper: seize refused with `EACCES`, `process_vm_readv` and `pidfd_getfd` with `EPERM`. Frontend: seized, stopped, marker read, detached |
 | `n2c` | Shape B probe against the same targets, plus the side actions | As N1c; file creation, exec and the IP socket refused. A unit that does not reach the probe's handshake is recorded (`unitStart`) and fails the case |
 | `n3c` | Shape A probe against an operator sleeper and the copy without set-ID bits | Both refused as in N1c |
 | `n4c` | Shape A probe, side actions only | File creation, exec and the IP socket refused |
-| `n5c` | The monitor against the second set-group-ID copy, which no profile attaches | It connects (it has the group); the seize is refused with `EPERM`; rejected |
+| `n5c` | The monitor against the second set-group-ID copy, which no profile attaches | It connects (it has the group); the seize is refused with `EACCES`; rejected |
 | `n6c` | The operator bind-mounts another image over the installed path in a user namespace | Namespace refused, or the mount refused (`EPERM`/`EACCES`) |
 | `n7c` | The limit: shape A probe against the installed frontend started by Root | Reached: the Root process has the frontend label |
 | `c1` | Control: the shape A probe without a profile | The Root sleeper is reached; the side actions work |
@@ -257,7 +259,8 @@ result go here in this change.
   `aa_may_ptrace`, the tracer and tracee checks, the unconfined tracer exemption.
 - `security/apparmor/domain.c`: `change_onexec` (`aa-exec`), the `no_new_privs` rule
   for transitions from a confined label.
-- `kernel/ptrace.c`: `__ptrace_may_access`, `ptrace_attach` (`EPERM` for any refusal);
+- `kernel/ptrace.c`: `__ptrace_may_access`, `ptrace_attach` (it returns the error of the
+  refusing check: `EPERM` from the capability check, `EACCES` from AppArmor);
   `mm/process_vm_access.c` (`EACCES` from `mm_access` becomes `EPERM`);
   `kernel/pid.c`: `pidfd_getfd`.
 - `fs/proc/base.c`: owner and mode of `/proc/<pid>/mem`, `proc_mem_open`.

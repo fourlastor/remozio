@@ -80,20 +80,24 @@ IDENTITY_B = {**IDENTITY_A, "selfDrop": "not-requested", "capsInheritable": "ptr
 # every target here, confined or not. Reach is shown by seize, process_vm_readv and pidfd_getfd.
 # /proc/<pid>/maps is 0444 and checked with PTRACE_MODE_READ: it measures AppArmor's ptrace
 # read permission (the monitor profile has a file rule for it), refused with EACCES.
-SLEEPER_REFUSED = {"seize": "EPERM", "memOpen": "EACCES", "memRead": "not-attempted", "vmRead": "EPERM",
+# The probe holds CAP_SYS_PTRACE, so the capability hook passes and AppArmor refuses the seize
+# with EACCES, which ptrace_attach returns as is (measured in the first supervised run; #728
+# measured EPERM without AppArmor). process_vm_readv and pidfd_getfd turn any refusal into EPERM.
+SLEEPER_REFUSED = {"seize": "EACCES", "memOpen": "EACCES", "memRead": "not-attempted", "vmRead": "EPERM",
                    "pidfdOpen": "ok", "pidfdGetfd": "EPERM", "getfdCopyIsPipe": "not-attempted", "mapsRead": "EACCES",
                    "statusRead": "ok"}
 SLEEPER_REACHED = {**SLEEPER_REFUSED, "seize": "ok", "vmRead": "match", "pidfdGetfd": "ok", "getfdCopyIsPipe": "yes",
                    "mapsRead": "ok"}
 FRONTEND_REACHED = {"seize": "ok", "interrupt": "yes", "vmRead": "match", "memOpen": "EACCES", "detach": "ok"}
-FRONTEND_REFUSED = {"seize": "EPERM", "interrupt": "not-attempted", "vmRead": "EPERM", "memOpen": "EACCES",
+FRONTEND_REFUSED = {"seize": "EACCES", "interrupt": "not-attempted", "vmRead": "EPERM", "memOpen": "EACCES",
                     "detach": "not-attempted"}
 SIDE_REFUSED = {"fileCreate": REFUSED, "exec": REFUSED, "inetSocket": REFUSED}
 SIDE_WORKING = {"fileCreate": "ok", "exec": "ok", "inetSocket": "ok"}
 
 # The #728 monitor tables, with its AppArmor categories required here.
 ADMITTED = {**PL.ADMITTED, "monitorAppArmor": "confined", "frontendAppArmor": "confined"}
-NOT_SEIZED = {**PL.NOT_SEIZED, "monitorAppArmor": "confined", "frontendAppArmor": "not-attempted"}
+NOT_SEIZED = {**PL.NOT_SEIZED, "seize": "EACCES", "monitorAppArmor": "confined",
+              "frontendAppArmor": "not-attempted"}
 FRONTEND_EXITS = {0: "accepted", 2: "rejected", 3: "forbidden-returned", 4: "usage", 5: "policy-setup-failed",
                   10: "connect-EACCES", 11: "socket-failure", 12: "protocol-failure"}
 
@@ -211,10 +215,25 @@ def loaded_profiles():
     return result
 
 
+LABEL_MODES = ("enforce", "complain", "kill", "unconfined", "mixed")
+STACK_PARTS = {UNCONFINED: UNCONFINED, **{f"rmzmc-{role}-<tag>": role
+                                          for role in ("frontend", "monitor", "probe", "complain")}}
+
+
 def sanitize_label(raw, tag):
+    """A closed value: a known label, a stack of known parts ("stack(probe+unconfined) (mode)"),
+    "not-measured" or "other". Nothing else from the kernel string is published."""
     text = raw.decode("ascii", "replace").strip("\0 \n") if isinstance(raw, bytes) else "not-measured"
     text = text.replace(tag, "<tag>") if tag else text
-    return text if text in LABELS else "other"
+    if text in LABELS:
+        return text
+    body, separator, mode = text.rpartition(" (")
+    if not separator or mode[:-1] not in LABEL_MODES or not mode.endswith(")") or "//&" not in body:
+        return "other"
+    parts = body.split("//&")
+    if len(parts) > 4:
+        return "other"
+    return f"stack({'+'.join(STACK_PARTS.get(part, 'other') for part in parts)}) ({mode[:-1]})"
 
 
 def read_label(pid, tag):

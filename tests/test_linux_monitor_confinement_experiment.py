@@ -262,6 +262,25 @@ class LabelAndDenialTests(unittest.TestCase):
                          EXPERIMENT.PROBE_LABEL)
         self.assertEqual(EXPERIMENT.sanitize_label(b"unconfined\n\0", TAG), "unconfined")
 
+    def test_stacked_labels_publish_known_parts_only(self):
+        self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//&unconfined (mixed)\0".encode(), TAG),
+                         "stack(probe+unconfined) (mixed)")
+        self.assertEqual(EXPERIMENT.sanitize_label(f"unconfined//&rmzmc-probe-{TAG} (enforce)\n".encode(), TAG),
+                         "stack(unconfined+probe) (enforce)")
+        self.assertEqual(EXPERIMENT.sanitize_label(b"/usr/bin/x//&unconfined (enforce)", TAG),
+                         "stack(other+unconfined) (enforce)")
+        self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//&unconfined (secret)".encode(), TAG), "other")
+        self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//child (enforce)".encode(), TAG), "other")
+        self.assertEqual(EXPERIMENT.sanitize_label(("a//&" * 4 + "b (enforce)").encode(), TAG), "other")
+
+    def test_a_refused_seize_is_the_apparmor_eacces(self):
+        for case in ("n1c", "n2c"):
+            self.assertEqual(EXPERIMENT.CASES[case]["expect"]["sleeper.seize"], {"EACCES"})
+        self.assertEqual(EXPERIMENT.CASES["n3c"]["expect"]["copy.seize"], {"EACCES"})
+        for case in ("n5c", "f3"):
+            self.assertEqual(EXPERIMENT.CASES[case]["expect"]["seize"], {"EACCES"})
+        self.assertEqual(EXPERIMENT.CASES["n1c"]["expect"]["sleeper.vmRead"], {"EPERM"})
+
     def test_loaded_profiles_parses_names_and_modes(self):
         listing = b"rmzmc-frontend-0123abcd (enforce)\n/usr/bin/man (complain)\nbroken line\n"
         with patch.object(EXPERIMENT, "LOADED_PROFILES", Mock(read_bytes=Mock(return_value=listing))):
