@@ -114,6 +114,13 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
             guard claim.token === token else { throw JournalLeaseError.invalidated }
             try requireCurrentAuthorization()
         }
+        /// Fresh rights and the exact joined token guard this read of the retained record.
+        func recoveryApplicability() throws -> SetupRetainedInvocationReservation.RecoveryApplicability {
+            try requireCurrentAuthorization()
+            let result = try claim.token.recoveryApplicability()
+            try requireCurrentAuthorization()
+            return result
+        }
         func restorationPhases() throws -> SetupRetainedInvocationReservation.RestorationPhases {
             try claim.token.restorationPhases()
         }

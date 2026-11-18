@@ -8,7 +8,7 @@ import RemozioProtocol
 
 private enum StartupTestError: Error, Equatable { case expected }
 /// Real owned machine rows and account locks. Native code identity and launchd remain outside these tests.
-private final class StartupHarness: @unchecked Sendable {
+final class StartupHarness: @unchecked Sendable {
     typealias Row = RuntimeMaintenanceWindowRecord
     let f: RuntimeMaintenanceWriterFixture
     let barrier: UpdateAdmissionBarrier
@@ -127,12 +127,12 @@ private final class StartupHarness: @unchecked Sendable {
 
 }
 
-private final class StartupMetrics: Sendable {
+final class StartupMetrics: Sendable {
     let actions = Mutex<[AuthorityMaintenanceChannelRequest.Action]>([]), hellos = Mutex(0), probes = Mutex(0), gates = Mutex(0)
 }
 
 /// A callback transport for owned tests. It supplies no native peer identity or Authority endpoint evidence.
-private final class StartupDriver: AuthorityMaintenanceClientDriver, Sendable {
+final class StartupDriver: AuthorityMaintenanceClientDriver, Sendable {
     typealias Request = AuthorityMaintenanceChannelRequest
     let epoch: Data, barrier: UpdateAdmissionBarrier
     let metrics: StartupMetrics
@@ -1283,7 +1283,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
 
 /// Owned transports and real writer receipts exercise the in-process origin.
 /// These tests do not qualify installed Root identity or launchd behaviour.
-private final class ExplicitStartupRights: Sendable {
+final class ExplicitStartupRights: Sendable {
     let value = Mutex(true)
 }
 private final class ExplicitDeadlineTrigger: Sendable {
@@ -1291,7 +1291,7 @@ private final class ExplicitDeadlineTrigger: Sendable {
     func expire() { value.withLock { $0 = true } }
     var expired: Bool { value.withLock { $0 } }
 }
-private final class ExplicitStartupFixture: @unchecked Sendable {
+final class ExplicitStartupFixture: @unchecked Sendable {
     typealias Row = RuntimeMaintenanceWindowRecord
     typealias Joined = SetupRetainedOrphanClaim.Joined
     let h: StartupHarness

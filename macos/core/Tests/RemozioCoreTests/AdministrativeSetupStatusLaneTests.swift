@@ -569,4 +569,64 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         XCTAssertTrue(h.recorder.calls.withLock { $0.isEmpty })
     }
 
+    func testRecoverySlotsShareNormalCapacityAndPreserveTheStatusReserve() throws {
+        for total in [1, 2, 3, 8] {
+            let slots = try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 5000, timer: ManualTimer().timer)
+            try slots.start(); defer { slots.close() }
+            var shared: [UUID] = []
+            for index in 0..<slots.maximumNormal {
+                let id = try XCTUnwrap(slots.reserve()); shared.append(id)
+                XCTAssertTrue(slots.select(index % 2 == 0 ? .recoveryOnly : .normal, id: id))
+            }
+            if slots.maximumStatus == 1 {
+                let status = try XCTUnwrap(slots.reserve())
+                XCTAssertFalse(slots.select(.recoveryOnly, id: status))
+                slots.remove(try XCTUnwrap(shared.first))
+                XCTAssertFalse(slots.select(.recoveryOnly, id: status))
+                XCTAssertTrue(slots.select(.statusOnly, id: status))
+                XCTAssertFalse(slots.select(.normal, id: status))
+            } else { XCTAssertNil(slots.reserve()) }
+        }
+    }
+    func testRecoveryHandshakeKeepsItsModeAndCancelsOnlyItsDeadline() throws {
+        let manual = ManualTimer()
+        let slots = try SetupConnectionSlots(maximumConnections: 3, timeoutMilliseconds: 5000, timer: manual.timer)
+        try slots.start(); defer { slots.close() }
+        let unfinished = try XCTUnwrap(slots.reserve())
+        XCTAssertTrue(slots.select(.recoveryOnly, id: unfinished))
+        slots.handshake(unfinished)
+        XCTAssertEqual(slots.mode(unfinished), .recoveryOnly)
+        manual.elapse(); XCTAssertNil(slots.mode(unfinished))
+        let ready = try XCTUnwrap(slots.reserve())
+        XCTAssertTrue(slots.select(.recoveryOnly, id: ready)); slots.recoveryHandshake(ready)
+        slots.handshake(ready); manual.elapse(); slots.expire(ready)
+        XCTAssertEqual(slots.mode(ready), .recoveryOnly)
+        XCTAssertFalse(slots.select(.normal, id: ready)); XCTAssertFalse(slots.select(.statusOnly, id: ready))
+    }
+    func testSmallTotalsKeepNormalHandshakeAndStatusIdleSemantics() throws {
+        for total in [1, 2, 3] {
+            let manual = ManualTimer()
+            let slots = try SetupConnectionSlots(maximumConnections: total, timeoutMilliseconds: 5000, timer: manual.timer)
+            try slots.start(); defer { slots.close() }
+            let normal = try XCTUnwrap(slots.reserve()); slots.handshake(normal)
+            XCTAssertEqual(slots.mode(normal), .normal)
+            slots.recoveryHandshake(normal); manual.elapse()
+            XCTAssertEqual(slots.mode(normal), .normal)
+            slots.remove(normal)
+            let status = try XCTUnwrap(slots.reserve())
+            XCTAssertEqual(slots.select(.statusOnly, id: status), total >= 3)
+            slots.touch(status); manual.elapse(); XCTAssertNil(slots.mode(status))
+        }
+    }
+    func testRecoveryHandshakeUsesTheUnchangedFiveSecondTimer() throws {
+        let deadlines = Mutex<[UInt64]>([])
+        let slots = try SetupConnectionSlots(maximumConnections: 3, timeoutMilliseconds: 5000, timer: { ms, _ in
+            deadlines.withLock { $0.append(ms) }; return {}
+        })
+        try slots.start(); defer { slots.close() }
+        let id = try XCTUnwrap(slots.reserve())
+        XCTAssertTrue(slots.select(.recoveryOnly, id: id)); slots.recoveryHandshake(id)
+        XCTAssertEqual(deadlines.withLock { $0 }, [5000])
+    }
+
 }
