@@ -213,7 +213,7 @@ prints one JSON object of closed-vocabulary values.
 | Runner | Case | Required result |
 | --- | --- | --- |
 | `p1c` | The #728 monitor, shape A, admits the installed frontend | Accepted. Every #728 monitor check passes; the monitor is confined, the frontend has the frontend label |
-| `n1c` | Shape A probe against a Root sleeper and the installed frontend | Sleeper: seize refused with `EACCES`, `process_vm_readv` and `pidfd_getfd` with `EPERM`. Frontend: seized, stopped, marker read, detached |
+| `n1c` | Shape A probe against a Root sleeper and the installed frontend | Sleeper: seize refused with `EACCES` (AppArmor's refusal; #728 measured `EPERM` without a profile), `process_vm_readv` and `pidfd_getfd` with `EPERM`. Frontend: seized, stopped, marker read, detached |
 | `n2c` | Shape B probe against the same targets, plus the side actions | As N1c; file creation, exec and the IP socket refused. A unit that does not reach the probe's handshake is recorded (`unitStart`) and fails the case |
 | `n3c` | Shape A probe against an operator sleeper and the copy without set-ID bits | Both refused as in N1c |
 | `n4c` | Shape A probe, side actions only | File creation, exec and the IP socket refused |

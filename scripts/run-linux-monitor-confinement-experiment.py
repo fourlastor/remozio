@@ -228,7 +228,7 @@ def sanitize_label(raw, tag):
     if text in LABELS:
         return text
     body, separator, mode = text.rpartition(" (")
-    if not separator or mode[:-1] not in LABEL_MODES or not mode.endswith(")") or "//&" not in body:
+    if not separator or not mode.endswith(")") or mode[:-1] not in LABEL_MODES or "//&" not in body:
         return "other"
     parts = body.split("//&")
     if len(parts) > 4:

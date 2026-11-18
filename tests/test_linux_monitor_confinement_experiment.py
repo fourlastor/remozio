@@ -272,11 +272,16 @@ class LabelAndDenialTests(unittest.TestCase):
         self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//&unconfined (secret)".encode(), TAG), "other")
         self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//child (enforce)".encode(), TAG), "other")
         self.assertEqual(EXPERIMENT.sanitize_label(("a//&" * 4 + "b (enforce)").encode(), TAG), "other")
+        four = "//&".join(f"rmzmc-{role}-{TAG}" for role in ("frontend", "monitor", "probe", "complain"))
+        self.assertEqual(EXPERIMENT.sanitize_label(f"{four} (enforce)".encode(), TAG),
+                         "stack(frontend+monitor+probe+complain) (enforce)")
+        self.assertEqual(EXPERIMENT.sanitize_label(f"rmzmc-probe-{TAG}//&unconfined".encode(), TAG), "other")
 
     def test_a_refused_seize_is_the_apparmor_eacces(self):
         for case in ("n1c", "n2c"):
             self.assertEqual(EXPERIMENT.CASES[case]["expect"]["sleeper.seize"], {"EACCES"})
         self.assertEqual(EXPERIMENT.CASES["n3c"]["expect"]["copy.seize"], {"EACCES"})
+        self.assertEqual(EXPERIMENT.FRONTEND_REFUSED["seize"], "EACCES")
         for case in ("n5c", "f3"):
             self.assertEqual(EXPERIMENT.CASES[case]["expect"]["seize"], {"EACCES"})
         self.assertEqual(EXPERIMENT.CASES["n1c"]["expect"]["sleeper.vmRead"], {"EPERM"})
