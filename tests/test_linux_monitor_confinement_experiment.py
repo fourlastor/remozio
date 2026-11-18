@@ -537,6 +537,17 @@ class PreconditionTests(unittest.TestCase):
         with EXPERIMENT.deferred_cancel():
             pass
 
+    def test_a_signal_in_a_failing_block_still_cancels(self):
+        before = {number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            with EXPERIMENT.deferred_cancel():
+                os.kill(os.getpid(), signal.SIGHUP)
+                raise OSError("cleanup failed")
+        self.assertIsInstance(raised.exception.__context__, OSError)
+        self.assertEqual({number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}, before)
+        with self.assertRaises(OSError), EXPERIMENT.deferred_cancel():
+            raise OSError("no signal: the error stays")
+
     def test_a_second_signal_during_cleanup_does_not_stop_it(self):
         run = Mock(base_created=True)
         run.setup.side_effect = KeyboardInterrupt()

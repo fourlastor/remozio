@@ -920,7 +920,11 @@ CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 
 @contextlib.contextmanager
 def deferred_cancel():
-    """Record SIGTERM, SIGHUP and SIGINT in the block, and cancel only after it ends."""
+    """Record SIGTERM, SIGHUP and SIGINT in the block, and cancel only after it ends.
+
+    The operator asked to stop, so a recorded signal always ends as a cancel: it also replaces an error
+    that the block, or the code around it, raised. Python keeps that error as the cancel's __context__.
+    """
     received = []
     previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
                 for number in CANCEL_SIGNALS}
@@ -929,8 +933,8 @@ def deferred_cancel():
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
-    if received:
-        raise KeyboardInterrupt()
+        if received:
+            raise KeyboardInterrupt()
 
 
 def main():
