@@ -926,13 +926,23 @@ def deferred_cancel():
     that the block, or the code around it, raised. Python keeps that error as the cancel's __context__.
     """
     received = []
-    previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
-                for number in CANCEL_SIGNALS}
+    # The signals stay blocked while the handlers are swapped, so none arrives half way through a swap: one
+    # that comes then is delivered when the mask returns, to the handler that is in place by that time.
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+    try:
+        previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
+                    for number in CANCEL_SIGNALS}
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
     try:
         yield
     finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
+        signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+        try:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         if received:
             raise KeyboardInterrupt()
 
