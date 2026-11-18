@@ -18,11 +18,14 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
     private let lock = NSLock(), processID = getpid(), ownerUID = getuid()
     private var captured: SetupRetainedInvocationStatus.Window?
     private var claimID: UUID?, latestClaimID: UUID?, attemptedClaim: UUID?, work: Work?
-    private var settled = false
+    private var settled = false, completionAdopted = false
+    private var lastConfirmedRow: SetupRestartStatus.Row?
+    let status: SetupRestartStatus.Handle
     private var attempt: RuntimeMaintenanceStartupRecovery.RestartAttempt?
 
     fileprivate init(permit: SetupAccountOwner.RestartPermit) {
         self.permit = permit; phases = .restart(permit: permit)
+        status = .init(accountID: permit.accountID, owner: permit.accountOwner)
     }
     /// The permit's initializer is private to the owner file. No caller can inject the owner check or executor.
     static func reserve(permit: SetupAccountOwner.RestartPermit, authorization: SetupRetainedRecoveryAuthorization,
@@ -44,7 +47,7 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
               authorization.peer.userID == accountOwner.uid else { throw XPCPeerPolicyError.wrongPeer }
         return try lock.withLock {
             guard !settled, claimID == nil else { throw AdministrativeSetupError.unavailable }
-            let id = UUID(); claimID = id; latestClaimID = id
+            let id = UUID(); claimID = id; latestClaimID = id; publishStatusLocked()
             return Claim(record: self, authorization: authorization, processLease: processLease, id: id)
         }
     }
@@ -73,7 +76,9 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
             try requireClaim(id)
             guard captured == nil || captured?.identifies(row) == true else { throw RuntimePreparationError.changedScope }
             if captured == nil { captured = .init(row) }
+            lastConfirmedRow = .init(row); publishStatusLocked()
         }
+        permit.publishCapture(self, row: row)
     }
     private func requireWindow(_ row: RuntimeMaintenanceWindowRecord, claim id: UUID) throws {
         try requireCurrent(id)
@@ -93,12 +98,14 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
             let retired = work, retiredAttempt = self.attempt
             let next = Work.restart(permit: permit) { try await attempt.run(workID: $0) }
             work = next.work; attemptedClaim = id; self.attempt = attempt
+            attempt.attachStatus(to: self); publishStatusLocked()
             return (next.work, retired, retiredAttempt, next.open)
         }
         withExtendedLifetime((retired, retiredAttempt)) {}
         // This observer only joins the retained task. It never writes, opens custody or fabricates a completion.
         Task {
             _ = try? await started.value()
+            self.lock.withLock { self.publishStatusLocked() }
             _ = try? await self.phases.cleanup { try self.releaseSafe(claim: id, allowAbandoned: true,
                 releasingAbandonedSuccessor: true, allowForwardEffects: false) }
         }
@@ -121,7 +128,7 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
             guard attempt?.permitsRelease(allowForwardEffects: allowForwardEffects) != false,
                   work == nil || work?.actualReturnObserved == true,
                   work?.holdsUnsettledCompletion != true else { return nil }
-            try permit.activity?.validate(); settled = true
+            try permit.activity?.validate(); settled = true; publishStatusLocked()
             return permit.hold.markRecordReleased()
         }
         guard let release else { return false }
@@ -137,10 +144,33 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
                   completed.window.gate?.hold == .released, completed.window.gate?.admission == .available else {
                 throw RuntimePreparationError.changedScope
             }
-            try permit.activity?.validate(); settled = true
+            try permit.activity?.validate(); settled = true; completionAdopted = true; publishStatusLocked()
             return permit.hold.markRecordReleased()
         }
         release()
+    }
+    /// Called only by the actual attempt after releasing its own state lock.
+    func observeStatus(_ execution: RuntimeMaintenanceStartupRecovery.RestartAttempt, row: RuntimeMaintenanceWindowRecord? = nil) {
+        guard (try? requireProcess()) != nil else { return }
+        lock.withLock {
+            guard attempt === execution else { return }
+            if let row { lastConfirmedRow = captured?.identifies(row) == true ? .init(row) : nil }
+            publishStatusLocked()
+        }
+    }
+    private func publishStatusLocked() {
+        let task: SetupRestartStatus.Task
+        if completionAdopted { task = .completionAdopted }
+        else if let work {
+            task = work.actualReturnObserved ? (work.holdsUnsettledCompletion ? .completionPending : .failedReturn) : .running
+        } else { task = settled ? .idleReleased : .notStarted }
+        let facts = attempt?.statusFacts
+        let custody: SetupRestartStatus.Custody?
+        if facts?.opened == true { custody = facts?.closed == true ? .closed : .open }
+        else { custody = facts?.closed == false ? nil : .notOpened }
+        let writer: SetupRestartStatus.Writer? = custody == nil || custody == .open ? nil : (facts?.uncertain == true ? .uncertain : .noUncertaintyObserved)
+        status.publish(slot: settled ? .released : .held, claim: claimID == nil ? .abandoned : .present,
+            task: task, custody: custody, writer: writer, row: lastConfirmedRow)
     }
     var description: String { "SetupRestartRecovery(redacted)" }
     var debugDescription: String { description }
@@ -164,6 +194,26 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
             try RuntimeMaintenanceOwnedControl.require()
             return try await owner.claimRestartRecovery(authorization: authorization, processLease: processLease,
                 accountID: accountID, native: false, until: deadline)
+        }
+        /// The endpoint uses the peer-derived owner path. It cannot inject a prepared account identifier.
+        static func openOwned(owner: SetupAccountOwner, authorization: SetupRetainedRecoveryAuthorization,
+            processLease: SetupProcessLease, policy: SetupAccountOwner.RestartClaimPolicy,
+            until deadline: ContinuousClock.Instant) async throws -> Claim {
+            try RuntimeMaintenanceOwnedControl.require()
+            return try await owner.claimRestartRecovery(authorization: authorization, processLease: processLease,
+                native: false, policy: policy, until: deadline)
+        }
+        func restorationAccountID() throws -> Data {
+            try requireCurrentAuthorization(); return record.accountID
+        }
+        /// A returned effect value cannot manufacture the claim's actual checked settlement.
+        func hasCheckedRestorationResult(_ row: RuntimeMaintenanceWindowRecord) -> Bool {
+            guard (try? record.requireProcess()) != nil else { return false }
+            return record.lock.withLock {
+                guard record.settled, record.completionAdopted, record.latestClaimID == id,
+                      let actual = record.lastConfirmedRow, actual.window.identifies(row) else { return false }
+                return actual.operation == row.operation && actual.restoration == .init(phase: row.phase, service: row.service, failure: row.failure)
+            }
         }
         func requireCurrentAuthorization() throws {
             try processLease.validate(); try authorization.requireCurrent(); try record.requireCurrent(id)
@@ -211,6 +261,27 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
         func releaseRefusedAttemptIfSafe() async {
             _ = try? await record.phases.cleanup { try self.record.releaseSafe(claim: self.id, allowAbandoned: true, allowForwardEffects: false) }
         }
+        enum ReleaseApplicability: Sendable { case idle, liveWork, completionNeedsAdoption, restoreRequired, repairRequired }
+        func releaseApplicability() throws -> ReleaseApplicability {
+            try requireCurrentAuthorization()
+            return try record.lock.withLock {
+                try record.requireClaim(id)
+                if let work = record.work, !work.actualReturnObserved { return .liveWork }
+                if record.work?.holdsUnsettledCompletion == true { return .completionNeedsAdoption }
+                if let attempt = record.attempt {
+                    if attempt.hasUncertainWriter || !attempt.hasRestingRow || !attempt.statusFacts.closed { return .repairRequired }
+                    if !attempt.permitsRelease(allowForwardEffects: false) { return .restoreRequired }
+                }
+                return .idle
+            }
+        }
+        /// Session completion and expiry can release only a closed, certain attempt without forward effects.
+        func releaseIdleAfterRequest() async throws -> Bool {
+            try await record.phases.cleanupUnlessReleased {
+                try self.processLease.validate(); try self.authorization.requireCurrent()
+                return try self.record.releaseSafe(claim: self.id, allowForwardEffects: false)
+            } ?? false
+        }
         /// Fresh rights release only this process's idle slot. This writes no row and clears no account drain.
         func releaseWithoutRestoration() async throws -> Bool {
             // A record that released every hold is settled. As before, that answer is `false`.
@@ -222,7 +293,7 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
         /// The future endpoint calls this on connection loss, even while the actual task retains this claim.
         func abandon() {
             guard getpid() == record.processID else { return }
-            record.lock.withLock { if record.claimID == id { record.claimID = nil } }
+            record.lock.withLock { if record.claimID == id { record.claimID = nil; record.publishStatusLocked() } }
             authorization.close()
             _ = try? record.releaseSafe(claim: id, allowAbandoned: true, allowForwardEffects: false)
         }

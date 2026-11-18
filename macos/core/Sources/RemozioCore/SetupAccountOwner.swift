@@ -637,6 +637,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func retainedInvocationStatus(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
         retainedStatus.read(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
     }
+    /// Library-only v2 projection. The producer slice owns live version routing.
+    func retainedInvocationStatusV2(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedStatusProjection {
+        retainedStatus.readV2(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
+    /// Ordinary-owner race fixture using the reader's existing after-snapshot seam.
+    func retainedInvocationStatusV2Owned(authenticatedPeer: XPCPeerCredentials, currentOwner: LocalAccountIdentity,
+        afterSnapshot: @escaping () -> Void) throws -> SetupRetainedStatusProjection {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try retainedStatus.readV2Owned(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner, afterSnapshot: afterSnapshot)
+    }
     enum StatusLaneCheck: Equatable, Sendable { case verified, pinned, busy, refused }
     /// The installation and configuration check for a connection that selects status. It never waits:
     /// - owner lock held by other work, or the store's writer lease busy: `busy`;
@@ -690,7 +700,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     activity: activity, authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor,
                     hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver),
                     recoverySignal: { [weak self] in self?.signalMaintenanceRecovery() })
-                retainedInvocationReservation = record; admissionHolder = record.hold; retainedStatus.publish(record)
+                retainedInvocationReservation = record; admissionHolder = record.hold; retainedStatus.publish(record, owner: authenticatedOwner)
                 return (record, {
                     try self.lock.withLock {
                         guard self.retainedInvocationReservation === record, !self.closed, !self.closing,
@@ -716,9 +726,31 @@ public final class SetupAccountOwner: @unchecked Sendable {
             self.admission = hold.admission; self.reply = hold.reply; self.hold = hold
             self.activity = activity; self.executor = executor
         }
+        func publishCapture(_ record: SetupRestartRecovery, row: RuntimeMaintenanceWindowRecord) {
+            owner?.publishRestartCapture(record, row: row)
+        }
         func requireOwner(_ record: SetupRestartRecovery, windowID: Data?, starting: Bool = false) throws {
             guard let owner else { throw AdministrativeSetupError.unavailable }
             try owner.verifyRestartSlot(record, windowID: windowID, starting: starting)
+        }
+    }
+    /// Metadata-only capacity fixture. It creates no claim or admission, and Root cannot call it.
+    func fillRestartStatusCapacityOwned(_ owners: [LocalAccountIdentity]) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        guard owners.count <= 64 else { throw AdministrativeSetupError.invalidConfiguration }
+        try lock.withLock {
+            guard getpid() == processID, !closed, asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
+            for (index, owner) in owners.enumerated() {
+                guard try retainedStatus.publishRestartOwned(.init(accountID: Data(repeating: UInt8(index), count: 16), owner: owner)) else {
+                    throw AdministrativeSetupError.unavailable
+                }
+            }
+        }
+    }
+    private func publishRestartCapture(_ record: SetupRestartRecovery, row: RuntimeMaintenanceWindowRecord) {
+        lock.withLock {
+            guard getpid() == processID, !closed, restartRecovery === record else { return }
+            retainedStatus.supersedeRecovery(row)
         }
     }
     private func verifyRestartSlot(_ record: SetupRestartRecovery, windowID: Data?, starting: Bool) throws {
@@ -731,6 +763,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     /// How a restart claim may enter the shared executor. Each entry holds a worker hold before the executor starts.
     /// A fresh claim holds new admissions. A reclaim adds a worker hold to the unsettled record's admissions.
+    enum RestartClaimPolicy: Equatable, Sendable { case freshOrReclaim, reclaimOnly }
     private enum RestartEntry: Sendable {
         case fresh(ExecutorAdmission, endWorker: @Sendable () -> Void)
         case reclaim(SetupRestartRecovery, endWorker: @Sendable () -> Void)
@@ -739,16 +772,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     /// The entry check found that the borrowed record settled before the body used it. Nothing was consumed.
     private struct RestartEntryChanged: Error {}
-    private func admitRestartEntry(accountID: Data, native: Bool) throws -> RestartEntry {
+    private func admitRestartEntry(expectedAccountID: Data?, native: Bool, policy: RestartClaimPolicy) throws -> RestartEntry {
         if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
         else { try RuntimeMaintenanceOwnedControl.require() }
         return try lock.withLock {
-            guard getpid() == processID, !closed, accountID.count == 16 else { throw AdministrativeSetupError.unavailable }
+            guard getpid() == processID, !closed, expectedAccountID == nil || expectedAccountID?.count == 16 else { throw AdministrativeSetupError.unavailable }
             // The worker hold is added under the owner lock. A concurrent abandon() cannot close the tokens under it.
             if let restartRecovery, !restartRecovery.isSettled, let endWorker = try? restartRecovery.hold.beginPhase() {
                 return .reclaim(restartRecovery, endWorker: endWorker)
             }
-            guard !closing else { throw AdministrativeSetupError.unavailable }
+            guard !closing, policy == .freshOrReclaim else { throw AdministrativeSetupError.unavailable }
             if !asynchronousWork.isIdle || !setupReplyWork.isIdle {
                 // A live retained reservation, an unsettled restart record or other setup work is durable: refuse.
                 guard admissionHeldByExecutorRunsOnly() else { throw AdministrativeSetupError.unavailable }
@@ -763,11 +796,22 @@ public final class SetupAccountOwner: @unchecked Sendable {
     /// An executor run (for example an audit) is waited for, like a busy executor, until the deadline.
     func claimRestartRecovery(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
         accountID: Data, native: Bool, until deadline: ContinuousClock.Instant) async throws -> SetupRestartRecovery.Claim {
+        try await claimRestartRecovery(authorization: authorization, processLease: processLease,
+            expectedAccountID: accountID, native: native, policy: .freshOrReclaim, until: deadline)
+    }
+    /// The endpoint supplies no account identifier. Only the original executor derives the prepared account.
+    func claimRestartRecovery(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
+        native: Bool, policy: RestartClaimPolicy, until deadline: ContinuousClock.Instant) async throws -> SetupRestartRecovery.Claim {
+        try await claimRestartRecovery(authorization: authorization, processLease: processLease,
+            expectedAccountID: nil, native: native, policy: policy, until: deadline)
+    }
+    private func claimRestartRecovery(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
+        expectedAccountID: Data?, native: Bool, policy: RestartClaimPolicy, until deadline: ContinuousClock.Instant) async throws -> SetupRestartRecovery.Claim {
         do {
             while true {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { throw CancellationError() }
-                let entry = try admitRestartEntry(accountID: accountID, native: native)
+                let entry = try admitRestartEntry(expectedAccountID: expectedAccountID, native: native, policy: policy)
                 let afterReturn: @Sendable () -> Void
                 switch entry {
                 case .waitForExecutorRun:
@@ -777,7 +821,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 do {
                     return try await auditUpgradeExecutor.runRestorationPhase(afterReturn: afterReturn) { _ in
                         try self.claimRestartRecoveryBlocking(authorization: authorization, processLease: processLease,
-                            accountID: accountID, native: native, entry: entry)
+                            expectedAccountID: expectedAccountID, native: native, entry: entry)
                     }
                 } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
                     try await ContinuousClock().sleep(for: .milliseconds(25))
@@ -786,7 +830,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         } catch { authorization.close(); throw error }
     }
     private func claimRestartRecoveryBlocking(authorization: SetupRetainedRecoveryAuthorization, processLease: SetupProcessLease,
-        accountID: Data, native: Bool, entry: RestartEntry) throws -> SetupRestartRecovery.Claim {
+        expectedAccountID: Data?, native: Bool, entry: RestartEntry) throws -> SetupRestartRecovery.Claim {
         if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
         else { try RuntimeMaintenanceOwnedControl.require() }
         try processLease.validate()
@@ -795,9 +839,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
         try authorization.takeForClaim()
         let (claim, retired) = try lock.withLock {
-            guard getpid() == processID, !closed, accountID.count == 16 else { throw AdministrativeSetupError.unavailable }
-            guard try retainedInvocationReservation?.excludesRestart(accountID: accountID,
-                owner: authorization.currentOwner, windowID: nil) != true else { throw AdministrativeSetupError.unavailable }
+            guard getpid() == processID, !closed else { throw AdministrativeSetupError.unavailable }
             switch entry {
             case .waitForExecutorRun: throw AdministrativeSetupError.unavailable
             case .reclaim(let record, _):
@@ -805,17 +847,25 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 guard restartRecovery === record, !record.isSettled else { throw AdministrativeSetupError.unavailable }
                 // Reclaim reenters this owner's NSRecursiveLock. It cannot use a nonrecursive owner lock.
                 // Shutdown permits adoption and a safe exit, but the slot refuses starting another attempt.
+                let accountID = record.accountID
+                guard expectedAccountID == nil || expectedAccountID == accountID,
+                      try retainedInvocationReservation?.excludesRestart(accountID: accountID,
+                        owner: authorization.currentOwner, windowID: nil) != true else { throw AdministrativeSetupError.unavailable }
                 return (try SetupRestartRecovery.reclaim(record, authorization: authorization,
                     processLease: processLease, accountID: accountID, native: native), Optional<SetupRestartRecovery>.none)
             case .fresh(let held, _):
                 guard !closing, restartRecovery?.isSettled != false, asynchronousWork.permits(held.admission),
                       setupReplyWork.permits(held.reply) else { throw AdministrativeSetupError.unavailable }
-                try machines.use { machine in
+                let accountID = try machines.use { machine in
                     _ = try currentInventory(machine)
                     guard let account = try machine.accountPreparation(ownerUID: authorization.peer.userID),
-                          account.accountID == accountID else { throw AdministrativeSetupError.wrongAccount }
+                          expectedAccountID == nil || account.accountID == expectedAccountID else { throw AdministrativeSetupError.wrongAccount }
                     try LocalAccountDirectory.validateOwnership(authorization.currentOwner, uid: account.ownerUID, directoryID: account.directoryID)
+                    return account.accountID
                 }
+                guard try retainedInvocationReservation?.excludesRestart(accountID: accountID,
+                    owner: authorization.currentOwner, windowID: nil) != true else { throw AdministrativeSetupError.unavailable }
+                guard retainedStatus.canPublishRestart(owner: authorization.currentOwner) else { throw AdministrativeSetupError.unavailable }
                 // On failure the worker hold still closes both tokens after this body returns.
                 let activity = try releaseActivity?.acquireShared()
                 let permit = RestartPermit(owner: self, accountID: accountID, accountOwner: authorization.currentOwner, native: native,
@@ -823,6 +873,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 let created = try SetupRestartRecovery.reserve(permit: permit, authorization: authorization, processLease: processLease)
                 try held.transferToRecord(activity: activity)
                 let retired = restartRecovery; restartRecovery = created.record
+                // This private reader cannot change capacity while the owner's installation section runs.
+                precondition(retainedStatus.publishRestart(created.record))
                 return (created.claim, retired)
             }
         }
