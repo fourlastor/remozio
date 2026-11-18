@@ -159,8 +159,9 @@ The runner:
    sanitized target) and counts;
 7. cleans up in this order, also after a failure or `SIGTERM`: transient units (stop,
    then an empty cgroup), profiles (every fixture process is already reaped), files,
-   the user, the group. It reports whether each step is complete, and prints the
-   manual steps when one is not.
+   the user, the group. A `SIGTERM`, `SIGHUP` or Ctrl-C that arrives during cleanup
+   is held until cleanup ends, then cancels the run. It reports whether each step is
+   complete, and prints the manual steps when one is not.
 
 If the runner itself is killed, its profiles stay loaded until reboot (`-K` writes no
 cache). Remove them by name: list the `rmzmc-` names in

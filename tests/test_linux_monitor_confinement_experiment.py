@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -522,6 +523,40 @@ class PreconditionTests(unittest.TestCase):
         with patch.object(EXPERIMENT.sys, "stderr", stderr):
             self.assertFalse(self.measure_with(run)["passed"])
         self.assertIn("rmzmc- profiles", stderr.getvalue())
+
+    def test_deferred_cancel_finishes_the_block_then_cancels(self):
+        before = {number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}
+        finished = []
+        with self.assertRaises(KeyboardInterrupt):
+            with EXPERIMENT.deferred_cancel():
+                for number in EXPERIMENT.CANCEL_SIGNALS:
+                    os.kill(os.getpid(), number)
+                finished.append(True)
+        self.assertEqual(finished, [True])
+        self.assertEqual({number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}, before)
+        with EXPERIMENT.deferred_cancel():
+            pass
+
+    def test_a_second_signal_during_cleanup_does_not_stop_it(self):
+        run = Mock(base_created=True)
+        run.setup.side_effect = KeyboardInterrupt()
+
+        def cleanup():
+            os.kill(os.getpid(), signal.SIGTERM)
+            removed.append(True)
+            return {"profilesRemoved": False}
+
+        removed = []
+        run.cleanup.side_effect = cleanup
+        stderr = io.StringIO()
+        previous = signal.signal(signal.SIGTERM, EXPERIMENT._cancel)
+        try:
+            with patch.object(EXPERIMENT.sys, "stderr", stderr), self.assertRaises(KeyboardInterrupt):
+                self.measure_with(run)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(removed, [True])
+        self.assertIn("Disposable state not fully removed", stderr.getvalue())
 
     def test_main_reports_no_raw_data_on_failure(self):
         for error in (OSError("/private/path"), subprocess.TimeoutExpired("/private/path", 1)):

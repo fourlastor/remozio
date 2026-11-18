@@ -14,6 +14,7 @@ If the runner itself is killed, its profiles stay loaded until reboot. Remove th
 list the rmzmc- names in /sys/kernel/security/apparmor/profiles and write each name to
 /sys/kernel/security/apparmor/.remove."""
 import argparse
+import contextlib
 import datetime
 import grp
 import hashlib
@@ -884,13 +885,15 @@ def measure(timeout=15):
                 cases = {case: run.run_case(case) for case in CASES}
             denials = run.denials(since) if run.base_created else "not-measured"
         finally:
-            cleanup = run.cleanup()
-            if not all(cleanup.values()):
-                sys.stderr.write(f"Disposable state not fully removed: inspect {PL.BASE_PARENT}/{BASE_PREFIX}*, the "
-                                 "rmzcg*/rmzcm* system accounts, rmzmc-* transient units, and the rmzmc- profiles in "
-                                 "/sys/kernel/security/apparmor/profiles. End every remaining fixture process and "
-                                 "rmzmc- unit first, then remove each profile by writing its name to "
-                                 "/sys/kernel/security/apparmor/.remove.\n")
+            # A second SIGTERM, SIGHUP or Ctrl-C must not stop the removal half way: it is held until cleanup ends.
+            with deferred_cancel():
+                cleanup = run.cleanup()
+                if not all(cleanup.values()):
+                    sys.stderr.write(f"Disposable state not fully removed: inspect {PL.BASE_PARENT}/{BASE_PREFIX}*, "
+                                     "the rmzcg*/rmzcm* system accounts, rmzmc-* transient units, and the rmzmc- "
+                                     "profiles in /sys/kernel/security/apparmor/profiles. End every remaining fixture "
+                                     "process and rmzmc- unit first, then remove each profile by writing its name to "
+                                     "/sys/kernel/security/apparmor/.remove.\n")
     passed = (bool(setup) and all(setup.values()) and all(cleanup.values()) and set(cases) == set(CASES)
               and all(item["passed"] for item in cases.values()))
     return {"experiment": "linux-monitor-confinement-v1",
@@ -910,6 +913,24 @@ def measure(timeout=15):
 
 def _cancel(_signum, _frame):
     raise KeyboardInterrupt()
+
+
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def deferred_cancel():
+    """Record SIGTERM, SIGHUP and SIGINT in the block, and cancel only after it ends."""
+    received = []
+    previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
+                for number in CANCEL_SIGNALS}
+    try:
+        yield
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+    if received:
+        raise KeyboardInterrupt()
 
 
 def main():
