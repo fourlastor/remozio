@@ -6,7 +6,7 @@ import Foundation
 /// and moves to the status slot only when it selects status. When every normal slot is taken but the status slot is
 /// free, a new connection is admitted provisionally on the status slot; it can then only select status.
 final class SetupConnectionSlots: @unchecked Sendable {
-    enum Mode: Equatable, Sendable { case undecided, statusOnly, normal }
+    enum Mode: Equatable, Sendable { case undecided, statusOnly, normal, recoveryOnly }
     /// Arms a one-shot deadline and returns its cancellation. Tests inject a manual timer instead of real sleeps.
     typealias Timer = @Sendable (_ milliseconds: UInt64, _ fire: @escaping @Sendable () -> Void) -> @Sendable () -> Void
     static let realTimer: Timer = { milliseconds, fire in
@@ -90,9 +90,9 @@ final class SetupConnectionSlots: @unchecked Sendable {
             guard !closed, var entry = entries[id], entry.mode == .undecided else { return false }
             switch mode {
             case .undecided: return false
-            case .normal:
+            case .normal, .recoveryOnly:
                 guard !entry.onStatusSlot else { return false }
-                entry.mode = .normal; entries[id] = entry
+                entry.mode = mode; entries[id] = entry
             case .statusOnly:
                 guard entry.onStatusSlot || statusCount < maximumStatus else { return false }
                 // A status-only connection never completes a handshake. Its deadline becomes an idle limit.
@@ -110,8 +110,15 @@ final class SetupConnectionSlots: @unchecked Sendable {
     /// handshake on a provisional normal slot also selects normal; one on the status slot is ignored.
     func handshake(_ id: UUID) {
         lock.withLock {
-            guard var entry = entries[id], entry.mode != .statusOnly, !entry.onStatusSlot else { return }
+            guard var entry = entries[id], entry.mode == .undecided || entry.mode == .normal, !entry.onStatusSlot else { return }
             entry.mode = .normal; entry.ready = true; entry.cancelDeadline?(); entry.cancelDeadline = nil; entries[id] = entry
+        }
+    }
+    /// The recovery handshake keeps the selected lane and cancels only its original handshake deadline.
+    func recoveryHandshake(_ id: UUID) {
+        lock.withLock {
+            guard var entry = entries[id], entry.mode == .recoveryOnly, !entry.onStatusSlot else { return }
+            entry.ready = true; entry.cancelDeadline?(); entry.cancelDeadline = nil; entries[id] = entry
         }
     }
     func mode(_ id: UUID) -> Mode? { lock.withLock { entries[id]?.mode } }

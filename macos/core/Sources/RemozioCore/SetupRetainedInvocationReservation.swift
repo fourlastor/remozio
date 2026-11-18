@@ -508,6 +508,16 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         guard restorationJoined else { throw AdministrativeSetupError.unavailable }
         return try recovery.requireJoined()
     }
+    enum RecoveryApplicability: Equatable, Sendable { case noCompletion, unsettledCompletion, windowFree }
+    /// Reads only this joined claim. No work, writer, state transition or cleanup starts here.
+    private func recoveryApplicability(seal: UUID, claim: UUID) throws -> RecoveryApplicability {
+        try lock.withLock {
+            let evidence = try requireJoinedRecovery(seal: seal, claim: claim)
+            if restorationWork?.holdsUnsettledCompletion == true { return .unsettledCompletion }
+            if capturedWindow == nil && evidence.windowWriteNeverPossible { return .windowFree }
+            return .noCompletion
+        }
+    }
     private func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord, seal: UUID, claim: UUID) throws {
         try requireRecovery(seal: seal, claim: claim)
         guard let capturedWindow, capturedWindow.identifies(row), let capturedBinding,
@@ -645,6 +655,9 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
         fileprivate func settleRestoration(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion, work: RestorationWork) throws {
             try record.settleRestoration(completed, work: work, seal: seal, claim: claim)
+        }
+        func recoveryApplicability() throws -> RecoveryApplicability {
+            try record.recoveryApplicability(seal: seal, claim: claim)
         }
         func releaseWindowFree() throws -> Bool { try record.releaseWindowFree(seal: seal, claim: claim) }
         func ownerDropped() {
