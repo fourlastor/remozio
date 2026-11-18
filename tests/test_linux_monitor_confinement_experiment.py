@@ -7,6 +7,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -522,6 +523,76 @@ class PreconditionTests(unittest.TestCase):
         with patch.object(EXPERIMENT.sys, "stderr", stderr):
             self.assertFalse(self.measure_with(run)["passed"])
         self.assertIn("rmzmc- profiles", stderr.getvalue())
+
+    def test_deferred_cancel_finishes_the_block_then_cancels(self):
+        before = {number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}
+        finished = []
+        with self.assertRaises(KeyboardInterrupt):
+            with EXPERIMENT.deferred_cancel():
+                for number in EXPERIMENT.CANCEL_SIGNALS:
+                    os.kill(os.getpid(), number)
+                finished.append(True)
+        self.assertEqual(finished, [True])
+        self.assertEqual({number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}, before)
+        with EXPERIMENT.deferred_cancel():
+            pass
+
+    def test_a_signal_during_the_handler_swap_is_not_lost(self):
+        before = {number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}
+        real_signal = signal.signal
+        sent = []
+
+        def install(number, handler):
+            # Send SIGTERM while the first handler is being swapped in, the window the mask closes.
+            if not sent:
+                sent.append(number)
+                os.kill(os.getpid(), signal.SIGTERM)
+            return real_signal(number, handler)
+
+        finished = []
+        previous = real_signal(signal.SIGTERM, EXPERIMENT._cancel)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                with patch.object(EXPERIMENT.signal, "signal", side_effect=install):
+                    with EXPERIMENT.deferred_cancel():
+                        finished.append(True)
+        finally:
+            real_signal(signal.SIGTERM, previous)
+        self.assertEqual(finished, [True])
+        self.assertEqual({number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}, before)
+        self.assertEqual(signal.pthread_sigmask(signal.SIG_BLOCK, []), set())
+
+    def test_a_signal_in_a_failing_block_still_cancels(self):
+        before = {number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}
+        with self.assertRaises(KeyboardInterrupt) as raised:
+            with EXPERIMENT.deferred_cancel():
+                os.kill(os.getpid(), signal.SIGHUP)
+                raise OSError("cleanup failed")
+        self.assertIsInstance(raised.exception.__context__, OSError)
+        self.assertEqual({number: signal.getsignal(number) for number in EXPERIMENT.CANCEL_SIGNALS}, before)
+        with self.assertRaises(OSError), EXPERIMENT.deferred_cancel():
+            raise OSError("no signal: the error stays")
+
+    def test_a_second_signal_during_cleanup_does_not_stop_it(self):
+        run = Mock(base_created=True)
+        run.setup.side_effect = KeyboardInterrupt()
+
+        def cleanup():
+            os.kill(os.getpid(), signal.SIGTERM)
+            removed.append(True)
+            return {"profilesRemoved": False}
+
+        removed = []
+        run.cleanup.side_effect = cleanup
+        stderr = io.StringIO()
+        previous = signal.signal(signal.SIGTERM, EXPERIMENT._cancel)
+        try:
+            with patch.object(EXPERIMENT.sys, "stderr", stderr), self.assertRaises(KeyboardInterrupt):
+                self.measure_with(run)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+        self.assertEqual(removed, [True])
+        self.assertIn("Disposable state not fully removed", stderr.getvalue())
 
     def test_main_reports_no_raw_data_on_failure(self):
         for error in (OSError("/private/path"), subprocess.TimeoutExpired("/private/path", 1)):
