@@ -241,7 +241,14 @@ November 2026 the owner adopted the measured candidate for decision 5. Decisions
    reports itself. That capability can trace Root processes, so production also
    needs confinement to the frontend peer, a separate experiment. The
    [monitor confinement experiment](experiments/linux-monitor-confinement.md)
-   prepares an AppArmor ptrace peer policy for it; its supervised run is pending.
+   measured an AppArmor ptrace peer policy for it on one host (2026-11-18): with the
+   profile applied through `aa-exec` before the monitor's self-drop, the monitor
+   reached only the frontend label, and Root processes, other users' processes and
+   unlabeled copies were refused. Applied through systemd's `AppArmorProfile=` under
+   `NoNewPrivileges=yes`, the profile is stacked on the unconfined label and the
+   frontend peer rule no longer matches, so the candidate unit starts the monitor
+   through `aa-exec`. A Root process that runs the installed frontend also has the
+   frontend label; that limit is still a decision for the Linux host owner.
    The execution identity stays open.
 3. **Execution sandbox inheritance.** A command started directly by
    `remozio-exec.service` inherits the unit's sandbox: `NoNewPrivileges=` would

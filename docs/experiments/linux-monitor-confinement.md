@@ -113,7 +113,8 @@ Differences from the reviewed plan, found while writing the policy:
   `AmbientCapabilities=CAP_SYS_PTRACE`, `CapabilityBoundingSet=CAP_SYS_PTRACE`,
   `NoNewPrivileges=yes`, `AppArmorProfile=rmzmc-probe-<tag>`, `RuntimeMaxSec=`,
   `--collect`. This is the shape a production unit would use. AppArmor allows a
-  transition from an unconfined label under `no_new_privs`; if the unit still does
+  transition from an unconfined label under `no_new_privs` (N2c measured it as a
+  stack); if the unit still does
   not start, N2c records it and fails. The runner publishes a stacked label as
   `stack(<parts>) (<mode>)`, where each part is a role of this experiment,
   `unconfined` or `other`.
@@ -233,12 +234,60 @@ runner runs F3 last because it removes the frontend profile.
 
 ## Recorded result
 
-Not yet run. The Linux host owner runs the supervised step; the evidence file and the
-result go here in this change.
+**Shape A passed; shape B failed as specified. One host, 2026-11-18**
+([evidence](linux-monitor-confinement-evidence.json)): Ubuntu 25.10, kernel
+`6.17.0-41`, x86_64, `ptrace_scope` 1, `suid_dumpable` 2, AppArmor enabled with ptrace,
+signal and `af_unix` mediation, `apparmor_parser` 5.0.0~alpha1. The Linux host owner
+ran it as Root through classic sudo. Every setup check and every cleanup check passed,
+and 13 of the 14 cases passed. The source hashes in the evidence match the fixtures and
+the runner in this change. The report does not pass, because N2c failed.
+
+- **P1c:** accepted. Every #728 monitor check held with the monitor and the frontend
+  both confined in enforce mode.
+- **N1c, N3c:** the shape A probe could not reach the Root sleeper, the operator's
+  sleeper or the copy without set-ID bits: the seize failed with `EACCES`,
+  `process_vm_readv` and `pidfd_getfd` with `EPERM`, and `/proc/<pid>/maps` with
+  `EACCES`. It seized, stopped, read and detached the installed frontend.
+- **N4c:** file creation, exec and the IP socket were refused.
+- **N5c, F3:** the confined monitor could not seize a frontend without the frontend
+  label (the second copy, then the installed frontend after its profile was removed):
+  `EACCES`, rejected.
+- **N6c:** the user namespace or the bind mount was refused.
+- **N7c:** the limit holds as written: the shape A probe reached the installed frontend
+  started by Root.
+- **C1, C2, F1:** without a profile, or in complain mode, the probe reached the Root
+  sleeper and the side actions worked.
+- **F2, K1:** `aa-exec` with an unloaded profile failed before the probe ran; the
+  runner's `SIGKILL` ended a confined probe at the deadline.
+- **N2c (failed):** systemd started the shape B probe with the stacked label
+  `stack(probe+unconfined) (enforce)`, not `rmzmc-probe-<tag> (enforce)`: under
+  `no_new_privs` the profile was stacked on the unit's unconfined label. The probe was still confined: it could not reach the Root sleeper,
+  and file creation, exec and the IP socket were refused. It also could not seize the
+  installed frontend (`EACCES`), because the frontend profile's `tracedby` rule names
+  the probe profile alone and does not match the stack.
+- The AppArmor log for the run held only refusals by the experiment's own monitor and
+  probe profiles, of `ptrace` against unconfined peers.
+
+Two earlier runs on the same day are not the evidence. The first stopped at the YubiKey
+prompt before the runner started. The second measured the same outcomes, but five cases
+failed on a wrong expectation: the probe holds `CAP_SYS_PTRACE`, so the capability hook
+passes and AppArmor refuses the seize with `EACCES`, which `ptrace_attach` returns as
+is. The expectation came from #728, which ran without a profile and measured `EPERM`.
+The runner now requires `EACCES` and publishes a stacked label as
+`stack(<parts>) (<mode>)`; the recorded evidence is the third run.
+
+On this host the AppArmor peer policy confines a `CAP_SYS_PTRACE` monitor started with
+shape A to the frontend label. A production unit therefore starts the monitor with
+shape A, for example `aa-exec -p <profile> --` in `ExecStart=`, and not with
+`AppArmorProfile=` under `NoNewPrivileges=yes`. A shape B variant (a peer rule that
+matches the stack, or a unit without `no_new_privs`) is unmeasured.
 
 ## What this experiment does not establish
 
 - **The Root-instance limit** (N7c). A decision for the Linux host owner.
+- **Shape B as a working launch.** N2c shows that `AppArmorProfile=` under
+  `NoNewPrivileges=yes` stacks the profile and loses the frontend peer. No variant
+  that would fix it was run.
 - **The socket surface.** The `unix` rules carry no peer or address limit, so the
   policy does not restrict which seqpacket sockets the monitor can use. The review
   of the IPC surface that #728 defers still applies.
