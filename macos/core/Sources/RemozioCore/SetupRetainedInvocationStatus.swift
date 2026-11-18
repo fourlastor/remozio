@@ -115,9 +115,17 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
         private let process = getpid(), user = getuid()
         private let lock: NSLock
         private var record: SetupRetainedInvocationReservation?
+        private struct RestartOwner: Hashable {
+            let uid: UInt32, directory: UUID
+            init(_ owner: LocalAccountIdentity) { uid = owner.uid; directory = owner.directoryID }
+        }
+        private var restart: [RestartOwner: SetupRestartStatus.Handle] = [:]
+        private var recordOwner: RestartOwner?
+        private var generation: UInt64 = 0
         private struct RecoverySnapshot {
             let row: RuntimeMaintenanceWindowRecord
             var status: SetupRetainedInvocationStatus
+            var superseded = false
         }
         private var recovery: [Data: RecoverySnapshot] = [:]
         private var closed = false
@@ -128,14 +136,63 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
             try RuntimeMaintenanceOwnedControl.require()
             return .init(ownedStatusLock: statusLock)
         }
-        func publish(_ value: SetupRetainedInvocationReservation) {
+        func publish(_ value: SetupRetainedInvocationReservation, owner: LocalAccountIdentity? = nil) {
             guard getpid() == process else { return }
-            lock.withLock { if !closed { record = value } }
+            let retired = lock.withLock { () -> (SetupRetainedInvocationReservation?, SetupRestartStatus.Handle?) in
+                guard !closed else { return (nil, nil) }
+                let key = owner.map(RestartOwner.init)
+                let old = (record, key.flatMap { restart.removeValue(forKey: $0) })
+                record = value; recordOwner = key; generation &+= 1; return old
+            }
+            withExtendedLifetime(retired) {}
+        }
+        /// Capacity is checked before the owner installs a fresh record. No existing origin is evicted.
+        func canPublishRestart(owner: LocalAccountIdentity) -> Bool {
+            guard getpid() == process, getuid() == user, geteuid() == user else { return false }
+            let key = RestartOwner(owner)
+            let result = lock.withLock { () -> (Bool, SetupRetainedInvocationReservation?) in
+                guard !closed else { return (false, nil) }
+                if restart[key] != nil || restart.count < 64 { return (true, nil) }
+                let retired = recordOwner == key ? record : nil
+                if recordOwner == key { record = nil; recordOwner = nil }
+                for (id, snapshot) in recovery where Binding(snapshot.row.scope).matches(owner) {
+                    recovery[id] = .init(row: snapshot.row, status: .unavailable, superseded: true)
+                }
+                generation &+= 1
+                return (false, retired)
+            }
+            withExtendedLifetime(result.1) {}; return result.0
+        }
+        @discardableResult func publishRestart(_ value: SetupRestartRecovery) -> Bool {
+            publishRestartHandle(value.status)
+        }
+        private func publishRestartHandle(_ value: SetupRestartStatus.Handle) -> Bool {
+            guard getpid() == process, getuid() == user, geteuid() == user else { return false }
+            return lock.withLock {
+                let key = RestartOwner(value.owner)
+                guard !closed, restart[key] != nil || restart.count < 64 else { return false }
+                restart[key] = value; generation &+= 1; return true
+            }
+        }
+        /// Metadata-only capacity fixture. Root cannot inject a status origin.
+        @discardableResult func publishRestartOwned(_ value: SetupRestartStatus.Handle) throws -> Bool {
+            try RuntimeMaintenanceOwnedControl.require()
+            guard canPublishRestart(owner: value.owner) else { return false }
+            return publishRestartHandle(value)
+        }
+        func supersedeRecovery(_ row: RuntimeMaintenanceWindowRecord) {
+            guard getpid() == process, getuid() == user, geteuid() == user else { return }
+            lock.withLock {
+                guard !closed, recovery[row.scope.authority.accountID] != nil || recovery.count < 64 else { return }
+                recovery[row.scope.authority.accountID] = .init(row: row, status: .unavailable, superseded: true)
+                generation &+= 1
+            }
         }
         func publishRecovery(_ row: RuntimeMaintenanceWindowRecord) {
             guard getpid() == process, getuid() == user, geteuid() == user else { return }
             lock.withLock {
-                guard !closed, recovery[row.scope.authority.accountID] != nil || recovery.count < 64 else { return }
+                guard !closed, recovery[row.scope.authority.accountID] != nil || recovery.count < 64,
+                      !recovery.values.contains(where: { $0.superseded && $0.row.scope.authority == row.scope.authority }) else { return }
                 var status = SetupRetainedInvocationStatus.recovery(row)
                 if let previous = recovery[row.scope.authority.accountID], previous.row.id == row.id,
                    previous.row.scope == row.scope, case .observed(let observation) = previous.status.supervisor {
@@ -159,35 +216,53 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
             case .retired: value = .retired
             }
             lock.withLock {
-                guard !closed, var captured = recovery[request.key.accountID], captured.row.id == request.key.windowID else { return }
+                guard !closed, var captured = recovery[request.key.accountID], !captured.superseded, captured.row.id == request.key.windowID else { return }
                 captured.status = captured.status.observing(supervisor: value)
                 recovery[request.key.accountID] = captured
             }
         }
-        func close() { guard getpid() == process else { return }; lock.withLock { closed = true; recovery = [:] } }
+        func close() {
+            guard getpid() == process else { return }
+            let retired = lock.withLock { () -> (SetupRetainedInvocationReservation?, [RestartOwner: SetupRestartStatus.Handle]) in
+                let old = (record, restart); closed = true; record = nil; recordOwner = nil; restart = [:]; recovery = [:]; generation &+= 1; return old
+            }
+            withExtendedLifetime(retired) {}
+        }
         func read(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedInvocationStatus {
-            read(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: nil)
+            projection(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: nil).v1
         }
         /// Ordinary-owner race fixtures only. Root cannot inject a callback into a status read.
         func readOwned(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity,
             afterSnapshot: @escaping () -> Void) throws -> SetupRetainedInvocationStatus {
             try RuntimeMaintenanceOwnedControl.require()
-            return read(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: afterSnapshot)
+            return projection(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: afterSnapshot).v1
         }
-        private func read(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity,
-            afterSnapshot: (() -> Void)?) -> SetupRetainedInvocationStatus {
+        func readV2(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity) -> SetupRetainedStatusProjection {
+            projection(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: nil)
+        }
+        func readV2Owned(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity,
+            afterSnapshot: @escaping () -> Void) throws -> SetupRetainedStatusProjection {
+            try RuntimeMaintenanceOwnedControl.require()
+            return projection(authenticatedPeer: peer, currentOwner: currentOwner, afterSnapshot: afterSnapshot)
+        }
+        private func projection(authenticatedPeer peer: XPCPeerCredentials, currentOwner: LocalAccountIdentity,
+            afterSnapshot: (() -> Void)?) -> SetupRetainedStatusProjection {
             guard getpid() == process, getuid() == user, geteuid() == user,
                   peer.processID > 0, peer.userID > 0, peer.userID < UInt32.max, currentOwner.uid == peer.userID,
                   lock.try() else { return .unavailable }
-            let current = record, stopped = closed
+            let key = RestartOwner(currentOwner)
+            let current = record, stopped = closed, observedRestart = restart[key], revision = generation
             let captured = recovery.values.first { snapshot in
-                snapshot.row.scope.authority.ownerUID == peer.userID && Binding(snapshot.row.scope).matches(currentOwner)
+                !snapshot.superseded && snapshot.row.scope.authority.ownerUID == peer.userID && Binding(snapshot.row.scope).matches(currentOwner)
             }
             lock.unlock()
             guard !stopped else { return .unavailable }
             // An empty slot has no recorded owner, so no peer UID can match it. Answering `absent` would let any
             // authenticated UID tell an empty slot from another account's reservation (#795 review, contract section 7).
-            let retained = current?.status(authenticatedPeer: peer, currentOwner: currentOwner) ?? .unavailable
+            let selectedRestart = observedRestart?.matches(peer, currentOwner) == true
+            let restartSnapshot = selectedRestart ? observedRestart?.read() : nil
+            guard !selectedRestart || restartSnapshot != nil else { return .unavailable }
+            let retained = selectedRestart ? .unavailable : (current?.status(authenticatedPeer: peer, currentOwner: currentOwner) ?? .unavailable)
             let result: SetupRetainedInvocationStatus
             if let captured {
                 if case .observed(let bound) = retained.binding, bound.matches(captured.row.scope),
@@ -199,14 +274,15 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                 else { result = retained }
             } else { result = retained }
             afterSnapshot?()
+            if let restartSnapshot, observedRestart?.isCurrent(restartSnapshot) != true { return .unavailable }
             guard lock.try() else { return .unavailable }
             defer { lock.unlock() }
-            guard !closed, record === current else { return .unavailable }
+            guard !closed, record === current, restart[key] === observedRestart, generation == revision else { return .unavailable }
             if let captured {
                 guard let latest = recovery[captured.row.scope.authority.accountID], latest.row == captured.row,
                       latest.status == captured.status else { return .unavailable }
             }
-            return result
+            return .init(retained: selectedRestart ? .unavailable : result, restart: restartSnapshot)
         }
     }
     static func capturedBinding(_ value: SetupRetainedCallerBinding) throws -> Binding { try .init(value) }

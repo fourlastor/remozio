@@ -64,7 +64,12 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         private typealias Body = @Sendable (RestartAttempt, UUID) async throws -> ExplicitCompletion
         private let lock = NSLock(), processID = getpid(), ownerUID = getuid()
         private var body: Body?
-        private var custodyClosed = true, uncertainWriter = false, forwardEffects = false, rowAtRest = true
+        private var custodyOpened = false, custodyClosed = true, uncertainWriter = false, forwardEffects = false, rowAtRest = true
+        private weak var statusRecord: SetupRestartRecovery?
+        func attachStatus(to record: SetupRestartRecovery) { lock.withLock { statusRecord = record } }
+        var statusFacts: (opened: Bool, closed: Bool, uncertain: Bool) {
+            lock.withLock { (custodyOpened, custodyClosed, uncertainWriter) }
+        }
         fileprivate init(_ body: @escaping @Sendable (RestartAttempt, UUID) async throws -> ExplicitCompletion) { self.body = body }
         func run(workID: UUID) async throws -> ExplicitCompletion {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
@@ -74,13 +79,22 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             }
             return try await current(self, workID)
         }
-        fileprivate func beginCustody() { lock.withLock { custodyClosed = false } }
+        fileprivate func beginCustody() {
+            let record = lock.withLock { custodyClosed = false; return statusRecord }
+            record?.observeStatus(self)
+        }
+        fileprivate func didOpenCustody() {
+            let record = lock.withLock { custodyOpened = true; return statusRecord }
+            record?.observeStatus(self)
+        }
         fileprivate func didCloseCustody(uncertain: Bool) {
-            lock.withLock { custodyClosed = true; uncertainWriter = uncertainWriter || uncertain }
+            let record = lock.withLock { custodyClosed = true; uncertainWriter = uncertainWriter || uncertain; return statusRecord }
+            record?.observeStatus(self)
         }
         fileprivate func willUseForwardEffects() { lock.withLock { forwardEffects = true } }
         fileprivate func confirmedRow(_ row: Record) {
-            lock.withLock { rowAtRest = row.phase == .needsOwnerRecovery || row.phase == .restored }
+            let record = lock.withLock { rowAtRest = row.phase == .needsOwnerRecovery || row.phase == .restored; return statusRecord }
+            record?.observeStatus(self, row: row)
         }
         var hasUncertainWriter: Bool { lock.withLock { uncertainWriter } }
         var hasRestingRow: Bool { lock.withLock { rowAtRest } }
@@ -223,6 +237,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             self.release = release; self.read = read; self.writeNative = writeNative; self.writeOwned = writeOwned
             native = writeNative != nil; self.verifyCaller = verifyCaller; self.verifyConfiguration = verifyConfiguration
             self.inspect = inspect; self.observe = observe
+            restartAttempt?.didOpenCustody()
         }
         private func checkCancellation() throws {
             try cancellation?.check(); try Task.checkCancellation()

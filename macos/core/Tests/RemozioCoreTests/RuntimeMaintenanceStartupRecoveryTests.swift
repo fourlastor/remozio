@@ -2541,7 +2541,7 @@ private final class RestartShutdownProbe: Sendable {
 final class RuntimeMaintenanceRestartRestorationTests: XCTestCase {
     typealias Row = RuntimeMaintenanceWindowRecord
     typealias Claim = SetupRestartRecovery.Claim
-    private func withFixture(epoch: UInt8 = 81,
+    func withFixture(epoch: UInt8 = 81, outerDeadline: ContinuousClock.Instant? = nil,
         _ body: @escaping @Sendable (ExplicitStartupFixture) async throws -> Void) throws {
         try MachineUpdateReplacementTests.withMaintenanceWriterFixture { material in
             let fixture = try ExplicitStartupFixture(material, epoch: epoch, reserveInProcess: false)
@@ -2556,11 +2556,16 @@ final class RuntimeMaintenanceRestartRestorationTests: XCTestCase {
                 catch { result.withLock { $0 = .failure(error) } }
                 done.signal()
             }
-            guard done.wait(timeout: .now() + 50) == .success else { return XCTFail("Restart restoration did not return") }
+            let wait: TimeInterval
+            if let outerDeadline {
+                let duration = ContinuousClock.now.duration(to: outerDeadline).components
+                wait = max(0, Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+            } else { wait = 50 }
+            guard done.wait(timeout: .now() + wait) == .success else { return XCTFail("Restart restoration did not return") }
             try XCTUnwrap(result.withLock { $0 }).get()
         }
     }
-    private static func claim(_ f: ExplicitStartupFixture,
+    static func claim(_ f: ExplicitStartupFixture,
         authorization: SetupRetainedRecoveryAuthorization? = nil, accountID: Data? = nil,
         processLease: SetupProcessLease? = nil) async throws -> Claim {
         let live = f.rightsLive
@@ -2570,7 +2575,7 @@ final class RuntimeMaintenanceRestartRestorationTests: XCTestCase {
         return try await .openOwned(owner: f.retained.owner, authorization: rights, processLease: processLease ?? f.processLease,
             accountID: accountID ?? f.h.initial.scope.authority.accountID, until: .now.advanced(by: .seconds(5)))
     }
-    private static func restore(_ f: ExplicitStartupFixture, _ claim: Claim,
+    static func restore(_ f: ExplicitStartupFixture, _ claim: Claim,
         frame: RuntimeMaintenanceStartupFrame? = nil,
         deadline: ContinuousClock.Instant = .now.advanced(by: restorationTestForwardDeadline),
         expiry: SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl? = nil,
