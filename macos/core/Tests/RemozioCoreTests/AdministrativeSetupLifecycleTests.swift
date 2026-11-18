@@ -149,6 +149,8 @@ private struct SetupLifecycleFixture: Sendable {
     init(clock: SetupLifecycleClock = .init(), rows: [RuntimeMaintenanceWindowRecord] = [], prepareGate: SetupLifecycleGate? = nil,
         discoveryGate: SetupLifecycleGate? = nil, confirmationGate: SetupLifecycleGate? = nil,
         closeGate: SetupLifecycleGate? = nil,
+        terminalSchedulingResult: Supervisor.SchedulingResult? = nil,
+        terminalSchedulingOverride: (@Sendable () -> Supervisor.SchedulingResult?)? = nil,
         availability: @escaping @Sendable () -> AsyncStream<Void> = { AsyncStream { $0.finish() } },
         acquire: @escaping @Sendable (Supervisor.Request, ContinuousClock.Instant) async throws -> Supervisor.Acquisition = { _, _ in .terminal(.noWindow) }) throws {
         let custody = SetupLifecycleCustody(closeGate: closeGate), probe = SetupLifecycleProbe()
@@ -157,6 +159,10 @@ private struct SetupLifecycleFixture: Sendable {
             if probe.state.withLock({ $0.invalidLease }) { throw AdministrativeSetupError.changedInstallation }
         })
         let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: acquire), timing: clock.timing)
+        let terminal: (@Sendable () -> Supervisor.SchedulingResult?)?
+        if let terminalSchedulingOverride { terminal = terminalSchedulingOverride }
+        else if let terminalSchedulingResult { terminal = { terminalSchedulingResult } }
+        else { terminal = nil }
         let runtime = try Lifecycle.Runtime.owned(supervisor: supervisor, discover: { _ in
             probe.state.withLock { $0.discoveries += 1; $0.activeDiscoveries += 1; $0.maximumDiscoveries = max($0.maximumDiscoveries, $0.activeDiscoveries) }
             defer { probe.state.withLock { $0.activeDiscoveries -= 1 } }
@@ -171,7 +177,7 @@ private struct SetupLifecycleFixture: Sendable {
         }, confirmServing: { _ in
             await confirmationGate?.wait()
             probe.state.withLock { $0.confirmations += 1 }
-        }, availability: availability)
+        }, availability: availability, terminalSchedulingResult: terminal)
         let lifecycle = try Lifecycle.openOwned(routing: routing, timing: clock.timing,
             validateStartup: {
                 if probe.state.withLock({ $0.invalidLease }) { throw AdministrativeSetupError.changedInstallation }
@@ -344,6 +350,148 @@ final class AdministrativeSetupLifecycleTests: XCTestCase, @unchecked Sendable {
         try await eventually { f.probe.state.withLock { $0.discoveries } >= 2 }
         XCTAssertEqual(calls.withLock { $0 }, 1); await f.lifecycle.close()
     }
+    private func terminalSchedulingRetires(_ result: SetupMaintenanceRecoverySupervisor.SchedulingResult) async throws {
+        let discovery = SetupLifecycleGate(), close = SetupLifecycleGate()
+        let row = try await SetupExecutorAdmissionTestFixture.make { try SetupLifecycleFixture.row() }
+        let injected = result == .invalidProcess || result == .cancelled
+        let f = try SetupLifecycleFixture(rows: [row], discoveryGate: discovery, closeGate: close,
+            terminalSchedulingResult: injected ? result : nil)
+        var supervisorClose: Task<Void, Never>?
+        do {
+            for refused in [SetupMaintenanceRecoverySupervisor.SchedulingResult.scheduled, .duplicate, .deadlineReached] {
+                XCTAssertThrowsError(try AdministrativeSetupLifecycle.Runtime.owned(supervisor: f.supervisor,
+                    discover: { _ in [] }, terminalSchedulingResult: { refused }))
+            }
+            await f.lifecycle.start()
+            try await eventually {
+                f.probe.state.withLock { $0.activeDiscoveries == 1 }
+                    && f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(1)))
+            }
+            if !injected {
+                supervisorClose = Task {
+                    if result == .retired { await f.supervisor.retire() }
+                    else { await f.supervisor.close() }
+                }
+                try await eventually { f.custody.counts.withLock { $0.admissionsClosed == 1 } }
+            }
+            await discovery.open()
+            try await eventually { f.routing.state == .retiring && f.custody.counts.withLock { $0.actualCloses == 1 } }
+            XCTAssertEqual(f.clock.now, f.clock.epoch)
+            XCTAssertEqual(f.clock.timerArms, 1)
+            XCTAssertEqual(f.probe.state.withLock { $0.confirmations }, 0)
+            XCTAssertFalse(f.routing.allowsNormal)
+            XCTAssertThrowsError(try f.routing.normalOwner())
+            XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 0)
+            XCTAssertEqual(f.probe.state.withLock { $0.stopped }, 0)
+            await close.open()
+            await supervisorClose?.value
+            await f.lifecycle.close()
+            XCTAssertEqual(f.routing.state, .closed)
+            XCTAssertEqual(f.custody.counts.withLock { $0.actualCloses }, 1)
+            XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 1)
+            XCTAssertEqual(f.probe.state.withLock { $0.stopped }, 1)
+            XCTAssertTrue(f.probe.state.withLock { $0.exits.isEmpty })
+        } catch {
+            await discovery.open(); await close.open(); await supervisorClose?.value
+            await f.lifecycle.close()
+            throw error
+        }
+    }
+    func testRetiredSchedulingRetiresBeforeTheNextIdleCheck() async throws {
+        try await terminalSchedulingRetires(.retired)
+    }
+    func testInvalidProcessSchedulingRetiresBeforeTheNextIdleCheck() async throws {
+        try await terminalSchedulingRetires(.invalidProcess)
+    }
+    func testClosedSchedulingRetiresWhileIdleCustodyStillPasses() async throws {
+        try await terminalSchedulingRetires(.closed)
+    }
+    func testCancelledSchedulingRetiresWithoutLeavingDiscoveryPending() async throws {
+        try await terminalSchedulingRetires(.cancelled)
+    }
+    func testSchedulingCancellationDuringRetirementKeepsTheFirstDeadlineAndCloseTask() async throws {
+        let work = SetupLifecycleGate(), close = SetupLifecycleGate(), acquired = Mutex(0)
+        let rows = try await SetupExecutorAdmissionTestFixture.make { try [SetupLifecycleFixture.row(), SetupLifecycleFixture.row(10)] }
+        let f = try SetupLifecycleFixture(rows: [rows[1]], closeGate: close, acquire: { _, _ in
+            acquired.withLock { $0 += 1 }
+            return .owner(.init(run: { _ in await work.wait(); return .noWindow }, join: {}))
+        })
+        do {
+            let occupied = try SetupMaintenanceRecoverySupervisor.Request(accountID: rows[0].scope.authority.accountID,
+                windowID: rows[0].id, revision: rows[0].revision)
+            let scheduled = await f.supervisor.schedule(occupied); XCTAssertTrue(scheduled)
+            try await eventually { acquired.withLock { $0 == 1 } }
+            await f.lifecycle.start()
+            try await eventually { f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(120))) }
+            await f.lifecycle.requestRetirement()
+            let deadline = f.clock.epoch.advanced(by: .seconds(300))
+            try await eventually { f.clock.deadlines.contains(deadline) && f.custody.counts.withLock { $0.admissionsClosed == 1 } }
+            f.clock.advance(.milliseconds(250)); await f.lifecycle.requestRetirement()
+            await work.open()
+            try await eventually { f.custody.counts.withLock { $0.actualCloses == 1 } }
+            XCTAssertEqual(f.clock.timerArms, 1)
+            XCTAssertTrue(f.clock.deadlines.contains(deadline))
+            XCTAssertFalse(f.routing.allowsNormal)
+            XCTAssertEqual(f.routing.state, .retiring)
+            XCTAssertEqual(acquired.withLock { $0 }, 1)
+            XCTAssertEqual(f.probe.state.withLock { $0.confirmations }, 0)
+            XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 0)
+            await close.open(); await f.lifecycle.close()
+            XCTAssertEqual(f.custody.counts.withLock { $0.actualCloses }, 1)
+            XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 1)
+            XCTAssertEqual(f.probe.state.withLock { $0.stopped }, 1)
+            XCTAssertTrue(f.probe.state.withLock { $0.exits.isEmpty })
+        } catch {
+            await work.open(); await close.open(); await f.lifecycle.close()
+            throw error
+        }
+    }
+
+    func testTerminalRearmAfterServingRetiresThroughTheOwnedSchedulingControl() async throws {
+        for result in [SetupMaintenanceRecoverySupervisor.SchedulingResult.retired, .invalidProcess, .closed] {
+            let work = SetupLifecycleGate(), close = SetupLifecycleGate(), acquired = Mutex(0)
+            let terminal = Mutex<SetupMaintenanceRecoverySupervisor.SchedulingResult?>(nil)
+            let rows = try await SetupExecutorAdmissionTestFixture.make { try [SetupLifecycleFixture.row(), SetupLifecycleFixture.row(10)] }
+            let f = try SetupLifecycleFixture(closeGate: close, terminalSchedulingOverride: { terminal.withLock { $0 } }, acquire: { _, _ in
+                acquired.withLock { $0 += 1 }
+                return .owner(.init(run: { _ in await work.wait(); return .noWindow }, join: {}))
+            })
+            do {
+                await f.lifecycle.start()
+                try await eventually { f.routing.state == .serving }
+                let occupied = try SetupMaintenanceRecoverySupervisor.Request(accountID: rows[0].scope.authority.accountID,
+                    windowID: rows[0].id, revision: rows[0].revision)
+                let scheduled = await f.supervisor.schedule(occupied); XCTAssertTrue(scheduled)
+                try await eventually { acquired.withLock { $0 == 1 } }
+                f.probe.state.withLock { $0.rows = [rows[1]] }; await f.lifecycle.requestDiscovery()
+                try await eventually { f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(120))) }
+                f.clock.advance(.seconds(120))
+                try await eventually { f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(180))) }
+                XCTAssertEqual(f.routing.state, .serving)
+                XCTAssertEqual(f.clock.timerArms, 0)
+                terminal.withLock { $0 = result }; f.clock.advance(.seconds(60))
+                try await eventually { f.routing.state == .retiring && f.clock.timerArms == 1 }
+                XCTAssertFalse(f.routing.allowsNormal)
+                XCTAssertEqual(f.clock.timerArms, 1)
+                XCTAssertTrue(f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(480))))
+                XCTAssertEqual(acquired.withLock { $0 }, 1)
+                XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 0)
+                await work.open()
+                try await eventually { f.custody.counts.withLock { $0.actualCloses == 1 } }
+                XCTAssertEqual(f.probe.state.withLock { $0.stopped }, 0)
+                await close.open(); await f.lifecycle.close()
+                XCTAssertEqual(f.routing.state, .closed)
+                XCTAssertEqual(f.custody.counts.withLock { $0.actualCloses }, 1)
+                XCTAssertEqual(f.custody.counts.withLock { $0.finishedCloses }, 1)
+                XCTAssertEqual(f.probe.state.withLock { $0.stopped }, 1)
+                XCTAssertTrue(f.probe.state.withLock { $0.exits.isEmpty })
+            } catch {
+                await work.open(); await close.open(); await f.lifecycle.close()
+                throw error
+            }
+        }
+    }
+
     func testIdleCustodyUsesOneSecondCadenceWithoutAdmission() async throws {
         let f = try SetupLifecycleFixture(); await f.lifecycle.start()
         try await eventually { f.routing.state == .serving && f.clock.deadlines.contains(f.clock.epoch.advanced(by: .seconds(1))) }

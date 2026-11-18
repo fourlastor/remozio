@@ -70,13 +70,16 @@ actor AdministrativeSetupLifecycle {
         let confirmServing: @Sendable (HostCheck) async throws -> Void
         let publish: @Sendable (RuntimeMaintenanceWindowRecord) -> Void
         let availability: @Sendable () -> AsyncStream<Void>
+        private let ownedSchedulingResult: (@Sendable () -> Supervisor.SchedulingResult?)?
         private init(owner: SetupAccountOwner?, supervisor: Supervisor,
             discover: @escaping @Sendable (HostCheck) async throws -> [RuntimeMaintenanceWindowRecord],
             confirmServing: @escaping @Sendable (HostCheck) async throws -> Void,
             publish: @escaping @Sendable (RuntimeMaintenanceWindowRecord) -> Void,
-            availability: @escaping @Sendable () -> AsyncStream<Void>) {
+            availability: @escaping @Sendable () -> AsyncStream<Void>,
+            ownedSchedulingResult: (@Sendable () -> Supervisor.SchedulingResult?)? = nil) {
             self.owner = owner; self.supervisor = supervisor; self.discover = discover
             self.confirmServing = confirmServing; self.publish = publish; self.availability = availability
+            self.ownedSchedulingResult = ownedSchedulingResult
         }
         static func native(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown,
             candidate: SignedReleaseEvidence) throws -> Runtime {
@@ -93,9 +96,31 @@ actor AdministrativeSetupLifecycle {
             discover: @escaping @Sendable (HostCheck) async throws -> [RuntimeMaintenanceWindowRecord],
             confirmServing: @escaping @Sendable (HostCheck) async throws -> Void = { _ in },
             publish: @escaping @Sendable (RuntimeMaintenanceWindowRecord) -> Void = { _ in },
-            availability: @escaping @Sendable () -> AsyncStream<Void> = { AsyncStream { $0.finish() } }) throws -> Runtime {
+            availability: @escaping @Sendable () -> AsyncStream<Void> = { AsyncStream { $0.finish() } },
+            terminalSchedulingResult: (@Sendable () -> Supervisor.SchedulingResult?)? = nil) throws -> Runtime {
             try RuntimeMaintenanceOwnedControl.require()
-            return .init(owner: nil, supervisor: supervisor, discover: discover, confirmServing: confirmServing, publish: publish, availability: availability)
+            if let result = terminalSchedulingResult?() {
+                switch result {
+                case .retired, .invalidProcess, .closed, .cancelled: break
+                default: throw JournalLeaseError.unsafeMetadata
+                }
+            }
+            return .init(owner: nil, supervisor: supervisor, discover: discover, confirmServing: confirmServing, publish: publish,
+                availability: availability, ownedSchedulingResult: terminalSchedulingResult)
+        }
+        /// Ordinary-owner tests can terminate scheduling, but cannot inject an admitted request.
+        fileprivate func scheduleWhenAvailable(_ request: Supervisor.Request, until deadline: ContinuousClock.Instant) async -> Supervisor.SchedulingResult {
+            if let ownedSchedulingResult {
+                do { try RuntimeMaintenanceOwnedControl.require() }
+                catch { return .invalidProcess }
+                if let result = ownedSchedulingResult() {
+                    switch result {
+                    case .retired, .invalidProcess, .closed, .cancelled: return result
+                    default: return .invalidProcess
+                    }
+                }
+            }
+            return await supervisor.scheduleWhenAvailable(request, until: deadline)
         }
     }
 
@@ -266,20 +291,21 @@ actor AdministrativeSetupLifecycle {
                 }
                 guard Set(requests.map(\.key)).count == requests.count else { throw PreparationStoreError.corruptRecord }
                 for request in requests {
-                    while !Task.isCancelled, routing.state != .retiring {
+                    scheduling: while !Task.isCancelled, routing.state != .retiring {
                         // Scheduling waits do not consume this window's own 120-second attempt in the supervisor.
                         let deadline = timing.now().advanced(by: .seconds(120))
-                        let result = await runtime.supervisor.scheduleWhenAvailable(request, until: deadline)
-                        if result == .scheduled || result == .duplicate {
+                        switch await runtime.scheduleWhenAvailable(request, until: deadline) {
+                        case .scheduled, .duplicate:
                             await runtime.supervisor.waitForInitialAttempt(request.key)
-                            break
-                        }
-                        if result == .deadlineReached {
+                            break scheduling
+                        case .deadlineReached:
                             runtime.owner?.publishMaintenanceRecovery(request: request, observation: .busy)
-                            if startupComplete { rearm(request, runtime: runtime); break }
-                            continue
+                            if startupComplete { rearm(request, runtime: runtime); break scheduling }
+                            continue scheduling
+                        case .retired, .invalidProcess, .closed, .cancelled:
+                            requestRetirement()
+                            return
                         }
-                        return
                     }
                 }
                 guard !Task.isCancelled, routing.state != .retiring else { return }
@@ -336,8 +362,13 @@ actor AdministrativeSetupLifecycle {
             while !Task.isCancelled {
                 do { try await timing.sleep(timing.now().advanced(by: .seconds(60))) } catch { break }
                 guard !Task.isCancelled else { break }
-                let result = await runtime.supervisor.scheduleWhenAvailable(request, until: timing.now().advanced(by: .seconds(120)))
-                if result != .deadlineReached { break }
+                switch await runtime.scheduleWhenAvailable(request, until: timing.now().advanced(by: .seconds(120))) {
+                case .deadlineReached: continue
+                case .scheduled, .duplicate, .cancelled: break
+                case .retired, .invalidProcess, .closed:
+                    requestRetirement()
+                }
+                break
             }
             self.didRearm(request.key)
         }
