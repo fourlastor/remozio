@@ -336,11 +336,11 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     func testRecordReplacementDuringAReadReturnsUnavailable() throws {
         let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
         let account = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())
-        let work = SetupOwnerAsyncWork(), replies = SetupOwnerAsyncWork(), reader = Status.Reader()
+        let work = try SetupOwnerAsyncWork.fixtureOwned(), replies = try SetupOwnerAsyncWork.fixtureOwned(), reader = Status.Reader()
         let first = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
             admission: work.admit(), reply: replies.admit(), activity: nil, authenticatedOwner: account)
         let second = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
-            admission: SetupOwnerAsyncWork().admit(), reply: SetupOwnerAsyncWork().admit(), activity: nil, authenticatedOwner: account)
+            admission: try SetupOwnerAsyncWork.fixtureOwned().admit(), reply: try SetupOwnerAsyncWork.fixtureOwned().admit(), activity: nil, authenticatedOwner: account)
         defer { first.abortConstruction(); second.abortConstruction() }
         reader.publish(first)
         XCTAssertEqual(try reader.readOwned(authenticatedPeer: peer, currentOwner: account, afterSnapshot: { reader.publish(second) }), .unavailable)
@@ -349,7 +349,7 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
     func testReaderAndRecordContentionReturnUnavailableWithoutWaiting() throws {
         let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
         let input = Input(peer, .init(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID()))
-        let readerLock = NSLock(), recordLock = NSLock(), work = SetupOwnerAsyncWork(), replies = SetupOwnerAsyncWork()
+        let readerLock = NSLock(), recordLock = NSLock(), work = try SetupOwnerAsyncWork.fixtureOwned(), replies = try SetupOwnerAsyncWork.fixtureOwned()
         let record = try SetupRetainedInvocationReservation(authenticatedPeer: peer, incarnation: UUID(),
             admission: work.admit(), reply: replies.admit(), activity: nil, ownedStatusLock: recordLock, authenticatedOwner: input.owner)
         defer { record.abortConstruction() }

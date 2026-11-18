@@ -820,7 +820,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             let gate = AutomaticSupervisorPhaseGate(boundary, rpc: rpc, until: deadline), cancellation = SetupAuditUpgradeCancellation()
             defer { gate.open() }
             defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
-            let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+            let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
                 deadline: deadline, cancellation: cancellation)
             let work = try RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork(phases: phases,
                 cancellation: cancellation, control: gate.control())
@@ -884,7 +884,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
             let gate = AutomaticSupervisorPhaseGate(boundary, rpc: rpc, until: deadline), cancellation = SetupAuditUpgradeCancellation()
             defer { gate.open() }
             defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
-            let phases = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+            let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
                 deadline: deadline, cancellation: cancellation)
             let work = try RuntimeMaintenanceStartupRecovery.OwnedSupervisorWork(phases: phases,
                 cancellation: cancellation, control: gate.control())
@@ -926,7 +926,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
         try withAsyncStartup(.stopped) { h, driver in
             let expired = Mutex(false), cancellation = SetupAuditUpgradeCancellation(), deadline = ContinuousClock.now.advanced(by: restorationTestForwardDeadline)
             defer { XCTAssertLessThan(ContinuousClock.now, deadline, "forward deadline expired") }
-            let base = try SetupRetainedInvocationReservation.RestorationPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
+            let base = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor(),
                 deadline: deadline, cancellation: cancellation)
             let trigger = try SetupRetainedInvocationReservation.RestorationPhases.OwnedDeadlineControl(
                 phase: phase == .restoring ? .beforePending : phase == .reopenPending ? .beforeRestored : .afterRestored,

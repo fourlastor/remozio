@@ -48,13 +48,13 @@ final class AuditUpgradeSetupEndpointTests: XCTestCase {
             }, importAuthorization: { form in
                 XCTAssertEqual(form.count, MemoryLayout<AuthorizationExternalForm>.size); probe.imported()
                 return try .openOwned(callerUID: probe.authorizedUID, verifyRights: {})
-            }, openInvocation: { expected, grant in
+            }, openInvocation: { expected, grant, admission in
                 probe.opened()
                 if probe.pauseWorker {
                     probe.workerStarted?.fulfill()
                     guard probe.workerGate.wait(timeout: .now() + 15) == .success else { throw Refused() }
                 }
-                return try .openOwned(owner: owner, expected: expected, authorization: grant, openOperation: h.operation(scope:))
+                return try .openOwned(owner: owner, expected: expected, authorization: grant, admission: admission, openOperation: h.operation(scope:))
             })
             endpoint = .init(owner: owner, verify: { probe.callerUID }, authorize: { _ in XCTFail("Legacy authorization") },
                 invalidate: probe.invalidated, auditUpgradeOperations: operations)
@@ -166,8 +166,8 @@ final class AuditUpgradeSetupEndpointTests: XCTestCase {
         h.quiescenceCloseFails = true
         let operations = try SetupAuditUpgradeEndpointOperations.owned(importAuthorization: { _ in
             try .openOwned(verifyRights: { if h.q != nil { reference.invalidateOnce() } })
-        }, openInvocation: { expected, grant in
-            try .openOwned(owner: owner, expected: expected, authorization: grant, openOperation: h.operation(scope:))
+        }, openInvocation: { expected, grant, admission in
+            try .openOwned(owner: owner, expected: expected, authorization: grant, admission: admission, openOperation: h.operation(scope:))
         })
         let endpoint = AdministrativeSetupXPCEndpoint(owner: owner, verify: { getuid() }, authorize: { _ in XCTFail("Legacy authorization") },
             invalidate: probe.invalidated, auditUpgradeOperations: operations)

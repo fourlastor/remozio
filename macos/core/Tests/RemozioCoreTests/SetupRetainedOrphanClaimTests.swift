@@ -524,23 +524,20 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             XCTAssertTrue(try actual.releaseIfWindowFree()); try f.assertReleased()
         }
     }
-    func testBusyOwnerExecutorReportsJoinFailureAndKeepsTokensUntilAFreshClaim() throws {
+    func testTransientExecutorWorkRefusesANewRetainedReservationBeforeItsBody() throws {
         try withFrame { f in
             let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0)
             defer { resume.signal() }
-            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
-            defer { authorization.close() }
             let busy = VoidProbe {
-                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
-                    entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
+                try await f.owner.occupyExecutorOwned {
+                    entered.signal()
+                    guard resume.wait(timeout: .now() + 5) == .success else { throw Failure.timeout }
                 }
             }
             XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
-            var value: Invocation? = try f.invocation(); try f.lose(&value)
-            let first = try f.claim(); try JoinProbe(first).waitForFailure()
-            XCTAssertEqual(f.status.cleanup, .observed(.joinFailed)); f.assertHeld()
-            first.abandon(); resume.signal(); try busy.wait()
-            let actual = try joined(f.claim()); XCTAssertTrue(try actual.releaseIfWindowFree()); try f.assertReleased()
+            XCTAssertThrowsError(try f.invocation()) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
+            resume.signal(); try busy.wait()
+            let value = try f.invocation(); try value.close(); try f.assertReleased()
         }
     }
     func testRepeatedJoinOnTheSameFailedClaimDoesNotRepeatCleanup() throws {
@@ -607,10 +604,9 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
             let original = try joined(f.claim()), phases = try original.restorationPhases()
             let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), closed = Mutex(0), stack = Mutex(0)
-            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
-            defer { resume.signal(); authorization.close() }
+            defer { resume.signal() }
             let busy = VoidProbe {
-                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
+                try await phases.cleanup {
                     entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
                 }
             }
@@ -638,10 +634,9 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
             let phases = try joined(f.claim()).restorationPhases()
             let entered = DispatchSemaphore(value: 0), resume = DispatchSemaphore(value: 0), calls = Mutex(0)
-            let authorization = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
-            defer { resume.signal(); authorization.close() }
+            defer { resume.signal() }
             let busy = VoidProbe {
-                try await f.owner.performAuditUpgradeWork(authorization: authorization) { _ in
+                try await phases.cleanup {
                     entered.signal(); guard resume.wait(timeout: .now() + 3) == .success else { throw Failure.timeout }
                 }
             }

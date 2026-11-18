@@ -5,6 +5,14 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
     private let lock = NSLock()
     private var accepting = true
     private var active: UUID?
+    private let ownedFixture: Bool
+    init() { ownedFixture = false }
+    private init(ownedFixture: Bool) { self.ownedFixture = ownedFixture }
+    /// Private fixture admissions cannot be confused with a Setup owner's admission sets.
+    static func fixtureOwned() throws -> SetupOwnerAsyncWork {
+        try RuntimeMaintenanceOwnedControl.require()
+        return .init(ownedFixture: true)
+    }
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func admit() throws -> Token {
@@ -42,6 +50,12 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
         fileprivate init(owner: SetupOwnerAsyncWork, id: UUID) { self.owner = owner; self.id = id }
         fileprivate func belongs(to expected: SetupOwnerAsyncWork, id: UUID) -> Bool {
             lock.withLock { owner === expected && self.id == id }
+        }
+        /// Only a live token from an explicitly created Owned fixture set can back a fixture hold.
+        func requireOwnedFixture() throws {
+            try RuntimeMaintenanceOwnedControl.require()
+            let source = lock.withLock { owner }
+            guard let source, source.ownedFixture, source.permits(self) else { throw AdministrativeSetupError.unavailable }
         }
         func close() {
             let previous = lock.withLock { let previous = owner; owner = nil; return previous }

@@ -183,10 +183,11 @@ public final class AdministrativeSetupXPCEndpoint: NSObject, AdministrativeSetup
                     var failed = false
                     do {
                         try Task.checkCancellation()
-                        try await owner.performAuditUpgradeWork(authorization: reservation.grant) { [self, reservation] cancellation in
+                        // The owner takes both Setup admissions before its executor starts and keeps them until this body returns.
+                        try await owner.performAuditUpgradeWork(authorization: reservation.grant) { [self, reservation] cancellation, admission in
                             try cancellation.check()
                             guard let auditUpgradeOperations else { throw AdministrativeSetupError.unavailable }
-                            let invocation = try auditUpgradeOperations.openInvocation(reservation.expected, reservation.grant)
+                            let invocation = try auditUpgradeOperations.openInvocation(reservation.expected, reservation.grant, admission)
                             // Cleanup starts after the reply callback returns. Failed cleanup stays with the setup owner.
                             defer { _ = owner.settleAuditUpgradeInvocation(invocation) }
                             do {

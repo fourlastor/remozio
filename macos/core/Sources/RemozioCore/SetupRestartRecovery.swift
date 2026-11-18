@@ -12,6 +12,8 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
     var accountOwner: LocalAccountIdentity { permit.accountOwner }
     var admission: SetupOwnerAsyncWork.Token { permit.admission }
     var reply: SetupOwnerAsyncWork.Token { permit.reply }
+    /// A reclaim adds its worker hold here before it enters the executor.
+    var hold: SetupAccountOwner.ExecutorAdmission { permit.hold }
     private let phases: Phases
     private let lock = NSLock(), processID = getpid(), ownerUID = getuid()
     private var captured: SetupRetainedInvocationStatus.Window?
@@ -113,21 +115,22 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
         try requireProcess()
         if lock.withLock({ settled || !(latestClaimID == id || releasingAbandonedSuccessor && claimID == nil) }) { return false }
         try permit.requireOwner(self, windowID: lock.withLock { captured?.id })
-        let released = try lock.withLock {
+        let release = try lock.withLock { () throws -> (@Sendable () -> Void)? in
             guard !settled, latestClaimID == id || releasingAbandonedSuccessor && claimID == nil,
-                  allowAbandoned || claimID == id else { return false }
+                  allowAbandoned || claimID == id else { return nil }
             guard attempt?.permitsRelease(allowForwardEffects: allowForwardEffects) != false,
                   work == nil || work?.actualReturnObserved == true,
-                  work?.holdsUnsettledCompletion != true else { return false }
+                  work?.holdsUnsettledCompletion != true else { return nil }
             try permit.activity?.validate(); settled = true
-            return true
+            return permit.hold.markRecordReleased()
         }
-        if released { permit.activity?.close(); admission.close(); reply.close() }
-        return released
+        guard let release else { return false }
+        release()
+        return true
     }
     private func settle(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion, work: Work, claim id: UUID) throws {
         try requireWindow(completed.window, claim: id)
-        try lock.withLock {
+        let release = try lock.withLock {
             try requireClaim(id)
             guard self.work === work, work.actualReturnObserved, completed.workID == work.id,
                   attempt?.permitsRelease(allowForwardEffects: true) == true, completed.window.phase == .restored,
@@ -135,8 +138,9 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
                 throw RuntimePreparationError.changedScope
             }
             try permit.activity?.validate(); settled = true
+            return permit.hold.markRecordReleased()
         }
-        permit.activity?.close(); admission.close(); reply.close()
+        release()
     }
     var description: String { "SetupRestartRecovery(redacted)" }
     var debugDescription: String { description }
@@ -209,10 +213,11 @@ final class SetupRestartRecovery: @unchecked Sendable, CustomStringConvertible, 
         }
         /// Fresh rights release only this process's idle slot. This writes no row and clears no account drain.
         func releaseWithoutRestoration() async throws -> Bool {
-            try await record.phases.cleanup {
+            // A record that released every hold is settled. As before, that answer is `false`.
+            try await record.phases.cleanupUnlessReleased {
                 try self.processLease.validate(); try self.authorization.requireCurrent()
                 return try self.record.releaseSafe(claim: self.id, allowForwardEffects: true)
-            }
+            } ?? false
         }
         /// The future endpoint calls this on connection loss, even while the actual task retains this claim.
         func abandon() {

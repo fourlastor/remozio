@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import Synchronization
 import XCTest
 @testable import RemozioCore
 
@@ -23,19 +24,19 @@ final class RuntimeAuditUpgradeWorkerTests: XCTestCase {
         var settlement: Bool? { lock.withLock { settled } }
     }
     private func worker(_ name: String, owner: SetupAccountOwner? = nil,
-                        authorization: SetupAuditUpgradeAuthorization? = nil, body: @escaping @Sendable (SetupAuditUpgradeCancellation) throws -> Void) throws {
+                        authorization: SetupAuditUpgradeAuthorization? = nil, body: @escaping @Sendable (SetupAuditUpgradeCancellation, SetupAccountOwner.ExecutorAdmission?) throws -> Void) throws {
         let completed = expectation(description: name), result = ResultBox()
         Task.detached { [completed, result] in
-            let probe: @Sendable (SetupAuditUpgradeCancellation) throws -> Void = { cancellation in
+            let probe: @Sendable (SetupAuditUpgradeCancellation, SetupAccountOwner.ExecutorAdmission?) throws -> Void = { cancellation, admission in
                 let stack = pthread_get_stacksize_np(pthread_self())
                 FileHandle.standardOutput.write(Data("AUDIT_WORKER start \(name) main=\(pthread_main_np() != 0) stackBytes=\(stack)\n".utf8))
                 XCTAssertEqual(pthread_main_np(), 0)
                 XCTAssertGreaterThanOrEqual(stack, SetupAuditUpgradeWorkExecutor.stackBytes)
-                try body(cancellation)
+                try body(cancellation, admission)
             }
             do {
-                if let owner, let authorization { try await owner.performAuditUpgradeWork(authorization: authorization, probe) }
-                else { try await SetupAuditUpgradeWorkExecutor().run(probe) }
+                if let owner, let authorization { try await owner.performAuditUpgradeWork(authorization: authorization) { c, admission in try probe(c, admission) } }
+                else { try await SetupAuditUpgradeWorkExecutor().run { c in try probe(c, nil) } }
                 result.set(.success(()))
             } catch { result.set(.failure(error)) }
             FileHandle.standardOutput.write(Data("AUDIT_WORKER settled \(name)\n".utf8))
@@ -52,7 +53,7 @@ final class RuntimeAuditUpgradeWorkerTests: XCTestCase {
             if FileManager.default.fileExists(atPath: path) { XCTAssertEqual(unlink(path), 0) }
         }
         let owned = Owned(files)
-        try worker("source-preparation") { cancellation in
+        try worker("source-preparation") { cancellation, _ in
             let files = owned.value, f = files.f, release = try XCTUnwrap(f.nativeRelease)
             let plan = try RuntimeAuditUpgradeSourcePlan.retainOwned(machine: f.machine, account: f.account,
                 installedRelease: release, owner: getuid(), runtime: XCTUnwrap(files.directories[.runtime]),
@@ -84,11 +85,11 @@ final class RuntimeAuditUpgradeWorkerTests: XCTestCase {
         defer { try? owner.close() }
         let expected = try XCTUnwrap(owner.auditUpgradeProgress(callerUID: getuid())), harness = Owned(h)
         let grant = try SetupAuditUpgradeAuthorization.openOwned(verifyRights: {})
-        try worker("complete-cutover", owner: owner, authorization: grant) { cancellation in
+        try worker("complete-cutover", owner: owner, authorization: grant) { cancellation, admission in
             XCTAssertTrue(cancellation === grant.cancellationToken)
             let invocation: SetupAuditUpgradeInvocation
             do {
-                invocation = try .openOwned(owner: owner, expected: expected, authorization: grant,
+                invocation = try .openOwned(owner: owner, expected: expected, authorization: grant, admission: admission,
                     openOperation: harness.value.operation(scope:))
             } catch { grant.close(); throw error }
             defer { XCTAssertTrue(owner.settleAuditUpgradeInvocation(invocation)) }
@@ -119,8 +120,8 @@ final class RuntimeAuditUpgradeWorkerTests: XCTestCase {
         let done = expectation(description: "Cancelled worker settled"), result = ResultBox()
         let task = Task.detached { [done, result] in
             do {
-                try await owner.performAuditUpgradeWork(authorization: grant) { _ in
-                    let invocation = try SetupAuditUpgradeInvocation.openOwned(owner: owner, expected: expected, authorization: grant,
+                try await owner.performAuditUpgradeWork(authorization: grant) { _, admission in
+                    let invocation = try SetupAuditUpgradeInvocation.openOwned(owner: owner, expected: expected, authorization: grant, admission: admission,
                         openOperation: harness.value.operation(scope:))
                     defer { latch.settle(owner.settleAuditUpgradeInvocation(invocation)) }
                     try invocation.run { _ in XCTFail("Cancelled reply") }
@@ -129,9 +130,31 @@ final class RuntimeAuditUpgradeWorkerTests: XCTestCase {
             } catch { result.set(.failure(error)) }
             done.fulfill()
         }
-        wait(for: [reached], timeout: 30); task.cancel(); resume.signal(); wait(for: [done], timeout: 30)
+        wait(for: [reached], timeout: 30); task.cancel()
+        XCTAssertNil(latch.settlement)
+        XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+        resume.signal(); wait(for: [done], timeout: 30)
         XCTAssertThrowsError(try result.check()); XCTAssertEqual(latch.settlement, false)
         XCTAssertThrowsError(try owner.verifyCurrent()); XCTAssertThrowsError(try h.installer.acquireShared())
+        XCTAssertThrowsError(try owner.acquireSetupReplyAdmission())
+        let process = try SetupProcessLease.openOwned(directory: .init(anchor: h.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        defer { process.close() }
+        let checks = Mutex(0), identity = h.base.runtime.f.identity, accountID = h.base.runtime.account.accountID
+        let rights = try SetupRetainedRecoveryAuthorization.openOwned(
+            peer: .init(processID: getpid(), userID: identity.uid, auditSessionID: 1), currentOwner: identity,
+            incarnation: UUID(), verifyRights: { checks.withLock { $0 += 1 } })
+        let baseline = checks.withLock { $0 }, started = ContinuousClock.now
+        let refused = expectation(description: "Failed cleanup refuses another claim")
+        Task.detached {
+            do {
+                _ = try await SetupRestartRecovery.Claim.openOwned(owner: owner, authorization: rights,
+                    processLease: process, accountID: accountID, until: .now.advanced(by: .seconds(5)))
+                XCTFail("A failed audit cleanup lost its admission")
+            } catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+            refused.fulfill()
+        }
+        wait(for: [refused], timeout: 3)
+        XCTAssertLessThan(started.duration(to: .now), .milliseconds(100)); XCTAssertEqual(checks.withLock { $0 }, baseline)
         XCTAssertFalse(owner.retryAuditUpgradeCleanup())
         try XCTUnwrap(h.q).closeFails = false
         XCTAssertTrue(owner.retryAuditUpgradeCleanup()); try owner.verifyCurrent(); try h.machine { _ in () }
