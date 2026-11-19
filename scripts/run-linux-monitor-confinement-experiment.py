@@ -14,7 +14,6 @@ If the runner itself is killed, its profiles stay loaded until reboot. Remove th
 list the rmzmc- names in /sys/kernel/security/apparmor/profiles and write each name to
 /sys/kernel/security/apparmor/.remove."""
 import argparse
-import contextlib
 import datetime
 import grp
 import hashlib
@@ -915,36 +914,8 @@ def _cancel(_signum, _frame):
     raise KeyboardInterrupt()
 
 
-CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-
-
-@contextlib.contextmanager
-def deferred_cancel():
-    """Record SIGTERM, SIGHUP and SIGINT in the block, and cancel only after it ends.
-
-    The operator asked to stop, so a recorded signal always ends as a cancel: it also replaces an error
-    that the block, or the code around it, raised. Python keeps that error as the cancel's __context__.
-    """
-    received = []
-    # The signals stay blocked while the handlers are swapped, so none arrives half way through a swap: one
-    # that comes then is delivered when the mask returns, to the handler that is in place by that time.
-    mask = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
-    try:
-        previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
-                    for number in CANCEL_SIGNALS}
-    finally:
-        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
-    try:
-        yield
-    finally:
-        signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
-        try:
-            for number, handler in previous.items():
-                signal.signal(number, handler)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
-        if received:
-            raise KeyboardInterrupt()
+# The cancel primitive is the #728 runner's, so both supervised runners hold signals the same way.
+CANCEL_SIGNALS, deferred_cancel = PL.CANCEL_SIGNALS, PL.deferred_cancel
 
 
 def main():

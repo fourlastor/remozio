@@ -134,7 +134,8 @@ The runner:
    `SIGTERM`, and reports whether each removal is complete. It removes an account
    whose creation it started even when the tool timed out, and never one that
    existed before. If a removal is not complete, it prints a warning on standard
-   error.
+   error. A `SIGTERM`, `SIGHUP` or Ctrl-C that arrives during this removal is held
+   until the removal ends, then cancels the run.
 
 The report holds booleans, errno names, outcome categories, the OS release and
 numeric kernel version with the distribution revision (for example `6.17.0-41`),
