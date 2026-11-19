@@ -6,6 +6,7 @@ Run once as root through sudo from the operator's session. The runner creates a 
 group with no members and a disposable monitor user, measures every case, then removes all
 of it. The report holds booleans, errno names, categories, settings and hashes only."""
 import argparse
+import contextlib
 import datetime
 import grp
 import hashlib
@@ -613,10 +614,12 @@ def measure(timeout=15):
                 policy = run.seccomp_policy_sha256()
                 cases = {case: run.run_case(case) for case in CASES}
         finally:
-            cleanup = run.cleanup()
-            if not all(cleanup.values()):
-                sys.stderr.write(f"Disposable state not fully removed: inspect {BASE_PARENT}/{BASE_PREFIX}* and the "
-                                 "rmzpl*/rmzpm* system accounts.\n")
+            # A second SIGTERM, SIGHUP or Ctrl-C must not stop the removal half way: it is held until cleanup ends.
+            with deferred_cancel():
+                cleanup = run.cleanup()
+                if not all(cleanup.values()):
+                    sys.stderr.write(f"Disposable state not fully removed: inspect {BASE_PARENT}/{BASE_PREFIX}* and "
+                                     "the rmzpl*/rmzpm* system accounts.\n")
     passed = (all(setup.values()) and all(cleanup.values()) and set(cases) == set(CASES)
               and all(item["passed"] for item in cases.values()))
     return {"experiment": "linux-protected-launch-v1",
@@ -633,6 +636,38 @@ def measure(timeout=15):
 
 def _cancel(_signum, _frame):
     raise KeyboardInterrupt()
+
+
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+@contextlib.contextmanager
+def deferred_cancel():
+    """Record SIGTERM, SIGHUP and SIGINT in the block, and cancel only after it ends.
+
+    The operator asked to stop, so a recorded signal always ends as a cancel: it also replaces an error
+    that the block, or the code around it, raised. Python keeps that error as the cancel's __context__.
+    """
+    received = []
+    # The signals stay blocked while the handlers are swapped, so none arrives half way through a swap: one
+    # that comes then is delivered when the mask returns, to the handler that is in place by that time.
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+    try:
+        previous = {number: signal.signal(number, lambda signum, _frame: received.append(signum))
+                    for number in CANCEL_SIGNALS}
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+        try:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        if received:
+            raise KeyboardInterrupt()
 
 
 def main():
