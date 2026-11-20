@@ -38,7 +38,7 @@ jobs:
           mkdir -p prof
           t=$(head -1 scripts/profile/methods.txt)
           for attempt in 1 2 3; do
-            xcrun xctrace record --template 'Time Profiler' --output "prof/t$attempt.trace" --no-prompt \
+            xcrun xctrace record --template 'Time Profiler' --output "prof/t$attempt.trace" --no-prompt --target-stdout "prof/out$attempt.log" \
               --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/trace$attempt.log" 2>&1 &
             tracer=$!; waited=0
             while kill -0 $tracer 2>/dev/null && [ $waited -lt 150 ]; do sleep 3; waited=$((waited+3)); done
@@ -51,11 +51,11 @@ jobs:
                 echo "--- sampling pid $pid: $(ps -o state=,etime=,command= -p $pid | cut -c1-160)"
                 sample $pid 5 -file "prof/hang$attempt-$pid.txt" >/dev/null 2>&1 || sudo sample $pid 5 -file "prof/hang$attempt-$pid.txt" >/dev/null 2>&1 || true
               done
-              grep -E "passed \(|failed \(|started" "prof/trace$attempt.log" | tail -5
+              grep -E "passed \(|failed \(|started" "prof/out$attempt.log" | tail -5 || true
               pkill -9 -f "PackageTests.xctest" || true; kill -9 $tracer 2>/dev/null || true; sudo pkill -9 xctrace || true
               sleep 3
             else
-              echo "=== done under xctrace (attempt $attempt) in ${waited}s"; grep -E "passed \(|failed \(" "prof/trace$attempt.log"
+              echo "=== done under xctrace (attempt $attempt) in ${waited}s"; grep -E "passed \(|failed \(" "prof/out$attempt.log" || echo "no test result lines"
             fi
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
