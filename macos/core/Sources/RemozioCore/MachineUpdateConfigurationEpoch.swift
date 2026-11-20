@@ -46,10 +46,20 @@ enum MachineUpdateConfigurationEpoch {
         let artifacts: [Artifact]
         private let cache: ArchiveCache
         private let decodedValues: PreparationImmutableTupleDecodeCache<Configuration>
-        init(record: MachineUpdateConfigurationEpochRecord, artifacts: [Artifact],
-            decodedValues: PreparationImmutableTupleDecodeCache<Configuration> = .init()) {
-            self.record = record; self.artifacts = artifacts; cache = ArchiveCache(); self.decodedValues = decodedValues
+        private let validations: PreparationImmutableValidationCache
+        /// A store passes its own caches. The caches only skip work on identical bytes; they never prove currency.
+        init(record: MachineUpdateConfigurationEpochRecord, artifacts: [Artifact], caches: PreparationEpochDecodeCaches) {
+            self.record = record; self.artifacts = artifacts; cache = ArchiveCache()
+            decodedValues = caches.configurations; validations = caches.configurationValidations
         }
+        /// The exact bytes that validateImmutableValue reads: the encoded record and every artifact in order.
+        var validationKey: Data { get throws {
+            try PreparationImmutableValidationCache.key(domain: "remozio.configuration-epoch.validation.v1",
+                [record.encoded] + artifacts.flatMap { artifact -> [Data] in
+                    var kind = artifact.kind.bigEndian
+                    return [withUnsafeBytes(of: &kind) { Data($0) }, artifact.account, artifact.bytes]
+                })
+        } }
         func artifact(_ kind: Int64, account: Data = global) throws -> Data {
             guard let value = artifacts.first(where: { $0.kind == kind && $0.account == account }) else { throw PreparationStoreError.corruptRecord }
             return value.bytes
@@ -102,9 +112,13 @@ enum MachineUpdateConfigurationEpoch {
         }
         func validate() throws {
             if cache.isValidated() { return }
+            let key = try validationKey
+            if validations.contains(key) { cache.markValidated(); return }
             try validateImmutableValue()
-            cache.markValidated()
+            validations.insert(key); cache.markValidated()
         }
+        /// Must stay a pure function of `validationKey`'s bytes: no clock, file, database, process or caller state.
+        /// The shared validation cache reuses a success for identical bytes, so any other input would be skipped.
         private func validateImmutableValue() throws {
             _ = try record.encoded
             guard artifacts.count == record.operands.count else { throw PreparationStoreError.corruptRecord }

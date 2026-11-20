@@ -1541,7 +1541,7 @@ final class MachineUpdateReplacementTests: XCTestCase {
         }
         XCTAssertThrowsError(try escaped.read()) { XCTAssertEqual($0 as? JournalLeaseError, .invalidated) }
         let wrong = MachineUpdateRestartSnapshot(source: source,
-            configuration: .init(record: snapshot.configuration.record, artifacts: []), backend: snapshot.backend)
+            configuration: .init(record: snapshot.configuration.record, artifacts: [], caches: .unshared()), backend: snapshot.backend)
         XCTAssertThrowsError(try store.withCurrentMachineUpdateRestartSnapshot(wrong,
             directory: f.directory, restart: restart) { _ in XCTFail("Changed archive reached the reader") }) {
             XCTAssertEqual($0 as? PreparationStoreError, .staleRevision)
@@ -7449,8 +7449,12 @@ final class MachineUpdateReplacementTests: XCTestCase {
 
             let archive = try build(boundaries: [boundary])
             let encoded = try archive.record.encoded
+            // One store's caches, warmed by a valid decode. Changed bytes below must still be validated from scratch.
+            let caches = PreparationEpochDecodeCaches.unshared()
             let reopened = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: encoded,
-                artifacts: archive.artifacts, candidate: candidate)
+                artifacts: archive.artifacts, candidate: candidate, caches: caches)
+            XCTAssertEqual(try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: encoded,
+                artifacts: archive.artifacts, candidate: candidate, caches: caches).record, archive.record)
             XCTAssertEqual(reopened.record, archive.record)
             XCTAssertEqual(try reopened.inventory(), plan.inventory)
             XCTAssertEqual(try reopened.completionIntent(), recorded)
@@ -7463,9 +7467,33 @@ final class MachineUpdateReplacementTests: XCTestCase {
             bytes[bytes.startIndex] ^= 1
             tampered[index] = .init(kind: policy.kind, accountID: policy.accountID, bytes: bytes)
             XCTAssertThrowsError(try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: encoded,
-                artifacts: tampered, candidate: candidate)) {
+                artifacts: tampered, candidate: candidate, caches: caches)) {
                     XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
                 }
+            // The decode above warmed this store's caches. Identical epoch bytes reuse them; any other bytes are
+            // validated from scratch and fail, so the cache never vouches for a changed or different row set.
+            let epoch = try reopened.configuration(), backend = try reopened.backend()
+            try MachineUpdateConfigurationEpoch.Archive(record: epoch.record, artifacts: epoch.artifacts, caches: caches).validate()
+            try MachineUpdateBackendEpoch.Archive(record: backend.record, artifacts: backend.artifacts, caches: caches)
+                .validate(epoch: epoch)
+            var changed = epoch.artifacts
+            let last = changed.index(before: changed.endIndex)
+            var tail = changed[last].bytes
+            tail[tail.index(before: tail.endIndex)] ^= 1
+            changed[last] = .init(kind: changed[last].kind, account: changed[last].account, bytes: tail)
+            XCTAssertThrowsError(try MachineUpdateConfigurationEpoch.Archive(record: epoch.record, artifacts: changed,
+                caches: caches).validate()) { XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord) }
+            XCTAssertThrowsError(try MachineUpdateConfigurationEpoch.Archive(record: epoch.record,
+                artifacts: Array(epoch.artifacts.dropLast()), caches: caches).validate()) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord)
+                }
+            if let first = backend.artifacts.first {
+                var rows = backend.artifacts, payload = first.bytes
+                payload[payload.startIndex] ^= 1
+                rows[0] = .init(kind: first.kind, accountID: first.accountID, bytes: payload)
+                XCTAssertThrowsError(try MachineUpdateBackendEpoch.Archive(record: backend.record, artifacts: rows, caches: caches)
+                    .validate(epoch: epoch)) { XCTAssertEqual($0 as? PreparationStoreError, .corruptRecord) }
+            }
         }
     }
 
