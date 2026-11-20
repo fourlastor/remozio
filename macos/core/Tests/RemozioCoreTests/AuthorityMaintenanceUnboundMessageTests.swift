@@ -50,14 +50,12 @@ final class AuthorityMaintenanceUnboundMessageTests: XCTestCase {
     }
     func testCommandIdleRefusesEachOutstandingPairingOwner() throws {
         let admission = try AuthorityMaintenancePairingAdmission(accountID: bytes(2), incarnation: bytes(8))
-        try admission.requireUnboundCommandIdle()
-        func refuses() {
-            XCTAssertThrowsError(try admission.requireUnboundCommandIdle()) {
-                guard case AuthorityPairingSetupError.unavailable = $0 else { return XCTFail("Unexpected error: \($0)") }
-            }
+        try admission.withUnboundCommandIdle {}
+        func refuses(_ expected: AuthorityMaintenancePairingAdmission.UnboundCommandError = .busy) {
+            XCTAssertThrowsError(try admission.withUnboundCommandIdle {}) { XCTAssertEqual($0 as? AuthorityMaintenancePairingAdmission.UnboundCommandError, expected) }
         }
         let stage = try admission.reserveStage()
-        refuses(); stage.close(); try admission.requireUnboundCommandIdle()
+        refuses(); stage.close(); try admission.withUnboundCommandIdle {}
         let connection = try admission.openConnection(attemptID: bytes(3), revision: bytes(4))
         refuses()
         _ = try connection.blockNewStages(matching: connection.binding)
@@ -69,6 +67,6 @@ final class AuthorityMaintenanceUnboundMessageTests: XCTestCase {
             directoryID: bytes(13), ownerUID: 501, gate: .init(device: 1, inode: 2))
         try shutdown.retainCloseMarker(marker)
         XCTAssertEqual(try admission.claimCloseMarker(), marker)
-        refuses(); admission.close(); refuses()
+        refuses(.stopping); admission.close(); refuses(.stopping)
     }
 }

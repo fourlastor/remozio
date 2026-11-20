@@ -6,10 +6,14 @@ struct RuntimeMaintenanceAdmissionProjection: Equatable, Sendable, CustomStringC
     let requiresLocalHold: Bool
     let needsOwnerRecovery: Bool
     let attemptID: Data?, revision: Data?
+    let startupMacID: Data?, startupInstallationID: Data?
+    let startupAccount: RuntimeMaintenanceWindowRecord.Account?
+    let startupRecord: RuntimeMaintenanceWindowRecord?
     var description: String { "RuntimeMaintenanceAdmissionProjection(redacted)" }
     var debugDescription: String { description }
     private init() {
         requiresLocalHold = true; needsOwnerRecovery = true; attemptID = nil; revision = nil
+        startupMacID = nil; startupInstallationID = nil; startupAccount = nil; startupRecord = nil
     }
     /// A changed startup scope retains closure and exposes recovery without terminating the host.
     static func startup(record: RuntimeMaintenanceWindowRecord?, macID: Data, installationID: Data,
@@ -27,16 +31,18 @@ struct RuntimeMaintenanceAdmissionProjection: Equatable, Sendable, CustomStringC
               registration.macID == macID, registration.installationID == installationID else {
             throw RuntimePreparationError.changedScope
         }
-        guard let record else { requiresLocalHold = false; needsOwnerRecovery = false; attemptID = nil; revision = nil; return }
+        startupMacID = macID; startupInstallationID = installationID; startupAccount = account
+        guard let record else { startupRecord = nil; requiresLocalHold = false; needsOwnerRecovery = false; attemptID = nil; revision = nil; return }
         guard record.scope.macID == macID, record.scope.installationID == installationID else {
             throw RuntimePreparationError.changedScope
         }
         guard record.scope.authority.accountID == account.accountID else {
-            requiresLocalHold = false; needsOwnerRecovery = false; attemptID = nil; revision = nil; return
+            startupRecord = nil; requiresLocalHold = false; needsOwnerRecovery = false; attemptID = nil; revision = nil; return
         }
         guard record.scope.authority == account,
               let gate = registration.accounts.first(where: { $0.accountID == account.accountID }),
               record.gate == nil || record.gate?.identity == gate.identity else { throw RuntimePreparationError.changedScope }
+        startupRecord = record
         requiresLocalHold = record.phase != .restored
         needsOwnerRecovery = record.phase == .needsOwnerRecovery
         attemptID = record.id; revision = record.revision

@@ -34,6 +34,7 @@ struct AuthorityMaintenanceBinding: Equatable, Sendable {
 /// Stage reservations and the maintenance block share one lock. Neither grants idle or shutdown authority.
 final class AuthorityMaintenancePairingAdmission: Sendable {
     enum TransferError: Error, Equatable { case stagesPending(Int) }
+    enum UnboundCommandError: Error, Equatable { case busy, stopping }
     private struct State {
         var closed = false
         var connections = Set<UUID>(), stages: [UUID: Int] = [:]
@@ -78,6 +79,14 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         try state.withLock {
             guard !$0.closed else { throw AuthorityPairingSetupError.unavailable }
             guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+            return incarnation
+        }
+    }
+    /// Unbound release treats a terminating owner as a refusal, never as retryable pairing contention.
+    func liveUnboundIncarnation(accountID: Data) throws -> Data {
+        try state.withLock {
+            guard accountID == self.accountID else { throw RuntimePreparationError.changedScope }
+            guard !$0.closed, !$0.closing else { throw UnboundCommandError.stopping }
             return incarnation
         }
     }
@@ -151,11 +160,15 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         }
     }
     var hasArmedShutdown: Bool { state.withLock { !$0.closed && $0.armed != nil } }
-    /// Inspection only. The account command guard must still exclude an earlier validated arm or stop.
-    func requireUnboundCommandIdle() throws {
+    /// Lock order is hold then pairing. The synchronous body mutates the already locked hold only.
+    /// It must not acquire an earlier lock, access storage, await or perform an RPC.
+    func withUnboundCommandIdle<T: Sendable>(_ body: () throws -> T) throws -> T {
         try state.withLock {
-            guard !$0.closed, !$0.closing, $0.armed == nil, $0.blocker == nil,
-                  $0.connections.isEmpty, $0.stages.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+            guard !$0.closed, !$0.closing else { throw UnboundCommandError.stopping }
+            guard $0.armed == nil, $0.blocker == nil, $0.connections.isEmpty, $0.stages.isEmpty else {
+                throw UnboundCommandError.busy
+            }
+            return try body()
         }
     }
     func claimCloseMarker() throws -> AuthorityMaintenanceCloseMarker? {
