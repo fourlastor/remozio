@@ -1,0 +1,67 @@
+name: Profile core fixtures
+on:
+  push:
+    branches: ['profile/**']
+jobs:
+  profile:
+    runs-on: macos-26
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [base, change]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 3
+      - name: Select sources
+        if: matrix.flavor == 'base'
+        run: git checkout HEAD~2 -- macos/core && git log -3 --oneline
+      - name: Build tests
+        run: swift build --package-path macos/core --build-tests --triple arm64-apple-macosx26.0 -Xswiftc -O
+      - name: Run changed tests
+        if: matrix.flavor == 'change'
+        run: |
+          bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
+          for t in RemozioCoreTests.PreparationImmutableValidationCacheTests RemozioCoreTests.PreparationImmutableTupleDecodeCacheTests \
+            RemozioCoreTests.MachineUpdateReplacementTests/testInstalledReleaseArchiveRequiresAllFilesAndFreshPairedPolicy \
+            RemozioCoreTests.MachineUpdateRetainedSetupMaterialValueTests; do
+            status=0; "$(xcrun -f xctest)" -XCTest "$t" "$bundle" > test.log 2>&1 || status=$?
+            grep -E "error|failed|passed \(|Executed" test.log | tail -40 || true
+            test "$status" -eq 0
+          done
+      - name: Profile methods
+        run: |
+          bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
+          xctest=$(xcrun -f xctest)
+          mkdir -p prof
+          while read -r t; do
+            [ -z "$t" ] && continue
+            n=$(echo "$t" | tr '/.' '__')
+            /usr/bin/time -l "$xctest" -XCTest "$t" "$bundle" > "prof/$n.plain.log" 2>&1 || true
+            xcrun xctrace record --template 'Time Profiler' --output "prof/$n.trace" --no-prompt \
+              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.trace.log" 2>&1 || true
+            xcrun xctrace export --input "prof/$n.trace" --toc > "prof/$n.toc.xml" 2>/dev/null || true
+            xcrun xctrace export --input "prof/$n.trace" \
+              --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/$n.xml" 2>/dev/null || true
+            { grep -E "passed \(|real" "prof/$n.plain.log"; python3 scripts/profile/summarize2.py "prof/$n.xml" | head -120; } > "prof/$n.summary.txt" 2>&1 || true
+            xcrun xctrace record --template 'System Trace' --output "prof/$n.sys.trace" --no-prompt \
+              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.sys.log" 2>&1 || true
+            xcrun xctrace export --input "prof/$n.sys.trace" --toc > "prof/$n.sys.toc.xml" 2>/dev/null || true
+            for schema in syscall; do
+              xcrun xctrace export --input "prof/$n.sys.trace" \
+                --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$schema\"]" > "prof/$n.sys.$schema.xml" 2>/dev/null || true
+            done
+            python3 scripts/profile/syscalls.py "prof/$n.sys.syscall.xml" >> "prof/$n.summary.txt" 2>&1 || true
+            echo "=== $t"; cat "prof/$n.summary.txt"
+          done < scripts/profile/methods.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: core-profile-${{ matrix.flavor }}
+          path: |
+            prof/*.log
+            prof/*.summary.txt
+            prof/*.xml
+            !prof/*.sys.syscall.xml
+          retention-days: 7
