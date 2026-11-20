@@ -53,6 +53,7 @@ struct PreparationEpochDecodeCaches: @unchecked Sendable {
     let configurationValidations: PreparationImmutableValidationCache
     let backends: PreparationImmutableTupleDecodeCache<MachineUpdateBackendEpoch.Capture>
     let backendValidations: PreparationImmutableValidationCache
+    /// Returns a fresh, empty set. "Unshared" means no other owner holds it; the caller decides how long to reuse it.
     static func unshared() -> Self {
         .init(configurations: .init(), configurationValidations: .init(), backends: .init(), backendValidations: .init())
     }

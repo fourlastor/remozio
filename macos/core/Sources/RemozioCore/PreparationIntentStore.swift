@@ -24,7 +24,8 @@ public final class PreparationIntentStore {
     private let macID: Data
     private let didCommit: (() throws -> Void)?
     private let inventoryRecordLimit: Int32
-    /// Decode and pure-validation caches for immutable epoch archives, for the life of this store only.
+    /// Decode and pure-validation caches for immutable epoch archives. `.unshared()` gives this store its own set,
+    /// which no other store sees; the store reuses it for every epoch archive it loads, for its whole life.
     private let epochCaches = PreparationEpochDecodeCaches.unshared()
     private var active = false
     private var unavailable = false
