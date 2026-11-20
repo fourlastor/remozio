@@ -234,6 +234,64 @@ actor AuthorityMaintenanceXPCClient {
             return .init(accountID: response.accountID, incarnation: response.incarnation, observer: ObjectIdentifier(lifetime))
         } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
+    /// The native driver authenticates both replies. Owned drivers remain unavailable to root.
+    func observeUnboundGate(joined: SetupRetainedOrphanClaim.Joined, row: RuntimeMaintenanceWindowRecord,
+        gate: PreparationFileIdentity, until deadline: ContinuousClock.Instant) async throws -> VerifiedUnboundGateObservation {
+        if getuid() == 0 {
+            guard geteuid() == 0, driver is NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        } else { try RuntimeMaintenanceOwnedControl.require() }
+        guard row.scope.authority.accountID == context.accountID, row.scope.installationID == context.installationID,
+              row.id == context.attemptID, gate == context.gate, binding == nil else {
+            throw RuntimePreparationError.changedScope
+        }
+        let proof = try await observeIncarnation(until: deadline)
+        try enter(); defer { busy = false }
+        do {
+            try proof.requireObserved(by: self)
+            let challenge = try joined.issueUnboundGateChallenge(row: row, gate: gate, probedIncarnation: proof.incarnation)
+            let bytes = try challenge.request.encoded
+            let reply = try await invokeUnboundGate(bytes, until: deadline)
+            try proof.requireObserved(by: self)
+            let response = try AuthorityMaintenanceUnboundGateResponse.decode(reply)
+            guard response.request == challenge.request, response.request.authorityIncarnation == proof.incarnation else {
+                throw RuntimePreparationError.changedScope
+            }
+            try challenge.requireCurrent(joined: joined, row: row, gate: gate)
+            _ = try response.completedGateReadback()
+            return .init(challenge: challenge, response: response)
+        } catch { finish(); throw error }
+    }
+    private func invokeUnboundGate(_ bytes: Data, until deadline: ContinuousClock.Instant) async throws -> Data {
+        try Task.checkCancellation()
+        let expectedState = state, verify = self.verify
+        if let recoveryPhases { try await recoveryPhases.run(verify) } else { try verify() }
+        guard state == expectedState, state == .greeted, binding == nil, lifetime.ifActive(), ContinuousClock.now < deadline else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        let id = UUID(), end = min(deadline, .now.advanced(by: timeout))
+        let result: AuthorityMaintenanceClientReply = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = (id, continuation)
+                guard lifetime.begin(id) else { finish(); return }
+                timer = Task { [weak self] in
+                    do { try await ContinuousClock().sleep(until: end) } catch { return }; await self?.expire(id)
+                }
+                let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self, lifetime] value in
+                    guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }
+                }
+                guard lifetime.ifActive({ driver.readGate(bytes, reply) }) else { finish(); return }
+            }
+        } onCancel: { [weak self, lifetime, driver] in
+            lifetime.close(); driver.close(); Task { await self?.close() }
+        }
+        try Task.checkCancellation()
+        if let recoveryPhases { try await recoveryPhases.run(verify) } else { try verify() }
+        guard state == expectedState, lifetime.ifActive(), lifetime.reply(id) != nil,
+              case .bytes(let response) = result, let response else {
+            throw AuthorityMaintenanceClientError.needsOwnerRecovery
+        }
+        return response
+    }
     func observe(until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceChannelResponse {
         guard state == .open else { throw AuthorityMaintenanceClientError.invalidState }; try enter(); defer { busy = false }
         return try await send(.observe, until: deadline)
@@ -1089,6 +1147,26 @@ actor AuthorityMaintenanceXPCClient {
         state = .closed; if preservingReply { lifetime.invalidate() } else { lifetime.close() }; timer?.cancel(); timer = nil
         pending = nil; driver.close()
         if let value { p?.1.resume(returning: value) } else { p?.1.resume(throwing: error) }
+    }
+}
+
+/// Only the authenticated exchange verifier can construct this writer input.
+struct VerifiedUnboundGateObservation: Sendable {
+    private let challenge: SetupRetainedOrphanClaim.Joined.UnboundGateChallenge
+    private let response: AuthorityMaintenanceUnboundGateResponse
+    fileprivate init(challenge: SetupRetainedOrphanClaim.Joined.UnboundGateChallenge,
+        response: AuthorityMaintenanceUnboundGateResponse) {
+        self.challenge = challenge; self.response = response
+    }
+    var request: AuthorityMaintenanceUnboundRequest { response.request }
+    func requireCurrent(joined: SetupRetainedOrphanClaim.Joined, row: RuntimeMaintenanceWindowRecord,
+        gate: PreparationFileIdentity) throws {
+        try challenge.requireCurrent(joined: joined, row: row, gate: gate)
+        guard response.request == challenge.request else { throw RuntimePreparationError.changedScope }
+        _ = try response.completedGateReadback()
+    }
+    func completedGateReadback() throws -> RuntimeMaintenanceWindowRecord.GateReadback {
+        try response.completedGateReadback()
     }
 }
 

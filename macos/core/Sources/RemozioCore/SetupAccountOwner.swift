@@ -354,6 +354,10 @@ public final class SetupAccountOwner: @unchecked Sendable {
             return .init(admission: admission, reply: reply, record: true, activity: activity, endObserver: nil, ownedFixture: true)
         }
         fileprivate var recordIsHeld: Bool { lock.withLock { record && !closed } }
+        /// The supervisor phase also proves its private origin. Released admission cannot authorize startup metadata.
+        func requireUnboundStartupAdmission() throws {
+            try lock.withLock { guard record, !closed else { throw Released() } }
+        }
         /// A real record's hold cannot be used to construct an Owned phase fixture.
         func requireFreshOwnedPhaseFixture() throws {
             try RuntimeMaintenanceOwnedControl.require()

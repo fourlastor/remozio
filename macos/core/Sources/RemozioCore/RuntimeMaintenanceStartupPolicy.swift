@@ -41,7 +41,7 @@ enum RuntimeMaintenanceStartupPolicy {
         revision: Data = AccountPreparationIntent.randomID()) throws -> Record {
         let next = try Record(id: previous.id, revision: revision, purpose: previous.purpose,
             scope: previous.scope, phase: phase, operation: operation ?? previous.operation,
-            service: service, failure: failure, shutdownBinding: previous.shutdownBinding)
+            service: service, failure: failure, shutdownBinding: previous.shutdownBinding, unboundRelease: previous.unboundRelease)
         try next.requireReplacing(previous); return next
     }
 }

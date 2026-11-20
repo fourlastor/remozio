@@ -151,6 +151,13 @@ final class AuthorityMaintenancePairingAdmission: Sendable {
         }
     }
     var hasArmedShutdown: Bool { state.withLock { !$0.closed && $0.armed != nil } }
+    /// Inspection only. The account command guard must still exclude an earlier validated arm or stop.
+    func requireUnboundCommandIdle() throws {
+        try state.withLock {
+            guard !$0.closed, !$0.closing, $0.armed == nil, $0.blocker == nil,
+                  $0.connections.isEmpty, $0.stages.isEmpty else { throw AuthorityPairingSetupError.unavailable }
+        }
+    }
     func claimCloseMarker() throws -> AuthorityMaintenanceCloseMarker? {
         try state.withLock {
             guard !$0.closed, !$0.closing else { throw RuntimePreparationError.changedScope }

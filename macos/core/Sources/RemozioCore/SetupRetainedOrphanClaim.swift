@@ -133,6 +133,47 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
         func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord) throws {
             try requireCurrentAuthorization(); try claim.token.requireRestorationWindow(row)
         }
+        func requireUnboundAuthorizedOrigin(_ row: RuntimeMaintenanceWindowRecord) throws -> RuntimeMaintenanceWindowRecord {
+            try requireCurrentAuthorization()
+            let origin = try claim.token.requireUnboundAuthorizedOrigin(row)
+            try requireCurrentAuthorization()
+            return origin
+        }
+        func requireUnboundIntentReconciliation(_ row: RuntimeMaintenanceWindowRecord) throws {
+            try requireCurrentAuthorization(); try claim.token.requireUnboundIntentReconciliation(row)
+            try requireCurrentAuthorization()
+        }
+        func requireUnboundAuthorizedOriginInMemory(_ row: RuntimeMaintenanceWindowRecord) throws -> RuntimeMaintenanceWindowRecord {
+            try claim.token.requireUnboundAuthorizedOrigin(row)
+        }
+        func requireUnboundIntentInMemory(_ row: RuntimeMaintenanceWindowRecord) throws {
+            try claim.token.requireUnboundIntentReconciliation(row)
+        }
+        struct UnboundGateChallenge: Sendable {
+            let request: AuthorityMaintenanceUnboundRequest
+            private weak var issuer: Joined?
+            private let issuerID: ObjectIdentifier
+            fileprivate init(issuer: Joined, request: AuthorityMaintenanceUnboundRequest) {
+                self.issuer = issuer; issuerID = ObjectIdentifier(issuer); self.request = request
+            }
+            func requireCurrent(joined: Joined, row: RuntimeMaintenanceWindowRecord,
+                gate: PreparationFileIdentity) throws {
+                guard issuer === joined, issuerID == ObjectIdentifier(joined) else { throw RuntimePreparationError.changedScope }
+                try joined.requireUnboundIntentInMemory(row)
+                try request.requireWindow(row, gateIdentity: gate)
+            }
+        }
+        func issueUnboundGateChallenge(row: RuntimeMaintenanceWindowRecord, gate: PreparationFileIdentity,
+            probedIncarnation: Data) throws -> UnboundGateChallenge {
+            try requireCurrentAuthorization(); try requireUnboundIntentInMemory(row)
+            guard let descriptor = row.unboundRelease else { throw RuntimePreparationError.changedScope }
+            let request = try AuthorityMaintenanceUnboundRequest(kind: .gate,
+                installationID: row.scope.installationID, accountID: row.scope.authority.accountID,
+                attemptID: row.id, revision: row.revision, rowDigest: RuntimeMaintenanceUnboundRelease.digest(row),
+                pendingRevision: descriptor.pendingRevision, intentID: descriptor.intentID, gate: gate,
+                authorityIncarnation: probedIncarnation, challenge: AccountPreparationIntent.randomID())
+            return .init(issuer: self, request: request)
+        }
         /// Only the typed restoration slot can admit work after the general M12a ledger was sealed.
         func startRestoration(_ body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion)
             async throws -> SetupRetainedInvocationReservation.RestorationWork {
