@@ -40,6 +40,7 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
     let configuration: InstalledAuthorityCommandConfiguration
     let releaseActivity: ReleaseActivityBarrier
     let admissionStartup: AuthorityUpdateAdmissionStartup?
+    let maintenanceCommands = AuthorityMaintenanceCommandExclusion()
     private var startupActivity: ReleaseActivityToken?
     private let lock = NSLock()
     private let path: String
@@ -298,33 +299,85 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
             directoryID: account.directoryID, ownerUID: account.ownerUID, gate: gate)
     }
     fileprivate func prepareCloseMarker(service: AuthorityWakeService) async throws -> (@Sendable () throws -> Void)? {
+        let stop = try await maintenanceCommands.beginStop()
+        try stop.validate()
         guard let admission = service.armedMaintenanceCloseAdmission() else { return nil }
         let (current, _) = try await service.nativeMaintenanceScope()
-        guard current === admission, let marker = try admission.claimCloseMarker() else { return nil }
-        let activity = try releaseActivity.acquireShared(), configuration = configuration, path = path, requirement = requirement, selfPath = selfPath
+        guard current === admission else { return nil }
+        let configuration = configuration, path = path, requirement = requirement, selfPath = selfPath
+        return try Self.prepareCloseMarker(stop: stop, admission: admission, activity: releaseActivity,
+            owner: 0, openDirectory: { marker in
+                let path = try RuntimePreparationPaths(accountID: marker.binding.accountID).serviceDirectory
+                return try ProtectedSetupDirectory(anchor: "/", relativePath: String(path.dropFirst()), owner: 0,
+                    visibility: .sharedMetadata, createIfMissing: false)
+            }, verifyCurrent: {
+                guard getuid() == 0, geteuid() == 0, try ProtectedServiceConfiguration.read(path: path) == configuration.canonicalBytes,
+                      try DynamicCodeValidation.selfPath() == selfPath else { throw RuntimePreparationError.changedScope }
+                try DynamicCodeValidation.validateSelf(requirement: requirement)
+            })
+    }
+    /// Ordinary-owner fixtures use the same preparer. Root cannot enter through this path.
+    static func prepareOwnedCloseMarker(owner: uid_t, commands: AuthorityMaintenanceCommandExclusion,
+        admission: AuthorityMaintenancePairingAdmission, activity: ReleaseActivityBarrier,
+        directory: ProtectedSetupDirectory) async throws -> (@Sendable () throws -> Void)? {
+        guard owner > 0, getuid() == owner, geteuid() == owner else { throw JournalLeaseError.unsafeMetadata }
+        try directory.validate()
+        let location = URL(fileURLWithPath: directory.path)
+        let anchor = location.deletingLastPathComponent().path, name = location.lastPathComponent
+        let stop = try await commands.beginStop(); try stop.validate()
+        return try prepareCloseMarker(stop: stop, admission: admission, activity: activity, owner: owner,
+            openDirectory: { _ in
+                try ProtectedSetupDirectory(anchor: anchor, relativePath: name, owner: owner,
+                    visibility: .sharedMetadata, createIfMissing: false)
+            }, verifyCurrent: {
+                guard getuid() == owner, geteuid() == owner else { throw JournalLeaseError.invalidated }
+            })
+    }
+    private static func prepareCloseMarker(stop: AuthorityMaintenanceCommandExclusion.Stop,
+        admission: AuthorityMaintenancePairingAdmission, activity: ReleaseActivityBarrier, owner: uid_t,
+        openDirectory: @escaping @Sendable (AuthorityMaintenanceCloseMarker) throws -> ProtectedSetupDirectory,
+        verifyCurrent: @escaping @Sendable () throws -> Void) throws -> (@Sendable () throws -> Void)? {
+        try stop.validate(); try verifyCurrent()
+        guard let marker = try admission.claimCloseMarker() else { return nil }
+        let activity = try activity.acquireShared()
         return {
             defer { activity.close() }
             func verify() throws {
-                guard getuid() == 0, geteuid() == 0, try ProtectedServiceConfiguration.read(path: path) == configuration.canonicalBytes,
-                      try DynamicCodeValidation.selfPath() == selfPath else { throw RuntimePreparationError.changedScope }
-                try DynamicCodeValidation.validateSelf(requirement: requirement); try activity.validate(); try admission.requireCloseMarker(marker)
+                try stop.validate(); try verifyCurrent(); try activity.validate(); try admission.requireCloseMarker(marker)
             }
             try verify()
-            let path = try RuntimePreparationPaths(accountID: marker.binding.accountID).serviceDirectory
-            let directory = try ProtectedSetupDirectory(anchor: "/", relativePath: String(path.dropFirst()), owner: 0,
-                visibility: .sharedMetadata, createIfMissing: false)
+            let directory = try openDirectory(marker)
             defer { directory.close() }
             let previous = try ProtectedServiceConfiguration.readOptionalPrivate(anchor: directory.path,
-                relativePath: AuthorityMaintenanceCloseMarker.fileName, owner: 0)
+                relativePath: AuthorityMaintenanceCloseMarker.fileName, owner: owner)
             if let previous {
                 let old = try AuthorityMaintenanceCloseMarker.decode(previous)
                 guard old.binding.accountID == marker.binding.accountID, old.macID == marker.macID,
                       old.installationID == marker.installationID, old.directoryID == marker.directoryID else { throw RuntimePreparationError.changedScope }
             }
+            try verify()
+            guard try stop.claimClosePublication() else { return }
             try AdministrativeSetupPublication.replaceMaintenanceCloseMarker(marker.encoded, expected: previous,
-                directory: directory, owner: 0, verify: verify)
-            try AuthorityMaintenanceCloseMarker.readback(marker); try verify()
+                directory: directory, owner: owner, verify: verify)
+            try AuthorityMaintenanceCloseMarker.readback(marker, directory: directory, owner: owner); try verify()
         }
+    }
+    /// Both installed and ordinary-owner runners join the command owner before closing their actual resources.
+    static func maintenanceRuntimeInstance(commands: AuthorityMaintenanceCommandExclusion,
+        start: @escaping @Sendable () async throws -> Void,
+        close: @escaping @Sendable () async throws -> Void,
+        retired: @escaping @Sendable () async -> Bool,
+        prepareCloseMarker: @escaping @Sendable () async throws -> (@Sendable () throws -> Void)?) -> AuthorityRuntimeInstance {
+        var instance = AuthorityRuntimeInstance(start: start, close: {
+            var failure: (any Error)?
+            var stop: AuthorityMaintenanceCommandExclusion.Stop?
+            do { stop = try await commands.beginStop(); try stop?.validate() } catch { failure = error }
+            defer { withExtendedLifetime(stop) {} }
+            do { try await close() } catch { if failure == nil { failure = error } }
+            if let failure { throw failure }
+        }, retired: retired)
+        instance.prepareCloseMarker = prepareCloseMarker
+        return instance
     }
     /// A fresh expectation for one healthy maintenance readiness check. It reads the protected gateway runtime with the
     /// same loader and verification as the gateway extension monitor. No machine store or hold lock is held.
@@ -393,6 +446,16 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
                 guard try current.runtimeMaintenanceHealthyRecord(request, account: account, incarnation: incarnation,
                     restoring: restoring, candidate: release) == row else { throw RuntimePreparationError.changedScope }
             }
+        }
+    }
+    /// Each call owns and closes a fresh protected read. The operation supplies its actual admission epoch.
+    func captureUnboundMaintenanceRecord(_ request: AuthorityMaintenanceUnboundRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data) throws -> RuntimeMaintenanceWindowRecord {
+        guard account.accountID == configuration.command.accountID,
+              account.ownerUID == configuration.command.callerUID else { throw RuntimePreparationError.changedScope }
+        return try withGatewayRecoveryMachine { current, release in
+            try current.runtimeMaintenanceUnboundCommandRecord(request, account: account,
+                incarnation: incarnation, candidate: release)
         }
     }
     /// Called only by the accepted endpoint after its original binding check and before releasing that binding.
@@ -681,7 +744,7 @@ extension AuthorityRuntimeRunner {
                         }
                     }
                     let maintenance = AuthorityMaintenanceStartup.prepare { try registration.prepareMaintenance(service: service) }
-                    var instance = AuthorityRuntimeInstance(start: {
+                    return InstalledAuthorityCommandRegistration.maintenanceRuntimeInstance(commands: registration.maintenanceCommands, start: {
                         let activity = try registration.releaseActivity.acquireShared()
                         do {
                             _ = try await recovery.prepare(verifyCurrent: {
@@ -693,10 +756,12 @@ extension AuthorityRuntimeRunner {
                             after: { try await settings.start(); try await monitor?.start() })
                     }, close: {
                         await monitor?.close(); await consumerRecovery.close(); await settings.close()
-                        try await service.close(); try registration.close()
-                    }, retired: { await service.isRetired })
-                    instance.prepareCloseMarker = { try await registration.prepareCloseMarker(service: service) }
-                    return instance
+                        var failure: (any Error)?
+                        do { try await service.close() } catch { failure = error }
+                        do { try registration.close() } catch { if failure == nil { failure = error } }
+                        if let failure { throw failure }
+                    }, retired: { await service.isRetired },
+                    prepareCloseMarker: { try await registration.prepareCloseMarker(service: service) })
                 } catch { try? registration.close(); throw error }
             }, report: report)
     }

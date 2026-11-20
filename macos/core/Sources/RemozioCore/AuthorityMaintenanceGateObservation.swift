@@ -23,4 +23,29 @@ enum AuthorityMaintenanceGateObservation {
         try token?.validate()
         return try .init(request: request, authorityIncarnation: incarnation, hold: held, admission: admission)
     }
+    /// Both protected reads close before returning. No store or hold lock crosses the ordinary admission probe.
+    static func captureUnbound(request: AuthorityMaintenanceUnboundRequest, incarnation: Data,
+        hold: AuthorityMaintenanceAdmissionHold,
+        boundary: UpdateAdmissionBoundary, gateIdentity: PreparationFileIdentity,
+        read: () throws -> RuntimeMaintenanceWindowRecord) throws -> AuthorityMaintenanceUnboundGateResponse {
+        guard request.kind == .gate, request.authorityIncarnation == incarnation else {
+            throw RuntimePreparationError.changedScope
+        }
+        let before = try read()
+        try request.requireWindow(before, gateIdentity: gateIdentity)
+        let held = try hold.unboundObservation(before, incarnation: incarnation)
+        var token: UpdateAdmissionLease?
+        let admission: RuntimeMaintenanceWindowRecord.GateReadback.Admission
+        do { token = try boundary.acquireAdmission(); try token?.validate(); admission = .available }
+        catch UpdateAdmissionBarrierError.busy { admission = .busy }
+        catch { admission = .unavailable }
+        defer { token?.close() }
+        guard try read() == before,
+              try hold.unboundObservation(before, incarnation: incarnation) == held else {
+            throw RuntimePreparationError.changedScope
+        }
+        try token?.validate()
+        return try .init(request: request, hold: held, admission: admission)
+    }
+
 }

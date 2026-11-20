@@ -13,43 +13,52 @@ import Foundation
 /// Process-bound access. Root construction uses the installed registration and actual runtime owners.
 final class AuthorityMaintenanceChannelAccess: Sendable {
     let admission: AuthorityMaintenancePairingAdmission
+    let commandExclusion: AuthorityMaintenanceCommandExclusion
     let acquireActivity: @Sendable () throws -> ReleaseActivityToken?
     private let processID = getpid(), owner = getuid()
     private let marker: @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker?
     private let reopen: @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void
     private let readGate: @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse
+    private let readBusyGateHold: @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse.Readback.Hold
     private let healthyOpen: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord?
     private let healthyReopen: @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
     private let requireLive: @Sendable () throws -> Void
-    private init(admission: AuthorityMaintenancePairingAdmission, acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
+    private init(admission: AuthorityMaintenancePairingAdmission, commandExclusion: AuthorityMaintenanceCommandExclusion = .init(), acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
         marker: @escaping @Sendable (AuthorityMaintenanceBinding, AuthorityMaintenanceChannelRequest) throws -> AuthorityMaintenanceCloseMarker? = { _, _ in nil },
         reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() },
         readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope },
+        readBusyGateHold: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse.Readback.Hold = { _ in throw RuntimePreparationError.changedScope },
         healthyOpen: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? = { _ in nil },
         healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope },
         requireLive: @escaping @Sendable () throws -> Void = {}) {
-        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen; self.readGate = readGate; self.healthyOpen = healthyOpen; self.healthyReopen = healthyReopen
+        self.commandExclusion = commandExclusion
+        self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen; self.readGate = readGate; self.healthyOpen = healthyOpen; self.healthyReopen = healthyReopen; self.readBusyGateHold = readBusyGateHold
         self.requireLive = requireLive
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
+        commandExclusion: AuthorityMaintenanceCommandExclusion? = nil,
         acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken? = { nil },
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
         reopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, @Sendable () throws -> Void) throws -> Void = { _, release in try release() },
         readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope },
+        readBusyGateHold: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse.Readback.Hold = { _ in throw RuntimePreparationError.changedScope },
         healthyOpen: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? = { _ in nil },
         healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope }) throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return .init(admission: admission, acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen, readGate: readGate, healthyOpen: healthyOpen, healthyReopen: healthyReopen)
+        return .init(admission: admission, commandExclusion: commandExclusion ?? .init(), acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen, readGate: readGate, readBusyGateHold: readBusyGateHold, healthyOpen: healthyOpen, healthyReopen: healthyReopen)
     }
     static func openNative(service: AuthorityWakeService, registration: InstalledAuthorityCommandRegistration) async throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         let (admission, incarnation) = try await service.nativeMaintenanceScope()
         let account = try registration.captureMaintenanceAccount(); try admission.requireAccount(account.accountID)
+        let startup = registration.admissionStartup, hold = startup?.maintenanceHold
+        let gate = startup?.registration.accounts.first { $0.accountID == account.accountID }?.identity
+        let installationID = registration.configuration.installationID
         // Each check reads the expectation again, outside the actor and outside any hold lock. A change during the check refuses.
         let requireReady: @Sendable () async throws -> Void = {
             let expected = try registration.healthyMaintenanceReadiness()
@@ -57,7 +66,7 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try await service.requireHealthyMaintenanceReadiness(expected)
             guard try registration.healthyMaintenanceReadiness() == expected else { throw RuntimePreparationError.changedScope }
         }
-        return .init(admission: admission, acquireActivity: { try registration.releaseActivity.acquireShared() }, check: {
+        return .init(admission: admission, commandExclusion: registration.maintenanceCommands, acquireActivity: { try registration.releaseActivity.acquireShared() }, check: {
             try service.validateNativeMaintenanceIdentity()
             try registration.validateMaintenanceCommand($0, account: account, incarnation: incarnation, admission: admission)
             try service.validateNativeMaintenanceIdentity()
@@ -71,6 +80,10 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try service.validateNativeMaintenanceIdentity()
             let result = try registration.observeMaintenanceGate(request, account: account, incarnation: incarnation)
             try service.validateNativeMaintenanceIdentity(); return result
+        }, readBusyGateHold: { request in
+            guard request.accountID == account.accountID, request.installationID == installationID,
+                  request.gate == gate, let hold else { throw RuntimePreparationError.changedScope }
+            return try hold.gateHold(attemptID: request.attemptID)
         }, healthyOpen: { q in
             try service.validateNativeMaintenanceIdentity()
             let row = try registration.captureHealthyMaintenanceOpen(q, account: account, incarnation: incarnation)
@@ -99,6 +112,14 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     }
     func observeGate(_ request: AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse {
         try validateIdentity(); let result = try readGate(request); try validateIdentity(); return result
+    }
+    /// Uses the actual cached hold under its own lock. Contention does not justify a synthetic hold observation.
+    func observeBusyGate(_ request: AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse {
+        try validateIdentity()
+        let incarnation = try observeIncarnation(accountID: request.accountID)
+        let hold = try readBusyGateHold(request)
+        try validateIdentity()
+        return try .init(request: request, authorityIncarnation: incarnation, hold: hold, admission: .busy)
     }
     func retainCloseMarker(_ shutdown: AuthorityMaintenancePairingAdmission.Shutdown, request: AuthorityMaintenanceChannelRequest) throws {
         if let value = try marker(shutdown.binding, request) { try shutdown.retainCloseMarker(value) }
@@ -181,7 +202,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                 tasks[id] = Task { [self] in
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
                     let result = await response(q)
-                    lock.withLock { releaseBudget(id); if !closed { reply(result.0) } }
+                    lock.withLock { releaseBudget(id); if !closed, !Task.isCancelled { reply(result.0) } }
                     if result.1 { close() }
                 }
             }
@@ -197,12 +218,15 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
                     let bytes: Data?
                     do {
-                        try Task.checkCancellation()
+                        let command = try access.commandExclusion.acquire(); defer { command.close() }
+                        try Task.checkCancellation(); try command.validate()
                         let activity = try access.acquireActivity(); defer { activity?.close() }
                         try activity?.validate(); let encoded = try access.observeGate(request).encoded
                         try activity?.validate(); try Task.checkCancellation(); onHandshake(); bytes = encoded
+                    } catch AuthorityMaintenanceCommandExclusion.AcquisitionError.busy {
+                        bytes = try? access.observeBusyGate(request).encoded
                     } catch { bytes = nil }
-                    lock.withLock { releaseBudget(id); if !closed { reply(bytes) } }
+                    lock.withLock { releaseBudget(id); if !closed, !Task.isCancelled { reply(bytes) } }
                     if bytes == nil { close() }
                 }
             }
@@ -255,10 +279,21 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     private func response(_ q: Request) async -> (Data?, Bool) {
         // A refused open echoes metadata only. No Connection exists until all open checks and capture succeed.
         var binding = q.binding ?? (try? access.admission.refusalBinding(accountID: q.accountID, attemptID: q.attemptID, revision: q.revision))
+        let command: AuthorityMaintenanceCommandExclusion.Command
+        do {
+            if q.action == .open || q.action == .cancel || q.action == .reopen {
+                command = try await access.commandExclusion.acquireWhenAvailable()
+            } else { command = try access.commandExclusion.acquire() }
+        } catch is CancellationError { return (nil, false) }
+        catch {
+            guard let binding else { return (nil, true) }
+            return (try? Response(request: q, binding: binding, work: nil, outcome: .refused).encoded, true)
+        }
+        defer { command.close() }
         var opened = false
         var transferred: AuthorityMaintenancePairingAdmission.Shutdown?
         do {
-            try Task.checkCancellation(); try access.validateIdentity()
+            try command.validate(); try Task.checkCancellation(); try access.validateIdentity()
             let activity = try access.acquireActivity(); defer { activity?.close() }
             try activity?.validate()
             if q.action == .open, let restoring = try await access.captureHealthyOpen(q) {
