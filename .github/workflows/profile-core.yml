@@ -1,0 +1,38 @@
+name: Profile core fixtures
+on:
+  push:
+    branches: ['profile/**']
+jobs:
+  profile:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build tests
+        run: swift build --package-path macos/core --build-tests --triple arm64-apple-macosx26.0 -Xswiftc -O
+      - name: Profile methods
+        run: |
+          bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
+          xctest=$(xcrun -f xctest)
+          mkdir -p prof
+          while read -r t; do
+            [ -z "$t" ] && continue
+            n=$(echo "$t" | tr '/.' '__')
+            /usr/bin/time -l "$xctest" -XCTest "$t" "$bundle" > "prof/$n.plain.log" 2>&1 || true
+            xcrun xctrace record --template 'Time Profiler' --output "prof/$n.trace" --no-prompt \
+              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.trace.log" 2>&1 || true
+            xcrun xctrace export --input "prof/$n.trace" --toc > "prof/$n.toc.xml" 2>/dev/null || true
+            xcrun xctrace export --input "prof/$n.trace" \
+              --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/$n.xml" 2>/dev/null || true
+            python3 scripts/profile/summarize.py "prof/$n.xml" "prof/$n.plain.log" > "prof/$n.summary.txt" 2>&1 || true
+            echo "=== $t"; cat "prof/$n.summary.txt"
+          done < scripts/profile/methods.txt
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: core-profile
+          path: |
+            prof/*.log
+            prof/*.summary.txt
+            prof/*.xml
+          retention-days: 7
