@@ -28,6 +28,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     private var restorationClaimID: UUID?
     private var restorationJoined = true
     private var savedTargetRecoveryTransition: PreparationIntentStore.RuntimeMaintenanceTransition?
+    private var unboundAuthorizedRecoveryTransition: PreparationIntentStore.RuntimeMaintenanceTransition?
     private let ownerUID = getuid()
     private var capturedBinding: SetupRetainedInvocationStatus.Binding?
     private var capturedWindow: SetupRetainedInvocationStatus.Window?
@@ -148,6 +149,24 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                   capturedBinding?.matches(receipt.record.scope) == true else { throw RuntimePreparationError.changedScope }
             try receipt.requireSavedTargetReconnectOrigin(receipt.record)
             savedTargetRecoveryTransition = receipt
+        }
+    }
+    func retainUnboundAuthorizedOriginTransition(_ receipt: PreparationIntentStore.RuntimeMaintenanceTransition,
+        invocation owner: SetupRetainedInvocation) throws {
+        defer { withExtendedLifetime(owner) {} }
+        guard getpid() == process, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
+        let authorized = try receipt.requireUnboundAuthorizedRecoveryOrigin()
+        try lock.withLock {
+            try requireAttached(owner)
+            guard capturedWindow == SetupRetainedInvocationStatus.Window(authorized),
+                  capturedBinding?.matches(authorized.scope) == true else { throw RuntimePreparationError.changedScope }
+            if let existing = unboundAuthorizedRecoveryTransition {
+                guard existing.record == receipt.record,
+                      try existing.requireUnboundAuthorizedRecoveryOrigin() == authorized else {
+                    throw PreparationStoreError.staleRevision
+                }
+            }
+            unboundAuthorizedRecoveryTransition = receipt
         }
     }
     /// A live in-process record needs its Joined origin. A settled record no longer has that origin.
@@ -335,17 +354,20 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         private let cancellation: SetupAuditUpgradeCancellation?
         private let validate: @Sendable () throws -> Void
         private let ownedExpiration: OwnedDeadlineControl?
+        private let unboundStartupPhase: Bool
         private let processID = getpid(), ownerUID = getuid()
         fileprivate init(executor: SetupAuditUpgradeWorkExecutor, hold: SetupAccountOwner.ExecutorAdmission, deadline: ContinuousClock.Instant? = nil,
             ownedExpiration: OwnedDeadlineControl? = nil, cancellation: SetupAuditUpgradeCancellation? = nil,
-            validate: @escaping @Sendable () throws -> Void = {}) {
+            validate: @escaping @Sendable () throws -> Void = {}, unboundStartupPhase: Bool = false) {
             self.executor = executor; self.hold = hold; self.deadline = deadline; self.ownedExpiration = ownedExpiration
             self.cancellation = cancellation; self.validate = validate
+            self.unboundStartupPhase = unboundStartupPhase
         }
         static func maintenanceRecovery(permit: SetupAccountOwner.MaintenanceRecoveryPhasePermit,
             deadline: ContinuousClock.Instant?, cancellation: SetupAuditUpgradeCancellation?,
             validate: @escaping @Sendable () throws -> Void) -> RestorationPhases {
-            .init(executor: permit.executor, hold: permit.held, deadline: deadline, cancellation: cancellation, validate: validate)
+            .init(executor: permit.executor, hold: permit.held, deadline: deadline, cancellation: cancellation,
+                validate: validate, unboundStartupPhase: true)
         }
         static func owned(executor: SetupAuditUpgradeWorkExecutor, hold: SetupAccountOwner.ExecutorAdmission, deadline: ContinuousClock.Instant? = nil,
             cancellation: SetupAuditUpgradeCancellation? = nil) throws -> RestorationPhases {
@@ -360,12 +382,22 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
         }
         func forAttempt(until deadline: ContinuousClock.Instant) throws -> RestorationPhases {
-            try requireProcess(); return .init(executor: executor, hold: hold, deadline: deadline, cancellation: cancellation, validate: validate)
+            try requireProcess(); return .init(executor: executor, hold: hold, deadline: deadline, cancellation: cancellation,
+                validate: validate, unboundStartupPhase: unboundStartupPhase)
         }
         func forOwnedAttempt(until deadline: ContinuousClock.Instant,
             expiration: OwnedDeadlineControl) throws -> RestorationPhases {
             try RuntimeMaintenanceOwnedControl.require(); try requireProcess()
-            return .init(executor: executor, hold: hold, deadline: deadline, ownedExpiration: expiration, cancellation: cancellation, validate: validate)
+            return .init(executor: executor, hold: hold, deadline: deadline, ownedExpiration: expiration, cancellation: cancellation,
+                validate: validate, unboundStartupPhase: unboundStartupPhase)
+        }
+        func requireUnboundStartupPhase() throws {
+            try requireUnboundStartupPhaseInMemory(); try validate(); try requireUnboundStartupPhaseInMemory()
+        }
+        func requireUnboundStartupPhaseInMemory() throws {
+            try requireProcess()
+            guard unboundStartupPhase else { throw JournalLeaseError.invalidated }
+            try hold.requireUnboundStartupAdmission()
         }
         private func requireDeadline(_ deadline: ContinuousClock.Instant?) throws {
             if let deadline, ContinuousClock.now >= deadline {
@@ -609,6 +641,44 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         func requireRestorationWindow(_ row: RuntimeMaintenanceWindowRecord) throws {
             guard getpid() == record.process else { throw JournalLeaseError.invalidated }
             try record.lock.withLock { try record.requireRestorationWindow(row, seal: seal, claim: claim) }
+        }
+        func requireUnboundAuthorizedOrigin(_ row: RuntimeMaintenanceWindowRecord) throws -> RuntimeMaintenanceWindowRecord {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            return try record.lock.withLock {
+                try record.requireRecovery(seal: seal, claim: claim)
+                let evidence = try record.recovery.requireJoined()
+                guard evidence.neverEntered, evidence.stopNeverPossible,
+                      row.purpose == .retainedRuntime, row.operation == .notStarted, row.service == .notStopped,
+                      row.shutdownBinding == nil, row.unboundRelease == nil,
+                      record.capturedBinding?.matches(row.scope) == true else { throw RuntimePreparationError.changedScope }
+                let authorized: RuntimeMaintenanceWindowRecord
+                if row.phase == .authorized { authorized = row }
+                else {
+                    guard row.phase == .needsOwnerRecovery, let receipt = record.unboundAuthorizedRecoveryTransition,
+                          receipt.record == row else { throw RuntimePreparationError.changedScope }
+                    authorized = try receipt.requireUnboundAuthorizedRecoveryOrigin()
+                }
+                guard record.capturedWindow == SetupRetainedInvocationStatus.Window(authorized) else {
+                    throw RuntimePreparationError.changedScope
+                }
+                return authorized
+            }
+        }
+        func requireUnboundIntentReconciliation(_ row: RuntimeMaintenanceWindowRecord) throws {
+            guard getpid() == record.process else { throw JournalLeaseError.invalidated }
+            try record.lock.withLock {
+                try record.requireRecovery(seal: seal, claim: claim)
+                let evidence = try record.recovery.requireJoined()
+                guard evidence.neverEntered, evidence.stopNeverPossible, let descriptor = row.unboundRelease,
+                      let captured = record.capturedWindow, captured.identifies(row),
+                      captured.revision == descriptor.authorizedRevision,
+                      record.capturedBinding?.matches(row.scope) == true else { throw RuntimePreparationError.changedScope }
+                let authorized = try RuntimeMaintenanceWindowRecord(id: captured.id, revision: captured.revision,
+                    purpose: captured.purpose, scope: captured.scope)
+                guard descriptor.authorizedDigest == (try RuntimeMaintenanceUnboundRelease.digest(authorized)) else {
+                    throw RuntimePreparationError.changedScope
+                }
+            }
         }
         func restorationPhases() throws -> RestorationPhases {
             guard getpid() == record.process else { throw JournalLeaseError.invalidated }

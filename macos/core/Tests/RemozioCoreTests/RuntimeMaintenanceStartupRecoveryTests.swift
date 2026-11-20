@@ -1416,10 +1416,12 @@ private final class ExplicitActorPhaseGate: @unchecked Sendable {
 
 final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
     typealias Row = RuntimeMaintenanceWindowRecord
-    private func withFixture(epoch: UInt8 = 81,
+    static let fixtureWaitSeconds: TimeInterval = 50
+    static var unboundPhaseBudget: Duration { .seconds(fixtureWaitSeconds - 10) }
+    func withFixture(epoch: UInt8 = 81, reserveInProcess: Bool = true,
         _ body: @escaping @Sendable (ExplicitStartupFixture) async throws -> Void) throws {
         try MachineUpdateReplacementTests.withMaintenanceWriterFixture { f in
-            let fixture = try ExplicitStartupFixture(f, epoch: epoch)
+            let fixture = try ExplicitStartupFixture(f, epoch: epoch, reserveInProcess: reserveInProcess)
             defer {
                 fixture.h.beforeWrite = nil; fixture.h.afterWrite = nil; fixture.h.verifyOverride = nil
                 fixture.h.afterObservation = nil; fixture.h.inspectOverride = nil
@@ -1431,7 +1433,7 @@ final class RuntimeMaintenanceExplicitRestorationTests: XCTestCase {
                 catch { result.withLock { $0 = .failure(error) } }
                 done.signal()
             }
-            guard done.wait(timeout: .now() + 50) == .success else { return XCTFail("Explicit restoration did not return") }
+            guard done.wait(timeout: .now() + Self.fixtureWaitSeconds) == .success else { return XCTFail("Explicit restoration did not return") }
             try XCTUnwrap(result.withLock { $0 }).get()
         }
     }

@@ -83,7 +83,7 @@ def declarations(role):
         values.append({0: 'authority.retained-setup-completion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-intent', 1: [1], 2: [], 3: {}})
         values.append({0: 'authority.retained-setup-promotion-ready', 1: [1], 2: [], 3: {}})
-        values.append({0: 'runtime.maintenance-window-record', 1: [1, 2], 2: [1] if role == 8 else [], 3: {}})
+        values.append({0: 'runtime.maintenance-window-record', 1: [1, 2, 3], 2: [1, 3] if role == 8 else [], 3: {}})
     if role in (2, 12):
         values.append({0: 'command.monitor-activity', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     # Recovery fences include the retained settings revision and selected commit.
@@ -129,6 +129,8 @@ def declarations(role):
         # Channel version 2 adds the read-only incarnation probe. Swift pins it as AuthorityMaintenanceChannelScope.protocolVersion.
         values.append({0: 'authority.maintenance-channel', 1: [2], 2: [2], 3: {}})
         values.append({0: 'authority.maintenance-gate', 1: [1], 2: [1], 3: {}})
+        for name in ('authority.maintenance-unbound-release', 'authority.maintenance-unbound-gate'):
+            values.append({0: name, 1: [1], 2: [1], 3: {}})
         values.append({0: 'authority.maintenance-close-marker', 1: [1], 2: [1] if role == 2 else [], 3: {}})
     host_formats = {
         2: [('runtime.activation-plan', [1, 2, 3, 4, 5, 6], []),

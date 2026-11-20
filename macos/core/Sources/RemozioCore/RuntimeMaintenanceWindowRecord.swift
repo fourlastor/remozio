@@ -71,7 +71,8 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
                 targetConsentDigest: maintenanceData(a[11], count: 32), administratorIntentDigest: maintenanceData(a[12], count: 32))
         }
     }
-    /// Stores actual gate observations, not an acknowledgement. The native owner must independently verify them.
+    /// Records admission at the observed Authority epoch. A restored row's released hold means no local restriction remains.
+    /// It does not prove that a release RPC ran. The native owner must independently verify the observation.
     struct GateReadback: Equatable, Sendable {
         enum Hold: UInt64, CaseIterable, Sendable { case held = 1, released = 2, unknown = 3 }
         enum Admission: UInt64, CaseIterable, Sendable { case available = 1, busy = 2, unavailable = 3 }
@@ -109,12 +110,14 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
     let failure: Failure?
     let gate: GateReadback?
     let shutdownBinding: AuthorityMaintenanceBinding?
-    var formatVersion: UInt64 { shutdownBinding == nil ? 1 : 2 }
+    let unboundRelease: RuntimeMaintenanceUnboundRelease?
+    var formatVersion: UInt64 { unboundRelease != nil ? 3 : shutdownBinding == nil ? 1 : 2 }
     var description: String { "RuntimeMaintenanceWindowRecord(redacted)" }
     var debugDescription: String { description }
     init(id: Data, revision: Data, purpose: Purpose, scope: Scope, phase: Phase = .authorized,
         operation: OperationOutcome = .notStarted, service: ServiceOutcome = .notStopped,
-        failure: Failure? = nil, gate: GateReadback? = nil, shutdownBinding: AuthorityMaintenanceBinding? = nil) throws {
+        failure: Failure? = nil, gate: GateReadback? = nil, shutdownBinding: AuthorityMaintenanceBinding? = nil,
+        unboundRelease: RuntimeMaintenanceUnboundRelease? = nil) throws {
         guard id.count == 16, revision.count == 16, gate == nil || gate?.attemptID == id,
               shutdownBinding == nil || (phase != .authorized && phase != .restored && shutdownBinding?.accountID == scope.authority.accountID
                 && shutdownBinding?.attemptID == id),
@@ -126,6 +129,14 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
                 && gate?.hold == .released && gate?.admission == .available) else {
             throw RuntimePreparationError.invalidRecord
         }
+        if let unboundRelease {
+            guard purpose == .retainedRuntime, [.reopenPending, .needsOwnerRecovery].contains(phase),
+                  operation == .notStarted, service == .notStopped, shutdownBinding == nil, gate == nil,
+                  phase != .reopenPending || revision == unboundRelease.pendingRevision else {
+                throw RuntimePreparationError.invalidRecord
+            }
+        }
+        self.unboundRelease = unboundRelease
         self.id = id; self.revision = revision; self.purpose = purpose; self.scope = scope; self.phase = phase
         self.operation = operation; self.service = service; self.failure = failure; self.gate = gate; self.shutdownBinding = shutdownBinding
     }
@@ -141,6 +152,15 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
     }
     func requireReplacing(_ previous: Self?) throws {
         guard revision != previous?.revision else { throw PreparationStoreError.staleRevision }
+        if unboundRelease != nil || previous?.unboundRelease != nil {
+            guard let previous, previous.phase == .reopenPending, phase == .needsOwnerRecovery,
+                  let descriptor = previous.unboundRelease, unboundRelease == descriptor,
+                  operation == .notStarted, service == .notStopped, failure != nil else {
+                throw PreparationStoreError.invalidTransition
+            }
+            try requireSameScope(as: previous)
+            return
+        }
         guard let previous, previous.id == id else {
             guard previous == nil || previous?.phase == .restored, phase == .authorized,
                   operation == .notStarted, service == .notStopped, failure == nil, gate == nil else {
@@ -174,17 +194,44 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
               previous.phase != .reopenPending || previous.service != .notStopped || service == .notStopped,
               phase != .restored || gate?.requestRevision == previous.revision else { throw PreparationStoreError.invalidTransition }
     }
+    /// Structural checks only. The typed writer separately requires the actual Joined capability.
+    func requireUnboundIntentReplacing(_ previous: Self, authorized: Self) throws {
+        guard revision != previous.revision, phase == .reopenPending, let unboundRelease else {
+            throw PreparationStoreError.invalidTransition
+        }
+        try requireSameScope(as: previous)
+        try unboundRelease.requireOrigin(authorized, previous: previous)
+    }
+    /// Structural checks only. A decoded gate cannot authorize the typed completion writer.
+    func requireUnboundCompletionReplacing(_ previous: Self) throws {
+        guard revision != previous.revision, let descriptor = previous.unboundRelease,
+              [.reopenPending, .needsOwnerRecovery].contains(previous.phase),
+              phase == .restored, unboundRelease == nil, shutdownBinding == nil,
+              operation == .notStarted, service == .notStopped,
+              gate?.requestRevision == descriptor.pendingRevision else { throw PreparationStoreError.invalidTransition }
+        try requireSameScope(as: previous)
+    }
+    /// Startup metadata only. Removing an unusable descriptor keeps the window closed and repair-required.
+    func requireUnboundStartupDiscardReplacing(_ previous: Self) throws {
+        guard revision != previous.revision, previous.phase == .needsOwnerRecovery, previous.unboundRelease != nil,
+              phase == .needsOwnerRecovery, failure == .repairRequired, unboundRelease == nil,
+              operation == .notStarted, service == .notStopped, gate == nil, shutdownBinding == nil else {
+            throw PreparationStoreError.invalidTransition
+        }
+        try requireSameScope(as: previous)
+    }
     var encoded: Data { get throws {
         var fields: [UInt64: CBORValue] = [0: .unsigned(formatVersion), 1: .text(Self.formatName),
             2: .bytes(id), 3: .bytes(revision), 4: .unsigned(purpose.rawValue), 5: scope.value,
             6: .unsigned(phase.rawValue), 7: .unsigned(operation.rawValue), 8: .unsigned(service.rawValue),
             9: failure.map { .unsigned($0.rawValue) } ?? .null, 10: gate?.value ?? .null]
         if let shutdownBinding { fields[11] = .bytes(try shutdownBinding.encoded) }
+        if let unboundRelease { fields[11] = .null; fields[12] = .bytes(try unboundRelease.encoded) }
         return try DeterministicCBOR.encode(.map(fields), limits: Self.limits)
     } }
     static func decode(_ bytes: Data) throws -> Self {
         guard case .map(let f) = try DeterministicCBOR.decode(bytes, limits: limits), case .unsigned(let version) = f[0],
-              [UInt64(1), 2].contains(version), Set(f.keys) == Set(UInt64(0)...(version == 1 ? 10 : 11)),
+              [UInt64(1), 2, 3].contains(version), Set(f.keys) == Set(UInt64(0)...(version == 1 ? 10 : version == 2 ? 11 : 12)),
               f[1] == .text(Self.formatName),
               let purpose = Purpose(rawValue: try maintenanceUInt(f[4]!)), let phase = Phase(rawValue: try maintenanceUInt(f[6]!)),
               let operation = OperationOutcome(rawValue: try maintenanceUInt(f[7]!)),
@@ -197,9 +244,14 @@ struct RuntimeMaintenanceWindowRecord: Equatable, Sendable, CustomStringConverti
             guard case .bytes(let value) = f[11] else { throw RuntimePreparationError.invalidRecord }
             binding = try .decode(value)
         } else { binding = nil }
+        let unboundRelease: RuntimeMaintenanceUnboundRelease?
+        if version == 3 {
+            guard f[11] == .null, case .bytes(let bytes) = f[12] else { throw RuntimePreparationError.invalidRecord }
+            unboundRelease = try .decode(bytes)
+        } else { unboundRelease = nil }
         let result = try Self(id: maintenanceData(f[2]!, count: 16), revision: maintenanceData(f[3]!, count: 16), purpose: purpose,
             scope: Scope.decode(f[5]!), phase: phase, operation: operation, service: service, failure: failure,
-            gate: f[10] == .null ? nil : GateReadback.decode(f[10]!), shutdownBinding: binding)
+            gate: f[10] == .null ? nil : GateReadback.decode(f[10]!), shutdownBinding: binding, unboundRelease: unboundRelease)
         guard try result.encoded == bytes else { throw RuntimePreparationError.invalidRecord }; return result
     }
     static let limits = try! CBORLimits(maxBytes: 4096, maxDepth: 4, maxItems: 128)

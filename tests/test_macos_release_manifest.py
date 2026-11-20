@@ -36,7 +36,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'authority.machine-update-completion-publication', 'authority.installed-release-state',
                  'authority.stable-release-state', 'authority.retained-setup-policy-intent',
                  'authority.retained-setup-completion-intent', 'authority.retained-setup-promotion-intent',
-                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel', 'authority.maintenance-gate', 'authority.maintenance-close-marker',
+                 'authority.retained-setup-promotion-ready', 'runtime.maintenance-window-record', 'authority.maintenance-channel', 'authority.maintenance-gate', 'authority.maintenance-close-marker', 'authority.maintenance-unbound-release', 'authority.maintenance-unbound-gate',
                  'runtime.retained-setup-release', 'runtime.retained-setup-completion',
                  'runtime.retained-setup-completion-archive', 'runtime.retained-setup-completion-configuration',
                  'runtime.retained-setup-completion-publication',
@@ -178,7 +178,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {value[0]: value for value in MANIFEST.declarations(role)}
             if role in (2, 8):
-                self.assertEqual(declarations[name], {0: name, 1: [1, 2], 2: [1] if role == 8 else [], 3: {}})
+                self.assertEqual(declarations[name], {0: name, 1: [1, 2, 3], 2: [1, 3] if role == 8 else [], 3: {}})
                 preparation = declarations['authority.installation-preparation']
                 self.assertEqual(preparation[1], list(range(1, 30)))
                 self.assertEqual(29 in preparation[2], role == 8)

@@ -198,6 +198,13 @@ final class SetupRetainedInvocation: @unchecked Sendable, CustomStringConvertibl
             try reservation.retainMaintenanceRecoveryTransition(receipt, invocation: self)
         }
     }
+    func retainUnboundAuthorizedOriginTransition(_ receipt: PreparationIntentStore.RuntimeMaintenanceTransition) throws {
+        guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            guard !closed, !closing else { throw JournalLeaseError.invalidated }
+            try reservation.retainUnboundAuthorizedOriginTransition(receipt, invocation: self)
+        }
+    }
     private func installContext(_ make: () throws -> SetupRetainedInvocationContext) throws {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
         try lock.withLock {

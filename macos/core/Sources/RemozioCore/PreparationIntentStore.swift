@@ -5758,21 +5758,42 @@ public final class PreparationIntentStore {
 
     /// Issued only after the real window writer confirms its commit and every unrelated row.
     struct RuntimeMaintenanceTransition {
+        fileprivate enum Kind {
+            case ordinary, unboundIntent(RuntimeMaintenanceWindowRecord), unboundCompletion, unboundStartupDiscard
+        }
         private let receiptID = UUID()
+        private let kind: Kind
         let record: RuntimeMaintenanceWindowRecord
         private let previous: RuntimeMaintenanceWindowRecord?
         private let before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot
         fileprivate init(record: RuntimeMaintenanceWindowRecord, previous: RuntimeMaintenanceWindowRecord?,
-            before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot) {
+            before: MachineUpdateStableReleaseSnapshot, after: MachineUpdateStableReleaseSnapshot, kind: Kind = .ordinary) {
             self.record = record; self.previous = previous; self.before = before; self.after = after
+            self.kind = kind
         }
         func requireReplacement(_ next: RuntimeMaintenanceWindowRecord, replacing previous: RuntimeMaintenanceWindowRecord) throws {
             guard record == next, self.previous == previous else { throw PreparationStoreError.staleRevision }
+            switch kind {
+            case .ordinary: try record.requireReplacing(previous)
+            case .unboundIntent(let authorized): try record.requireUnboundIntentReplacing(previous, authorized: authorized)
+            case .unboundCompletion: try record.requireUnboundCompletionReplacing(previous)
+            case .unboundStartupDiscard: try record.requireUnboundStartupDiscardReplacing(previous)
+            }
+        }
+        func requireUnboundAuthorizedRecoveryOrigin() throws -> RuntimeMaintenanceWindowRecord {
+            guard case .ordinary = kind, let previous, previous.phase == .authorized,
+                  record.phase == .needsOwnerRecovery, record.purpose == .retainedRuntime,
+                  record.operation == .notStarted, record.service == .notStopped,
+                  previous.shutdownBinding == nil, record.shutdownBinding == nil,
+                  previous.unboundRelease == nil, record.unboundRelease == nil else {
+                throw RuntimePreparationError.changedScope
+            }
             try record.requireReplacing(previous)
+            return previous
         }
         /// The real writer, not a decoded recovery row, proves an automatic-M09d reconnectable origin.
         func requireSavedTargetReconnectOrigin(_ expected: RuntimeMaintenanceWindowRecord) throws {
-            guard record == expected, expected.phase == .needsOwnerRecovery, expected.operation == .notStarted,
+            guard case .ordinary = kind, record == expected, expected.phase == .needsOwnerRecovery, expected.operation == .notStarted,
                   expected.service == .notStopped, let previous, previous.phase == .draining,
                   previous.operation == .notStarted, previous.service == .notStopped,
                   let binding = previous.shutdownBinding, expected.shutdownBinding == binding else {
@@ -5793,6 +5814,7 @@ public final class PreparationIntentStore {
             }
             var cursor = before, previous = first.previous
             for value in values {
+                guard case .ordinary = value.kind else { throw PreparationStoreError.invalidTransition }
                 try value.before.requireSame(as: cursor)
                 guard value.previous == previous else { throw PreparationStoreError.staleRevision }
                 try value.record.requireReplacing(previous); try value.record.requireSameScope(as: first.record)
@@ -5817,12 +5839,65 @@ public final class PreparationIntentStore {
         expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease,
         admission: UpdateOrdinaryAdmissionLease, accountDrain: UpdateDrainToken? = nil,
         verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
+        try writeRuntimeMaintenanceTransitionChecked(next, replacing: previous, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: accountDrain, verifyScoped: verifyScoped, mode: .ordinary)
+    }
+    /// A certain refusal before the writer enters any transaction. Only this writer can classify it.
+    struct RuntimeMaintenancePretransactionRefusal: Error {
+        let underlying: any Error
+        fileprivate init(_ underlying: any Error) { self.underlying = underlying }
+    }
+    private enum RuntimeMaintenanceWriteMode {
+        case ordinary
+        case unboundIntent(SetupRetainedOrphanClaim.Joined, RuntimeMaintenanceWindowRecord)
+        case unboundCompletion(SetupRetainedOrphanClaim.Joined, VerifiedUnboundGateObservation)
+        case unboundStartupDiscard(RuntimeMaintenanceStartupRecovery.UnboundStartupDiscardAuthorization)
+    }
+    private func writeRuntimeMaintenanceTransitionChecked(_ next: RuntimeMaintenanceWindowRecord,
+        replacing previous: RuntimeMaintenanceWindowRecord?, expected: MachineUpdateStableReleaseSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        accountDrain: UpdateDrainToken?, verifyScoped: (CompletionIntentStorageStage) throws -> Void,
+        mode: RuntimeMaintenanceWriteMode) throws -> RuntimeMaintenanceTransition {
+        func requireTransition() throws -> RuntimeMaintenanceTransition.Kind {
+            switch mode {
+            case .ordinary:
+                try next.requireReplacing(previous); return .ordinary
+            case .unboundIntent(let joined, let authorized):
+                guard let previous, try joined.requireUnboundAuthorizedOriginInMemory(previous) == authorized else {
+                    throw RuntimePreparationError.changedScope
+                }
+                try next.requireUnboundIntentReplacing(previous, authorized: authorized)
+                return .unboundIntent(authorized)
+            case .unboundCompletion(let joined, let observation):
+                guard let previous, let gate = expected.admission.accounts.first(where: {
+                    $0.accountID == previous.scope.authority.accountID
+                }) else { throw RuntimePreparationError.changedScope }
+                try joined.requireUnboundIntentInMemory(previous)
+                try observation.requireCurrent(joined: joined, row: previous, gate: gate.identity)
+                guard try next.gate == observation.completedGateReadback() else { throw RuntimePreparationError.changedScope }
+                try next.requireUnboundCompletionReplacing(previous); return .unboundCompletion
+            case .unboundStartupDiscard(let authorization):
+                guard let previous else { throw PreparationStoreError.invalidTransition }
+                try authorization.requireCurrentInMemory(previous, expected: expected)
+                try next.requireUnboundStartupDiscardReplacing(previous); return .unboundStartupDiscard
+            }
+        }
         try RuntimeMaintenanceWindowStorage.requireWriteFormats(candidate, sourceSchema: expected.schemaVersion, recordVersion: next.formatVersion)
-        _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded); try next.requireReplacing(previous)
+        _ = try RuntimeMaintenanceWindowRecord.decode(next.encoded)
+        let transitionKind = try requireTransition()
+        do {
+            switch mode {
+            case .ordinary: break
+            case .unboundIntent(let joined, _), .unboundCompletion(let joined, _):
+                try joined.requireCurrentAuthorization()
+            case .unboundStartupDiscard(let authorization): try authorization.requireExternalAuthorization()
+            }
+        } catch { throw RuntimeMaintenancePretransactionRefusal(error) }
         try requireRetainedSetupPromotionWriterAvailable()
         var commitAttempted = false
         do { return try admission.withMachineAdmission { scope in
             func boundary() throws {
+                _ = try requireTransition()
                 try requireUpdateAdmissionDirectory(directory)
                 try scope.validateMachineBoundary(directory: directory, expected: expected.admission.machine)
                 if next.phase == .draining {
@@ -5887,9 +5962,70 @@ public final class PreparationIntentStore {
             return try transaction(write: false, runtimeMaintenance: owner) {
                 try verifyScoped(.afterCommit); try owner.capture(in: self)
                 let actual = try loadStableMachineUpdate(candidate: candidate); try owner.capture(in: self)
-                return .init(record: next, previous: previous, before: expected, after: actual)
+                return .init(record: next, previous: previous, before: expected, after: actual, kind: transitionKind)
             }
         } } catch { if commitAttempted { unavailable = true; shutdown() }; throw error }
+    }
+
+    func writeRuntimeMaintenanceUnboundIntent(replacing previous: RuntimeMaintenanceWindowRecord,
+        joined: SetupRetainedOrphanClaim.Joined, expected: MachineUpdateStableReleaseSnapshot,
+        candidate: SignedReleaseEvidence, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        pendingRevision: Data = AccountPreparationIntent.randomID(), intentID: Data = AccountPreparationIntent.randomID()) throws -> RuntimeMaintenanceTransition {
+        let authorized = try joined.requireUnboundAuthorizedOriginInMemory(previous)
+        let descriptor = try RuntimeMaintenanceUnboundRelease(authorized: authorized, previous: previous,
+            pendingRevision: pendingRevision, intentID: intentID)
+        let next = try RuntimeMaintenanceWindowRecord(id: previous.id, revision: pendingRevision, purpose: .retainedRuntime,
+            scope: previous.scope, phase: .reopenPending, unboundRelease: descriptor)
+        try AuthorityMaintenanceUnboundRequest.requireFormats(candidate)
+        return try writeRuntimeMaintenanceTransitionChecked(next, replacing: previous, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: nil, verifyScoped: { _ in }, mode: .unboundIntent(joined, authorized))
+    }
+    func writeRuntimeMaintenanceUnboundCompletion(replacing previous: RuntimeMaintenanceWindowRecord,
+        joined: SetupRetainedOrphanClaim.Joined, observation: VerifiedUnboundGateObservation,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
+        try AuthorityMaintenanceUnboundRequest.requireFormats(candidate)
+        let next = try RuntimeMaintenanceWindowRecord(id: previous.id, revision: AccountPreparationIntent.randomID(),
+            purpose: .retainedRuntime, scope: previous.scope, phase: .restored, gate: observation.completedGateReadback())
+        return try writeRuntimeMaintenanceTransitionChecked(next, replacing: previous, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: nil, verifyScoped: verifyScoped, mode: .unboundCompletion(joined, observation))
+    }
+    func writeRuntimeMaintenanceUnboundStartupDiscard(replacing previous: RuntimeMaintenanceWindowRecord,
+        authorization: RuntimeMaintenanceStartupRecovery.UnboundStartupDiscardAuthorization,
+        expected: MachineUpdateStableReleaseSnapshot, candidate: SignedReleaseEvidence,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+        verifyScoped: (CompletionIntentStorageStage) throws -> Void = { _ in }) throws -> RuntimeMaintenanceTransition {
+        let next = try RuntimeMaintenanceWindowRecord(id: previous.id, revision: AccountPreparationIntent.randomID(),
+            purpose: .retainedRuntime, scope: previous.scope, phase: .needsOwnerRecovery, failure: .repairRequired)
+        return try writeRuntimeMaintenanceTransitionChecked(next, replacing: previous, expected: expected, candidate: candidate,
+            directory: directory, admission: admission, accountDrain: nil, verifyScoped: verifyScoped, mode: .unboundStartupDiscard(authorization))
+    }
+
+    /// Both reads around the Authority mutation must use this exact context. No lease crosses an RPC await.
+    func runtimeMaintenanceUnboundCommandRecord(_ request: AuthorityMaintenanceUnboundRequest,
+        account: RuntimeMaintenanceWindowRecord.Account, incarnation: Data,
+        candidate: SignedReleaseEvidence) throws -> RuntimeMaintenanceWindowRecord {
+        try AuthorityMaintenanceUnboundRequest.requireFormats(candidate)
+        try RuntimeMaintenanceWindowStorage.requireReaderFormats(candidate, recordVersions: [1, 3])
+        return try transaction(write: false) {
+            let frame = try loadStableMachineUpdateFrame(candidate: candidate), current = frame.snapshot
+            guard current.schemaVersion == 29, request.authorityIncarnation == incarnation,
+                  request.accountID == account.accountID, incarnation.count == 16,
+                  current.inventory.installationID == request.installationID,
+                  current.admission.installationID == request.installationID,
+                  current.inventory.accounts.contains(where: { $0.accountID == account.accountID && $0.ownerUID == account.ownerUID }),
+                  let prepared = try loadAccountPreparation(ownerUID: account.ownerUID), prepared.storagePrepared,
+                  prepared.accountID == account.accountID, prepared.installationID == request.installationID,
+                  let gate = current.admission.accounts.first(where: { $0.accountID == account.accountID }),
+                  let row = frame.maintenanceWindows.first(where: { $0.scope.authority.accountID == account.accountID }),
+                  row.scope.authority == account, row.scope.macID == macID,
+                  row.scope.releaseDigest == current.inventory.releaseDigest else { throw RuntimePreparationError.changedScope }
+            var directory = prepared.directoryID.uuid
+            guard withUnsafeBytes(of: &directory, { Data($0) }) == account.directoryID else { throw RuntimePreparationError.changedScope }
+            try request.requireWindow(row, gateIdentity: gate.identity)
+            return row
+        }
     }
 
     /// The existing writer confirms the committed record. The caller closes this store before sending arm.

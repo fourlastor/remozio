@@ -104,6 +104,14 @@ private final class MachineReplacementFixture {
                 }
             }
             if maintenanceWriterFormats {
+                for role in [AuthorityCodeRole.authority, .setupController] {
+                    requiredFormats.append(try .init(role: role, name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [3]))
+                    for kind in [AuthorityMaintenanceUnboundRequest.Kind.release, .gate] {
+                        requiredFormats.append(try .init(role: role, name: kind.rawValue, readVersions: [1], writeVersions: [1]))
+                    }
+                }
+                requiredFormats.append(try .init(role: .setupController, name: RuntimeMaintenanceWindowRecord.formatName,
+                    readVersions: [3], writeVersions: [3]))
                 requiredFormats += try [RetainedReleaseFormat(role: .setupController, name: "authority.installation-preparation",
                     readVersions: [28, 29], writeVersions: [29]), RetainedReleaseFormat(role: .setupController,
                     name: RuntimeMaintenanceWindowRecord.formatName, readVersions: [1, 2], writeVersions: [1, 2])]

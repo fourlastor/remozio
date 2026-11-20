@@ -109,15 +109,17 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
         private enum Origin { case inProcess(SetupRetainedOrphanClaim.Joined), restart(SetupRestartRecovery.Claim, RestartAttempt) }
         private let origin: Origin
+        private let allowUnbound: Bool
         let processLease: SetupProcessLease
         let phases: SetupRetainedInvocationReservation.RestorationPhases
         private let lock = NSLock()
         private var captured: SetupRetainedInvocationStatus.Window?
         init(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease, native: Bool,
-            phases: SetupRetainedInvocationReservation.RestorationPhases) throws {
+            phases: SetupRetainedInvocationReservation.RestorationPhases, allowUnbound: Bool = false) throws {
             if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
             else { try RuntimeMaintenanceOwnedControl.require() }
             origin = .inProcess(joined); self.processLease = processLease; self.phases = phases
+            self.allowUnbound = allowUnbound
             try requireCurrent()
         }
         init(restart: SetupRestartRecovery.Claim, attempt: RestartAttempt, native: Bool,
@@ -125,6 +127,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             if native { guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired } }
             else { try RuntimeMaintenanceOwnedControl.require() }
             origin = .restart(restart, attempt); processLease = restart.processLease; self.phases = phases
+            allowUnbound = false
             try requireCurrent()
         }
         func requireCurrent() throws {
@@ -136,6 +139,9 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         }
         var restartAttempt: RestartAttempt? {
             if case .restart(_, let attempt) = origin { return attempt }; return nil
+        }
+        var unboundJoined: SetupRetainedOrphanClaim.Joined? {
+            if allowUnbound, case .inProcess(let joined) = origin { return joined }; return nil
         }
         func willUseForwardEffects() throws {
             if case .restart(_, let attempt) = origin { attempt.willUseForwardEffects() }
@@ -153,9 +159,14 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             case .inProcess(let joined): try joined.requireRestorationWindow(row)
             case .restart(let claim, _): try claim.capture(row)
             }
-            guard row.phase == .needsOwnerRecovery, row.shutdownBinding != nil, row.purpose == .retainedRuntime,
-                  let failure = row.failure, failure != .repairRequired else {
-                throw RuntimeMaintenanceStartupFailure(.repairRequired, RuntimePreparationError.changedScope)
+            if let joined = unboundJoined {
+                if row.unboundRelease == nil { _ = try joined.requireUnboundAuthorizedOrigin(row) }
+                else { try joined.requireUnboundIntentReconciliation(row) }
+            } else {
+                guard row.phase == .needsOwnerRecovery, row.shutdownBinding != nil, row.purpose == .retainedRuntime,
+                      let failure = row.failure, failure != .repairRequired else {
+                    throw RuntimeMaintenanceStartupFailure(.repairRequired, RuntimePreparationError.changedScope)
+                }
             }
             try lock.withLock {
                 guard captured == nil else { throw JournalLeaseError.invalidated }
@@ -172,6 +183,10 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 guard captured?.identifies(row) == true else { throw RuntimePreparationError.changedScope }
             }
         }
+    }
+    fileprivate struct OwnedUnboundWriters: Sendable {
+        let intent: @Sendable (Record, SetupRetainedOrphanClaim.Joined, Frame) throws -> Transition
+        let completion: @Sendable (Record, SetupRetainedOrphanClaim.Joined, VerifiedUnboundGateObservation, Frame) throws -> Transition
     }
     /// Only the explicit dispatcher can issue this capability after committing its exact restoring row.
     final class ExplicitReconnect: @unchecked Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
@@ -219,6 +234,10 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         private let lock = NSRecursiveLock(), processID = getpid(), ownerUID = getuid()
         private var row: Record, invalidated = false, registrationUsed = false, recoveryUsed = false
         private var writerUncertain = false
+        private let nativeUnboundFiles: NativeFiles?
+        private let ownedUnboundWriters: OwnedUnboundWriters?
+        private let unboundJoined: SetupRetainedOrphanClaim.Joined?
+        private var unboundDrainReleased = false
         fileprivate var hasUncertainWriter: Bool { lock.withLock { writerUncertain } }
         fileprivate init(floor: RuntimeMaintenanceStartupFloor, row: Record, admission: UpdateOrdinaryAdmissionLease,
             drain: UpdateDrainToken, directory: ReleaseDestinationLease, release: SignedReleaseEvidence,
@@ -230,9 +249,12 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             inspect: @escaping @Sendable (InstalledAccountJobManifest) throws -> RuntimeJobStopSession.Observation,
             observe: @escaping @Sendable (InstalledAccountJobManifest, AuthorityCodeEntry, pid_t) throws -> any RuntimeJobExitWitness,
             verifySetupIdentity: @escaping @Sendable () throws -> Void = {}, restartAttempt: RestartAttempt? = nil,
-            cancellation: SetupAuditUpgradeCancellation? = nil) {
+            cancellation: SetupAuditUpgradeCancellation? = nil, nativeUnboundFiles: NativeFiles? = nil,
+            ownedUnboundWriters: OwnedUnboundWriters? = nil, unboundJoined: SetupRetainedOrphanClaim.Joined? = nil) {
             self.verifySetupIdentity = verifySetupIdentity; self.restartAttempt = restartAttempt
             self.cancellation = cancellation; restartAttempt?.confirmedRow(row)
+            self.nativeUnboundFiles = nativeUnboundFiles; self.ownedUnboundWriters = ownedUnboundWriters
+            self.unboundJoined = unboundJoined
             self.floor = floor; self.row = row; self.admission = admission; self.drain = drain; self.directory = directory
             self.release = release; self.read = read; self.writeNative = writeNative; self.writeOwned = writeOwned
             native = writeNative != nil; self.verifyCaller = verifyCaller; self.verifyConfiguration = verifyConfiguration
@@ -251,7 +273,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 }
                 try admission.validateMachineBoundary(directory: directory, expected: floor.cohort.machineIdentity)
                 // The committed pending row is the only boundary after which the client may close the drain.
-                if row.phase != .reopenPending && row.phase != .restored {
+                if row.phase != .reopenPending && row.phase != .restored && !unboundDrainReleased {
                     try drain.validateAccountBoundary(directory: directory, accountID: floor.cohort.accountID,
                         expected: floor.cohort.accountIdentity)
                 }
@@ -435,6 +457,94 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 try admission.validateMachineBoundary(directory: directory, expected: floor.cohort.machineIdentity)
             }
         }
+        func persistUnboundIntent() throws -> Transition {
+            try lock.withLock {
+                guard let joined = unboundJoined else { throw RuntimePreparationError.changedScope }
+                let previous = row, frame = try requireCurrent(row)
+                _ = try joined.requireUnboundAuthorizedOrigin(previous)
+                try checkCancellation()
+                let receipt: Transition
+                do {
+                    if let nativeUnboundFiles { receipt = try nativeUnboundFiles.writeUnboundIntent(previous, joined: joined, frame: frame) }
+                    else if let ownedUnboundWriters {
+                        try RuntimeMaintenanceOwnedControl.require()
+                        receipt = try ownedUnboundWriters.intent(previous, joined, frame)
+                    } else { throw RuntimePreparationError.changedScope }
+                    try receipt.requireReplacement(receipt.record, replacing: previous)
+                    guard receipt.record.phase == .reopenPending, receipt.record.unboundRelease != nil else {
+                        throw PreparationStoreError.invalidTransition
+                    }
+                } catch let refusal as PreparationIntentStore.RuntimeMaintenancePretransactionRefusal {
+                    throw refusal.underlying
+                } catch { invalidated = true; writerUncertain = true; throw error }
+                row = receipt.record
+                _ = try requireCurrent(row)
+                return receipt
+            }
+        }
+        func releaseUnboundCleanupDrain() throws {
+            try lock.withLock {
+                guard let joined = unboundJoined else { throw RuntimePreparationError.changedScope }
+                try joined.requireUnboundIntentReconciliation(row)
+                _ = try requireCurrent(row)
+                if !unboundDrainReleased {
+                    try drain.validateAccountBoundary(directory: directory, accountID: floor.cohort.accountID,
+                        expected: floor.cohort.accountIdentity)
+                    drain.close(); unboundDrainReleased = true
+                }
+            }
+        }
+        func persistUnboundCompletion(_ observation: VerifiedUnboundGateObservation) throws -> Transition {
+            try lock.withLock {
+                guard let joined = unboundJoined, unboundDrainReleased else { throw RuntimePreparationError.changedScope }
+                let previous = row, frame = try requireCurrent(row)
+                try joined.requireUnboundIntentReconciliation(previous)
+                guard let gate = frame.source.actual.admission.accounts.first(where: {
+                    $0.accountID == previous.scope.authority.accountID
+                }) else { throw RuntimePreparationError.changedScope }
+                try observation.requireCurrent(joined: joined, row: previous, gate: gate.identity)
+                _ = try observation.completedGateReadback()
+                try checkCancellation()
+                let receipt: Transition
+                do {
+                    if let nativeUnboundFiles {
+                        receipt = try nativeUnboundFiles.writeUnboundCompletion(previous, joined: joined, observation: observation, frame: frame)
+                    } else if let ownedUnboundWriters {
+                        try RuntimeMaintenanceOwnedControl.require()
+                        receipt = try ownedUnboundWriters.completion(previous, joined, observation, frame)
+                    } else { throw RuntimePreparationError.changedScope }
+                    try receipt.requireReplacement(receipt.record, replacing: previous)
+                    try receipt.record.requireUnboundCompletionReplacing(previous)
+                } catch let refusal as PreparationIntentStore.RuntimeMaintenancePretransactionRefusal {
+                    throw refusal.underlying
+                } catch { invalidated = true; writerUncertain = true; throw error }
+                row = receipt.record
+                if native { restoredTransition = receipt } else { restoredOwned = row }
+                _ = try requireCurrent(row)
+                return receipt
+            }
+        }
+        func requireUnboundCleanup() throws {
+            try lock.withLock {
+                guard unboundJoined != nil else { throw RuntimePreparationError.changedScope }
+                _ = try requireCurrent(row)
+            }
+        }
+        @discardableResult func persistUnboundFailure(_ failure: Record.Failure) throws -> Record {
+            try lock.withLock {
+                guard unboundJoined != nil, !invalidated, !writerUncertain else { throw JournalLeaseError.invalidated }
+                if row.phase == .needsOwnerRecovery || row.phase == .restored || row.unboundRelease == nil { return row }
+                return try persistRecovery(row, failure: failure)
+            }
+        }
+        fileprivate func requireUnboundCompletion() throws {
+            guard unboundJoined != nil else { throw RuntimePreparationError.changedScope }
+            try requireExplicitCompletion(current)
+        }
+        func closeUnboundCustody() {
+            guard unboundJoined != nil else { return }
+            close()
+        }
         fileprivate func close() { lock.withLock { invalidated = true; drain.close(); admission.close(); directory.close() } }
         deinit { close() }
     }
@@ -460,7 +570,7 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
             try requireReceipt(); return custody
         }
     }
-    private final class NativeFiles: @unchecked Sendable {
+    fileprivate final class NativeFiles: @unchecked Sendable {
         let configuration: AdministrativeSetupConfiguration, release: SignedReleaseEvidence
         let directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken
         let accountID: Data
@@ -481,6 +591,34 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     admission: admission, accountDrain: drain)
             }
         }
+        func writeUnboundIntent(_ previous: Record, joined: SetupRetainedOrphanClaim.Joined, frame: Frame) throws -> Transition {
+            try use {
+                try $0.writeRuntimeMaintenanceUnboundIntent(replacing: previous, joined: joined,
+                    expected: frame.source.actual, candidate: release, directory: directory, admission: admission)
+            }
+        }
+        func writeUnboundCompletion(_ previous: Record, joined: SetupRetainedOrphanClaim.Joined,
+            observation: VerifiedUnboundGateObservation, frame: Frame) throws -> Transition {
+            try use {
+                try $0.writeRuntimeMaintenanceUnboundCompletion(replacing: previous, joined: joined, observation: observation,
+                    expected: frame.source.actual, candidate: release, directory: directory, admission: admission)
+            }
+        }
+        func discardUnboundStartup(_ initial: Frame, startupPhases: SetupRetainedInvocationReservation.RestorationPhases?, hasExplicitAuthority: Bool,
+            verify: @escaping @Sendable () throws -> Void) throws -> Frame {
+            try RuntimeMaintenanceStartupRecovery.prepareUnboundStartupFrame(frame: initial, hasExplicitAuthority: hasExplicitAuthority,
+                startupPhases: startupPhases, directory: directory, admission: admission, drain: drain,
+                verify: verify, read: { try self.read() },
+                persistFailure: { try self.write($0, $1, $2) },
+                persistDiscard: { previous, authorization, frame in
+                    try self.use { machine in
+                        try machine.writeRuntimeMaintenanceUnboundStartupDiscard(replacing: previous,
+                            authorization: authorization, expected: frame.source.actual, candidate: self.release,
+                            directory: self.directory, admission: self.admission)
+                    }
+                })
+        }
+
         private func use<Value>(_ body: (PreparationIntentStore) throws -> Value) throws -> Value {
             guard getpid() == processID, getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.invalidated }
             let machine = try PreparationIntentStore.open(directoryPath: configuration.machineDirectory, macID: configuration.macID)
@@ -516,6 +654,10 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
     static func open(accountID: Data) throws -> RuntimeMaintenanceStartupRecovery? {
         try open(accountID: accountID, explicit: nil)
     }
+    struct OwnedStartupWriters: Sendable {
+        let failure: @Sendable (Record, Record, Frame) throws -> Transition
+        let discard: @Sendable (Record, UnboundStartupDiscardAuthorization, Frame) throws -> Transition
+    }
     struct OwnedSupervisorWork: Sendable {
         let phases: SetupRetainedInvocationReservation.RestorationPhases
         let cancellation: SetupAuditUpgradeCancellation
@@ -529,6 +671,40 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         }
     }
     enum NativeOpening: Sendable { case terminal(Record?), owner(RuntimeMaintenanceStartupRecovery) }
+    /// Minted only by fixed startup construction or the separate ordinary-owner fixture entry.
+    final class UnboundStartupDiscardAuthorization: @unchecked Sendable {
+        private let process = getpid(), owner = getuid()
+        private let row: Record, source: MachineUpdateStableReleaseSnapshot
+        private let directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken
+        private let verify: @Sendable () throws -> Void
+        private let startupPhases: SetupRetainedInvocationReservation.RestorationPhases
+        fileprivate init(frame: Frame, directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease,
+            drain: UpdateDrainToken, startupPhases: SetupRetainedInvocationReservation.RestorationPhases,
+            verify: @escaping @Sendable () throws -> Void) throws {
+            try startupPhases.requireUnboundStartupPhase()
+            guard let row = frame.window, row.phase == .needsOwnerRecovery, row.unboundRelease != nil,
+                  row.scope.macID == frame.source.actual.inventory.macID,
+                  row.scope.installationID == frame.source.actual.inventory.installationID else {
+                throw RuntimePreparationError.changedScope
+            }
+            self.row = row; source = frame.source.actual; self.directory = directory
+            self.admission = admission; self.drain = drain; self.verify = verify
+            self.startupPhases = startupPhases
+        }
+        func requireExternalAuthorization() throws {
+            try startupPhases.requireUnboundStartupPhase(); try verify()
+        }
+        func requireCurrentInMemory(_ previous: Record, expected: MachineUpdateStableReleaseSnapshot) throws {
+            guard getpid() == process, getuid() == owner, geteuid() == owner, previous == row,
+                  let account = source.admission.accounts.first(where: { $0.accountID == row.scope.authority.accountID }) else {
+                throw JournalLeaseError.invalidated
+            }
+            try source.requireSame(as: expected)
+            try startupPhases.requireUnboundStartupPhaseInMemory()
+            try admission.validateMachineBoundary(directory: directory, expected: source.admission.machine)
+            try drain.validateAccountBoundary(directory: directory, accountID: account.accountID, expected: account.identity)
+        }
+    }
     private final class NativeTerminalCapture: @unchecked Sendable {
         private let lock = NSLock()
         private var captured: Record?
@@ -608,7 +784,9 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                     let files = NativeFiles(configuration: configuration, release: release, accountID: accountID,
                         directory: directory, admission: admission, drain: drain)
                     let read: @Sendable () throws -> Frame = { try files.read() }
-                    let frame = try read()
+                    var frame = try read()
+                    frame = try files.discardUnboundStartup(frame, startupPhases: nativePhases,
+                        hasExplicitAuthority: explicit != nil, verify: verify)
                     guard let row = frame.window else { drain.close(); admission.close(); directory.close(); return nil }
                     if let terminal, let row = try terminalRow(frame, accountID: accountID) {
                         guard frame.source.actual.admission == registration else { throw RuntimePreparationError.changedScope }
@@ -651,7 +829,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                             try RuntimeJobStopSession.classify(BoundedNativeCommand.run(executable: "/bin/launchctl",
                                 arguments: ["print", "system/" + job.declaration.label]), job: job)
                         }, observe: { try RuntimeJobProcessObservation.open(job: $0, code: $1, processID: $2) },
-                        verifySetupIdentity: verifyHost, restartAttempt: explicit?.restartAttempt, cancellation: cancellation)
+                        verifySetupIdentity: verifyHost, restartAttempt: explicit?.restartAttempt, cancellation: cancellation,
+                        nativeUnboundFiles: explicit?.unboundJoined == nil ? nil : files, unboundJoined: explicit?.unboundJoined)
                     _ = try custody.requireCurrent(row)
                     return .init(custody: custody, explicitAuthority: explicit, nativePhases: nativePhases, observeOperation: { window in
                         // The synchronous M08 loan opens B only and ends before any async transfer.
@@ -882,10 +1061,11 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         register: @escaping @Sendable () throws -> Void,
         afterProbePolicy: @escaping @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action = {
             try RuntimeMaintenanceStartupPolicy.afterProbe($0, sameIncarnation: $1)
-        }, supervisorWork: OwnedSupervisorWork? = nil) throws -> RuntimeMaintenanceStartupRecovery {
+        }, supervisorWork: OwnedSupervisorWork? = nil,
+        startupWriters: OwnedStartupWriters? = nil) throws -> RuntimeMaintenanceStartupRecovery {
         try openOwned(frame: frame, release: release, admission: admission, directory: directory, accountBarrier: accountBarrier,
             read: read, persist: persist, verify: verify, inspect: inspect, observe: observe,
-            observeOperation: observeOperation, register: register, afterProbePolicy: afterProbePolicy, explicit: nil, supervisorWork: supervisorWork)
+            observeOperation: observeOperation, register: register, afterProbePolicy: afterProbePolicy, explicit: nil, supervisorWork: supervisorWork, startupWriters: startupWriters)
     }
     private static func openOwned(frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
         directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier,
@@ -896,12 +1076,24 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         observeOperation: @escaping @Sendable (Record) -> RuntimeMaintenanceRuntimeObservation.State,
         register: @escaping @Sendable () throws -> Void,
         afterProbePolicy: @escaping @Sendable (Record, Bool) throws -> RuntimeMaintenanceStartupPolicy.Action,
-        explicit: ExplicitAuthority?, supervisorWork: OwnedSupervisorWork? = nil) throws -> RuntimeMaintenanceStartupRecovery {
+        explicit: ExplicitAuthority?, supervisorWork: OwnedSupervisorWork? = nil,
+        ownedUnboundWriters: OwnedUnboundWriters? = nil,
+        startupWriters: OwnedStartupWriters? = nil) throws -> RuntimeMaintenanceStartupRecovery {
         try RuntimeMaintenanceOwnedControl.require()
         guard supervisorWork == nil || explicit == nil else { throw RuntimePreparationError.changedScope }
-        guard let row = frame.window else { throw PreparationStoreError.notFound }
         let drain = try accountBarrier.beginDrain()
         do {
+            let frame = try prepareUnboundStartupFrame(frame: frame, hasExplicitAuthority: explicit != nil,
+                startupPhases: supervisorWork?.phases, directory: directory, admission: admission, drain: drain,
+                verify: verify, read: read,
+                persistFailure: { next, previous, frame in
+                    guard let startupWriters else { throw RuntimePreparationError.changedScope }
+                    return try startupWriters.failure(next, previous, frame)
+                }, persistDiscard: { previous, authorization, frame in
+                    guard let startupWriters else { throw RuntimePreparationError.changedScope }
+                    return try startupWriters.discard(previous, authorization, frame)
+                })
+            guard let row = frame.window else { throw PreparationStoreError.notFound }
             if let explicit { try explicit.capture(row) }
             let floor = try RuntimeMaintenanceStartupFloor(frame: frame, release: release)
             let instance = explicit?.processLease
@@ -909,7 +1101,8 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
                 release: release, read: read, writeNative: nil, writeOwned: persist,
                 verifyCaller: { try instance?.validate() }, verifyConfiguration: { try verify(); try explicit?.requireCurrent() },
                 inspect: inspect, observe: observe, verifySetupIdentity: verify,
-                restartAttempt: explicit?.restartAttempt, cancellation: supervisorWork?.cancellation)
+                restartAttempt: explicit?.restartAttempt, cancellation: supervisorWork?.cancellation,
+                ownedUnboundWriters: ownedUnboundWriters, unboundJoined: explicit?.unboundJoined)
             _ = try custody.requireCurrent(row)
             return .init(custody: custody, explicitAuthority: explicit, ownedSupervisorWork: supervisorWork,
                 observeOperation: observeOperation, register: { custody, restoring in
@@ -918,6 +1111,95 @@ final class RuntimeMaintenanceStartupRecovery: @unchecked Sendable {
         } catch { drain.close(); throw error }
     }
 
+    /// Library only. The concrete runner calls this on its original executor after it owns the actual work slot.
+    static func makeUnboundJoinedCustodyNative(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease,
+        accountID: Data, until deadline: ContinuousClock.Instant) throws -> Custody {
+        guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+        let phases = try joined.restorationPhases().forAttempt(until: deadline)
+        try joined.requireRestorationAccount(accountID)
+        let authority = try ExplicitAuthority(joined: joined, processLease: processLease, native: true,
+            phases: phases, allowUnbound: true)
+        guard let recovery = try open(accountID: accountID, explicit: authority) else { throw PreparationStoreError.notFound }
+        return recovery.custody
+    }
+    static func makeUnboundJoinedCustodyOwned(joined: SetupRetainedOrphanClaim.Joined, processLease: SetupProcessLease,
+        frame: Frame, release: SignedReleaseEvidence, admission: UpdateOrdinaryAdmissionLease,
+        directory: ReleaseDestinationLease, accountBarrier: UpdateAdmissionBarrier,
+        read: @escaping @Sendable () throws -> Frame, persist: @escaping @Sendable (Record, Record) throws -> Record,
+        writeIntent: @escaping @Sendable (Record, SetupRetainedOrphanClaim.Joined, Frame) throws -> Transition,
+        writeCompletion: @escaping @Sendable (Record, SetupRetainedOrphanClaim.Joined, VerifiedUnboundGateObservation, Frame) throws -> Transition,
+        verify: @escaping @Sendable () throws -> Void, until deadline: ContinuousClock.Instant) throws -> Custody {
+        try RuntimeMaintenanceOwnedControl.require()
+        let phases = try joined.restorationPhases().forAttempt(until: deadline)
+        let authority = try ExplicitAuthority(joined: joined, processLease: processLease, native: false,
+            phases: phases, allowUnbound: true)
+        let recovery = try openOwned(frame: frame, release: release, admission: admission, directory: directory,
+            accountBarrier: accountBarrier, read: read, persist: persist, verify: verify,
+            inspect: { _ in throw RuntimePreparationError.changedScope }, observe: { _, _, _ in throw RuntimePreparationError.changedScope },
+            observeOperation: { _ in .unknown }, register: { throw RuntimePreparationError.changedScope },
+            afterProbePolicy: { _, _ in throw RuntimePreparationError.changedScope }, explicit: authority,
+            ownedUnboundWriters: .init(intent: writeIntent, completion: writeCompletion))
+        return recovery.custody
+    }
+    static func makeUnboundExplicitCompletion(custody: Custody, workID: UUID,
+        originalRunFailed: Bool = false) throws -> ExplicitCompletion {
+        try custody.requireUnboundCompletion()
+        return try ExplicitCompletion(window: custody.current, workID: workID, custody: custody, originalRunFailed: originalRunFailed)
+    }
+    /// Ordinary-owner entry uses the same preflight as native open, before terminal or policy handling.
+    static func openUnboundStartupOwned(frame: Frame, processLease: SetupProcessLease,
+        startupPhases: SetupRetainedInvocationReservation.RestorationPhases,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken,
+        read: () throws -> Frame, persistFailure: (Record, Record, Frame) throws -> Transition,
+        persistDiscard: (Record, UnboundStartupDiscardAuthorization, Frame) throws -> Transition) throws -> NativeOpening {
+        try RuntimeMaintenanceOwnedControl.require(); try processLease.validate()
+        let result = try prepareUnboundStartupFrame(frame: frame, hasExplicitAuthority: false, startupPhases: startupPhases,
+            directory: directory, admission: admission, drain: drain, verify: { try processLease.validate() },
+            read: read, persistFailure: persistFailure, persistDiscard: persistDiscard)
+        guard let row = try terminalRow(result, accountID: frame.window?.scope.authority.accountID ?? Data()) else {
+            throw RuntimePreparationError.changedScope
+        }
+        return .terminal(row)
+    }
+    private static func prepareUnboundStartupFrame(frame: Frame, hasExplicitAuthority: Bool,
+        startupPhases: SetupRetainedInvocationReservation.RestorationPhases?,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken,
+        verify: @escaping @Sendable () throws -> Void,
+        read: () throws -> Frame, persistFailure: (Record, Record, Frame) throws -> Transition,
+        persistDiscard: (Record, UnboundStartupDiscardAuthorization, Frame) throws -> Transition) throws -> Frame {
+        guard !hasExplicitAuthority, frame.window?.unboundRelease != nil else { return frame }
+        guard let startupPhases else { throw RuntimePreparationError.changedScope }
+        return try unboundStartupPreflight(frame: frame, startupPhases: startupPhases,
+            directory: directory, admission: admission, drain: drain, verify: verify,
+            read: read, persistFailure: persistFailure, persistDiscard: persistDiscard)
+    }
+    private static func unboundStartupPreflight(frame initial: Frame,
+        startupPhases: SetupRetainedInvocationReservation.RestorationPhases,
+        directory: ReleaseDestinationLease, admission: UpdateOrdinaryAdmissionLease, drain: UpdateDrainToken,
+        verify: @escaping @Sendable () throws -> Void,
+        read: () throws -> Frame, persistFailure: (Record, Record, Frame) throws -> Transition,
+        persistDiscard: (Record, UnboundStartupDiscardAuthorization, Frame) throws -> Transition) throws -> Frame {
+        try startupPhases.requireUnboundStartupPhase(); try verify()
+        guard var previous = initial.window, previous.unboundRelease != nil else { return initial }
+        var frame = initial
+        if previous.phase == .reopenPending {
+            let next = try RuntimeMaintenanceStartupPolicy.row(previous, phase: .needsOwnerRecovery,
+                service: .notStopped, failure: .admissionUnconfirmed)
+            let receipt = try persistFailure(next, previous, frame)
+            try receipt.requireReplacement(next, replacing: previous)
+            frame = try read(); guard frame.window == next else { throw PreparationStoreError.staleRevision }
+            previous = next
+        }
+        let authorization = try UnboundStartupDiscardAuthorization(frame: frame, directory: directory,
+            admission: admission, drain: drain, startupPhases: startupPhases, verify: verify)
+        let receipt = try persistDiscard(previous, authorization, frame)
+        try receipt.requireReplacement(receipt.record, replacing: previous)
+        try receipt.record.requireUnboundStartupDiscardReplacing(previous)
+        let result = try read()
+        guard result.window == receipt.record else { throw PreparationStoreError.staleRevision }
+        try verify()
+        return result
+    }
     private func blockingPhase<Value: Sendable>(_ body: @escaping @Sendable () throws -> Value) async throws -> Value {
         if let phases { return try await phases.run(body) }
         return try body()
