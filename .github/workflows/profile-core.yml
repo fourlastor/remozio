@@ -6,10 +6,16 @@ jobs:
   profile:
     runs-on: macos-26
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [optimized, plain]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Build tests
-        run: swift build --package-path macos/core --build-tests --triple arm64-apple-macosx26.0 -Xswiftc -O
+        run: |
+          if [ "${{ matrix.flavor }}" = optimized ]; then o="-Xswiftc -O"; else o=""; fi
+          swift build --package-path macos/core --build-tests --triple arm64-apple-macosx26.0 $o
       - name: Profile methods
         run: |
           bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
@@ -25,14 +31,23 @@ jobs:
             xcrun xctrace export --input "prof/$n.trace" \
               --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/$n.xml" 2>/dev/null || true
             python3 scripts/profile/summarize.py "prof/$n.xml" "prof/$n.plain.log" > "prof/$n.summary.txt" 2>&1 || true
+            xcrun xctrace record --template 'System Trace' --output "prof/$n.sys.trace" --no-prompt \
+              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.sys.log" 2>&1 || true
+            xcrun xctrace export --input "prof/$n.sys.trace" --toc > "prof/$n.sys.toc.xml" 2>/dev/null || true
+            for schema in syscall; do
+              xcrun xctrace export --input "prof/$n.sys.trace" \
+                --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$schema\"]" > "prof/$n.sys.$schema.xml" 2>/dev/null || true
+            done
+            python3 scripts/profile/syscalls.py "prof/$n.sys.syscall.xml" >> "prof/$n.summary.txt" 2>&1 || true
             echo "=== $t"; cat "prof/$n.summary.txt"
           done < scripts/profile/methods.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
-          name: core-profile
+          name: core-profile-${{ matrix.flavor }}
           path: |
             prof/*.log
             prof/*.summary.txt
             prof/*.xml
+            !prof/*.sys.syscall.xml
           retention-days: 7
