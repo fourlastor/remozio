@@ -202,8 +202,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                 tasks[id] = Task { [self] in
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
                     let result = await response(q)
-                    lock.withLock { releaseBudget(id); if !closed, !Task.isCancelled { reply(result.0) } }
-                    if result.1 { close() }
+                    finish(id, result.0, closing: result.1, reply: reply)
                 }
             }
         } catch { close(); reply(nil) }
@@ -226,8 +225,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                     } catch AuthorityMaintenanceCommandExclusion.AcquisitionError.busy {
                         bytes = try? access.observeBusyGate(request).encoded
                     } catch { bytes = nil }
-                    lock.withLock { releaseBudget(id); if !closed, !Task.isCancelled { reply(bytes) } }
-                    if bytes == nil { close() }
+                    finish(id, bytes, closing: bytes == nil, reply: reply)
                 }
             }
         } catch { close(); reply(nil) }
@@ -249,11 +247,22 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                         try Task.checkCancellation()
                         bytes = try AuthorityMaintenanceIncarnationResponse(request: request, incarnation: incarnation).encoded
                     } catch { bytes = nil }
-                    lock.withLock { releaseBudget(id); if !closed { reply(bytes) } }
-                    if bytes == nil { close() }
+                    finish(id, bytes, closing: bytes == nil, ignoringCancellation: true, reply: reply)
                 }
             }
         } catch { close(); reply(nil) }
+    }
+    /// A failed operation closes before its nil reply, as the synchronous rejection path does, so a caller that
+    /// receives nil already sees the connection closed. A response that must reach the peer, such as a refusal
+    /// that also retires the connection, is still sent first, because invalidating first would drop it.
+    private func finish(_ id: UUID, _ bytes: Data?, closing: Bool, ignoringCancellation: Bool = false,
+        reply: @escaping @Sendable (Data?) -> Void) {
+        guard closing, bytes == nil else {
+            lock.withLock { releaseBudget(id); if !closed, ignoringCancellation || !Task.isCancelled { reply(bytes) } }
+            if closing { close() }; return
+        }
+        let deliver = lock.withLock { releaseBudget(id); return !closed && (ignoringCancellation || !Task.isCancelled) }
+        close(); if deliver { reply(nil) }
     }
     private func releaseBudget(_ id: UUID) {
         if active == id { active = nil }
