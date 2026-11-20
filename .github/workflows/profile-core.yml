@@ -44,7 +44,10 @@ jobs:
             while kill -0 $tracer 2>/dev/null && [ $waited -lt 150 ]; do sleep 3; waited=$((waited+3)); done
             if kill -0 $tracer 2>/dev/null; then
               echo "=== HUNG under xctrace (attempt $attempt) after ${waited}s"
-              for pid in $(pgrep -f "PackageTests.xctest"); do
+              ps -axo pid,ppid,stat,etime,command | grep -vE "grep|ps -axo" | grep -E "xctest|xctrace|Remozio|PackageTests" | cut -c1-200
+              roots=$(pgrep -f "PackageTests.xctest"); all="$roots"
+              for r in $roots; do all="$all $(pgrep -P $r | tr '\n' ' ')"; done
+              for pid in $all; do
                 echo "--- sampling pid $pid: $(ps -o state=,etime=,command= -p $pid | cut -c1-160)"
                 sample $pid 5 -file "prof/hang$attempt-$pid.txt" >/dev/null 2>&1 || sudo sample $pid 5 -file "prof/hang$attempt-$pid.txt" >/dev/null 2>&1 || true
               done
