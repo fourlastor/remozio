@@ -141,6 +141,8 @@ enum MachineUpdateInstalledReleaseEpoch {
         let artifacts: [Artifact]
         // Each immutable archive owns its decoded values. Candidate validation and current database checks remain separate.
         private let decoded = Decoded()
+        // A store-decoded archive shares the store's epoch caches. A proposal captured from completion facts does not.
+        private let caches: PreparationEpochDecodeCaches
         var description: String { "MachineUpdateInstalledReleaseEpoch.Archive(redacted)" }
         var debugDescription: String { description }
 
@@ -163,15 +165,16 @@ enum MachineUpdateInstalledReleaseEpoch {
             rows += restart.backend.artifacts.map { .init(kind: 200 + $0.kind, accountID: $0.accountID, bytes: $0.bytes) }
             rows += try snapshot.completion.intent.policies.map { .init(kind: 300, accountID: $0.binding.accountID, bytes: try $0.encoded) }
             rows.sort { $0.kind == $1.kind ? $0.accountID.lexicographicallyPrecedes($1.accountID) : $0.kind < $1.kind }
-            artifacts = rows
+            artifacts = rows; caches = .unshared()
             record = try .init(sourceSchemaVersion: 22,
                 activationAttempt: restart.source.replacement.activation.attemptID, inventory: plan.inventory,
                 publication: publication, artifacts: rows)
             try validate(candidate: candidate)
         }
 
-        private init(record: MachineUpdateInstalledReleaseRecord, artifacts: [Artifact], candidate: SignedReleaseEvidence) throws {
-            self.record = record; self.artifacts = artifacts; try validate(candidate: candidate)
+        private init(record: MachineUpdateInstalledReleaseRecord, artifacts: [Artifact], candidate: SignedReleaseEvidence,
+            caches: PreparationEpochDecodeCaches) throws {
+            self.record = record; self.artifacts = artifacts; self.caches = caches; try validate(candidate: candidate)
         }
         func artifact(_ kind: Int64, accountID: Data = global) throws -> Data {
             guard let value = artifacts.first(where: { $0.kind == kind && $0.accountID == accountID }) else {
@@ -185,7 +188,7 @@ enum MachineUpdateInstalledReleaseEpoch {
                 let rows = artifacts.filter { (101...109).contains($0.kind) }.map {
                     MachineUpdateConfigurationEpoch.Artifact(kind: $0.kind - 100, account: $0.accountID, bytes: $0.bytes)
                 }
-                let result = MachineUpdateConfigurationEpoch.Archive(record: header, artifacts: rows)
+                let result = MachineUpdateConfigurationEpoch.Archive(record: header, artifacts: rows, caches: caches)
                 try result.validate(); return result
             }
         }
@@ -195,7 +198,7 @@ enum MachineUpdateInstalledReleaseEpoch {
                 let rows = artifacts.filter { (201...203).contains($0.kind) }.map {
                     MachineUpdateBackendEpoch.Artifact(kind: $0.kind - 200, accountID: $0.accountID, bytes: $0.bytes)
                 }
-                let result = MachineUpdateBackendEpoch.Archive(record: header, artifacts: rows)
+                let result = MachineUpdateBackendEpoch.Archive(record: header, artifacts: rows, caches: caches)
                 try result.validate(epoch: configuration()); return result
             }
         }
@@ -236,9 +239,12 @@ enum MachineUpdateInstalledReleaseEpoch {
                   inventory.releaseDigest == record.releaseDigest,
                   try configuration().record.activationAttempt == record.activationAttempt else { throw PreparationStoreError.staleRevision }
         }
-        static func decode(record bytes: Data, artifacts: [Artifact], candidate: SignedReleaseEvidence) throws -> Self {
-            do { return try .init(record: MachineUpdateInstalledReleaseRecord.decode(bytes), artifacts: artifacts, candidate: candidate) }
-            catch { throw PreparationStoreError.corruptRecord }
+        static func decode(record bytes: Data, artifacts: [Artifact], candidate: SignedReleaseEvidence,
+            caches: PreparationEpochDecodeCaches) throws -> Self {
+            do {
+                return try .init(record: MachineUpdateInstalledReleaseRecord.decode(bytes), artifacts: artifacts,
+                    candidate: candidate, caches: caches)
+            } catch { throw PreparationStoreError.corruptRecord }
         }
     }
 }

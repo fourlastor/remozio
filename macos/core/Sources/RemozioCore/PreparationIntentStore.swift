@@ -24,6 +24,8 @@ public final class PreparationIntentStore {
     private let macID: Data
     private let didCommit: (() throws -> Void)?
     private let inventoryRecordLimit: Int32
+    /// Decode and pure-validation caches for immutable epoch archives, for the life of this store only.
+    private let epochCaches = PreparationEpochDecodeCaches.unshared()
     private var active = false
     private var unavailable = false
     private var retainedSetupPromotionAuthorization: RetainedSetupPromotionAuthorization?
@@ -2746,7 +2748,7 @@ public final class PreparationIntentStore {
                 let provenance = try MachineUpdateConfigurationEpoch.provisioningHistory(source: expected, candidate: candidate)
                 let artifacts = try MachineUpdateConfigurationEpoch.artifacts(source: expected, policies: policies,
                     configurations: configurations, provenance: provenance)
-                let archive = MachineUpdateConfigurationEpoch.Archive(record: record, artifacts: artifacts); try archive.validate()
+                let archive = MachineUpdateConfigurationEpoch.Archive(record: record, artifacts: artifacts, caches: epochCaches); try archive.validate()
                 if let existing {
                     guard existing.record == record, existing.artifacts == artifacts else { throw PreparationStoreError.staleRevision }
                 } else {
@@ -2871,7 +2873,7 @@ public final class PreparationIntentStore {
         let artifacts = rows.dropFirst().map {
             MachineUpdateConfigurationEpoch.Artifact(kind: $0.kind, account: $0.account, bytes: $0.payload)
         }
-        let archive = MachineUpdateConfigurationEpoch.Archive(record: header, artifacts: artifacts)
+        let archive = MachineUpdateConfigurationEpoch.Archive(record: header, artifacts: artifacts, caches: epochCaches)
         try archive.validate()
         return archive
     }
@@ -5738,7 +5740,7 @@ public final class PreparationIntentStore {
         guard activation == seal.completed else { throw PreparationStoreError.corruptRecord }
         try requireFinishingActivation(seal.finishing, inventory: inventory, candidate: candidate, admission: admission, schema: schema)
         let (header, rows) = try loadInstalledReleaseRows()
-        let installed = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
+        let installed = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release, caches: epochCaches)
         guard try installed.inventory() == inventory else { throw PreparationStoreError.corruptRecord }
         try seal.requireCurrentInventory(inventory, epoch: installed, candidate: release)
         let policies = hasRetainedPolicy ? try loadRetainedSetupPolicyIntents(installationID: inventory.installationID) : []
@@ -6136,7 +6138,7 @@ public final class PreparationIntentStore {
             guard try scalar("SELECT COUNT(*) FROM \(table)") == 0 else { throw PreparationStoreError.corruptRecord }
         }
         let (header, rows) = try loadInstalledReleaseRows()
-        let archive = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release)
+        let archive = try MachineUpdateInstalledReleaseEpoch.Archive.decode(record: header.encoded, artifacts: rows, candidate: release, caches: epochCaches)
         guard try archive.inventory() == inventory else { throw PreparationStoreError.staleRevision }
         let intent = try archive.completionIntent()
         var preparations: [AccountPreparationIntent] = []
@@ -6810,7 +6812,7 @@ public final class PreparationIntentStore {
                 throw PreparationStoreError.corruptRecord
             }
             let archive = MachineUpdateBackendEpoch.Archive(record: header,
-                artifacts: rows.dropFirst().map { .init(kind: $0.0, accountID: $0.1, bytes: $0.4) })
+                artifacts: rows.dropFirst().map { .init(kind: $0.0, accountID: $0.1, bytes: $0.4) }, caches: epochCaches)
             try archive.validate(epoch: epoch)
             return archive
         }

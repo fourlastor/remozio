@@ -22,9 +22,11 @@ enum MachineUpdateBackendEpoch {
         let artifacts: [Artifact]
         private let cache: ArchiveCache
         private let decodedValues: PreparationImmutableTupleDecodeCache<Capture>
-        init(record: MachineUpdateBackendEpochRecord, artifacts: [Artifact],
-            decodedValues: PreparationImmutableTupleDecodeCache<Capture> = .init()) {
-            self.record = record; self.artifacts = artifacts; cache = ArchiveCache(); self.decodedValues = decodedValues
+        private let validations: PreparationImmutableValidationCache
+        /// A store passes its own caches. The caches only skip work on identical bytes; they never prove currency.
+        init(record: MachineUpdateBackendEpochRecord, artifacts: [Artifact], caches: PreparationEpochDecodeCaches) {
+            self.record = record; self.artifacts = artifacts; cache = ArchiveCache()
+            decodedValues = caches.backends; validations = caches.backendValidations
         }
         func capture(accountID: Data) throws -> Capture? {
             guard let accounts = record.accounts else { throw PreparationStoreError.invalidTransition }
@@ -44,6 +46,18 @@ enum MachineUpdateBackendEpoch {
             cache.retain(value); return value
         }
         func validate(epoch: MachineUpdateConfigurationEpoch.Archive) throws {
+            // The key binds this archive's bytes to the exact configuration epoch bytes it is validated against.
+            let key = try PreparationImmutableValidationCache.key(domain: "remozio.backend-epoch.validation.v1",
+                [record.encoded, epoch.validationKey] + artifacts.flatMap { artifact -> [Data] in
+                    var kind = artifact.kind.bigEndian
+                    return [withUnsafeBytes(of: &kind) { Data($0) }, artifact.accountID, artifact.bytes]
+                })
+            if validations.contains(key) { return }
+            try validateImmutableValue(epoch: epoch)
+            validations.insert(key)
+        }
+        /// Must stay a pure function of the key bytes above: this archive's record and artifacts and the epoch's bytes.
+        private func validateImmutableValue(epoch: MachineUpdateConfigurationEpoch.Archive) throws {
             try record.requireScope(epoch)
             guard artifacts.count == record.operands.count else { throw PreparationStoreError.corruptRecord }
             for (artifact, operand) in zip(artifacts, record.operands) {
