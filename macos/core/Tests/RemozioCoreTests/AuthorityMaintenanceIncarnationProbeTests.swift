@@ -48,6 +48,13 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
             guard done.wait(timeout: .now() + 3) == .success else { throw Fault.timeout }
             return result.withLock { $0 }
         }
+        /// Records the invalidation count inside the reply itself, so the close-before-reply order is checked without waiting.
+        func invalidationsAtReply(_ send: (@escaping @Sendable (Data?) -> Void) -> Void) throws -> (Data?, Int) {
+            let done = DispatchSemaphore(value: 0), result = Mutex<(Data?, Int)>((nil, -1))
+            send { [self] b in let seen = invalidations.withLock { $0 }; result.withLock { $0 = (b, seen) }; done.signal() }
+            guard done.wait(timeout: .now() + 3) == .success else { throw Fault.timeout }
+            return result.withLock { $0 }
+        }
         func probe(account: Data = AuthorityMaintenanceIncarnationProbeTests.account, challenge: UInt8 = 6) throws -> AuthorityMaintenanceIncarnationResponse? {
             let q = try Probe(accountID: account, challenge: Data(repeating: challenge, count: 16))
             return try raw(q.encoded).map { try .decode($0, expected: q) }
@@ -130,15 +137,25 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
         XCTAssertEqual(f.endpoint.pendingOperations(), 0); XCTAssertTrue(f.budget.acquire()); f.budget.release()
         XCTAssertEqual(try f.admission.connectionReservations(), 0)
     }
-    func testClosedAdmissionRefusesTheProbe() async throws {
+    func testClosedAdmissionRefusesTheProbe() throws {
         let f = try Endpoint(); defer { f.endpoint.close() }
         XCTAssertEqual(f.hello(), AuthorityMaintenanceChannelScope.protocolVersion)
-        f.admission.close(); XCTAssertNil(try f.probe())
-        let limit = deadline
-        while f.invalidations.withLock({ $0 }) == 0 && ContinuousClock.now < limit {
-            try await ContinuousClock().sleep(until: min(limit, .now.advanced(by: .milliseconds(1))))
-        }
-        XCTAssertEqual(f.invalidations.withLock { $0 }, 1)
+        f.admission.close(); XCTAssertNil(try f.probe()); XCTAssertEqual(f.invalidations.withLock { $0 }, 1)
+    }
+    func testFailedAsynchronousOperationsCloseBeforeTheirNilReply() throws {
+        let probe = try Endpoint(); defer { probe.endpoint.close() }
+        XCTAssertEqual(probe.hello(), AuthorityMaintenanceChannelScope.protocolVersion)
+        let foreign = try Probe(accountID: data(2), challenge: data(6)).encoded
+        let (probeReply, probeSeen) = try probe.invalidationsAtReply { probe.endpoint.observeIncarnation(foreign, reply: $0) }
+        XCTAssertNil(probeReply); XCTAssertEqual(probeSeen, 1)
+        let gate = try Endpoint(); defer { gate.endpoint.close() }
+        XCTAssertEqual(gate.hello(), AuthorityMaintenanceChannelScope.protocolVersion)
+        let target = try AuthorityMaintenanceBinding(accountID: Self.account, attemptID: data(2), revision: data(3),
+            incarnation: gate.incarnation, connectionID: data(5))
+        let request = try AuthorityMaintenanceGateRequest(accountID: Self.account, attemptID: data(2), revision: data(8),
+            installationID: data(7), gate: .init(device: 8, inode: 9), target: target, challenge: data(11)).encoded
+        let (gateReply, gateSeen) = try gate.invalidationsAtReply { gate.endpoint.readGate(request, reply: $0) }
+        XCTAssertNil(gateReply); XCTAssertEqual(gateSeen, 1); XCTAssertEqual(gate.gates.withLock { $0 }, 1)
     }
 
     // MARK: Client
