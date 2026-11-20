@@ -83,7 +83,6 @@ enum RuntimeMaintenanceUnboundRestoreRunner {
                     guard probe.admission == .available else { throw PeerFailure.busy }
                 }
                 // Only this existing authenticated path can mint the writer's private observation.
-                // Its final busy response remains changedScope. The existing verifier does not distinguish that failure.
                 let observation = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: deadline)
                 await client.close()
                 _ = try await phases.run { try custody.persistUnboundCompletion(observation) }
@@ -139,6 +138,7 @@ enum RuntimeMaintenanceUnboundRestoreRunner {
             case .unknown: return .changedScope
             }
         }
+        if let client = error as? AuthorityMaintenanceClientError, client == .busy { return .busy }
         if error is AuthorityMaintenanceClientError { return .serviceUnavailable }
         return RuntimeMaintenanceStartupRecovery.failure(error, fallback: .admissionUnconfirmed)
     }

@@ -9,11 +9,12 @@ final class AuthorityMaintenanceUnboundClientTests: XCTestCase, @unchecked Senda
     private typealias Row = RuntimeMaintenanceWindowRecord
     private typealias Joined = SetupRetainedOrphanClaim.Joined
     private final class Driver: AuthorityMaintenanceClientDriver, Sendable {
-        enum Fault: Equatable, Sendable { case none, replayRelease, wrongIntent, nativeClosing }
+        enum Fault: Equatable, Sendable { case none, replayRelease, wrongIntent, nativeClosing, wrongGateChallenge, wrongGateIncarnation, malformedGate, replayGate }
         struct State {
             var invalidated: (@Sendable () -> Void)?
             var closed = false
             var priorRelease: Data?
+            var priorGate: AuthorityMaintenanceUnboundRequest?
             var releaseRequests: [AuthorityMaintenanceUnboundRequest] = []
         }
         let state = Mutex(State())
@@ -38,9 +39,24 @@ final class AuthorityMaintenanceUnboundClientTests: XCTestCase, @unchecked Senda
         }
         func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             if fault == .nativeClosing { reply(.bytes(nil)); close(); return }
+            if fault == .malformedGate { reply(.bytes(Data([0xff]))); return }
             do {
-                let request = try AuthorityMaintenanceUnboundRequest.decode(bytes)
-                reply(.bytes(try AuthorityMaintenanceUnboundGateResponse(request: request, hold: hold, admission: admission).encoded))
+                let original = try AuthorityMaintenanceUnboundRequest.decode(bytes)
+                let request: AuthorityMaintenanceUnboundRequest
+                let replyAdmission: Row.GateReadback.Admission
+                if fault == .wrongGateChallenge || fault == .wrongGateIncarnation {
+                    request = try .init(kind: original.kind, installationID: original.installationID,
+                        accountID: original.accountID, attemptID: original.attemptID, revision: original.revision,
+                        rowDigest: original.rowDigest, pendingRevision: original.pendingRevision,
+                        intentID: original.intentID, gate: original.gate,
+                        authorityIncarnation: fault == .wrongGateIncarnation ? Data(repeating: 42, count: 16) : original.authorityIncarnation,
+                        challenge: fault == .wrongGateChallenge ? AccountPreparationIntent.randomID() : original.challenge)
+                    replyAdmission = admission
+                } else if fault == .replayGate {
+                    let previous = state.withLock { value in let old = value.priorGate; value.priorGate = original; return old }
+                    request = previous ?? original; replyAdmission = previous == nil ? .available : .busy
+                } else { request = original; replyAdmission = admission }
+                reply(.bytes(try AuthorityMaintenanceUnboundGateResponse(request: request, hold: hold, admission: replyAdmission).encoded))
             } catch { reply(.bytes(nil)) }
         }
         func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
@@ -165,8 +181,59 @@ final class AuthorityMaintenanceUnboundClientTests: XCTestCase, @unchecked Senda
                 do {
                     _ = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: .now.advanced(by: .seconds(20)))
                     XCTFail("An incomplete observation minted a completion proof")
-                } catch { XCTAssertEqual(error as? RuntimePreparationError, .changedScope) }
+                } catch {
+                    if driver.admission == .busy { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .busy) }
+                    else { XCTAssertEqual(error as? RuntimePreparationError, .changedScope) }
+                }
                 await client.close()
+            }
+            XCTAssertEqual(try f.h.frame().window, row); f.retained.assertHeld()
+        }
+    }
+    func testReleasedFinalBusyIsTypedWithoutACompletion() throws {
+        try fixture { f in
+            let (joined, row, gate) = try await Self.intent(f), driver = Driver(hold: .released, admission: .busy)
+            let client = try Self.client(row, gate: gate, driver: driver, joined: joined)
+            do {
+                _ = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: .now.advanced(by: .seconds(20)))
+                XCTFail("Busy admission produced a completion")
+            } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .busy) }
+            XCTAssertTrue(driver.state.withLock { $0.closed }); XCTAssertEqual(driver.state.withLock { $0.releaseRequests.count }, 0)
+            await client.close(); XCTAssertEqual(try f.h.frame().window, row); f.retained.assertHeld()
+        }
+    }
+    func testNeverHeldFinalBusyIsTypedWithoutACompletion() throws {
+        try fixture { f in
+            let (joined, row, gate) = try await Self.intent(f), driver = Driver(hold: .neverHeld, admission: .busy)
+            let client = try Self.client(row, gate: gate, driver: driver, joined: joined)
+            do {
+                _ = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: .now.advanced(by: .seconds(20)))
+                XCTFail("Busy admission produced a completion")
+            } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .busy) }
+            XCTAssertTrue(driver.state.withLock { $0.closed }); XCTAssertEqual(driver.state.withLock { $0.releaseRequests.count }, 0)
+            await client.close(); XCTAssertEqual(try f.h.frame().window, row); f.retained.assertHeld()
+        }
+    }
+    func testBusyCannotMaskMalformedForeignStaleOrIncompleteObservations() throws {
+        try fixture { f in
+            let (joined, row, gate) = try await Self.intent(f)
+            let cases: [(Driver.Fault, AuthorityMaintenanceUnboundGateResponse.Hold, Row.GateReadback.Admission)] = [
+                (.wrongGateChallenge, .released, .busy), (.wrongGateIncarnation, .released, .busy),
+                (.malformedGate, .released, .busy), (.replayGate, .released, .busy),
+                (.none, .held, .busy), (.none, .unknown, .busy), (.none, .released, .unavailable)]
+            for (fault, hold, admission) in cases {
+                let driver = Driver(fault: fault, hold: hold, admission: admission)
+                let client = try Self.client(row, gate: gate, driver: driver, joined: joined)
+                if fault == .replayGate {
+                    let first = try await client.observeUnboundGate(joined: joined, row: row, gate: gate,
+                        until: .now.advanced(by: .seconds(20)))
+                    XCTAssertEqual(try first.completedGateReadback().admission, .available)
+                }
+                do {
+                    _ = try await client.observeUnboundGate(joined: joined, row: row, gate: gate, until: .now.advanced(by: .seconds(20)))
+                    XCTFail("An invalid observation produced a completion")
+                } catch { XCTAssertNotEqual(error as? AuthorityMaintenanceClientError, .busy) }
+                XCTAssertTrue(driver.state.withLock { $0.closed }); await client.close()
             }
             XCTAssertEqual(try f.h.frame().window, row); f.retained.assertHeld()
         }

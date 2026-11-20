@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import Security
 
-enum AuthorityMaintenanceClientError: Error, Equatable { case invalidState, cancelled, needsOwnerRecovery }
+enum AuthorityMaintenanceClientError: Error, Equatable { case invalidState, cancelled, needsOwnerRecovery, busy }
 enum AuthorityMaintenanceClientReply: Sendable { case hello(UInt64), bytes(Data?) }
 protocol AuthorityMaintenanceClientDriver: Sendable {
     func start(_ invalidated: @escaping @Sendable () -> Void)
@@ -313,6 +313,9 @@ actor AuthorityMaintenanceXPCClient {
                 throw RuntimePreparationError.changedScope
             }
             try challenge.requireCurrent(joined: joined, row: row, gate: gate)
+            if response.admission == .busy, response.hold == .released || response.hold == .neverHeld {
+                throw AuthorityMaintenanceClientError.busy
+            }
             _ = try response.completedGateReadback()
             return .init(challenge: challenge, response: response)
         } catch { finish(); throw error }

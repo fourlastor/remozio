@@ -490,6 +490,7 @@ final class RuntimeMaintenanceUnboundWriterTests: XCTestCase {
                     XCTFail("A refused gate reply minted a verified observation")
                 } catch {
                     if fault == .noncanonical { XCTAssertEqual(error as? CBORError, .nonCanonical) }
+                    else if fault == .busy { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .busy) }
                     else { XCTAssertEqual(error as? RuntimePreparationError, .changedScope) }
                 }
                 XCTAssertEqual(try f.h.frame().window, pending)

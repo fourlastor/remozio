@@ -6,6 +6,34 @@ import XCTest
 final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Sendable {
     private typealias Row = RuntimeMaintenanceWindowRecord
     private enum Fault: Error, Equatable { case afterCommit }
+    private final class AfterReleaseDrainDriver: AuthorityMaintenanceClientDriver, Sendable {
+        let base: any AuthorityMaintenanceClientDriver, context: InProcessUnboundEffectFixture
+        init(base: any AuthorityMaintenanceClientDriver, context: InProcessUnboundEffectFixture) {
+            self.base = base; self.context = context
+        }
+        func start(_ invalidated: @escaping @Sendable () -> Void) { base.start(invalidated) }
+        func hello(_ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) { base.hello(reply) }
+        func observeIncarnation(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+            base.observeIncarnation(bytes, reply)
+        }
+        func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+            base.readGate(bytes, reply)
+        }
+        func exchange(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
+            base.exchange(bytes) { [context] value in
+                if case .bytes(let bytes) = value, let bytes,
+                   let response = try? AuthorityMaintenanceUnboundReleaseResponse.decode(bytes),
+                   response.outcome == .released || response.outcome == .alreadyReleased {
+                    do {
+                        let drain = try context.f.h.barrier.beginDrain()
+                        context.foreignDrain.withLock { $0 = drain }
+                    } catch { reply(.bytes(nil)); return }
+                }
+                reply(value)
+            }
+        }
+        func close() { base.close() }
+    }
     private func fixture(epoch: UInt8 = 81, _ body: @escaping @Sendable (ExplicitStartupFixture) async throws -> Void) throws {
         try RuntimeMaintenanceExplicitRestorationTests().withFixture(epoch: epoch, body)
     }
@@ -326,4 +354,45 @@ final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Senda
         }
     }
 
+    func testFinalBusyAfterReleaseStaysTypedAndNeverCompletesTheIntent() throws {
+        try fixture { f in
+            try f.h.seed(.authorized)
+            let context = try InProcessUnboundEffectFixture(f, held: true)
+            let actual = Mutex<SetupOrphanInProcessRestoreEffect.OwnedResources?>(nil)
+            let effect = try SetupOrphanInProcessRestoreEffect.owned(processLease: f.processLease,
+                read: { try f.h.frame() }, makeResources: {
+                    let base = try context.resources(); actual.withLock { $0 = base }
+                    return try .init(release: base.release, admission: base.admission, directory: base.directory,
+                        accountBarrier: base.accountBarrier, read: base.read, persist: base.persist,
+                        writeIntent: base.writeIntent, writeCompletion: base.writeCompletion, verify: base.verify,
+                        inspect: base.inspect, observe: base.observe, register: base.register,
+                        makeDriver: { phases in AfterReleaseDrainDriver(base: try base.makeDriver(phases), context: context) },
+                        capturePeer: base.capturePeer, requirePeerLive: base.requirePeerLive)
+                })
+            let (joined, target) = try await context.joined()
+            do {
+                _ = try await effect.restore(joined: joined, target: target, until: .now.advanced(by: .seconds(90)))
+                XCTFail("Busy final admission completed restoration")
+            } catch { XCTAssertEqual(error as? AuthorityMaintenanceClientError, .busy) }
+            let before = try XCTUnwrap(f.h.frame().window), bytes = try before.encoded
+            XCTAssertEqual(before.phase, .needsOwnerRecovery); XCTAssertEqual(before.failure, .busy); XCTAssertNil(before.gate)
+            XCTAssertEqual(context.releases.withLock { $0 }, 1); XCTAssertEqual(context.gateCalls.withLock { $0 }, 2)
+            try context.authority.withLock { try $0.hold.requireOpen() }
+            try context.foreignDrain.withLock { try XCTUnwrap($0).validate() }
+            let resources = try XCTUnwrap(actual.withLock { $0 }), machine = try f.h.frame().source.actual.admission.machine
+            XCTAssertThrowsError(try resources.admission.validateMachineBoundary(directory: resources.directory, expected: machine))
+            f.claim?.abandon(); let (retry, retryTarget) = try await context.joined()
+            // The held account drain refuses the retry before another RPC.
+            do { _ = try await effect.restore(joined: retry, target: retryTarget, until: .now.advanced(by: .seconds(90))); XCTFail() }
+            catch { XCTAssertEqual(error as? UpdateAdmissionBarrierError, .busy) }
+            XCTAssertEqual(try f.h.frame().window?.encoded, bytes)
+            XCTAssertEqual(context.writes.withLock { $0 }, [.reopenPending, .needsOwnerRecovery])
+            XCTAssertEqual(context.releases.withLock { $0 }, 1); XCTAssertEqual(context.gateCalls.withLock { $0 }, 2)
+            XCTAssertEqual(context.resourceCount.withLock { $0 }, 2)
+            try context.foreignDrain.withLock { try XCTUnwrap($0).validate() }
+            let retriedResources = try XCTUnwrap(actual.withLock { $0 })
+            XCTAssertThrowsError(try retriedResources.admission.validateMachineBoundary(directory: retriedResources.directory, expected: machine))
+            f.retained.assertHeld()
+        }
+    }
 }
