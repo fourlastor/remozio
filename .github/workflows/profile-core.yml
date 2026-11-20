@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [base, change]
+        flavor: [change]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -26,34 +26,34 @@ jobs:
           for t in RemozioCoreTests.PreparationImmutableValidationCacheTests RemozioCoreTests.PreparationImmutableTupleDecodeCacheTests \
             RemozioCoreTests.MachineUpdateReplacementTests/testInstalledReleaseArchiveRequiresAllFilesAndFreshPairedPolicy \
             RemozioCoreTests.MachineUpdateRetainedSetupMaterialValueTests; do
+            echo "--- $t"
             status=0; "$(xcrun -f xctest)" -XCTest "$t" "$bundle" > test.log 2>&1 || status=$?
             grep -E "error|failed|passed \(|Executed" test.log | tail -40 || true
             test "$status" -eq 0
           done
-      - name: Profile methods
+      - name: Run methods with a hang watchdog
         run: |
           bundle=$(find macos/core/.build -name '*PackageTests.xctest' -maxdepth 4 | head -1)
           xctest=$(xcrun -f xctest)
           mkdir -p prof
+          n=0
           while read -r t; do
             [ -z "$t" ] && continue
-            n=$(echo "$t" | tr '/.' '__')
-            /usr/bin/time -l "$xctest" -XCTest "$t" "$bundle" > "prof/$n.plain.log" 2>&1 || true
-            xcrun xctrace record --template 'Time Profiler' --output "prof/$n.trace" --no-prompt \
-              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.trace.log" 2>&1 || true
-            xcrun xctrace export --input "prof/$n.trace" --toc > "prof/$n.toc.xml" 2>/dev/null || true
-            xcrun xctrace export --input "prof/$n.trace" \
-              --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' > "prof/$n.xml" 2>/dev/null || true
-            { grep -E "passed \(|real" "prof/$n.plain.log"; python3 scripts/profile/summarize2.py "prof/$n.xml" | head -120; } > "prof/$n.summary.txt" 2>&1 || true
-            xcrun xctrace record --template 'System Trace' --output "prof/$n.sys.trace" --no-prompt \
-              --launch -- "$xctest" -XCTest "$t" "$bundle" > "prof/$n.sys.log" 2>&1 || true
-            xcrun xctrace export --input "prof/$n.sys.trace" --toc > "prof/$n.sys.toc.xml" 2>/dev/null || true
-            for schema in syscall; do
-              xcrun xctrace export --input "prof/$n.sys.trace" \
-                --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$schema\"]" > "prof/$n.sys.$schema.xml" 2>/dev/null || true
+            for attempt in 1 2; do
+              n=$((n+1))
+              "$xctest" -XCTest "$t" "$bundle" > "prof/run$n.log" 2>&1 &
+              pid=$!; waited=0
+              while kill -0 $pid 2>/dev/null && [ $waited -lt 120 ]; do sleep 2; waited=$((waited+2)); done
+              if kill -0 $pid 2>/dev/null; then
+                echo "=== HUNG $t (attempt $attempt) after ${waited}s"
+                sudo sample $pid 5 -file "prof/hang$n.txt" >/dev/null 2>&1 || sample $pid 5 -file "prof/hang$n.txt" >/dev/null 2>&1 || true
+                kill -9 $pid; wait $pid 2>/dev/null || true
+                grep -E "^ +[0-9]+ Thread_|^Call graph" -A0 "prof/hang$n.txt" | head -20 || true
+              else
+                wait $pid || true
+                echo "=== done $t (attempt $attempt) in ${waited}s"; grep -E "passed \(|failed \(|error:" "prof/run$n.log" | head -10
+              fi
             done
-            python3 scripts/profile/syscalls.py "prof/$n.sys.syscall.xml" >> "prof/$n.summary.txt" 2>&1 || true
-            echo "=== $t"; cat "prof/$n.summary.txt"
           done < scripts/profile/methods.txt
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
@@ -61,7 +61,5 @@ jobs:
           name: core-profile-${{ matrix.flavor }}
           path: |
             prof/*.log
-            prof/*.summary.txt
-            prof/*.xml
-            !prof/*.sys.syscall.xml
+            prof/*.txt
           retention-days: 7
