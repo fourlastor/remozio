@@ -234,6 +234,62 @@ actor AuthorityMaintenanceXPCClient {
             return .init(accountID: response.accountID, incarnation: response.incarnation, observer: ObjectIdentifier(lifetime))
         } catch { finish(); throw (error as? AuthorityMaintenanceClientError) ?? .needsOwnerRecovery }
     }
+    /// Reports the authenticated hold and admission separately. It never grants a completion capability.
+    func probeUnboundGate(joined: SetupRetainedOrphanClaim.Joined, row: RuntimeMaintenanceWindowRecord,
+        gate: PreparationFileIdentity, until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceUnboundGateResponse {
+        if getuid() == 0 {
+            guard geteuid() == 0, driver is NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        } else { try RuntimeMaintenanceOwnedControl.require() }
+        guard row.scope.authority.accountID == context.accountID, row.scope.installationID == context.installationID,
+              row.id == context.attemptID, gate == context.gate, binding == nil else {
+            throw RuntimePreparationError.changedScope
+        }
+        let proof = try await observeIncarnation(until: deadline)
+        try enter(); defer { busy = false }
+        do {
+            try proof.requireObserved(by: self)
+            let challenge = try joined.issueUnboundGateChallenge(row: row, gate: gate, probedIncarnation: proof.incarnation)
+            let reply = try await invokeUnbound(try challenge.request.encoded, kind: .gate, until: deadline)
+            try proof.requireObserved(by: self)
+            let response = try AuthorityMaintenanceUnboundGateResponse.decode(reply)
+            guard response.request == challenge.request, response.request.authorityIncarnation == proof.incarnation else {
+                throw RuntimePreparationError.changedScope
+            }
+            try challenge.requireCurrent(joined: joined, row: row, gate: gate)
+            return response
+        } catch { finish(); throw error }
+    }
+    /// A release acknowledgement is not a gate observation. Busy and stop refusal remain distinct outcomes.
+    func releaseUnbound(joined: SetupRetainedOrphanClaim.Joined, row: RuntimeMaintenanceWindowRecord,
+        gate: PreparationFileIdentity, until deadline: ContinuousClock.Instant) async throws -> AuthorityMaintenanceUnboundReleaseResponse {
+        if getuid() == 0 {
+            guard geteuid() == 0, driver is NativeMaintenanceClient else { throw JournalLeaseError.rootRequired }
+        } else { try RuntimeMaintenanceOwnedControl.require() }
+        guard row.scope.authority.accountID == context.accountID, row.scope.installationID == context.installationID,
+              row.id == context.attemptID, gate == context.gate, binding == nil else {
+            throw RuntimePreparationError.changedScope
+        }
+        let proof = try await observeIncarnation(until: deadline)
+        try enter(); defer { busy = false }
+        do {
+            try proof.requireObserved(by: self)
+            let challenge = try joined.issueUnboundGateChallenge(row: row, gate: gate, probedIncarnation: proof.incarnation)
+            let template = challenge.request
+            let request = try AuthorityMaintenanceUnboundRequest(kind: .release,
+                installationID: template.installationID, accountID: template.accountID, attemptID: template.attemptID,
+                revision: template.revision, rowDigest: template.rowDigest, pendingRevision: template.pendingRevision,
+                intentID: template.intentID, gate: template.gate, authorityIncarnation: template.authorityIncarnation,
+                challenge: template.challenge)
+            let reply = try await invokeUnbound(try request.encoded, kind: .release, until: deadline)
+            try proof.requireObserved(by: self)
+            let response = try AuthorityMaintenanceUnboundReleaseResponse.decode(reply)
+            guard response.request == request, response.request.authorityIncarnation == proof.incarnation else {
+                throw RuntimePreparationError.changedScope
+            }
+            try challenge.requireCurrent(joined: joined, row: row, gate: gate)
+            return response
+        } catch { finish(); throw error }
+    }
     /// The native driver authenticates both replies. Owned drivers remain unavailable to root.
     func observeUnboundGate(joined: SetupRetainedOrphanClaim.Joined, row: RuntimeMaintenanceWindowRecord,
         gate: PreparationFileIdentity, until deadline: ContinuousClock.Instant) async throws -> VerifiedUnboundGateObservation {
@@ -262,6 +318,12 @@ actor AuthorityMaintenanceXPCClient {
         } catch { finish(); throw error }
     }
     private func invokeUnboundGate(_ bytes: Data, until deadline: ContinuousClock.Instant) async throws -> Data {
+        try await invokeUnbound(bytes, kind: .gate, until: deadline)
+    }
+    // This selects a driver method only. The routing slice chooses the actual selectors.
+    // The current native Authority endpoint does not route unbound messages.
+    private func invokeUnbound(_ bytes: Data, kind: AuthorityMaintenanceUnboundRequest.Kind,
+        until deadline: ContinuousClock.Instant) async throws -> Data {
         try Task.checkCancellation()
         let expectedState = state, verify = self.verify
         if let recoveryPhases { try await recoveryPhases.run(verify) } else { try verify() }
@@ -279,7 +341,12 @@ actor AuthorityMaintenanceXPCClient {
                 let reply: @Sendable (AuthorityMaintenanceClientReply) -> Void = { [weak self, lifetime] value in
                     guard lifetime.record(id, value, until: end) else { return }; Task { await self?.received(id) }
                 }
-                guard lifetime.ifActive({ driver.readGate(bytes, reply) }) else { finish(); return }
+                guard lifetime.ifActive({
+                    switch kind {
+                    case .gate: driver.readGate(bytes, reply)
+                    case .release: driver.exchange(bytes, reply)
+                    }
+                }) else { finish(); return }
             }
         } onCancel: { [weak self, lifetime, driver] in
             lifetime.close(); driver.close(); Task { await self?.close() }
