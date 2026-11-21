@@ -120,7 +120,8 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
 
     func recoveryHello(reply: @escaping @Sendable (UInt64) -> Void) {
         guard (try? verify()) != nil else { close(); reply(0); return }
-        let state = lock.withLock { current }
+        let selected = lock.withLock { (current, recoveryEndpoint) }, state = selected.0
+        if state == .recoveryOnly, selected.1 != nil { reply(AdministrativeSetupInterface.orphanRecoveryVersion); return }
         if state == .normal || state == .openingNormal || state == .openingRecovery { reply(0); return }
         guard recoveryAllowed(), let openRecovery else { close(); reply(0); return }
         let decision = lock.withLock { () -> (Bool, (any SetupRecoveryEndpoint)?) in

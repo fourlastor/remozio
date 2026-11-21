@@ -297,7 +297,8 @@ actor SetupMaintenanceRecoverySupervisor {
         }
     }
     deinit {
-        guard getpid() == processID, closing == nil else { return }
+        guard getpid() == processID else { return }
+        if let closing { finalClose.retainSupervisorDisposal(closing); return }
         let start = AsyncStream<Void>.makeStream()
         let tasks = entries.values.map(\.task), custody = finalClose
         let actual = Task {

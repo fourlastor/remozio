@@ -167,6 +167,38 @@ final class SetupRecoverySessionShutdownTests: XCTestCase, @unchecked Sendable {
             try await f.shutdown.close(); XCTAssertThrowsError(try f.lease.validate())
         }
     }
+    func testDirectCloseAfterPendingOrFailedShutdownAndSupervisorDisposalRetainsBothLeases() throws {
+        for retiring in [false, true] {
+            for cleanupFailed in [false, true] {
+                try fixture { f in
+                    let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: f.owner, shutdown: f.shutdown)
+                    let id = UUID(); custody.retain(id, id: id)
+                    if cleanupFailed { custody.cleanupFailed(id) }
+                    var supervisor: SetupMaintenanceRecoverySupervisor? = try .openOwned(custody: custody,
+                        driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
+                    if retiring { await supervisor?.retire() } else { await supervisor?.close() }
+                    let joined = await supervisor?.isClosed; XCTAssertEqual(joined, true)
+                    f.assertHeld()
+                    weak let old = supervisor; supervisor = nil; XCTAssertNil(old)
+                    let returned = Mutex(0)
+                    let close: @Sendable () async -> Void = {
+                        do { try await f.shutdown.close(); XCTFail("Pending recovery reported closed") }
+                        catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+                        returned.withLock { $0 += 1 }
+                    }
+                    let first = Task { await close() }, second = Task { await close() }
+                    do { try await Self.eventually { returned.withLock { $0 == 2 } } }
+                    catch {
+                        custody.joined(id); custody.releaseAfterJoining()
+                        await first.value; await second.value; throw error
+                    }
+                    await first.value; await second.value; f.assertHeld()
+                    custody.joined(id); custody.releaseAfterJoining()
+                    try await f.shutdown.close(); XCTAssertThrowsError(try f.lease.validate())
+                }
+            }
+        }
+    }
     func testOwnedCustodyWithoutSupervisorPublicationRefusesDirectClose() throws {
         try fixture { f in
             let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: f.owner, shutdown: f.shutdown)

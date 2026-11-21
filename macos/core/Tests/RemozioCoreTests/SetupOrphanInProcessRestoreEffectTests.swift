@@ -433,11 +433,12 @@ final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Senda
             XCTAssertEqual(afterCleanup.unboundRelease, interrupted.unboundRelease)
             f.retained.assertHeld(); XCTAssertNoThrow(try f.processLease.validate()); XCTAssertNoThrow(try placement.validate())
             f.claim?.abandon()
-            try await Self.discardInterruptedIntentOnFreshStartup(f)
+            let restarted = try await Self.discardInterruptedIntentOnFreshStartup(f)
+            XCTAssertEqual(restarted.failure, .repairRequired)
             placement.close()
         }
     }
-    private static func discardInterruptedIntentOnFreshStartup(_ f: ExplicitStartupFixture) async throws {
+    private static func discardInterruptedIntentOnFreshStartup(_ f: ExplicitStartupFixture) async throws -> RuntimeMaintenanceWindowRecord {
         let activity = try ReleaseActivityFixture()
         let owner = try SetupAccountOwner(machine: f.h.f.machine(),
             expectedReleaseDigest: InstallationInventory.digest(f.h.f.candidate), resume: { _, row in row }, releaseActivity: activity.open())
@@ -460,8 +461,9 @@ final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Senda
             guard case .terminal(let row) = result else { throw RuntimePreparationError.changedScope }
             return try XCTUnwrap(row)
         }
-        XCTAssertEqual(row.phase, .needsOwnerRecovery); XCTAssertEqual(row.failure, .repairRequired)
+        XCTAssertEqual(row.phase, .needsOwnerRecovery)
         XCTAssertNil(row.unboundRelease); XCTAssertNil(row.gate)
+        return row
     }
 
 }
