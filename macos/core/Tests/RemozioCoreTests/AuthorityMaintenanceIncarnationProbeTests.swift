@@ -284,7 +284,7 @@ final class AuthorityMaintenanceIncarnationProbeTests: XCTestCase, @unchecked Se
         }
     }
     func testVersionOneHelloRefusesTheProbeBeforeItIsSent() async throws {
-        for version: UInt64 in [0, 1, 3] {
+        for version: UInt64 in [0, 1, 2, 4] {
             let d = Driver(); d.configure(helloVersion: version); let c = try client(d)
             await expect(.needsOwnerRecovery) { _ = try await c.observeIncarnationOwned(until: self.deadline) }
             XCTAssertEqual(d.hellos, 1); XCTAssertEqual(d.probes, 0)

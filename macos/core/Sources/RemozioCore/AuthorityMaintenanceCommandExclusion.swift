@@ -142,6 +142,10 @@ final class AuthorityMaintenanceCommandExclusion: Sendable {
             guard !closed.withLock({ $0 }) else { throw JournalLeaseError.invalidated }
             try owner.requireCommand(id)
         }
+        func requireOwner(_ expected: AuthorityMaintenanceCommandExclusion) throws {
+            guard owner === expected else { throw JournalLeaseError.invalidated }
+            try validate()
+        }
         func close() {
             let release = closed.withLock { value in guard !value else { return false }; value = true; return true }
             if release { owner.release(id) }

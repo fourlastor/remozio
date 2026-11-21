@@ -107,9 +107,9 @@ final class AuthorityMaintenanceClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(d.hellos, 1); XCTAssertTrue(d.calls.isEmpty); XCTAssertGreaterThan(d.closes, 0)
     }
     func testUnsupportedHelloVersionCannotSendOpen() async throws {
-        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 2)
-        // Version 1 peers lack the incarnation probe, so the client refuses them like any other mismatch.
-        for version: UInt64 in [0, 1, 3] {
+        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 3)
+        // Version 2 peers do not dispatch unbound requests. Neither older nor future versions can substitute for version 3.
+        for version: UInt64 in [0, 1, 2, 4] {
             let d = Driver(); d.configure(helloVersion: version); let c = try client(d)
             await expect(.needsOwnerRecovery) { _ = try await c.start(until: self.deadline) }; XCTAssertTrue(d.calls.isEmpty)
         }
