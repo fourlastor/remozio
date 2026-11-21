@@ -16,7 +16,8 @@ public enum AdministrativeSetupInterface {
     public static let portableImportRecoveryVersion: UInt64 = 10
     public static let auditUpgradeVersion: UInt64 = 11
     public static let retainedRuntimeVersion: UInt64 = 12
-    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion, auditUpgradeVersion]
+    public static let orphanRecoveryVersion: UInt64 = SetupOrphanRecoveryWire.ipcVersion
+    public static let supportedVersions: Set<UInt64> = [storageVersion, enrollmentVersion, serviceAccountsVersion, runtimeVersion, activationVersion, gatewayVersion, gatewayActivationVersion, gatewaySettingsVersion, portableImportVersion, portableImportRecoveryVersion, auditUpgradeVersion, orphanRecoveryVersion]
 }
 
 /// Versioned local setup interface. Authenticate the chosen hello before sending an external authorization form.

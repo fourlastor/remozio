@@ -124,12 +124,59 @@ final class SetupOrphanRecoveryEndpointTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try Self.start(s, r), first)
     }
     func testFailedPeerCheckClosesTheSession() throws {
-        let h = try Harness(), s = try h.session(), r = try Self.request()
-        h.live.withLock { $0 = false }
-        XCTAssertNil(s.progress(try W.Progress(requestID: r.requestID).bytes))
-        h.live.withLock { $0 = true }
-        XCTAssertNil(s.progress(try W.Progress(requestID: r.requestID).bytes))
-        XCTAssertEqual(h.imports.withLock { $0 }, 0)
+        for selector in ["hello", "start", "progress"] {
+            let h = try Harness(), checks = Mutex(0), endpointChecks = Mutex(0)
+            let session = try h.session(verify: {
+                endpointChecks.withLock { $0 += 1 }
+                guard h.live.withLock({ $0 }) else { throw Failure.expected }; return h.peer
+            })
+            let facade = AdministrativeSetupConnectionFacade(verify: {
+                checks.withLock { $0 += 1 }
+                guard h.live.withLock({ $0 }) else { throw Failure.expected }; return h.peer.credentials
+            }, select: { _ in true }, openNormal: { _ in throw Failure.expected }, status: { _ in .unavailable },
+                openRecovery: { _ in session }, recoveryAllowed: { true }, invalidate: {})
+            defer { facade.close() }
+            let hello = Mutex<UInt64?>(nil)
+            facade.recoveryHello { value in hello.withLock { $0 = value } }
+            XCTAssertEqual(hello.withLock { $0 }, 13); XCTAssertEqual(facade.state, .recoveryOnly)
+            let before = checks.withLock { $0 }; h.live.withLock { $0 = false }
+            switch selector {
+            case "hello":
+                let reply = Mutex<UInt64?>(nil); facade.recoveryHello { value in reply.withLock { $0 = value } }
+                XCTAssertEqual(reply.withLock { $0 }, 0)
+            case "start":
+                let reply = Mutex<Data?>(nil)
+                facade.startRecovery(try Self.request().bytes, authorization: Data()) { value in reply.withLock { $0 = value } }
+                XCTAssertNil(reply.withLock { $0 })
+            default:
+                let reply = Mutex<Data?>(nil)
+                facade.recoveryProgress(try W.Progress(requestID: Self.request().requestID).bytes) { value in reply.withLock { $0 = value } }
+                XCTAssertNil(reply.withLock { $0 })
+            }
+            XCTAssertEqual(checks.withLock { $0 }, before + 1, selector)
+            XCTAssertEqual(facade.state, .closed); XCTAssertEqual(h.imports.withLock { $0 }, 0)
+            XCTAssertEqual(endpointChecks.withLock { $0 }, 1)
+        }
+        for selector in ["start", "progress", "foreign"] {
+            let h = try Harness(), checks = Mutex(0), peerLive = Mutex(true), request = try Self.request()
+            let session = try h.session(verify: {
+                checks.withLock { $0 += 1 }
+                guard peerLive.withLock({ $0 }) else { throw Failure.expected }; return h.peer
+            })
+            defer { session.close() }; XCTAssertEqual(checks.withLock { $0 }, 1)
+            peerLive.withLock { $0 = false }
+            switch selector {
+            case "start":
+                let reply = Mutex<Data?>(nil)
+                session.start(try request.bytes, authorization: Data()) { value in reply.withLock { $0 = value } }
+                XCTAssertNil(reply.withLock { $0 })
+            case "progress": XCTAssertNil(session.progress(try W.Progress(requestID: request.requestID).bytes))
+            default: XCTAssertNil(session.refuseForeignSelector())
+            }
+            XCTAssertEqual(checks.withLock { $0 }, 2, selector); XCTAssertEqual(h.imports.withLock { $0 }, 0)
+            peerLive.withLock { $0 = true }
+            XCTAssertNil(session.progress(try W.Progress(requestID: request.requestID).bytes))
+        }
     }
     func testStartupAndClosedRoutingRefuseWithoutImport() throws {
         for state in [AdministrativeSetupLifecycle.State.starting, .discovering, .closed] {

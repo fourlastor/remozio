@@ -140,15 +140,44 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
             scope.close(); custody.releaseAfterJoining(); try await h.shutdown.close()
         }
     }
-    func testBoundShutdownRefusesDirectCloseAndRetriesAfterTheScopeJoins() throws {
+    func testBoundDirectCloseWaitsForTheSupervisorBeforeReportingPendingScopeCleanup() throws {
         try withScope { h in
             let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
             let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown)
-            defer { scope.close(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
-            do { try await h.shutdown.close(); XCTFail("Direct shutdown bypassed its recovery binding") }
-            catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
-            let pending = await custody.closeAfterJoiningResult(); XCTAssertEqual(pending, .pending)
+            let supervisor = try SetupMaintenanceRecoverySupervisor.openOwned(custody: custody,
+                driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
+            let session = try h.shutdown.registerRecoverySession(owner: h.owner)
+            XCTAssertTrue(session.reservePublication())
+            let released = RecoveryScopeBoolean(), closing = RecoveryScopeBoolean(), returned = RecoveryScopeBoolean()
+            session.bindEndpointClose { closing.value.withLock { $0 = true } }
+            let actual = Task {
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while !released.value.withLock({ $0 }) {
+                    guard ContinuousClock.now < deadline else {
+                        XCTFail("Session did not receive its bounded async release"); return
+                    }
+                    await withCheckedContinuation { continuation in
+                        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(1)) {
+                            continuation.resume()
+                        }
+                    }
+                }
+            }
+            session.publish(actual)
+            defer { released.value.withLock { $0 = true }; scope.close(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
+            let close = Task {
+                do { try await h.shutdown.close(); XCTFail("Pending account scope reported closed") }
+                catch { XCTAssertEqual(error as? AdministrativeSetupError, .unavailable) }
+                returned.value.withLock { $0 = true }
+            }
+            try await Self.eventually { closing.value.withLock { $0 } }
+            XCTAssertFalse(returned.value.withLock { $0 })
+            XCTAssertTrue(h.shutdown.belongs(to: h.owner))
             XCTAssertNoThrow(try h.processLease.validate()); XCTAssertNoThrow(try h.placement.validate())
+            released.value.withLock { $0 = true }; await close.value
+            let closedSupervisor = await supervisor.isClosed, pending = await supervisor.closureResult
+            XCTAssertTrue(closedSupervisor); XCTAssertEqual(pending, .pending)
+            XCTAssertNoThrow(try h.processLease.validate())
             XCTAssertThrowsError(try h.acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
             scope.close()
             let closed = await custody.closeAfterJoiningResult(); XCTAssertEqual(closed, .closed)
@@ -242,7 +271,7 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
             }
             try await Self.eventually(for: .milliseconds(500)) { released.value.withLock { $0 } }
             await disposing.value
-            XCTAssertThrowsError(try shutdown.reserveRecoverySupervisor()) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
+            XCTAssertThrowsError(try shutdown.reserveRecoverySupervisor(expectsPublication: false)) { XCTAssertEqual($0 as? AdministrativeSetupError, .unavailable) }
             XCTAssertEqual(try custody.closeAttemptIDOwned(), firstID)
             await supervisor.retire()
             let secondResult = await supervisor.closureResult, secondExit = await supervisor.shouldExit

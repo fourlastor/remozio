@@ -179,7 +179,7 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
             async throws -> SetupRetainedInvocationReservation.RestorationWork {
             let phases = try restorationPhases()
             try await phases.run { try self.requireCurrentAuthorization() }
-            return try claim.token.startRestoration(body)
+            return try claim.token.startRestoration(session: claim.shutdownSession, body)
         }
         /// A new claimant can finish an actual completed write without replaying restoration or its RPCs.
         func finishRecordedRestorationNative(processLease: SetupProcessLease) async throws -> RuntimeMaintenanceWindowRecord {
@@ -218,15 +218,18 @@ final class SetupRetainedOrphanClaim: @unchecked Sendable, CustomStringConvertib
     }
     private let authorization: SetupRetainedRecoveryAuthorization
     private let token: SetupRetainedInvocationReservation.RecoveryToken
-    private init(authorization: SetupRetainedRecoveryAuthorization, token: SetupRetainedInvocationReservation.RecoveryToken) {
-        self.authorization = authorization; self.token = token
+    private let shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork?
+    private init(authorization: SetupRetainedRecoveryAuthorization, token: SetupRetainedInvocationReservation.RecoveryToken,
+        shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork?) {
+        self.authorization = authorization; self.token = token; self.shutdownSession = shutdownSession
     }
     /// Library only. The owner method seals its existing record without acquiring another admission.
     static func open(owner: SetupAccountOwner, target: Target,
-        authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedOrphanClaim {
+        authorization: SetupRetainedRecoveryAuthorization,
+        shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork? = nil) throws -> SetupRetainedOrphanClaim {
         do {
             let token = try owner.claimRetainedOrphan(target: target, authorization: authorization)
-            let value = Self(authorization: authorization, token: token)
+            let value = Self(authorization: authorization, token: token, shutdownSession: shutdownSession)
             try authorization.requireCurrent(); return value
         } catch { authorization.close(); throw error }
     }

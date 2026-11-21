@@ -6,14 +6,17 @@ import XCTest
 
 final class AdministrativeSetupServiceTests: XCTestCase {
     private let mac = Data(repeating: 1, count: 16), installation = Data(repeating: 2, count: 16)
-    private func release(generation: UInt64 = 1, path: String = AdministrativeSetupConfiguration.executablePath) throws -> SignedReleaseEvidence {
+    private func release(generation: UInt64 = 1, path: String = AdministrativeSetupConfiguration.executablePath, recovery: Bool = false) throws -> SignedReleaseEvidence {
+        let recoveryFormats: [ReleaseFormat] = try recovery
+            ? [.init(name: AdministrativeSetupInterface.formatName, readers: AdministrativeSetupInterface.supportedVersions,
+                writers: AdministrativeSetupInterface.supportedVersions)] : []
         let components = try [
             ReleaseComponent(role: .app, identifier: "dev.sebastiano.remozio.macos", generation: 1, relativePath: "Contents/MacOS/Remozio",
-                codeDirectoryHash: nil, build: "1", teamID: "ABCDEFGHIJ", formats: []),
+                codeDirectoryHash: nil, build: "1", teamID: "ABCDEFGHIJ", formats: recoveryFormats),
             ReleaseComponent(role: .authority, identifier: "dev.sebastiano.remozio.macos.authority", generation: 1, relativePath: "Contents/Library/LaunchServices/Authority",
                 codeDirectoryHash: Data(repeating: 4, count: 20), build: "1", teamID: "ABCDEFGHIJ", formats: []),
             ReleaseComponent(role: .setupController, identifier: "dev.sebastiano.remozio.macos.setup-controller", generation: generation, relativePath: path,
-                codeDirectoryHash: Data(repeating: 8, count: 20), build: "1", teamID: "ABCDEFGHIJ", formats: [])]
+                codeDirectoryHash: Data(repeating: 8, count: 20), build: "1", teamID: "ABCDEFGHIJ", formats: recoveryFormats)]
         return try .init(manifest: .init(release: "1", build: "1", components: components),
             codeDirectoryHashes: [.app: Data(repeating: 3, count: 20), .authority: Data(repeating: 4, count: 20), .setupController: Data(repeating: 8, count: 20)])
     }
@@ -100,4 +103,52 @@ final class AdministrativeSetupServiceTests: XCTestCase {
         XCTAssertTrue(path.hasPrefix("/")); XCTAssertTrue(FileManager.default.fileExists(atPath: path))
         XCTAssertThrowsError(try DynamicCodeValidation.validateSelf(requirement: "identifier \"dev.remozio.nonexistent-native-control\""))
     }
+    private func withRecoveryBinding(_ body: (AdministrativeSetupShutdown, SetupAccountOwner, SetupProcessLease,
+        AdministrativeSetupLifecycle.Routing, (Bool, Int) throws -> AdministrativeSetupService.RecoveryBinding) throws -> Void) throws {
+        let source = try RuntimeAuditUpgradeOperationTests.Harness(), owner = try source.owner()
+        let placement = try ReleaseDestinationLease(anchor: source.activity.root.path, relativeDirectory: "Machine", owner: getuid())
+        let lease = try SetupProcessLease.openOwned(directory: .init(anchor: source.activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+        let shutdown = AdministrativeSetupShutdown(owner: owner, placement: placement, processLease: lease)
+        let routing = AdministrativeSetupLifecycle.Routing(validateStartup: {})
+        try routing.install(owner); routing.move(to: .serving)
+        defer { try? owner.close(); placement.close(); lease.close() }
+        try body(shutdown, owner, lease, routing, { supported, maximum in
+            let release = try self.release(recovery: supported)
+            let configuration = try AdministrativeSetupConfiguration(machineDirectory: "/Library/Remozio/machine",
+                macID: self.mac, installationID: self.installation, releaseDigest: InstallationInventory.digest(release),
+                codePolicy: self.policy(), maximumConnections: maximum)
+            return try .owned(configuration: configuration, release: release, processLease: lease, shutdown: shutdown, routing: routing)
+        })
+    }
+    func testRecoveryBindingValidatesTheLeaseFormatsAndHostConnectionLimit() throws {
+        try withRecoveryBinding { _, owner, lease, _, binding in
+            XCTAssertThrowsError(try binding(false, 3).validate())
+            for maximum in [1, 2, 3, 64] {
+                let value = try binding(true, maximum)
+                XCTAssertEqual(value.maximumConnections, maximum); XCTAssertTrue(try value.currentOwner() === owner)
+            }
+            let value = try binding(true, 3); lease.close(); XCTAssertThrowsError(try value.validate())
+        }
+    }
+    func testRecoveryBindingRechecksTheOwnerAndAdmissionAtRegistration() throws {
+        try withRecoveryBinding { shutdown, owner, _, routing, binding in
+            let value = try binding(true, 3), source = try RuntimeAuditUpgradeOperationTests.Harness(), foreign = try source.owner()
+            defer { try? foreign.close() }
+            XCTAssertThrowsError(try value.registerSession(owner: foreign)) {
+                XCTAssertEqual($0 as? RuntimePreparationError, .changedScope)
+            }
+            let session = try value.registerSession(owner: owner); session.resolveWithoutWork()
+            shutdown.closeRecoveryAdmission()
+            XCTAssertThrowsError(try value.registerSession(owner: owner))
+            routing.move(to: .retiring); XCTAssertThrowsError(try value.registerSession(owner: owner))
+            XCTAssertThrowsError(try routing.recoveryOwner())
+            let other = AdministrativeSetupLifecycle.Routing(validateStartup: {})
+            try other.install(foreign); other.move(to: .serving)
+            let release = try self.release(recovery: true)
+            let wrong = try AdministrativeSetupService.RecoveryBinding.owned(configuration: self.configuration(release),
+                release: release, processLease: value.processLease, shutdown: shutdown, routing: other)
+            XCTAssertThrowsError(try wrong.currentOwner())
+        }
+    }
+
 }

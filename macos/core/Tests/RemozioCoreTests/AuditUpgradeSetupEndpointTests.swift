@@ -189,7 +189,9 @@ final class AuditUpgradeSetupEndpointTests: XCTestCase {
         f.probe.releaseAllowed = false
         f.endpoint.auditUpgradeHello { XCTAssertEqual($0, 0) }
         XCTAssertEqual(f.probe.imports, 0); XCTAssertEqual(f.probe.opens, 0); XCTAssertEqual(f.probe.invalidations, 1)
-        XCTAssertEqual(AdministrativeSetupInterface.supportedVersions, Set(UInt64(1)...11))
+        XCTAssertEqual(AdministrativeSetupInterface.supportedVersions, Set(UInt64(1)...11).union([13]))
+        XCTAssertEqual(AdministrativeSetupInterface.orphanRecoveryVersion, 13)
+        XCTAssertFalse(AdministrativeSetupInterface.supportedVersions.contains(12))
     }
     func testCloseCancelsDispatchedWorkBeforeItCanAcquireScopeOrChangeFiles() throws {
         let f = try Fixture(); defer { f.endpoint.close(); try? f.owner.close() }
@@ -231,4 +233,35 @@ final class AuditUpgradeSetupEndpointTests: XCTestCase {
         XCTAssertThrowsError(try SetupAuditUpgradeLocalContract.validate(release(omit: .setupController), policy: policy))
         XCTAssertThrowsError(try SetupAuditUpgradeLocalContract.validate(release(omitProgress: true), policy: policy))
     }
+    func testRecoveryFormatRejectsAWriterWithoutItsReader() throws {
+        let all = AdministrativeSetupInterface.supportedVersions
+        XCTAssertThrowsError(try ReleaseFormat(name: AdministrativeSetupInterface.formatName,
+            readers: all.subtracting([13]), writers: all)) {
+            XCTAssertEqual($0 as? ReleaseManifestError, .invalidDeclaration)
+        }
+    }
+    func testRecoveryContractRequiresReaderAndWriterThirteenOnBothPeers() throws {
+        let fixture = try RuntimeActivationFixture(nativeConsumerHosts: true, phoneAudit: true, auditDelivery: true)
+        func release(omit: AuthorityCodeRole? = nil, reader: Bool = true) throws -> SignedReleaseEvidence {
+            try NativeHostReleaseFixture.make(policy: fixture.plan.host.codePolicy, phoneAudit: true, auditDelivery: true) { c in
+                guard c.role == .app || c.role == .setupController else { return c }
+                var formats = c.formats.filter { $0.name != AdministrativeSetupInterface.formatName }
+                let all = AdministrativeSetupInterface.supportedVersions
+                let readers = c.role == omit && reader ? all.subtracting([13]) : all
+                let writers = c.role == omit ? all.subtracting([13]) : all
+                formats.append(try .init(name: AdministrativeSetupInterface.formatName, readers: readers, writers: writers))
+                return try .init(role: c.role, identifier: c.identifier, generation: c.generation, relativePath: c.relativePath,
+                    codeDirectoryHash: c.codeDirectoryHash, build: c.build, teamID: c.teamID, formats: formats, requests: c.requests)
+            }
+        }
+        try SetupOrphanRecoveryWire.requireFormats(release())
+        for peer in [AuthorityCodeRole.app, .setupController] {
+            for reader in [true, false] {
+                XCTAssertThrowsError(try SetupOrphanRecoveryWire.requireFormats(release(omit: peer, reader: reader))) {
+                    XCTAssertEqual($0 as? PreparationStoreError, .incompatibleStore)
+                }
+            }
+        }
+    }
+
 }

@@ -497,6 +497,10 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
             let work = RestorationWork(id: UUID(), start: barrier, body: body)
             return (work, { barrier.open() })
         }
+        func requestCancellation(using _: AdministrativeSetupShutdown.RecoveryCancellation) {
+            guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { return }
+            task.cancel()
+        }
         func value() async throws -> Completion {
             guard getpid() == processID, getuid() == ownerUID, geteuid() == ownerUID else { throw JournalLeaseError.invalidated }
             let result = await task.result
@@ -572,6 +576,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
     }
     private func startRestoration(seal: UUID, claim: UUID,
+        session: AdministrativeSetupShutdown.RecoverySessionWork? = nil,
         body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) throws -> RestorationWork {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
         let start = RestorationStart()
@@ -589,6 +594,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         }
         // A retired result may own a claim through its error. Drop it outside every record or owner lock.
         withExtendedLifetime(retired) {}
+        session?.retainRestoration(current)
         start.open()
         return current
     }
@@ -704,8 +710,9 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                       captured.scope.authority.accountID == accountID else { throw XPCPeerPolicyError.wrongPeer }
             }
         }
-        func startRestoration(_ body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) throws -> RestorationWork {
-            try record.startRestoration(seal: seal, claim: claim, body: body)
+        func startRestoration(session: AdministrativeSetupShutdown.RecoverySessionWork? = nil,
+            _ body: @escaping @Sendable (UUID) async throws -> RuntimeMaintenanceStartupRecovery.ExplicitCompletion) throws -> RestorationWork {
+            try record.startRestoration(seal: seal, claim: claim, session: session, body: body)
         }
         func currentRestoration() throws -> RestorationWork { try record.currentRestoration(seal: seal, claim: claim) }
         func finishRestorationNative(_ completed: RuntimeMaintenanceStartupRecovery.ExplicitCompletion,

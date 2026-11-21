@@ -446,7 +446,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
     def test_account_enrollment_advertises_the_new_handshake_and_explicit_storage_upgrade(self):
         by_role = {role: {item[0]: item for item in MANIFEST.declarations(role)} for role, *_ in MANIFEST.COMPONENTS}
         for role in (1, 8):
-            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)), list(range(1, 12))))
+            self.assertEqual((by_role[role]['setup.local-ipc'][1], by_role[role]['setup.local-ipc'][2]), (list(range(1, 12)) + [13], list(range(1, 12)) + [13]))
         self.assertEqual(by_role[8]['authority.installation-preparation'][1], list(range(1, 30)))
         self.assertEqual(by_role[8]['authority.installation-preparation'][3], {24: 25, 28: 29})
         for role in (4, 5, 6, 11, 12):
@@ -627,9 +627,21 @@ class ReleaseManifestBuildTests(unittest.TestCase):
         for role, *_ in MANIFEST.COMPONENTS:
             declarations = {item[0]: item for item in MANIFEST.declarations(role)}
             if role in (1, 8):
-                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 12))))
+                self.assertEqual(declarations['setup.local-ipc'], MANIFEST.format_declaration('setup.local-ipc', list(range(1, 12)) + [13]))
                 self.assertEqual(declarations['setup.audit-upgrade-progress'],
                                  MANIFEST.format_declaration('setup.audit-upgrade-progress', [1]))
+            else:
+                self.assertNotIn('setup.local-ipc', declarations)
+
+    def test_recovery_capability_thirteen_keeps_preparation_twelve_unexported(self):
+        expected = list(range(1, 12)) + [13]
+        for role, *_ in MANIFEST.COMPONENTS:
+            declarations = {item[0]: item for item in MANIFEST.declarations(role)}
+            if role in (1, 8):
+                actual = declarations['setup.local-ipc']
+                self.assertEqual(actual, {0: 'setup.local-ipc', 1: expected, 2: expected, 3: {}})
+                self.assertNotIn(12, actual[1])
+                self.assertNotIn(12, actual[2])
             else:
                 self.assertNotIn('setup.local-ipc', declarations)
 

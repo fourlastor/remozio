@@ -5,7 +5,7 @@ import Synchronization
 import XCTest
 @testable import RemozioCore
 
-/// Test-only protocol. The Root service neither inherits nor exports it.
+/// The anonymous fixture adds two foreign calls to the recovery selectors.
 @objc private protocol OwnedOrphanRecoveryTestProtocol {
     func recoveryHello(reply: @escaping @Sendable (UInt64) -> Void)
     func startRecovery(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
@@ -166,12 +166,12 @@ final class SetupOrphanRecoveryAnonymousXPCTests: XCTestCase, @unchecked Sendabl
             var count: UInt32 = 0
             if let list = protocol_copyProtocolList(current, &count) {
                 for index in 0..<Int(count) { visit(list[index]) }
-                free(unsafeBitCast(list, to: UnsafeMutableRawPointer.self))
+                free(UnsafeMutableRawPointer(list))
             }
         }
         visit(value); return result
     }
-    func testProductionProtocolHasNoRecoverySelectors() {
+    func testRecoverySelectorsAreExportedOnlyThroughTheCombinedServiceProtocol() {
         let expectedMain: Set<String> = [
             "accountEnrollmentProgressWithReply:",
             "accountStorageProgress:reply:",
@@ -210,8 +210,11 @@ final class SetupOrphanRecoveryAnonymousXPCTests: XCTestCase, @unchecked Sendabl
             "serviceAccountsHelloWithReply:",
             "serviceAccountsProgressWithReply:"
         ]
-        XCTAssertEqual(Self.selectors(AdministrativeSetupServiceXPCProtocol.self), expectedMain)
-        let forbidden = ["recoveryHelloWithReply:", "startRecovery:authorization:reply:", "recoveryProgress:reply:"]
-        for name in forbidden { XCTAssertFalse(expectedMain.contains(name)) }
+        let recovery: Set<String> = ["recoveryHelloWithReply:", "startRecovery:authorization:reply:", "recoveryProgress:reply:"]
+        XCTAssertEqual(Self.selectors(AdministrativeSetupServiceXPCProtocol.self), expectedMain.union(recovery))
+        XCTAssertEqual(Self.selectors(RetainedSetupRecoveryXPCProtocol.self), recovery)
+        let normal = Self.selectors(AdministrativeSetupMaintenanceXPCProtocol.self)
+        XCTAssertEqual(normal, expectedMain.subtracting(["retainedInvocationStatus:reply:"]))
+        XCTAssertTrue(normal.isDisjoint(with: recovery))
     }
 }

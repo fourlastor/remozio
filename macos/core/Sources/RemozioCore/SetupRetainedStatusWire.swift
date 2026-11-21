@@ -7,7 +7,7 @@ import RemozioProtocol
 }
 
 /// The daemon exports one fixed interface: every existing normal selector plus the status lane.
-@objc public protocol AdministrativeSetupServiceXPCProtocol: AdministrativeSetupMaintenanceXPCProtocol, RetainedSetupStatusXPCProtocol {}
+@objc public protocol AdministrativeSetupServiceXPCProtocol: AdministrativeSetupMaintenanceXPCProtocol, RetainedSetupStatusXPCProtocol, RetainedSetupRecoveryXPCProtocol {}
 
 /// Bounded status codec. It carries captured facts only. Rights, code requirements, paths, account bindings and error text never cross it.
 enum SetupRetainedStatusWire {

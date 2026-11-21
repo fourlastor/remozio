@@ -7,6 +7,9 @@ protocol SetupMaintenanceRecoveryWorkCustody: AnyObject, Sendable {
     func validateForRecovery() async -> Bool
 }
 protocol SetupMaintenanceRecoveryFinalClose: AnyObject, Sendable {
+    func joinRecoverySessions() async
+    func observeRecoverySessionsForDisposal() async
+    func retainSupervisorDisposal(_ actual: Task<Void, Never>)
     func closeAfterJoining() async
     func closeAdmission()
     func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult
@@ -99,7 +102,9 @@ actor SetupMaintenanceRecoverySupervisor {
     static func openOwned(custody: any SetupMaintenanceRecoveryProcessCustody,
                           driver: Driver, timing: Timing = .continuous) throws -> SetupMaintenanceRecoverySupervisor {
         try RuntimeMaintenanceOwnedControl.require()
-        return .init(custody: custody, driver: driver, timing: timing)
+        let actual = Self(custody: custody, driver: driver, timing: timing)
+        if let native = custody as? SetupMaintenanceRecoveryNativeAdapter.Custody { native.bindSupervisor(actual) }
+        return actual
     }
     /// Construction validates the lease and retains its lifecycle binding until release.
     /// M10d must retain this supervisor and close or retire it during explicit service shutdown.
@@ -282,13 +287,26 @@ actor SetupMaintenanceRecoverySupervisor {
         for task in tasks { task.cancel() }
         return Task {
             for task in tasks { await task.value }
-            if shutdown { await finished(await custody.closeAfterJoiningResult()) }
-            else { custody.releaseAfterJoining(); await finished(nil) }
+            if shutdown {
+                await custody.joinRecoverySessions()
+                await finished(await custody.closeAfterJoiningResult())
+            } else {
+                await custody.observeRecoverySessionsForDisposal()
+                custody.releaseAfterJoining(); await finished(nil)
+            }
         }
     }
     deinit {
-        guard getpid() == processID, closing == nil else { return }
-        _ = Self.join(entries.values.map(\.task), custody: finalClose, shutdown: false, finished: { _ in })
+        guard getpid() == processID else { return }
+        if let closing { finalClose.retainSupervisorDisposal(closing); return }
+        let start = AsyncStream<Void>.makeStream()
+        let tasks = entries.values.map(\.task), custody = finalClose
+        let actual = Task {
+            for await _ in start.stream {}
+            await Self.join(tasks, custody: custody, shutdown: false, finished: { _ in }).value
+        }
+        custody.retainSupervisorDisposal(actual)
+        start.continuation.finish()
     }
 
     private struct Runner: Sendable {

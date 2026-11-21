@@ -82,12 +82,23 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         }
     }
 
+    private final class RecoveryRecorder: SetupRecoveryEndpoint, @unchecked Sendable {
+        let calls = Mutex<[String]>([]), closes = Mutex(0)
+        func start(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+            calls.withLock { $0.append("start") }; reply(Data([13]))
+        }
+        func progress(_ request: Data) -> Data? { calls.withLock { $0.append("progress") }; return Data([13]) }
+        func close() { closes.withLock { $0 += 1 } }
+    }
+
     /// One harness per connection: injected peer proof, slot selection, normal construction and status source.
     private final class Harness: @unchecked Sendable {
         let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
         let verified = Mutex(true), statusAllowed = Mutex(true), normalAllowed = Mutex(true)
         let selections = Mutex<[SetupConnectionSlots.Mode]>([]), opens = Mutex(0), invalidations = Mutex(0), statusReads = Mutex(0)
-        let recorder = Recorder()
+        let recorder = Recorder(), recovery = RecoveryRecorder()
+        let recoveryAllowed = Mutex(true), recoveryOpens = Mutex(0), recoveryHandshakes = Mutex(0)
+        let closeRecoveryWhileOpening = Mutex(false)
         let source = Mutex<Status>(.unavailable)
         let checks = Mutex(SetupAccountOwner.StatusLaneCheck.verified), touches = Mutex(0)
         let dispatchAllowed = Mutex(true), closeWhileOpening = Mutex(false)
@@ -115,6 +126,13 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
             touch: { [unowned self] in self.touches.withLock { $0 += 1 } },
             now: { [unowned self] in self.clock.withLock { $0 } },
             normalAllowed: { [unowned self] in self.dispatchAllowed.withLock { $0 } },
+            openRecovery: { [unowned self] _ in
+                self.recoveryOpens.withLock { $0 += 1 }
+                if self.closeRecoveryWhileOpening.withLock({ $0 }) { self.recoveryAllowed.withLock { $0 = false } }
+                return self.recovery
+            },
+            recoveryAllowed: { [unowned self] in self.recoveryAllowed.withLock { $0 } },
+            onRecoveryHandshake: { [unowned self] in self.recoveryHandshakes.withLock { $0 += 1 } },
             invalidate: { [unowned self] in self.invalidations.withLock { $0 += 1 } })
     }
 
@@ -216,7 +234,8 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
     // MARK: Selector routing
 
     func testEverySelectorOfTheExportedInterfaceHasARouteInThisTest() {
-        let routed = Set(Self.selectors.keys).union([Self.statusSelector])
+        let routed = Set(Self.selectors.keys).union([Self.statusSelector,
+            "recoveryHelloWithReply:", "startRecovery:authorization:reply:", "recoveryProgress:reply:"])
         XCTAssertEqual(Self.exportedSelectors(), routed)
         XCTAssertTrue(Self.hellos.isSubset(of: Set(Self.selectors.keys)))
         XCTAssertTrue(Facade.self.instancesRespond(to: NSSelectorFromString(Self.statusSelector)))
@@ -627,6 +646,84 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         let id = try XCTUnwrap(slots.reserve())
         XCTAssertTrue(slots.select(.recoveryOnly, id: id)); slots.recoveryHandshake(id)
         XCTAssertEqual(deadlines.withLock { $0 }, [5000])
+    }
+
+    func testRecoveryHelloSelectsOneEndpointAndForeignSelectorsPreserveIt() throws {
+        let h = Harness(), hello = Reply<UInt64>()
+        h.facade.recoveryHello(reply: hello.callback)
+        XCTAssertEqual(hello.only, 13); XCTAssertEqual(h.facade.state, .recoveryOnly)
+        XCTAssertEqual(h.selections.withLock { $0 }, [.recoveryOnly])
+        XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 1)
+        XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 1)
+        h.dispatchAllowed.withLock { $0 = false }
+        for (name, call) in Self.selectors {
+            let result = call(h.facade)
+            XCTAssertFalse(result.0, name); XCTAssertTrue(result.1, name)
+            XCTAssertEqual(h.facade.state, .recoveryOnly, name)
+        }
+        XCTAssertEqual(status(h.facade, try request()), .some(nil))
+        let started = Reply<Data?>(), progress = Reply<Data?>(), repeated = Reply<UInt64>()
+        h.facade.startRecovery(Data(), authorization: Data(), reply: started.callback)
+        h.facade.recoveryProgress(Data(), reply: progress.callback)
+        h.facade.recoveryHello(reply: repeated.callback)
+        XCTAssertEqual(started.only, .some(Data([13]))); XCTAssertEqual(progress.only, .some(Data([13])))
+        XCTAssertEqual(repeated.only, 13); XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 1)
+        XCTAssertEqual(h.recovery.calls.withLock { $0 }, ["start", "progress"])
+        XCTAssertEqual(h.recovery.closes.withLock { $0 }, 0); XCTAssertEqual(h.invalidations.withLock { $0 }, 0)
+        h.facade.close(); h.facade.close()
+        XCTAssertEqual(h.recovery.closes.withLock { $0 }, 1); XCTAssertEqual(h.invalidations.withLock { $0 }, 1)
+    }
+    func testExistingRecoveryHelloPreservesProgressAfterNewAdmissionCloses() {
+        let h = Harness(), hello = Reply<UInt64>(), started = Reply<Data?>()
+        h.facade.recoveryHello(reply: hello.callback); XCTAssertEqual(hello.only, 13)
+        h.facade.startRecovery(Data(), authorization: Data(), reply: started.callback)
+        XCTAssertEqual(started.only, .some(Data([13])))
+        h.recoveryAllowed.withLock { $0 = false }
+        let repeated = Reply<UInt64>(), progress = Reply<Data?>()
+        h.facade.recoveryHello(reply: repeated.callback)
+        h.facade.recoveryProgress(Data(), reply: progress.callback)
+        XCTAssertEqual(repeated.only, 13); XCTAssertEqual(progress.only, .some(Data([13])))
+        XCTAssertEqual(h.facade.state, .recoveryOnly)
+        XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 1); XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 1)
+        XCTAssertEqual(h.recovery.closes.withLock { $0 }, 0); XCTAssertEqual(h.invalidations.withLock { $0 }, 0)
+        XCTAssertEqual(h.recovery.calls.withLock { $0 }, ["start", "progress"])
+        h.verified.withLock { $0 = false }; let unverified = Reply<UInt64>()
+        h.facade.recoveryHello(reply: unverified.callback)
+        XCTAssertEqual(unverified.only, 0); XCTAssertEqual(h.facade.state, .closed)
+    }
+    func testRecoverySelectorsRefuseOnlyTheCallOnANormalConnection() {
+        let h = Harness(); XCTAssertTrue(Self.selectors["helloWithReply:"]!(h.facade).0)
+        let hello = Reply<UInt64>(), start = Reply<Data?>(), progress = Reply<Data?>()
+        h.facade.recoveryHello(reply: hello.callback)
+        h.facade.startRecovery(Data(), authorization: Data(), reply: start.callback)
+        h.facade.recoveryProgress(Data(), reply: progress.callback)
+        XCTAssertEqual(hello.only, 0); XCTAssertEqual(start.only, .some(nil)); XCTAssertEqual(progress.only, .some(nil))
+        XCTAssertEqual(h.facade.state, .normal); XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 0)
+        XCTAssertEqual(h.recorder.closes.withLock { $0 }, 0); XCTAssertEqual(h.invalidations.withLock { $0 }, 0)
+        XCTAssertTrue(Self.selectors["runtimeProgressWithReply:"]!(h.facade).0)
+    }
+    func testClosedRecoveryAdmissionRefusesHelloWithoutOpeningTheEndpoint() {
+        let h = Harness(); h.recoveryAllowed.withLock { $0 = false }
+        let hello = Reply<UInt64>(); h.facade.recoveryHello(reply: hello.callback)
+        XCTAssertEqual(hello.only, 0); XCTAssertEqual(h.facade.state, .closed)
+        XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 0); XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 0)
+        let start = Reply<Data?>(), progress = Reply<Data?>()
+        h.facade.startRecovery(Data(), authorization: Data(), reply: start.callback)
+        h.facade.recoveryProgress(Data(), reply: progress.callback)
+        XCTAssertEqual(start.only, .some(nil)); XCTAssertEqual(progress.only, .some(nil))
+        XCTAssertTrue(h.recovery.calls.withLock { $0.isEmpty })
+    }
+    func testRecoveryAdmissionClosureDuringConstructionClosesTheUninstalledEndpoint() {
+        let h = Harness(); h.closeRecoveryWhileOpening.withLock { $0 = true }
+        let hello = Reply<UInt64>(); h.facade.recoveryHello(reply: hello.callback)
+        XCTAssertEqual(hello.only, 0); XCTAssertEqual(h.facade.state, .closed)
+        XCTAssertEqual(h.recovery.closes.withLock { $0 }, 1); XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 0)
+    }
+    func testLegacyListenerWithoutNativeRecoveryContextCannotSelectRecovery() {
+        let h = Harness(), facade = Facade(verify: { h.peer }, select: { _ in true },
+            openNormal: { _ in h.recorder }, status: { _ in .unavailable }, invalidate: {})
+        let hello = Reply<UInt64>(); facade.recoveryHello(reply: hello.callback)
+        XCTAssertEqual(hello.only, 0); XCTAssertEqual(facade.state, .closed)
     }
 
 }

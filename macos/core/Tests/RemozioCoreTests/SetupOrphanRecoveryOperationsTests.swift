@@ -205,6 +205,50 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
             XCTAssertThrowsError(try f.retained.claim()); f.retained.assertHeld()
         }
     }
+    private func retryAfterRetiringHello(_ f: ExplicitStartupFixture, action: W.Action) async throws {
+        let h = Context(f), request = try h.request(action), opened = Mutex<SetupOrphanRecoveryEndpoint?>(nil)
+        let invalidated = Mutex(0)
+        func facade(_ routing: AdministrativeSetupLifecycle.Routing) -> AdministrativeSetupConnectionFacade {
+            .init(verify: { h.peer.credentials }, select: { _ in true }, openNormal: { _ in throw Failure.expected },
+                status: { _ in .unavailable }, normalAllowed: { false }, openRecovery: { _ in
+                    let session = try h.session(); opened.withLock { $0 = session }; return session
+                }, recoveryAllowed: { (try? routing.recoveryOwner()) != nil },
+                invalidate: { invalidated.withLock { $0 += 1 } })
+        }
+        let retiring = AdministrativeSetupLifecycle.Routing(validateStartup: {})
+        try retiring.install(f.retained.owner); retiring.move(to: .serving); retiring.move(to: .retiring)
+        let old = facade(retiring), refused = Mutex<UInt64?>(nil), refusedStart = Mutex<Data?>(nil)
+        old.recoveryHello { value in refused.withLock { $0 = value } }
+        old.startRecovery(try request.bytes, authorization: Data()) { value in refusedStart.withLock { $0 = value } }
+        XCTAssertEqual(refused.withLock { $0 }, 0); XCTAssertEqual(old.state, .closed)
+        XCTAssertEqual(invalidated.withLock { $0 }, 1); XCTAssertNil(opened.withLock { $0 })
+        XCTAssertNil(refusedStart.withLock { $0 }); XCTAssertEqual(h.imports.withLock { $0 }, 0)
+        f.retained.assertHeld()
+        let next = AdministrativeSetupLifecycle.Routing(validateStartup: {})
+        try next.install(f.retained.owner); next.move(to: .serving)
+        let replacement = facade(next), accepted = Mutex<UInt64?>(nil), reply = Mutex<Data?>(nil)
+        defer { replacement.close() }
+        replacement.recoveryHello { value in accepted.withLock { $0 = value } }
+        XCTAssertEqual(accepted.withLock { $0 }, 13)
+        replacement.startRecovery(try request.bytes, authorization: Data()) { value in reply.withLock { $0 = value } }
+        let session = try XCTUnwrap(opened.withLock { $0 }); await session.waitForWork()
+        XCTAssertEqual(try W.Reply.decode(XCTUnwrap(reply.withLock { $0 })).code, .requestRecorded)
+        XCTAssertEqual(try E.code(session, request), action == .releaseWindowFree ? .released : .restored)
+        XCTAssertEqual(h.imports.withLock { $0 }, 1); try f.retained.assertReleased()
+    }
+    func testRetiringHelloLeavesTheSameWindowFreeReleaseForTheNextDaemon() throws {
+        try withFixture(window: false, binding: false) { f in
+            try await self.retryAfterRetiringHello(f, action: .releaseWindowFree)
+        }
+    }
+    func testRetiringHelloLeavesTheSameRecordedAdoptionForTheNextDaemon() throws {
+        try withFixture(seed: .stopped, helperRestorations: 1) { f in
+            try await Self.unsettled(f)
+            let writes = f.h.writes
+            try await self.retryAfterRetiringHello(f, action: .adoptRecordedCompletion)
+            XCTAssertEqual(f.h.writes, writes)
+        }
+    }
     func testWindowFreeReleaseRemainsAllowedAfterDeadlineAndDuringRetirement() throws {
         try withFixture(window: false, binding: false) { f in
             let h = Context(f), s = try h.session(), r = try h.request(.releaseWindowFree); defer { s.close() }

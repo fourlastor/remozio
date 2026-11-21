@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Synchronization
 import XCTest
@@ -395,4 +396,74 @@ final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Senda
             f.retained.assertHeld()
         }
     }
+    func testShutdownCancelsTheConcreteUnboundTaskWithAnIntentAndAPendingRPC() throws {
+        try fixture { f in
+            try f.h.seed(.authorized)
+            let context = try InProcessUnboundEffectFixture(f), effect = try context.effect()
+            context.fault.withLock { $0 = .pendingGate }
+            let placement = try ReleaseDestinationLease(anchor: f.activity.root.path, relativeDirectory: "Machine", owner: getuid())
+            let shutdown = AdministrativeSetupShutdown(owner: f.retained.owner, placement: placement, processLease: f.processLease)
+            let session = try shutdown.registerRecoverySession(owner: f.retained.owner)
+            XCTAssertTrue(session.reservePublication())
+            let (joined, target) = try await context.joined(shutdownSession: session)
+            let returned = Mutex(false), succeeded = Mutex(false)
+            let actual = Task {
+                do {
+                    _ = try await effect.restore(joined: joined, target: target, until: .now.advanced(by: .seconds(90)))
+                    succeeded.withLock { $0 = true }
+                } catch {}
+                returned.withLock { $0 = true }
+            }
+            session.publish(actual)
+            let deadline = ContinuousClock.now.advanced(by: RuntimeMaintenanceExplicitRestorationTests.unboundPhaseBudget)
+            while !context.gatePending.withLock({ $0 }) {
+                guard ContinuousClock.now < deadline else { throw Fault.afterCommit }
+                try await ContinuousClock().sleep(for: .milliseconds(1))
+            }
+            let interrupted = try XCTUnwrap(f.h.frame().window)
+            XCTAssertEqual(interrupted.phase, .reopenPending); XCTAssertNotNil(interrupted.unboundRelease)
+            XCTAssertFalse(returned.withLock { $0 }); f.retained.assertHeld()
+            await shutdown.joinRecoverySessions(); await actual.value
+            XCTAssertTrue(returned.withLock { $0 }); XCTAssertFalse(succeeded.withLock { $0 })
+            XCTAssertTrue(context.driverClosed.withLock { $0 })
+            XCTAssertEqual(context.releases.withLock { $0 }, 0)
+            XCTAssertFalse(context.writes.withLock { $0.contains(.restored) })
+            let afterCleanup = try XCTUnwrap(f.h.frame().window)
+            XCTAssertEqual(afterCleanup.phase, .needsOwnerRecovery); XCTAssertNotNil(afterCleanup.unboundRelease)
+            XCTAssertEqual(afterCleanup.unboundRelease, interrupted.unboundRelease)
+            f.retained.assertHeld(); XCTAssertNoThrow(try f.processLease.validate()); XCTAssertNoThrow(try placement.validate())
+            f.claim?.abandon()
+            let restarted = try await Self.discardInterruptedIntentOnFreshStartup(f)
+            XCTAssertEqual(restarted.failure, .repairRequired)
+            placement.close()
+        }
+    }
+    private static func discardInterruptedIntentOnFreshStartup(_ f: ExplicitStartupFixture) async throws -> RuntimeMaintenanceWindowRecord {
+        let activity = try ReleaseActivityFixture()
+        let owner = try SetupAccountOwner(machine: f.h.f.machine(),
+            expectedReleaseDigest: InstallationInventory.digest(f.h.f.candidate), resume: { _, row in row }, releaseActivity: activity.open())
+        let placement = try ReleaseDestinationLease(anchor: activity.root.path, relativeDirectory: "Machine", owner: getuid())
+        let shutdown = AdministrativeSetupShutdown(owner: owner, placement: placement, processLease: f.processLease)
+        let scope = try owner.acquireMaintenanceRecoveryScope(custody: shutdown), phases = try owner.maintenanceRecoveryPhases(scope: scope)
+        defer { scope.close(); try? owner.close(); placement.close() }
+        let row = try await phases.run {
+            let h = f.h, frame = try h.frame(), drain = try h.barrier.beginDrain()
+            defer { drain.close() }
+            let result = try RuntimeMaintenanceStartupRecovery.openUnboundStartupOwned(frame: frame,
+                processLease: f.processLease, startupPhases: phases, directory: h.f.directory, admission: h.f.admission,
+                drain: drain, read: { try h.frame() }, persistFailure: { next, previous, _ in
+                    _ = try h.write(next, previous: previous); return try XCTUnwrap(h.lastTransition)
+                }, persistDiscard: { previous, authorization, current in
+                    try h.f.machine().writeRuntimeMaintenanceUnboundStartupDiscard(replacing: previous,
+                        authorization: authorization, expected: current.source.actual, candidate: h.f.candidate,
+                        directory: h.f.directory, admission: h.f.admission)
+                })
+            guard case .terminal(let row) = result else { throw RuntimePreparationError.changedScope }
+            return try XCTUnwrap(row)
+        }
+        XCTAssertEqual(row.phase, .needsOwnerRecovery)
+        XCTAssertNil(row.unboundRelease); XCTAssertNil(row.gate)
+        return row
+    }
+
 }
