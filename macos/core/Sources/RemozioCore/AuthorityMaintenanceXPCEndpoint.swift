@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import RemozioProtocol
 
 /// Setup serializes exchanges. A concurrent call closes the connection and releases its pre-arm block.
 @objc protocol AuthorityMaintenanceXPCProtocol {
@@ -25,6 +26,7 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
     private let check: @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void
     private let observe: @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork
     private let requireLive: @Sendable () throws -> Void
+    private let unboundOperations: AuthorityMaintenanceUnboundOperation.Context?
     private init(admission: AuthorityMaintenancePairingAdmission, commandExclusion: AuthorityMaintenanceCommandExclusion = .init(), acquireActivity: @escaping @Sendable () throws -> ReleaseActivityToken?,
         check: @escaping @Sendable (AuthorityMaintenanceChannelRequest) throws -> Void,
         observe: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> AuthorityMaintenanceChannelWork,
@@ -34,10 +36,11 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
         readBusyGateHold: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse.Readback.Hold = { _ in throw RuntimePreparationError.changedScope },
         healthyOpen: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? = { _ in nil },
         healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope },
+        unbound: AuthorityMaintenanceUnboundOperation.Context? = nil,
         requireLive: @escaping @Sendable () throws -> Void = {}) {
         self.commandExclusion = commandExclusion
         self.admission = admission; self.acquireActivity = acquireActivity; self.check = check; self.observe = observe; self.marker = marker; self.reopen = reopen; self.readGate = readGate; self.healthyOpen = healthyOpen; self.healthyReopen = healthyReopen; self.readBusyGateHold = readBusyGateHold
-        self.requireLive = requireLive
+        self.requireLive = requireLive; unboundOperations = unbound
     }
     static func openOwned(admission: AuthorityMaintenancePairingAdmission,
         commandExclusion: AuthorityMaintenanceCommandExclusion? = nil,
@@ -48,9 +51,13 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
         readGate: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse = { _ in throw RuntimePreparationError.changedScope },
         readBusyGateHold: @escaping @Sendable (AuthorityMaintenanceGateRequest) throws -> AuthorityMaintenanceGateResponse.Readback.Hold = { _ in throw RuntimePreparationError.changedScope },
         healthyOpen: @escaping @Sendable (AuthorityMaintenanceChannelRequest) async throws -> RuntimeMaintenanceWindowRecord? = { _ in nil },
-        healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope }) throws -> AuthorityMaintenanceChannelAccess {
+        healthyReopen: @escaping @Sendable (AuthorityMaintenanceChannelRequest, RuntimeMaintenanceWindowRecord, @Sendable () throws -> Void) async throws -> Void = { _, _, _ in throw RuntimePreparationError.changedScope },
+        unbound: AuthorityMaintenanceUnboundOperation.Context? = nil) throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() > 0, getuid() == geteuid() else { throw JournalLeaseError.unsafeMetadata }
-        return .init(admission: admission, commandExclusion: commandExclusion ?? .init(), acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen, readGate: readGate, readBusyGateHold: readBusyGateHold, healthyOpen: healthyOpen, healthyReopen: healthyReopen)
+        try unbound?.requireAdmission(admission)
+        let commands = commandExclusion ?? unbound?.commands ?? .init()
+        if let unbound, unbound.commands !== commands { throw RuntimePreparationError.changedScope }
+        return .init(admission: admission, commandExclusion: commands, acquireActivity: acquireActivity, check: check, observe: observe, reopen: reopen, readGate: readGate, readBusyGateHold: readBusyGateHold, healthyOpen: healthyOpen, healthyReopen: healthyReopen, unbound: unbound)
     }
     static func openNative(service: AuthorityWakeService, registration: InstalledAuthorityCommandRegistration) async throws -> AuthorityMaintenanceChannelAccess {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -59,6 +66,8 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
         let startup = registration.admissionStartup, hold = startup?.maintenanceHold
         let gate = startup?.registration.accounts.first { $0.accountID == account.accountID }?.identity
         let installationID = registration.configuration.installationID
+        let unbound = try await AuthorityMaintenanceUnboundOperation.captureNativeContext(service: service, registration: registration)
+        try unbound.requireAdmission(admission); try service.validateNativeMaintenanceIdentity()
         // Each check reads the expectation again, outside the actor and outside any hold lock. A change during the check refuses.
         let requireReady: @Sendable () async throws -> Void = {
             let expected = try registration.healthyMaintenanceReadiness()
@@ -95,7 +104,23 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
             try await requireReady()
             try registration.reopenHealthyMaintenance(q, restoring: restoring, account: account, incarnation: incarnation, releaseBinding: release)
             try service.validateNativeMaintenanceIdentity()
-        }, requireLive: { try service.validateNativeMaintenanceIdentity() })
+        }, unbound: unbound, requireLive: { try service.validateNativeMaintenanceIdentity() })
+    }
+    func unboundContext(_ request: AuthorityMaintenanceUnboundRequest) throws -> AuthorityMaintenanceUnboundOperation.Context {
+        try validateIdentity(); try requireLive()
+        guard let unboundOperations else { throw RuntimePreparationError.changedScope }
+        try unboundOperations.requireAdmission(admission); try unboundOperations.requireCurrent(request)
+        try requireLive(); try validateIdentity(); return unboundOperations
+    }
+    /// A busy refusal reads the actual hold only. It does not acquire command ownership or read a store.
+    func unboundBusyReply(_ request: AuthorityMaintenanceUnboundRequest) throws -> Data {
+        let context = try unboundContext(request)
+        let bytes: Data
+        switch request.kind {
+        case .release: bytes = try AuthorityMaintenanceUnboundReleaseResponse(request: request, outcome: .busy).encoded
+        case .gate: bytes = try context.busyGate(request).encoded
+        }
+        try context.requireCurrent(request); try requireLive(); return bytes
     }
     /// Reads only the in-memory epoch that pairing admission puts in every binding. No store, reservation or hold is read or changed.
     func observeIncarnation(accountID: Data) throws -> Data {
@@ -144,6 +169,7 @@ final class AuthorityMaintenanceChannelAccess: Sendable {
 final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCProtocol, @unchecked Sendable {
     private typealias Request = AuthorityMaintenanceChannelRequest
     private typealias Response = AuthorityMaintenanceChannelResponse
+    private enum Mode: Equatable { case undecided, bound, unbound }
     private let lock = NSRecursiveLock()
     private let access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget
     private let verify: () throws -> Void
@@ -152,6 +178,7 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var active: UUID?, budgetOwners = Set<UUID>()
     private var closed = false, helloAccepted = false
+    private var mode = Mode.undecided
     private init(access: AuthorityMaintenanceChannelAccess, budget: AuthorityXPCWorkBudget,
         verify: @escaping () throws -> Void, invalidate: @escaping () -> Void, onHandshake: @escaping @Sendable () -> Void) {
         self.access = access; self.budget = budget; self.verify = verify; self.invalidate = invalidate; self.onHandshake = onHandshake
@@ -195,9 +222,18 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     func exchange(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
         do {
             // Authenticate on the original exported invocation stack before any asynchronous or protected access.
-            try verify(); let q = try Request.decode(payload)
+            try verify()
+            switch try Self.domain(payload) {
+            case AuthorityMaintenanceUnboundRequest.Kind.release.rawValue:
+                let request = try AuthorityMaintenanceUnboundRequest.decode(payload)
+                try startUnbound(request, reply: reply); return
+            case "authority.maintenance-request": break
+            default: throw RuntimePreparationError.invalidRecord
+            }
+            let q = try Request.decode(payload)
             try lock.withLock {
-                guard !closed, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                guard !closed, active == nil, mode != .unbound, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                mode = .bound
                 let id = UUID(); active = id; budgetOwners.insert(id)
                 tasks[id] = Task { [self] in
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
@@ -209,9 +245,18 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
     }
     func readGate(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
         do {
-            try verify(); let request = try AuthorityMaintenanceGateRequest.decode(payload)
+            try verify()
+            switch try Self.domain(payload) {
+            case AuthorityMaintenanceUnboundRequest.Kind.gate.rawValue:
+                let request = try AuthorityMaintenanceUnboundRequest.decode(payload)
+                try startUnbound(request, reply: reply); return
+            case "authority.maintenance-gate-request": break
+            default: throw RuntimePreparationError.invalidRecord
+            }
+            let request = try AuthorityMaintenanceGateRequest.decode(payload)
             try lock.withLock {
-                guard !closed, helloAccepted, active == nil, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                guard !closed, helloAccepted, active == nil, mode != .unbound, budget.acquire() else { throw AuthorityXPCEndpointError.unavailable }
+                mode = .bound
                 let id = UUID(); active = id; budgetOwners.insert(id)
                 tasks[id] = Task { [self] in
                     defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
@@ -229,6 +274,57 @@ final class AuthorityMaintenanceXPCEndpoint: NSObject, AuthorityMaintenanceXPCPr
                 }
             }
         } catch { close(); reply(nil) }
+    }
+    /// The final decoder keeps each existing codec's own limits. Unknown domains never try another decoder.
+    private static func domain(_ bytes: Data) throws -> String {
+        let limits = try CBORLimits(maxBytes: 1024, maxDepth: 2, maxItems: 32)
+        guard case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: limits),
+              case .text(let name) = fields[1] else { throw RuntimePreparationError.invalidRecord }
+        return name
+    }
+    private func startUnbound(_ request: AuthorityMaintenanceUnboundRequest,
+        reply: @escaping @Sendable (Data?) -> Void) throws {
+        try lock.withLock {
+            guard !closed, helloAccepted, active == nil, mode != .bound, budget.acquire() else {
+                throw AuthorityXPCEndpointError.unavailable
+            }
+            mode = .unbound
+            let id = UUID(); active = id; budgetOwners.insert(id)
+            tasks[id] = Task { [self] in
+                defer { lock.withLock { releaseBudget(id); tasks[id] = nil } }
+                let bytes = await unboundResponse(request)
+                finish(id, bytes, closing: bytes == nil, reply: reply)
+            }
+        }
+    }
+    private func unboundResponse(_ request: AuthorityMaintenanceUnboundRequest) async -> Data? {
+        do {
+            try Task.checkCancellation()
+            let context = try access.unboundContext(request)
+            let command: AuthorityMaintenanceCommandExclusion.Command
+            do { command = try access.commandExclusion.acquire() }
+            catch AuthorityMaintenanceCommandExclusion.AcquisitionError.busy { return try unboundContentionReply(request) }
+            defer { command.close() }
+            try command.requireOwner(context.commands); try Task.checkCancellation()
+            let activity = try access.acquireActivity(); defer { activity?.close() }
+            try activity?.validate()
+            do { try context.prepareOperation(command: command) }
+            catch AuthorityMaintenanceCommandExclusion.AcquisitionError.busy { return try unboundContentionReply(request) }
+            try Task.checkCancellation()
+            let operation = try context.operation(command: command)
+            try context.requireCurrent(request); try Task.checkCancellation()
+            let bytes: Data
+            switch request.kind {
+            case .release: bytes = try operation.release(request, command: command).encoded
+            case .gate: bytes = try operation.observeGate(request, command: command).encoded
+            }
+            try command.validate(); try activity?.validate(); try context.requireCurrent(request)
+            try Task.checkCancellation(); onHandshake(); return bytes
+        } catch { return nil }
+    }
+    private func unboundContentionReply(_ request: AuthorityMaintenanceUnboundRequest) throws -> Data {
+        try Task.checkCancellation(); let bytes = try access.unboundBusyReply(request)
+        try Task.checkCancellation(); return bytes
     }
     func observeIncarnation(_ payload: Data, reply: @escaping @Sendable (Data?) -> Void) {
         do {

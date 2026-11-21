@@ -238,8 +238,13 @@ final class InstalledAuthorityCommandRegistration: @unchecked Sendable {
         try validateRuntime()
         let release = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
         let name = AuthorityMaintenanceChannelScope.formatName, version = AuthorityMaintenanceChannelScope.protocolVersion
-        guard [authority, setup].allSatisfy({ entry in release.manifest.components.first(where: { $0.role == entry.role })?
-            .formats.contains(where: { $0.name == name && $0.readers.contains(version) && $0.writers.contains(version) }) == true }) else { return nil }
+        guard [authority, setup].allSatisfy({ entry in
+            guard let formats = release.manifest.components.first(where: { $0.role == entry.role })?.formats else { return false }
+            return formats.contains(where: { $0.name == name && $0.readers.contains(version) && $0.writers.contains(version) })
+                && [AuthorityMaintenanceUnboundRequest.Kind.release, .gate].allSatisfy { kind in
+                    formats.contains(where: { $0.name == kind.rawValue && $0.readers.contains(1) && $0.writers.contains(1) })
+                }
+        }) else { return nil }
         try configuration.validateRelease(release, bundlePath: bundle.path)
         try AuthorityMaintenanceChannelScope.validate(release, authority: authority, setup: setup)
         let policy = try XPCPeerPolicy(teamID: setup.teamID, componentIdentifier: setup.identifier,

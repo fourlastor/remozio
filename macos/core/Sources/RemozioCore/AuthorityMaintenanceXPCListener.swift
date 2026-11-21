@@ -4,8 +4,8 @@ import Foundation
 /// Fixed address and signed participant metadata. These checks do not declare a reachable product service.
 enum AuthorityMaintenanceChannelScope {
     static let formatName = "authority.maintenance-channel"
-    /// Both signed participants declare this version. Version 2 adds the read-only incarnation probe.
-    static let protocolVersion: UInt64 = 2
+    /// Both signed participants declare this version. Version 3 also dispatches unbound release and gate requests.
+    static let protocolVersion: UInt64 = 3
     static func serviceName(accountID: Data) throws -> String { try RuntimePreparationPaths(accountID: accountID).presenceService }
     static func validate(_ release: SignedReleaseEvidence, authority: AuthorityCodeEntry, setup: AuthorityCodeEntry) throws {
         guard authority.role == .authority, setup.role == .setupController, authority.active, setup.active,
@@ -21,6 +21,7 @@ enum AuthorityMaintenanceChannelScope {
                   let close = c.formats.first(where: { $0.name == AuthorityMaintenanceCloseMarker.formatName }), close.readers.contains(1),
                   entry.role == .authority ? close.writers.contains(1) : close.writers.isEmpty else { throw RuntimePreparationError.changedScope }
         }
+        try AuthorityMaintenanceUnboundRequest.requireFormats(release)
     }
 }
 protocol AuthorityMaintenanceEndpointBuilding: Sendable {

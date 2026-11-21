@@ -23,6 +23,11 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
         let components = try [AuthorityCodeRole.app, .authority, .setupController].map { role in
             var selected = try formats(role)
             if role != .app { selected.append(try .init(name: AuthorityMaintenanceCloseMarker.formatName, readers: [1], writers: role == .authority ? [1] : [])) }
+            if role != .app {
+                for kind in [AuthorityMaintenanceUnboundRequest.Kind.release, .gate] {
+                    selected.append(try .init(name: kind.rawValue, readers: [1], writers: [1]))
+                }
+            }
             return try edit(.init(role: role, identifier: identifier(role), generation: 4, relativePath: path(role),
                 codeDirectoryHash: role == .app ? nil : Data(repeating: 1, count: 20), build: "4", teamID: "ABCDEFGHIJ", formats: selected))
         }
@@ -40,16 +45,31 @@ final class AuthorityMaintenanceListenerScopeTests: XCTestCase {
     }
     func testBothParticipantsMustDeclareReadingAndWritingTheSelectedVersion() throws {
         let authority = try entry(.authority), setup = try entry(.setupController)
-        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 2)
-        for versions: Set<UInt64> in [[2], [1, 2], [2, 3]] {
+        XCTAssertEqual(AuthorityMaintenanceChannelScope.protocolVersion, 3)
+        for versions: Set<UInt64> in [[3], [1, 3], [2, 3]] {
             let evidence = try release { $0 == .app ? [] : [try self.format(readers: versions, writers: versions)] }
             XCTAssertNoThrow(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
         }
         for role in [AuthorityCodeRole.authority, .setupController] {
-            // A participant that declares only version 1 lacks the incarnation probe.
-            for formats in [[], [try format(readers: [1], writers: [1])], [try format(readers: [3], writers: [3])], [try format(writers: [])],
-                            [try format(readers: [1, 2], writers: [1])], [try format(readers: [2, 3], writers: [3])]] {
+            // The selected version must be present in both directions.
+            for formats in [[], [try format(readers: [1], writers: [1])], [try format(readers: [2], writers: [2])], [try format(writers: [])],
+                            [try format(readers: [1, 3], writers: [1])], [try format(readers: [2, 3], writers: [2])]] {
                 let evidence = try release { $0 == role ? formats : [try self.format()] }
+                XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
+            }
+        }
+    }
+    func testBothUnboundFormatsRemainRequiredForChannelThree() throws {
+        let authority = try entry(.authority), setup = try entry(.setupController)
+        for role in [AuthorityCodeRole.authority, .setupController] {
+            for kind in [AuthorityMaintenanceUnboundRequest.Kind.release, .gate] {
+                let evidence = try release(formats: { $0 == .app ? [] : [try self.format()] }, edit: { component in
+                    guard component.role == role else { return component }
+                    return try .init(role: component.role, identifier: component.identifier, generation: component.generation,
+                        relativePath: component.relativePath, codeDirectoryHash: component.codeDirectoryHash,
+                        build: component.build, teamID: component.teamID,
+                        formats: component.formats.filter { $0.name != kind.rawValue })
+                })
                 XCTAssertThrowsError(try AuthorityMaintenanceChannelScope.validate(evidence, authority: authority, setup: setup))
             }
         }

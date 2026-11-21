@@ -100,11 +100,12 @@ final class AuthorityMaintenanceUnboundOperationTests: XCTestCase, @unchecked Se
             XCTAssertEqual(observed.hold, .neverHeld); XCTAssertEqual(observed.admission, .busy); try drain.validate()
         }
     }
-    func testACompetingCommandRefusesBeforeAnyProtectedRead() throws {
+    func testACompetingCommandReturnsBusyBeforeAnyProtectedRead() throws {
         try fixture { owner in
             let operation = try owner.operation(), command = try owner.commands.acquire(); defer { command.close() }
             XCTAssertEqual(try operation.release(owner.records.request(.release)).outcome, .busy)
-            XCTAssertThrowsError(try operation.observeGate(owner.records.request(.gate)))
+            let request = try owner.records.request(.gate), observed = try operation.observeGate(request)
+            XCTAssertEqual(observed.request, request); XCTAssertEqual(observed.hold, .held); XCTAssertEqual(observed.admission, .busy)
             XCTAssertEqual(owner.reads.withLock { $0 }, 0); try command.validate()
         }
     }
