@@ -133,11 +133,12 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             try .openOwned(peer: peer ?? binding.peer, currentOwner: identity ?? binding.authorityOwner,
                 incarnation: incarnation, verifyRights: verify, closeRights: close)
         }
-        func claim(_ authorization: Authorization? = nil, target: Claim.Target? = nil) throws -> Claim {
+        func claim(_ authorization: Authorization? = nil, target: Claim.Target? = nil,
+            shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork? = nil) throws -> Claim {
             let rights: Authorization
             if let authorization { rights = authorization } else { rights = try authorize() }
             let exact = try target ?? Claim.Target.capture(owner: owner, authorization: rights)
-            return try .open(owner: owner, target: exact, authorization: rights)
+            return try .open(owner: owner, target: exact, authorization: rights, shutdownSession: shutdownSession)
         }
         func window(_ value: Invocation, id: Data = Data(repeating: 0xa1, count: 16),
             revision: Data = Data(repeating: 0xa2, count: 16)) throws {
@@ -709,5 +710,196 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             }
         }
     }
+
+    func testAbandonWithoutShutdownDoesNotCancelTheActualRestorationTask() throws {
+        try withFrame { f in
+            var value: Invocation? = try f.invocation(); try f.window(XCTUnwrap(value)); try f.lose(&value)
+            let first = try f.claim(), gate = Gate(), entered = DispatchSemaphore(value: 0)
+            let cancelled = Mutex(true); defer { gate.finish() }
+            let starting = RestorationProbe(try joined(first)) { _ in
+                entered.signal(); await gate.worker().value
+                cancelled.withLock { $0 = Task.isCancelled }; throw Failure.expected
+            }
+            let actual = try starting.wait(); XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            first.abandon(); let fresh = JoinProbe(try f.claim())
+            XCTAssertEqual(fresh.done.wait(timeout: .now() + 0.05), .timedOut); f.assertHeld()
+            gate.finish(); _ = try fresh.wait()
+            let resultJoined = VoidProbe { do { _ = try await actual.value(); XCTFail("Expected the actual failure") } catch {} }
+            try resultJoined.wait(); XCTAssertFalse(cancelled.withLock { $0 }); f.assertHeld()
+        }
+    }
+
+    private func withShutdownFrame(_ body: (Frame, AdministrativeSetupShutdown, SetupProcessLease, ReleaseDestinationLease) throws -> Void) throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { fixture in
+            let activity = try ReleaseActivityFixture(), f = try Frame(fixture, activity: activity)
+            let placement = try ReleaseDestinationLease(anchor: activity.root.path, relativeDirectory: "Machine", owner: getuid())
+            let process = try SetupProcessLease.openOwned(directory: .init(anchor: activity.root.path, relativeDirectory: "Machine", owner: getuid()))
+            let shutdown = AdministrativeSetupShutdown(owner: f.owner, placement: placement, processLease: process)
+            defer { placement.close(); process.close() }
+            try body(f, shutdown, process, placement)
+        }
+    }
+    func testShutdownKeepsBothLeasesWhileTheOriginalClaimWorkerHasNotReturned() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            let gate = Gate(); defer { gate.finish() }
+            var invocation: Invocation? = try f.invocation(), original = gate.worker()
+            try invocation?.retainWorker(original)
+            XCTAssertEqual(gate.parked.wait(timeout: .now() + 3), .success); try f.lose(&invocation)
+            let session = try shutdown.registerRecoverySession(owner: f.owner)
+            XCTAssertTrue(session.reservePublication())
+            let claim = try f.claim(shutdownSession: session), cancelled = Mutex(false)
+            session.bindEndpointClose { claim.abandon() }
+            let actual = Task {
+                do { _ = try await claim.join() } catch {}
+                cancelled.withLock { $0 = Task.isCancelled }
+            }
+            session.publish(actual)
+            let finalizer = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(finalizer.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate()); f.assertHeld()
+            gate.finish(); try finalizer.wait()
+            XCTAssertTrue(cancelled.withLock { $0 }); XCTAssertNoThrow(try process.validate())
+        }
+    }
+    func testShutdownCancelsTheRealRestorationTaskAndStillAwaitsItsActualReturn() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            var invocation: Invocation? = try f.invocation(); try f.window(XCTUnwrap(invocation)); try f.lose(&invocation)
+            let session = try shutdown.registerRecoverySession(owner: f.owner)
+            XCTAssertTrue(session.reservePublication())
+            let claim = try f.claim(shutdownSession: session), gate = Gate()
+            let entered = DispatchSemaphore(value: 0), cancelled = DispatchSemaphore(value: 0), returned = Mutex(false)
+            defer { gate.finish() }
+            let starting = RestorationProbe(try joined(claim)) { _ in
+                try await withTaskCancellationHandler {
+                    entered.signal(); await gate.worker().value
+                    returned.withLock { $0 = true }; throw Failure.expected
+                } onCancel: { cancelled.signal() }
+            }
+            let work = try starting.wait()
+            XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            session.publish(Task { do { _ = try await work.value() } catch {} })
+            let finalizer = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(cancelled.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(finalizer.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertFalse(returned.withLock { $0 }); f.assertHeld()
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate())
+            gate.finish(); try finalizer.wait(); XCTAssertTrue(returned.withLock { $0 })
+            XCTAssertNoThrow(try process.validate()); f.assertHeld()
+        }
+    }
+
+    func testShutdownRequestCancelsAnActualRestorationHandleRetainedAfterTheSnapshot() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            var invocation: Invocation? = try f.invocation(); try f.window(XCTUnwrap(invocation)); try f.lose(&invocation)
+            let claim = try f.claim(), gate = Gate(), entered = DispatchSemaphore(value: 0), cancelled = DispatchSemaphore(value: 0)
+            defer { gate.finish() }
+            let starting = RestorationProbe(try joined(claim)) { _ in
+                try await withTaskCancellationHandler {
+                    entered.signal(); await gate.worker().value; throw Failure.expected
+                } onCancel: { cancelled.signal() }
+            }
+            let work = try starting.wait(); XCTAssertEqual(entered.wait(timeout: .now() + 3), .success)
+            let session = try shutdown.registerRecoverySession(owner: f.owner), closing = DispatchSemaphore(value: 0)
+            XCTAssertTrue(session.reservePublication()); session.bindEndpointClose { closing.signal() }
+            session.publish(Task { do { _ = try await work.value() } catch {} })
+            let finalizer = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(closing.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(cancelled.wait(timeout: .now() + 0.05), .timedOut)
+            session.retainRestoration(work)
+            XCTAssertEqual(cancelled.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(finalizer.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate())
+            gate.finish(); try finalizer.wait(); f.assertHeld()
+        }
+    }
+    func testWatchdogExitSeventyFiveDoesNotReleaseLeasesDuringTheActualOriginalJoin() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            let gate = Gate(); defer { gate.finish() }
+            var invocation: Invocation? = try f.invocation(), original = gate.worker()
+            try invocation?.retainWorker(original)
+            XCTAssertEqual(gate.parked.wait(timeout: .now() + 3), .success); try f.lose(&invocation)
+            let session = try shutdown.registerRecoverySession(owner: f.owner)
+            XCTAssertTrue(session.reservePublication())
+            let claim = try f.claim(shutdownSession: session)
+            session.publish(Task { do { _ = try await claim.join() } catch {} })
+            let closing = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(closing.done.wait(timeout: .now() + 0.05), .timedOut)
+            let epoch = ContinuousClock.now, now = Mutex(epoch), codes = Mutex<[Int32]>([])
+            let fire = Mutex<(@Sendable () -> Void)?>(nil)
+            let timer = try AdministrativeSetupLifecycle.RetirementWatchdog.TimerDriver.owned(arm: { _, callback in
+                fire.withLock { $0 = callback }
+            }, cancel: { fire.withLock { $0 = nil } })
+            let watchdog = AdministrativeSetupLifecycle.RetirementWatchdog(timing: .init(now: { now.withLock { $0 } },
+                sleep: { _ in XCTFail("The independent watchdog must not use a cooperative sleep") }), timer: timer,
+                terminate: { code in codes.withLock { $0.append(code) } })
+            let deadline = watchdog.start(); XCTAssertEqual(deadline, epoch.advanced(by: .seconds(300)))
+            now.withLock { $0 = deadline }
+            let callback = try XCTUnwrap(fire.withLock { $0 }); callback()
+            XCTAssertEqual(codes.withLock { $0 }, [75])
+            XCTAssertEqual(closing.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate()); f.assertHeld()
+            XCTAssertEqual(f.status.cleanup, .observed(.joining)); XCTAssertEqual(f.status.window, .unavailable)
+            gate.finish(); try closing.wait(); watchdog.didClose()
+        }
+    }
+
+    func testShutdownBeforeRestorationPublicationCancelsTheTaskBeforeItsFirstForwardEffect() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            var invocation: Invocation? = try f.invocation(); try f.window(XCTUnwrap(invocation)); try f.lose(&invocation)
+            let publishing = DispatchSemaphore(value: 0), publish = DispatchSemaphore(value: 0)
+            let shutdownRequested = DispatchSemaphore(value: 0), forwardCalls = Mutex(0), sawCancellation = Mutex(false)
+            defer { publish.signal() }
+            let control = try AdministrativeSetupShutdown.RecoverySessionWork.OwnedPublicationControl(beforeRetaining: {
+                publishing.signal()
+                XCTAssertEqual(publish.wait(timeout: .now() + 3), .success)
+            })
+            let session = try shutdown.registerRecoverySessionOwned(owner: f.owner, publicationControl: control)
+            XCTAssertTrue(session.reservePublication()); session.bindEndpointClose { shutdownRequested.signal() }
+            let claim = try f.claim(shutdownSession: session), original = try joined(claim)
+            let actual = Task {
+                do {
+                    let work = try await original.startRestoration { _ in
+                        sawCancellation.withLock { $0 = Task.isCancelled }
+                        try Task.checkCancellation()
+                        forwardCalls.withLock { $0 += 1 }
+                        throw Failure.expected
+                    }
+                    _ = try await work.value()
+                } catch {}
+            }
+            session.publish(actual)
+            XCTAssertEqual(publishing.wait(timeout: .now() + 3), .success)
+            XCTAssertFalse(sawCancellation.withLock { $0 }); XCTAssertEqual(forwardCalls.withLock { $0 }, 0)
+            let finalizer = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(shutdownRequested.wait(timeout: .now() + 3), .success)
+            XCTAssertEqual(finalizer.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate())
+            publish.signal(); try finalizer.wait()
+            XCTAssertTrue(sawCancellation.withLock { $0 }); XCTAssertEqual(forwardCalls.withLock { $0 }, 0)
+            XCTAssertNoThrow(try process.validate()); f.assertHeld()
+        }
+    }
+
+    func testFinalizationWaitsForTheActualWrapperAfterItsOriginalClaimHasJoined() throws {
+        try withShutdownFrame { f, shutdown, process, placement in
+            var invocation: Invocation? = try f.invocation(); try f.window(XCTUnwrap(invocation)); try f.lose(&invocation)
+            let session = try shutdown.registerRecoverySession(owner: f.owner)
+            XCTAssertTrue(session.reservePublication())
+            let claim = try f.claim(shutdownSession: session), gate = Gate()
+            let originalJoined = DispatchSemaphore(value: 0); defer { gate.finish() }
+            session.bindEndpointClose { claim.abandon() }
+            let actual = Task {
+                do { _ = try await claim.join(); originalJoined.signal(); await gate.worker().value } catch {}
+            }
+            session.publish(actual)
+            XCTAssertEqual(originalJoined.wait(timeout: .now() + 3), .success)
+            let finalizer = VoidProbe { await shutdown.joinRecoverySessions() }
+            XCTAssertEqual(finalizer.done.wait(timeout: .now() + 0.05), .timedOut)
+            XCTAssertNoThrow(try process.validate()); XCTAssertNoThrow(try placement.validate()); f.assertHeld()
+            gate.finish(); try finalizer.wait()
+            XCTAssertNoThrow(try process.validate()); f.assertHeld()
+        }
+    }
+
 
 }

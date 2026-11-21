@@ -92,7 +92,7 @@ final class SetupOrphanInProcessRestoreEffect: Sendable {
             makeDriver: { try resources.makeDriver(phases) }, capturePeer: resources.capturePeer,
             requirePeerLive: resources.requirePeerLive, until: deadline)
     }
-    /// Fixed native library entry only. No installed operations factory calls it in this slice.
+    /// The native recovery operations call this fixed restoration entry.
     static func restoreNative(joined: Joined, target: SetupRetainedOrphanClaim.Target,
         processLease: SetupProcessLease, until deadline: ContinuousClock.Instant) async throws -> Row {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }

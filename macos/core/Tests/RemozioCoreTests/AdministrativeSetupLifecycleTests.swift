@@ -97,6 +97,9 @@ private final class SetupLifecycleClock: @unchecked Sendable {
     }
 }
 private final class SetupLifecycleCustody: SetupMaintenanceRecoveryProcessCustody, @unchecked Sendable {
+    func joinRecoverySessions() async {}
+    func observeRecoverySessionsForDisposal() async {}
+    func retainSupervisorDisposal(_ actual: Task<Void, Never>) {}
     struct Counters {
         var validations = 0, admissionsClosed = 0, closeAttempts = 0, actualCloses = 0, finishedCloses = 0
         var invalid = false

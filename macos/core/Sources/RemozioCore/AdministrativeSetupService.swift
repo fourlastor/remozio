@@ -81,7 +81,62 @@ public struct AdministrativeSetupConfiguration: Sendable, CustomStringConvertibl
 
 /// Owns verified host custody before the store-backed owner exists.
 public final class AdministrativeSetupService: @unchecked Sendable {
-    private final class Host: @unchecked Sendable {
+    /// Shared lease, release and routing checks. This binding cannot construct a native endpoint.
+    final class RecoveryBinding: Sendable {
+        let maximumConnections: Int
+        let processLease: SetupProcessLease
+        private let release: SignedReleaseEvidence
+        private let shutdown: AdministrativeSetupShutdown
+        private let routing: AdministrativeSetupLifecycle.Routing
+        fileprivate init(configuration: AdministrativeSetupConfiguration, release: SignedReleaseEvidence,
+            processLease: SetupProcessLease, shutdown: AdministrativeSetupShutdown, routing: AdministrativeSetupLifecycle.Routing) {
+            maximumConnections = configuration.maximumConnections; self.release = release; self.processLease = processLease
+            self.shutdown = shutdown; self.routing = routing
+        }
+        static func owned(configuration: AdministrativeSetupConfiguration, release: SignedReleaseEvidence,
+            processLease: SetupProcessLease, shutdown: AdministrativeSetupShutdown,
+            routing: AdministrativeSetupLifecycle.Routing) throws -> RecoveryBinding {
+            try RuntimeMaintenanceOwnedControl.require()
+            return .init(configuration: configuration, release: release, processLease: processLease, shutdown: shutdown, routing: routing)
+        }
+        func validate() throws {
+            try processLease.validate(); try SetupOrphanRecoveryWire.requireFormats(release)
+        }
+        func currentOwner() throws -> SetupAccountOwner {
+            try validate()
+            let owner = try routing.recoveryOwner()
+            guard shutdown.belongs(to: owner), shutdown.acceptsRecoverySessions else { throw AdministrativeSetupError.unavailable }
+            return owner
+        }
+        func registerSession(owner: SetupAccountOwner) throws -> AdministrativeSetupShutdown.RecoverySessionWork {
+            guard try currentOwner() === owner else { throw RuntimePreparationError.changedScope }
+            return try shutdown.registerRecoverySession(owner: owner)
+        }
+    }
+    /// Only the verified Host can mint the native recovery binding used by its accepted connections.
+    final class NativeRecoveryContext: @unchecked Sendable {
+        private let host: Host
+        private let routing: AdministrativeSetupLifecycle.Routing
+        private let binding: RecoveryBinding
+        fileprivate init(host: Host, routing: AdministrativeSetupLifecycle.Routing) {
+            self.host = host; self.routing = routing
+            binding = .init(configuration: host.configuration, release: host.release, processLease: host.processLease,
+                shutdown: host.shutdown, routing: routing)
+        }
+        var maximumConnections: Int { binding.maximumConnections }
+        var processLease: SetupProcessLease { binding.processLease }
+        var state: AdministrativeSetupLifecycle.State { routing.state }
+        func validate() throws { try host.validateStartup(); try binding.validate() }
+        func currentOwner() throws -> SetupAccountOwner {
+            try host.validateStartup(); return try binding.currentOwner()
+        }
+        func permitsSession() -> Bool { (try? currentOwner()) != nil }
+        func registerSession(owner: SetupAccountOwner) throws -> AdministrativeSetupShutdown.RecoverySessionWork {
+            try host.validateStartup(); return try binding.registerSession(owner: owner)
+        }
+    }
+
+    fileprivate final class Host: @unchecked Sendable {
         let configurationPath: String, configuration: AdministrativeSetupConfiguration
         let requirement: String, path: String, bundle: URL
         let placement: ReleaseDestinationLease, processLease: SetupProcessLease
@@ -243,7 +298,8 @@ public final class AdministrativeSetupService: @unchecked Sendable {
                 let listener = try AdministrativeSetupXPCListener(serviceName: AdministrativeSetupConfiguration.serviceName,
                     teamID: app.teamID, appIdentifier: app.identifier, appHashes: [app.codeDirectoryHash], routing: routing,
                     validateStartup: { try host.validateStartup() }, maximumConnections: configuration.maximumConnections,
-                    handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds)
+                    handshakeTimeoutMilliseconds: configuration.handshakeTimeoutMilliseconds,
+                    nativeRecoveryContext: NativeRecoveryContext(host: host, routing: routing))
                 return AdministrativeSetupService(host: host, listener: listener, routing: routing)
             })
         } catch { placement.close(); processLease?.close(); throw error }

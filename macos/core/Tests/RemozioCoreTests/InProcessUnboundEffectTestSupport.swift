@@ -8,7 +8,7 @@ import XCTest
 final class InProcessUnboundEffectFixture: @unchecked Sendable {
     typealias Row = RuntimeMaintenanceWindowRecord
     typealias Phases = SetupRetainedInvocationReservation.RestorationPhases
-    enum Fault: Equatable, Sendable { case none, nativeClosing, lostReleaseReply, foreignDrain, rpcBusy }
+    enum Fault: Equatable, Sendable { case none, nativeClosing, lostReleaseReply, foreignDrain, rpcBusy, pendingGate }
     struct AuthorityState: Sendable {
         let pairing: AuthorityMaintenancePairingAdmission, hold: AuthorityMaintenanceAdmissionHold
         let boundary: UpdateAdmissionBoundary, operation: AuthorityMaintenanceUnboundOperation
@@ -17,7 +17,7 @@ final class InProcessUnboundEffectFixture: @unchecked Sendable {
     let authority: Mutex<AuthorityState>
     let fault = Mutex(Fault.none), releases = Mutex(0), writes = Mutex<[Row.Phase]>([])
     let foreignDrain = Mutex<UpdateDrainToken?>(nil)
-    let gateCalls = Mutex(0)
+    let gateCalls = Mutex(0), gatePending = Mutex(false), driverClosed = Mutex(false)
     let beforeCompletion = Mutex<(@Sendable () throws -> Void)?>(nil)
     let afterCompletion = Mutex<(@Sendable () throws -> Void)?>(nil)
     let afterIntent = Mutex<(@Sendable () throws -> Void)?>(nil)
@@ -89,14 +89,15 @@ final class InProcessUnboundEffectFixture: @unchecked Sendable {
                 guard try !witness.hasExited() else { throw RuntimePreparationError.changedScope }
             })
     }
-    func joined() async throws -> (SetupRetainedOrphanClaim.Joined, SetupRetainedOrphanClaim.Target) {
+    func joined(shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork? = nil)
+        async throws -> (SetupRetainedOrphanClaim.Joined, SetupRetainedOrphanClaim.Target) {
         if f.invocation != nil { try f.retained.lose(&f.invocation) }
         let rights = f.rightsLive
         let authorization = try f.retained.authorize(verify: {
             guard rights.value.withLock({ $0 }) else { throw SetupAdministratorAuthorizationError.closed }
         })
         let target = try SetupRetainedOrphanClaim.Target.capture(owner: f.retained.owner, authorization: authorization)
-        let claim = try f.retained.claim(authorization, target: target); f.claim = claim
+        let claim = try f.retained.claim(authorization, target: target, shutdownSession: shutdownSession); f.claim = claim
         return (try await claim.join(), target)
     }
     func closeForeignDrain() { let drain = foreignDrain.withLock { value in let old = value; value = nil; return old }; drain?.close() }
@@ -119,6 +120,7 @@ final class InProcessUnboundEffectFixture: @unchecked Sendable {
         }
         func readGate(_ bytes: Data, _ reply: @escaping @Sendable (AuthorityMaintenanceClientReply) -> Void) {
             owner.gateCalls.withLock { $0 += 1 }
+            if owner.fault.withLock({ $0 }) == .pendingGate { owner.gatePending.withLock { $0 = true }; return }
             if owner.fault.withLock({ $0 }) == .nativeClosing { reply(.bytes(nil)); close(); return }
             Task {
                 do {
@@ -161,7 +163,7 @@ final class InProcessUnboundEffectFixture: @unchecked Sendable {
             let callback = state.withLock { value -> (@Sendable () -> Void)? in
                 guard !value.closed else { return nil }; value.closed = true; return value.invalidated
             }
-            callback?()
+            owner.driverClosed.withLock { $0 = true }; callback?()
         }
     }
 }

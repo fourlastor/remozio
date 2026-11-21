@@ -36,6 +36,14 @@ actor AdministrativeSetupLifecycle {
                 return owner
             }
         }
+        func recoveryOwner() throws -> SetupAccountOwner {
+            try lock.withLock {
+                guard getpid() == process, current == .serving, let owner else {
+                    throw AdministrativeSetupError.unavailable
+                }
+                return owner
+            }
+        }
         func checkStatus() -> SetupAccountOwner.StatusLaneCheck {
             guard getpid() == process else { return .refused }
             guard lock.try() else { return .busy }

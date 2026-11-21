@@ -21,6 +21,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
     private let registry: SetupConnectionSlots
     private let routing: AdministrativeSetupLifecycle.Routing
     private let validateStartup: @Sendable () throws -> Void
+    private let nativeRecoveryContext: AdministrativeSetupService.NativeRecoveryContext?
     private let teamID: String
     private let appIdentifier: String
     private let appHashes: Set<Data>
@@ -37,7 +38,8 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
     }
     init(serviceName: String, teamID: String, appIdentifier: String, appHashes: Set<Data>,
         routing: AdministrativeSetupLifecycle.Routing, validateStartup: @escaping @Sendable () throws -> Void,
-        maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000) throws {
+        maximumConnections: Int = 8, handshakeTimeoutMilliseconds: UInt64 = 5000,
+        nativeRecoveryContext: AdministrativeSetupService.NativeRecoveryContext? = nil) throws {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
         guard MacServiceNamespace.accepts(serviceName), (1...255).contains(serviceName.utf8.count),
               serviceName.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46 || $0 == 45 }) else {
@@ -47,7 +49,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
             approvedCodeDirectoryHashes: appHashes, expectedUserID: 0)
         registry = try SetupConnectionSlots(maximumConnections: maximumConnections, timeoutMilliseconds: handshakeTimeoutMilliseconds)
         listener = NSXPCListener(machServiceName: serviceName)
-        self.routing = routing; self.validateStartup = validateStartup
+        self.routing = routing; self.validateStartup = validateStartup; self.nativeRecoveryContext = nativeRecoveryContext
         self.teamID = teamID; self.appIdentifier = appIdentifier; self.appHashes = appHashes
         super.init()
         template.configure(listener)
@@ -76,7 +78,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                 guard uid > 0, uid < UInt32.max else { throw AdministrativeSetupError.wrongAccount }
                 let policy = try XPCPeerPolicy(teamID: teamID, componentIdentifier: appIdentifier,
                     approvedCodeDirectoryHashes: appHashes, expectedUserID: uid)
-                let facade = try Self.facade(connection: connection, policy: policy, routing: routing, registry: registry, id: id)
+                let facade = try Self.facade(connection: connection, policy: policy, routing: routing, registry: registry, id: id, nativeRecoveryContext: nativeRecoveryContext)
                 let retained = NativeAdministrativeSetupConnection(connection: connection, facade: facade)
                 return registry.install(retained, id: id)
             } catch { registry.remove(id); connection.invalidate(); return false }
@@ -84,13 +86,14 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
     }
     /// Accept-time work: real credentials, the lifetime observer and the facade only. No owner access, no store, no admission.
     private static func facade(connection: NSXPCConnection, policy: XPCPeerPolicy, routing: AdministrativeSetupLifecycle.Routing,
-                               registry: SetupConnectionSlots, id: UUID) throws -> AdministrativeSetupConnectionFacade {
+                               registry: SetupConnectionSlots, id: UUID,
+                               nativeRecoveryContext: AdministrativeSetupService.NativeRecoveryContext?) throws -> AdministrativeSetupConnectionFacade {
         _ = try policy.verifyCredentials(connection)
         let invocation = XPCInvocationGuard(connection: connection, policy: policy)
         let facade = AdministrativeSetupConnectionFacade(
             verify: { try invocation.verifyInvocation() },
             select: { [weak registry] in registry?.select($0, id: id) ?? false },
-            openNormal: { close in
+            openNormal: { [registry] close in
                 try AdministrativeSetupXPCEndpoint.openNormal(invocation: invocation, owner: routing.normalOwner(),
                     onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
             },
@@ -98,6 +101,12 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
             check: { routing.checkStatus() },
             touch: { [weak registry] in registry?.touch(id) },
             normalAllowed: { routing.allowsNormal },
+            openRecovery: { close in
+                guard let nativeRecoveryContext else { throw AdministrativeSetupError.unavailable }
+                return try SetupOrphanRecoveryEndpoint.openNative(context: nativeRecoveryContext, invocation: invocation, close: close)
+            },
+            recoveryAllowed: { nativeRecoveryContext?.permitsSession() ?? false },
+            onRecoveryHandshake: { [weak registry] in registry?.recoveryHandshake(id) },
             invalidate: { [weak connection, weak registry] in invocation.retireConnection(); connection?.invalidate(); registry?.remove(id) })
         policy.configure(connection)
         connection.exportedInterface = NSXPCInterface(with: AdministrativeSetupServiceXPCProtocol.self)

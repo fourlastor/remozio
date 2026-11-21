@@ -18,6 +18,9 @@ private actor RecoverySupervisorGate {
 }
 
 private final class RecoverySupervisorCustody: SetupMaintenanceRecoveryProcessCustody, @unchecked Sendable {
+    func joinRecoverySessions() async {}
+    func observeRecoverySessionsForDisposal() async {}
+    func retainSupervisorDisposal(_ actual: Task<Void, Never>) {}
     let retired = Mutex(false), closeStarted = Mutex(0), closeFinished = Mutex(0)
     let closeWasCancelled = Mutex(false)
     let closeAttempts = Mutex(0), disposalJoined = Mutex(0), admissionsClosed = Mutex(0)

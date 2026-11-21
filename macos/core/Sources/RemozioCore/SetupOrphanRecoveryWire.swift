@@ -1,9 +1,25 @@
 import Foundation
 import RemozioProtocol
 
-/// Library wire format. The production Setup interface does not export these messages.
+@objc public protocol RetainedSetupRecoveryXPCProtocol {
+    func recoveryHello(reply: @escaping @Sendable (UInt64) -> Void)
+    func startRecovery(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+    func recoveryProgress(_ request: Data, reply: @escaping @Sendable (Data?) -> Void)
+}
+
+/// Bounded messages for the selected Setup recovery lane.
 enum SetupOrphanRecoveryWire {
     static let version: UInt64 = 1
+    static let ipcVersion: UInt64 = 13
+    static func requireFormats(_ candidate: SignedReleaseEvidence) throws {
+        for role in [AuthorityCodeRole.app, .setupController] {
+            guard let component = candidate.manifest.components.first(where: { $0.role == role }),
+                  let format = component.formats.first(where: { $0.name == "setup.local-ipc" }),
+                  format.readers.contains(ipcVersion), format.writers.contains(ipcVersion) else {
+                throw PreparationStoreError.incompatibleStore
+            }
+        }
+    }
     static let maximumBytes = 1024
     static let requestName = "setup.orphan-recovery.request"
     static let progressName = "setup.orphan-recovery.progress"

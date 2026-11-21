@@ -5,15 +5,26 @@ import Foundation
 protocol SetupNormalEndpoint: AnyObject, AdministrativeSetupMaintenanceXPCProtocol { func close() }
 extension AdministrativeSetupXPCEndpoint: SetupNormalEndpoint {}
 
+protocol SetupRecoveryEndpoint: AnyObject, Sendable {
+    func start(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void)
+    func progress(_ request: Data) -> Data?
+    func close()
+}
+extension SetupOrphanRecoveryEndpoint: SetupRecoveryEndpoint {}
+
 /// Exported object for one accepted Setup connection. It holds no mutation capability until a normal hello builds the
-/// unchanged endpoint. Status first makes the connection status-only for its lifetime; status never reaches the owner lock.
+/// unchanged endpoint. The first hello selects one lane for the connection lifetime.
 final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupServiceXPCProtocol, @unchecked Sendable {
-    enum State: Equatable { case undecided, statusOnly, openingNormal, normal, closed }
+    enum State: Equatable { case undecided, statusOnly, openingNormal, normal, openingRecovery, recoveryOnly, closed }
     private let lock = NSLock()
     private let verify: () throws -> XPCPeerCredentials
     private let select: (SetupConnectionSlots.Mode) -> Bool
     private let openNormal: (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint
     private let normalAllowed: () -> Bool
+    private let openRecovery: ((_ close: @escaping @Sendable () -> Void) throws -> any SetupRecoveryEndpoint)?
+    private let recoveryAllowed: () -> Bool
+    private let onRecoveryHandshake: () -> Void
+    private var recoveryEndpoint: (any SetupRecoveryEndpoint)?
     private let status: (XPCPeerCredentials) -> SetupRetainedInvocationStatus
     private let check: () -> SetupAccountOwner.StatusLaneCheck
     private let touch: () -> Void
@@ -32,8 +43,11 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
          status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus,
          check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
          now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, normalAllowed: @escaping () -> Bool = { true },
+         openRecovery: ((_ close: @escaping @Sendable () -> Void) throws -> any SetupRecoveryEndpoint)? = nil,
+         recoveryAllowed: @escaping () -> Bool = { false }, onRecoveryHandshake: @escaping () -> Void = {},
          invalidate: @escaping () -> Void) {
         self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status
+        self.openRecovery = openRecovery; self.recoveryAllowed = recoveryAllowed; self.onRecoveryHandshake = onRecoveryHandshake
         self.check = check; self.touch = touch; self.now = now; self.normalAllowed = normalAllowed; self.invalidate = invalidate
     }
     /// Runs the owner check when none ran on this connection or the last one is older than `checkInterval`.
@@ -51,14 +65,14 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     var state: State { lock.withLock { current } }
 
     func close() {
-        let closing = lock.withLock { () -> (Bool, (any SetupNormalEndpoint)?) in
-            guard current != .closed else { return (false, nil) }
+        let closing = lock.withLock { () -> (Bool, (any SetupNormalEndpoint)?, (any SetupRecoveryEndpoint)?) in
+            guard current != .closed else { return (false, nil, nil) }
             current = .closed
-            defer { endpoint = nil }
-            return (true, endpoint)
+            defer { endpoint = nil; recoveryEndpoint = nil }
+            return (true, endpoint, recoveryEndpoint)
         }
         guard closing.0 else { return }
-        closing.1?.close()
+        closing.1?.close(); closing.2?.close()
         invalidate()
     }
 
@@ -70,7 +84,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         // The exported call stack proves the peer before any owner access.
         guard let peer = try? verify() else { close(); reply(nil); return }
         let state = lock.withLock { current }
-        if state == .normal || state == .openingNormal { reply(nil); return }
+        if state == .normal || state == .openingNormal || state == .recoveryOnly || state == .openingRecovery { reply(nil); return }
         guard state == .undecided || state == .statusOnly, request.count <= SetupRetainedStatusWire.maximumRequestBytes else {
             close(); reply(nil); return
         }
@@ -84,7 +98,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
                 guard select(.statusOnly) else { return false }
                 current = .statusOnly
             case .statusOnly: break
-            case .openingNormal, .normal, .closed: return false
+            case .openingNormal, .normal, .openingRecovery, .recoveryOnly, .closed: return false
             }
             statusInFlight = true
             return true
@@ -102,12 +116,61 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         } catch { close(); reply(nil) }
     }
 
+    // MARK: Recovery routing
+
+    func recoveryHello(reply: @escaping @Sendable (UInt64) -> Void) {
+        guard (try? verify()) != nil else { close(); reply(0); return }
+        let state = lock.withLock { current }
+        if state == .normal || state == .openingNormal || state == .openingRecovery { reply(0); return }
+        guard recoveryAllowed(), let openRecovery else { close(); reply(0); return }
+        let decision = lock.withLock { () -> (Bool, (any SetupRecoveryEndpoint)?) in
+            switch current {
+            case .undecided:
+                guard select(.recoveryOnly) else { return (false, nil) }
+                current = .openingRecovery; return (true, nil)
+            case .recoveryOnly: return (false, recoveryEndpoint)
+            case .openingNormal, .normal, .openingRecovery, .statusOnly, .closed: return (false, nil)
+            }
+        }
+        if decision.1 != nil { reply(AdministrativeSetupInterface.orphanRecoveryVersion); return }
+        guard decision.0 else { close(); reply(0); return }
+        let opened: any SetupRecoveryEndpoint
+        do { opened = try openRecovery({ [weak self] in self?.close() }) }
+        catch { close(); reply(0); return }
+        guard recoveryAllowed() else { opened.close(); close(); reply(0); return }
+        let installed = lock.withLock {
+            guard current == .openingRecovery else { return false }
+            recoveryEndpoint = opened; current = .recoveryOnly; return true
+        }
+        guard installed else { opened.close(); close(); reply(0); return }
+        onRecoveryHandshake()
+        reply(AdministrativeSetupInterface.orphanRecoveryVersion)
+    }
+    private func recovery(_ forward: (any SetupRecoveryEndpoint) -> Void, refuse: () -> Void) {
+        guard (try? verify()) != nil else { close(); refuse(); return }
+        let selected = lock.withLock { (current, recoveryEndpoint) }
+        if selected.0 == .normal || selected.0 == .openingNormal || selected.0 == .openingRecovery {
+            refuse(); return
+        }
+        guard selected.0 == .recoveryOnly, let endpoint = selected.1 else { close(); refuse(); return }
+        forward(endpoint)
+    }
+    func startRecovery(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        recovery({ $0.start(request, authorization: authorization, reply: reply) }, refuse: { reply(nil) })
+    }
+    func recoveryProgress(_ request: Data, reply: @escaping @Sendable (Data?) -> Void) {
+        recovery({ reply($0.progress(request)) }, refuse: { reply(nil) })
+    }
+
     // MARK: Normal routing
 
     /// A supported hello on an undecided connection is the only path that builds the mutation endpoint.
     private func hello(_ forward: (any SetupNormalEndpoint) -> Void, refuse: () -> Void) {
         // Prove the peer on the exported call stack before the owner is touched. The endpoint checks again per call.
-        guard (try? verify()) != nil, normalAllowed() else { close(); refuse(); return }
+        guard (try? verify()) != nil else { close(); refuse(); return }
+        let state = lock.withLock { current }
+        if state == .recoveryOnly || state == .openingRecovery { refuse(); return }
+        guard normalAllowed() else { close(); refuse(); return }
         let decision = lock.withLock { () -> (open: Bool, existing: (any SetupNormalEndpoint)?) in
             switch current {
             case .undecided:
@@ -115,7 +178,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
                 current = .openingNormal
                 return (true, nil)
             case .normal: return (false, endpoint)
-            case .statusOnly, .openingNormal, .closed: return (false, nil)
+            case .statusOnly, .openingNormal, .openingRecovery, .recoveryOnly, .closed: return (false, nil)
             }
         }
         if let existing = decision.existing { forward(existing); return }
@@ -132,6 +195,9 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     }
     /// Every other normal selector requires the endpoint that only a successful normal hello can create.
     private func normal(_ forward: (any SetupNormalEndpoint) -> Void, refuse: () -> Void) {
+        guard (try? verify()) != nil else { close(); refuse(); return }
+        let state = lock.withLock { current }
+        if state == .recoveryOnly || state == .openingRecovery { refuse(); return }
         guard normalAllowed() else { close(); refuse(); return }
         let value = lock.withLock { current == .normal ? endpoint : nil }
         guard let value else { close(); refuse(); return }
