@@ -47,7 +47,7 @@ final class AuthorityMaintenanceListenerTests: XCTestCase, @unchecked Sendable {
                   onHandshake: @escaping @Sendable () -> Void, onClose: @escaping @Sendable () -> Void) throws -> AuthorityMaintenanceXPCEndpoint {
             if fail.withLock({ $0 }) { throw Fault.rejected }
             let endpoint = try AuthorityMaintenanceXPCEndpoint.openOwned(access: access, budget: budget,
-                invalidate: { [weak connection, weak self] in connection?.invalidate(); onClose(); self?.closed.withLock { $0 += 1 } },
+                invalidate: { [weak connection, weak self] in connection?.invalidate(); self?.closed.withLock { $0 += 1 }; onClose() },
                 onHandshake: { [self] in if !suppressHandshake.withLock({ $0 }) { onHandshake() } })
             connection.exportedInterface = NSXPCInterface(with: AuthorityMaintenanceXPCProtocol.self); connection.exportedObject = endpoint
             connection.invalidationHandler = { [weak endpoint] in endpoint?.close() }; connection.interruptionHandler = { [weak endpoint] in endpoint?.close() }
@@ -103,7 +103,9 @@ final class AuthorityMaintenanceListenerTests: XCTestCase, @unchecked Sendable {
         let opened = try await peer.call(request(.open)); XCTAssertEqual(opened.outcome, .applied)
         let observed = try await peer.call(request(.observe, binding: opened.binding)); XCTAssertEqual(observed.outcome, .applied)
         await owner.closeAndWait(); await owner.closeAndWait()
-        XCTAssertEqual(builder.created.withLock { $0 }, 1); XCTAssertEqual(builder.closed.withLock { $0 }, 1)
+        try await waitUntil { builder.closed.withLock { $0 == 1 } }
+        XCTAssertEqual(builder.created.withLock { $0 }, 1)
+        XCTAssertEqual(builder.closed.withLock { $0 }, 1)
         XCTAssertEqual(owner.retainedEndpoints(), 0); XCTAssertEqual(try f.admission.connectionReservations(), 0)
         XCTAssertThrowsError(try owner.start())
     }
