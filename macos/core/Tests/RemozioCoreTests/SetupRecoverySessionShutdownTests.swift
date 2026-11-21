@@ -18,6 +18,9 @@ final class SetupRecoverySessionShutdownTests: XCTestCase, @unchecked Sendable {
             for waiter in pending { waiter.resume() }
         }
     }
+    private final class RegistrationCounts: Sendable {
+        let values = Mutex((registered: 0, closed: 0))
+    }
     private final class Fixture: @unchecked Sendable {
         let source: RuntimeAuditUpgradeOperationTests.Harness
         let owner: SetupAccountOwner, placement: ReleaseDestinationLease, lease: SetupProcessLease
@@ -223,18 +226,19 @@ final class SetupRecoverySessionShutdownTests: XCTestCase, @unchecked Sendable {
     }
     func testRegistrationRaceCannotEscapeTheShutdownSnapshot() throws {
         try fixture { f in
-            let registered = Mutex(0), closed = Mutex(0)
+            let counts = RegistrationCounts()
             await withTaskGroup(of: Void.self) { group in
                 for _ in 0..<20 {
-                    group.addTask {
+                    group.addTask { @Sendable [f, counts] in
                         guard let session = try? f.session() else { return }
-                        registered.withLock { $0 += 1 }
-                        session.bindEndpointClose { closed.withLock { $0 += 1 } }
+                        counts.values.withLock { $0.registered += 1 }
+                        session.bindEndpointClose { [counts] in counts.values.withLock { $0.closed += 1 } }
                     }
                 }
-                group.addTask { await f.shutdown.joinRecoverySessions() }
+                group.addTask { @Sendable [f] in await f.shutdown.joinRecoverySessions() }
             }
-            XCTAssertEqual(closed.withLock { $0 }, registered.withLock { $0 })
+            let result = counts.values.withLock { $0 }
+            XCTAssertEqual(result.closed, result.registered)
             XCTAssertFalse(f.shutdown.acceptsRecoverySessions); XCTAssertThrowsError(try f.session())
             try await f.shutdown.close()
         }
