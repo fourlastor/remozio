@@ -495,8 +495,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     /// progress. Durable records, scopes kept by failed cleanup, and other setup work return false.
     private func admissionHeldByExecutorRunsOnly() -> Bool {
         guard let holder = admissionHolder, holder.isTransientOrEnding else { return false }
-        return (asynchronousWork.isIdle || asynchronousWork.permits(holder.admission))
-            && (setupReplyWork.isIdle || setupReplyWork.permits(holder.reply))
+        return asynchronousWork.isIdleOrPermits(holder.admission) && setupReplyWork.isIdleOrPermits(holder.reply)
     }
 
     /// Blocking maintenance uses the cancellation token of the authorization imported on the exported invocation.
