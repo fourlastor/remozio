@@ -5,6 +5,7 @@ import Foundation
 final class SetupOrphanRecoveryOperations: @unchecked Sendable {
     typealias Claim = SetupRetainedOrphanClaim
     typealias Authorization = SetupRetainedRecoveryAuthorization
+    enum Validation { case full, live }
     struct Peer: Equatable, Sendable {
         let credentials: XPCPeerCredentials
         let owner: LocalAccountIdentity
@@ -17,6 +18,7 @@ final class SetupOrphanRecoveryOperations: @unchecked Sendable {
         let restore: @Sendable (Claim.Joined, Claim.Target, ContinuousClock.Instant) async throws -> RuntimeMaintenanceWindowRecord
         let adopt: @Sendable (Claim.Joined, Claim.Target) async throws -> RuntimeMaintenanceWindowRecord
         var now: @Sendable () -> ContinuousClock.Instant = { .now }
+        var validateContext: @Sendable (Validation) throws -> Void = { _ in }
     }
     struct WorkEffects: Sendable {
         let routing: @Sendable () -> AdministrativeSetupLifecycle.State
@@ -34,9 +36,12 @@ final class SetupOrphanRecoveryOperations: @unchecked Sendable {
     private var ownedCaller: OwnedCaller?
     let effects: WorkEffects
     private let nativeContext: AdministrativeSetupService.NativeRecoveryContext?
+    private let validateOwnedContext: @Sendable (Validation) throws -> Void
     private init(owner: SetupAccountOwner, effects: WorkEffects, ownedCaller: OwnedCaller? = nil,
-        nativeContext: AdministrativeSetupService.NativeRecoveryContext? = nil) {
+        nativeContext: AdministrativeSetupService.NativeRecoveryContext? = nil,
+        validateOwnedContext: @escaping @Sendable (Validation) throws -> Void = { _ in }) {
         self.owner = owner; self.effects = effects; self.ownedCaller = ownedCaller; self.nativeContext = nativeContext
+        self.validateOwnedContext = validateOwnedContext
     }
     static func native(context: AdministrativeSetupService.NativeRecoveryContext) throws -> SetupOrphanRecoveryOperations {
         guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
@@ -53,9 +58,12 @@ final class SetupOrphanRecoveryOperations: @unchecked Sendable {
         guard let nativeContext else { throw JournalLeaseError.unsafeMetadata }
         return try nativeContext.registerSession(owner: owner)
     }
-    func requireContext() throws {
-        if let nativeContext { try nativeContext.validate() }
-        else { try requireOwned() }
+    func requireContext(_ validation: Validation = .full) throws {
+        guard let nativeContext else { try requireOwned(); try validateOwnedContext(validation); return }
+        switch validation {
+        case .full: try nativeContext.validate()
+        case .live: try nativeContext.validateLive()
+        }
     }
 
     /// Root cannot inject effects. The native context comes from the verified Host.
@@ -64,7 +72,8 @@ final class SetupOrphanRecoveryOperations: @unchecked Sendable {
         let work = WorkEffects(routing: effects.routing, checkHost: effects.checkHost,
             restore: effects.restore, adopt: effects.adopt, now: effects.now)
         return .init(owner: owner, effects: work,
-            ownedCaller: .init(verifyPeer: effects.verifyPeer, importAuthorization: effects.importAuthorization))
+            ownedCaller: .init(verifyPeer: effects.verifyPeer, importAuthorization: effects.importAuthorization),
+            validateOwnedContext: effects.validateContext)
     }
     func takeCallerOwned() throws -> OwnedCaller {
         try requireOwned()
@@ -78,7 +87,7 @@ final class SetupOrphanRecoveryOperations: @unchecked Sendable {
         guard nativeContext == nil else { throw JournalLeaseError.unsafeMetadata }
     }
     func capture(_ authorization: Authorization) throws -> Claim.Target {
-        try requireContext(); return try .capture(owner: owner, authorization: authorization)
+        try requireContext(.live); return try .capture(owner: owner, authorization: authorization)
     }
     func claim(_ target: Claim.Target, authorization: Authorization,
         shutdownSession: AdministrativeSetupShutdown.RecoverySessionWork? = nil) throws -> Claim {

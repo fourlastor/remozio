@@ -112,6 +112,10 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                 guard let nativeRecoveryContext else { throw AdministrativeSetupError.unavailable }
                 return try SetupOrphanRecoveryEndpoint.openNative(context: nativeRecoveryContext, invocation: invocation, close: close)
             },
+            checkRecoveryOpening: {
+                guard let nativeRecoveryContext else { throw AdministrativeSetupError.unavailable }
+                try nativeRecoveryContext.validate()
+            },
             recoveryAllowed: { nativeRecoveryContext?.permitsSession() ?? false },
             onRecoveryHandshake: { [weak registry] in registry?.recoveryHandshake(id) },
             invalidate: { [weak connection, weak registry] in invocation.retireConnection(); connection?.invalidate(); registry?.remove(id) })

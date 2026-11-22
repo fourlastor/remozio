@@ -22,6 +22,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     private let openNormal: (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint
     private let normalAllowed: () -> Bool
     private let openRecovery: ((_ close: @escaping @Sendable () -> Void) throws -> any SetupRecoveryEndpoint)?
+    private let checkRecoveryOpening: () throws -> Void
     private let recoveryAllowed: () -> Bool
     private let onRecoveryHandshake: () -> Void
     private var recoveryEndpoint: (any SetupRecoveryEndpoint)?
@@ -46,10 +47,12 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
          check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
          now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, normalAllowed: @escaping () -> Bool = { true },
          openRecovery: ((_ close: @escaping @Sendable () -> Void) throws -> any SetupRecoveryEndpoint)? = nil,
-         recoveryAllowed: @escaping () -> Bool = { false }, onRecoveryHandshake: @escaping () -> Void = {},
+         checkRecoveryOpening: @escaping () throws -> Void = {}, recoveryAllowed: @escaping () -> Bool = { false },
+         onRecoveryHandshake: @escaping () -> Void = {},
          invalidate: @escaping () -> Void) {
         self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status; self.statusV3 = statusV3
-        self.openRecovery = openRecovery; self.recoveryAllowed = recoveryAllowed; self.onRecoveryHandshake = onRecoveryHandshake
+        self.openRecovery = openRecovery; self.checkRecoveryOpening = checkRecoveryOpening
+        self.recoveryAllowed = recoveryAllowed; self.onRecoveryHandshake = onRecoveryHandshake
         self.check = check; self.touch = touch; self.now = now; self.normalAllowed = normalAllowed; self.invalidate = invalidate
     }
     /// Runs the owner check when none ran on this connection or the last one is older than `checkInterval`.
@@ -126,7 +129,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     // MARK: Recovery routing
 
     func recoveryHello(reply: @escaping @Sendable (UInt64) -> Void) {
-        guard (try? verify()) != nil else { close(); reply(0); return }
+        guard let peer = try? verify() else { close(); reply(0); return }
         let selected = lock.withLock { (current, recoveryEndpoint) }, state = selected.0
         if state == .recoveryOnly, selected.1 != nil { reply(AdministrativeSetupInterface.orphanRecoveryVersion); return }
         if state == .normal || state == .openingNormal || state == .openingRecovery { reply(0); return }
@@ -145,7 +148,10 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         let opened: any SetupRecoveryEndpoint
         do { opened = try openRecovery({ [weak self] in self?.close() }) }
         catch { close(); reply(0); return }
-        guard recoveryAllowed() else { opened.close(); close(); reply(0); return }
+        // The endpoint remains provisional until the full release check and live admission both succeed.
+        do { try checkRecoveryOpening() }
+        catch { opened.close(); close(); reply(0); return }
+        guard recoveryAllowed(), (try? verify()) == peer else { opened.close(); close(); reply(0); return }
         let installed = lock.withLock {
             guard current == .openingRecovery else { return false }
             recoveryEndpoint = opened; current = .recoveryOnly; return true
