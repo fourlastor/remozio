@@ -94,6 +94,15 @@ private actor NativeMacSetupServiceDriver: MacSetupServiceDriver {
         guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
         return channel
     }
+    func recoveryClient(lane: MacSetupRecoveryLane) throws -> MacSetupRecoveryChannel {
+        var channel: MacSetupRecoveryChannel?
+        let state = try perform(registering: false) { release in
+            channel = try MacSetupRecoveryChannel(lane: lane, verifiedRelease: release)
+        }
+        guard state == .enabled, let channel else { throw SetupRegistrationError.unavailable }
+        return channel
+    }
+
     private func perform(registering: Bool, onVerified: ((SignedReleaseEvidence) throws -> Void)? = nil) throws -> MacSetupServiceState {
         guard getuid() > 0, getuid() == geteuid() else { throw SetupRegistrationError.wrongProcess }
         let bundle = URL(fileURLWithPath: MachineBootstrap.bundlePath)
@@ -212,6 +221,10 @@ public final class MacSetupServiceControls {
 
 /// Verifies protected placement and the running app before opening a pinned Root setup connection.
 public enum MacAccountSetupConnection {
+    static func openRecoveryClient(lane: MacSetupRecoveryLane) async throws -> MacSetupRecoveryChannel {
+        try await NativeMacSetupServiceDriver().recoveryClient(lane: lane)
+    }
+
     public static func openPortableImport(preferRecovery: Bool = false) async throws -> PortableSetupImportChannel {
         try await NativeMacSetupServiceDriver().portableImportChannel(preferRecovery: preferRecovery)
     }
