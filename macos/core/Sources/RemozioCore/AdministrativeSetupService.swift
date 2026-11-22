@@ -128,12 +128,13 @@ public final class AdministrativeSetupService: @unchecked Sendable {
         var supportsStatusApplicability: Bool { SetupRetainedStatusV3Wire.supports(host.release) }
         var state: AdministrativeSetupLifecycle.State { routing.state }
         func validate() throws { try host.validateStartup(); try binding.validate() }
+        func validateLive() throws { try host.validateRecoveryHostLive(); try binding.validate() }
         func currentOwner() throws -> SetupAccountOwner {
-            try host.validateStartup(); return try binding.currentOwner()
+            try host.validateRecoveryHostLive(); return try binding.currentOwner()
         }
         func permitsSession() -> Bool { (try? currentOwner()) != nil }
         func registerSession(owner: SetupAccountOwner) throws -> AdministrativeSetupShutdown.RecoverySessionWork {
-            try host.validateStartup(); return try binding.registerSession(owner: owner)
+            try host.validateRecoveryHostLive(); return try binding.registerSession(owner: owner)
         }
     }
 
@@ -158,19 +159,29 @@ public final class AdministrativeSetupService: @unchecked Sendable {
         // Before an owner exists these checks and the first store read have no activity token, as on main.
         // A concurrent release change can refuse startup; the lifecycle then retires for a fresh process.
         private func checkedStartup() throws -> SignedReleaseEvidence {
+            try validateProtectedPlacement()
+            let app = configuration.codePolicy.entries.first { $0.role == .app }!
+            let current = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
+            try configuration.validate(release: current)
+            try validateRunningExecutable()
+            return current
+        }
+        func validateRecoveryHostLive() throws {
+            try validateProtectedPlacement()
+            try validateRunningExecutable()
+        }
+        private func validateProtectedPlacement() throws {
             try processLease.validate()
             guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
             guard try AdministrativeSetupConfiguration.load(path: configurationPath).canonicalBytes == configuration.canonicalBytes else {
                 throw AdministrativeSetupServiceError.changedConfiguration
             }
             _ = try placement.inspectInstalledApplication(name: bundle.lastPathComponent)
-            let app = configuration.codePolicy.entries.first { $0.role == .app }!
-            let current = try SignedReleaseInspection.inspect(bundle, teamID: app.teamID, appIdentifier: app.identifier)
-            try configuration.validate(release: current)
+        }
+        private func validateRunningExecutable() throws {
             try DynamicCodeValidation.validateSelf(requirement: requirement)
             guard try DynamicCodeValidation.selfPath() == path else { throw AdministrativeSetupServiceError.wrongExecutable }
             try placement.validate()
-            return current
         }
         func verifyHost(_ inventory: InstallationInventory) throws {
             let inspected = try checkedStartup()

@@ -33,7 +33,9 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
             }
             return .init(credentials: f.retained.binding.peer, owner: f.retained.binding.authorityOwner)
         }
-        func session(maximum: Int = 8) throws -> SetupOrphanRecoveryEndpoint {
+        func session(maximum: Int = 8,
+            validateContext: @escaping @Sendable (SetupOrphanRecoveryOperations.Validation) throws -> Void = { _ in }
+        ) throws -> SetupOrphanRecoveryEndpoint {
             let peer = self.peer
             let ops = try SetupOrphanRecoveryOperations.owned(owner: f.retained.owner, effects: .init(
                 verifyPeer: { peer }, routing: { [self] in route.withLock { $0 } }, checkHost: { [self] in
@@ -51,7 +53,7 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
                 }, adopt: { [self] joined, _ in
                     effects.withLock { $0.append("adopt") }
                     return try await joined.finishRecordedRestorationOwned(processLease: f.processLease)
-                }, now: { [self] in clock.withLock { $0 } }))
+                }, now: { [self] in clock.withLock { $0 } }, validateContext: validateContext))
             return try .openOwned(operations: ops, maximumConnections: maximum)
         }
         func request(_ action: W.Action) throws -> W.Request {
@@ -503,6 +505,74 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
             XCTAssertEqual(h.imports.withLock { $0 }, 1)
             XCTAssertEqual(try E.code(s, r), .pending)
             gate.finish(); await s.waitForWork(); XCTAssertEqual(try E.code(s, r), .released)
+        }
+    }
+    func testStartAndHundredProgressReadsRun103SynchronousFullChecks() throws {
+        let cleanupEntered = Mutex(false), finishCleanup = DispatchSemaphore(value: 0)
+        defer { finishCleanup.signal() }
+        try withFixture(window: false, binding: false, prepare: { f in
+            try XCTUnwrap(f.invocation).retainCleanup {
+                cleanupEntered.withLock { $0 = true }
+                guard finishCleanup.wait(timeout: .now() + 45) == .success else {
+                    XCTFail("The progress reads did not release the retained cleanup")
+                    throw Failure.expected
+                }
+            }
+        }) { f in
+            let h = Context(f), checks = Mutex(0), r = try h.request(.releaseWindowFree)
+            let s = try h.session { validation in
+                if case .full = validation { checks.withLock { $0 += 1 } }
+            }
+            let facade = AdministrativeSetupConnectionFacade(verify: { h.peer.credentials },
+                select: { $0 == .recoveryOnly }, openNormal: { _ in throw Failure.expected }, status: { _ in .unavailable },
+                openRecovery: { _ in s }, recoveryAllowed: { true }, invalidate: {})
+            defer { facade.close(); finishCleanup.signal() }
+
+            let hello = Mutex<UInt64?>(nil)
+            facade.recoveryHello { value in hello.withLock { $0 = value } }
+            XCTAssertEqual(hello.withLock { $0 }, AdministrativeSetupInterface.orphanRecoveryVersion)
+            let started = Mutex<Data?>(nil)
+            facade.startRecovery(try r.bytes, authorization: Data()) { value in started.withLock { $0 = value } }
+            XCTAssertEqual(try W.Reply.decode(XCTUnwrap(started.withLock { $0 })).code, .requestRecorded)
+            XCTAssertEqual(try f.retained.owner.retainedInvocationState(), .recovering)
+            XCTAssertEqual(h.imports.withLock { $0 }, 1)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while !cleanupEntered.withLock({ $0 }) {
+                guard ContinuousClock.now < deadline else {
+                    return XCTFail("The retained cleanup did not reach the barrier")
+                }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+
+            let progress = try W.Progress(requestID: r.requestID).bytes
+            for _ in 0..<100 {
+                let reply = Mutex<Data?>(nil)
+                facade.recoveryProgress(progress) { value in reply.withLock { $0 = value } }
+                XCTAssertEqual(try W.Reply.decode(XCTUnwrap(reply.withLock { $0 })).code, .pending)
+            }
+            XCTAssertEqual(checks.withLock { $0 }, 103)
+            XCTAssertEqual(h.hostChecks.withLock { $0 }, 0)
+            finishCleanup.signal()
+            await s.waitForWork()
+            XCTAssertEqual(try E.code(s, r), .released)
+        }
+    }
+    func testFullValidationAfterRightsImportRefusesBeforeClaiming() throws {
+        try withFixture(window: false, binding: false) { f in
+            let h = Context(f), fullChecks = Mutex(0)
+            let s = try h.session { validation in
+                guard case .full = validation else { return }
+                fullChecks.withLock { $0 += 1 }
+                if h.imports.withLock({ $0 }) > 0 { throw Failure.expected }
+            }
+            defer { s.close() }
+            let r = try h.request(.releaseWindowFree)
+            XCTAssertEqual(try W.Reply.decode(E.start(s, r)).code, .requestRecorded)
+            XCTAssertEqual(fullChecks.withLock { $0 }, 3)
+            XCTAssertEqual(h.imports.withLock { $0 }, 1)
+            XCTAssertEqual(try f.retained.owner.retainedInvocationState(), .orphan)
+            XCTAssertEqual(h.hostChecks.withLock { $0 }, 0)
+            f.retained.assertHeld()
         }
     }
     func testDeadlineDuringJoinPreventsRestorationButDoesNotAbandon() throws {

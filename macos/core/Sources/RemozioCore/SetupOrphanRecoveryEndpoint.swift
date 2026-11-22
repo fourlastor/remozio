@@ -38,7 +38,9 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
             session.resolveWithoutWork(); session.connectionDidClose(); throw error
         }
     }
-    private func verifyCall() throws { try state.verifyPeer(caller.verifyPeer()) }
+    private func verifyCall(_ validation: Operations.Validation) throws {
+        try state.verifyPeer(caller.verifyPeer(), validation: validation)
+    }
     func start(_ bytes: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
         state.start(bytes, authorization: authorization, verifyCall: verifyCall,
             importAuthorization: caller.importAuthorization, reply: reply)
@@ -67,12 +69,12 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
             self.operations = operations; self.peer = peer; self.supportsCapturedTarget = supportsCapturedTarget
             self.shutdownSession = shutdownSession
         }
-        func verifyPeer(_ actual: Operations.Peer) throws {
-            try operations.requireContext()
+        func verifyPeer(_ actual: Operations.Peer, validation: Operations.Validation) throws {
+            try operations.requireContext(validation)
             guard actual == peer, lock.withLock({ !closed }) else { throw XPCPeerPolicyError.wrongConnection }
         }
-        private func requireOpen() throws {
-            try operations.requireContext()
+        private func requireOpen(_ validation: Operations.Validation = .full) throws {
+            try operations.requireContext(validation)
             guard lock.withLock({ !closed }) else { throw SetupAdministratorAuthorizationError.closed }
         }
         private func allowed(_ action: Wire.Action) -> Bool {
@@ -83,18 +85,18 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
             }
         }
         /// Other selectors refuse one call. They cannot clear the recorded request or abandon its claim.
-        func refuseForeignSelector(verifyCall: () throws -> Void) -> Data? {
+        func refuseForeignSelector(verifyCall: (Operations.Validation) throws -> Void) -> Data? {
             do {
-                try verifyCall()
+                try verifyCall(.full)
                 let id = lock.withLock { request?.requestID }
                 let result = try id.map { try Wire.Reply(requestID: $0, code: .refusedUnavailable).bytes }
-                try verifyCall(); return result
+                try verifyCall(.full); return result
             } catch { close(); return nil }
         }
-        func start(_ bytes: Data, authorization externalForm: Data, verifyCall: () throws -> Void,
+        func start(_ bytes: Data, authorization externalForm: Data, verifyCall: (Operations.Validation) throws -> Void,
             importAuthorization: (Data) throws -> SetupRetainedRecoveryAuthorization, reply: @escaping @Sendable (Data?) -> Void) {
             let decoded: Wire.Request
-            do { try verifyCall() } catch { close(); reply(nil); return }
+            do { try verifyCall(.full) } catch { close(); reply(nil); return }
             do { decoded = try Wire.Request.decode(bytes) } catch { reply(nil); return }
             let decision = lock.withLock { () -> (first: Bool, bytes: Data?) in
                 guard !closed else { return (false, nil) }
@@ -106,7 +108,7 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
                 recorded = try? Wire.Reply(requestID: decoded.requestID, code: .requestRecorded).bytes
                 return (true, recorded)
             }
-            do { try verifyCall() } catch { close(); reply(nil); return }
+            do { try verifyCall(decision.first ? .live : .full) } catch { close(); reply(nil); return }
             reply(decision.bytes)
             guard decision.first else { return }
             if let shutdownSession, !shutdownSession.reservePublication() { finish(.refusedUnavailable); return }
@@ -122,7 +124,7 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
             var adopted = false
             defer { if !adopted { authorization.close() } }
             do {
-                try requireOpen()
+                try requireOpen(.live)
                 guard allowed(decoded.action), authorization.peer == peer.credentials, authorization.currentOwner == peer.owner else {
                     finish(.refusedUnavailable); return
                 }
@@ -189,13 +191,13 @@ final class SetupOrphanRecoveryEndpoint: @unchecked Sendable {
             let retired = lock.withLock { () -> Task<Void, Never>? in let old = work; work = nil; return old }
             withExtendedLifetime(retired) {}
         }
-        func progress(_ bytes: Data, verifyCall: () throws -> Void) -> Data? {
-            do { try verifyCall() } catch { close(); return nil }
+        func progress(_ bytes: Data, verifyCall: (Operations.Validation) throws -> Void) -> Data? {
+            do { try verifyCall(.full) } catch { close(); return nil }
             guard let decoded = try? Wire.Progress.decode(bytes) else { return nil }
             do {
                 let code = lock.withLock { request?.requestID == decoded.requestID ? outcome : .refusedUnavailable }
                 let result = try Wire.Reply(requestID: decoded.requestID, code: code).bytes
-                try verifyCall(); return result
+                try verifyCall(.live); return result
             } catch { close(); return nil }
         }
         func waitForWork() async {

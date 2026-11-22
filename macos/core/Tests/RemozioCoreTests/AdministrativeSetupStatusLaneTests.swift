@@ -719,6 +719,40 @@ final class AdministrativeSetupStatusLaneTests: XCTestCase, @unchecked Sendable 
         XCTAssertEqual(hello.only, 0); XCTAssertEqual(h.facade.state, .closed)
         XCTAssertEqual(h.recovery.closes.withLock { $0 }, 1); XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 0)
     }
+    func testRecoveryHelloChecksReleaseOnceBeforePublishingAndDisposesOnFailure() {
+        for failure in [nil, "release", "admission"] {
+            let h = Harness(), checks = Mutex(0)
+            let facade = Facade(verify: { h.peer }, select: { $0 == .recoveryOnly },
+                openNormal: { _ in h.recorder }, status: { _ in .unavailable }, openRecovery: { _ in
+                    h.recoveryOpens.withLock { $0 += 1 }
+                    return h.recovery
+                }, checkRecoveryOpening: {
+                    checks.withLock { $0 += 1 }
+                    XCTAssertEqual(h.recoveryOpens.withLock { $0 }, 1)
+                    XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 0)
+                    if failure == "release" { throw XPCPeerPolicyError.wrongConnection }
+                    if failure == "admission" { h.recoveryAllowed.withLock { $0 = false } }
+                }, recoveryAllowed: { h.recoveryAllowed.withLock { $0 } },
+                onRecoveryHandshake: { h.recoveryHandshakes.withLock { $0 += 1 } }, invalidate: {})
+            defer { facade.close() }
+            let first = Reply<UInt64>()
+            facade.recoveryHello(reply: first.callback)
+            if failure == nil {
+                XCTAssertEqual(first.only, AdministrativeSetupInterface.orphanRecoveryVersion)
+                let repeated = Reply<UInt64>()
+                facade.recoveryHello(reply: repeated.callback)
+                XCTAssertEqual(repeated.only, first.only)
+                XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 1)
+                XCTAssertEqual(h.recovery.closes.withLock { $0 }, 0)
+            } else {
+                XCTAssertEqual(first.only, 0)
+                XCTAssertEqual(facade.state, .closed)
+                XCTAssertEqual(h.recoveryHandshakes.withLock { $0 }, 0)
+                XCTAssertEqual(h.recovery.closes.withLock { $0 }, 1)
+            }
+            XCTAssertEqual(checks.withLock { $0 }, 1)
+        }
+    }
     func testLegacyListenerWithoutNativeRecoveryContextCannotSelectRecovery() {
         let h = Harness(), facade = Facade(verify: { h.peer }, select: { _ in true },
             openNormal: { _ in h.recorder }, status: { _ in .unavailable }, invalidate: {})

@@ -46,7 +46,10 @@ final class SetupOrphanRecoveryEndpointTests: XCTestCase, @unchecked Sendable {
             peer = .init(credentials: .init(processID: getpid(), userID: getuid(), auditSessionID: 1),
                 owner: .init(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID()))
         }
-        func session(verify: (@Sendable () throws -> SetupOrphanRecoveryOperations.Peer)? = nil) throws -> SetupOrphanRecoveryEndpoint {
+        func session(
+            validateContext: @escaping @Sendable (SetupOrphanRecoveryOperations.Validation) throws -> Void = { _ in },
+            verify: (@Sendable () throws -> SetupOrphanRecoveryOperations.Peer)? = nil
+        ) throws -> SetupOrphanRecoveryEndpoint {
             let host: (@Sendable () throws -> Void)?
             if hasHost { host = { @Sendable [self] in hostChecks.withLock { $0 += 1 } } } else { host = nil }
             let effects = SetupOrphanRecoveryOperations.Effects(verifyPeer: { [self] in
@@ -56,7 +59,8 @@ final class SetupOrphanRecoveryEndpointTests: XCTestCase, @unchecked Sendable {
                 imports.withLock { $0 += 1 }; onImport?()
                 guard !failImport.withLock({ $0 }) else { throw Failure.expected }
                 return try .openOwned(peer: peer.credentials, currentOwner: peer.owner, incarnation: UUID(), verifyRights: {})
-            }, restore: { _, _, _ in throw Failure.expected }, adopt: { _, _ in throw Failure.expected }, now: { [self] in clock.withLock { $0 } })
+            }, restore: { _, _, _ in throw Failure.expected }, adopt: { _, _ in throw Failure.expected },
+                now: { [self] in clock.withLock { $0 } }, validateContext: validateContext)
             return try .openOwned(operations: .owned(owner: owner, effects: effects), maximumConnections: 8)
         }
         deinit { try? owner.close(); try? FileManager.default.removeItem(at: root) }
@@ -116,6 +120,44 @@ final class SetupOrphanRecoveryEndpointTests: XCTestCase, @unchecked Sendable {
         XCTAssertNotNil(s.refuseForeignSelector()); XCTAssertNotNil(s.refuseForeignSelector())
         XCTAssertEqual(try Self.start(s, r), first)
         XCTAssertEqual(h.imports.withLock { $0 }, 1)
+    }
+    func testConcurrentProgressChecksEachCallAndRevalidatesBeforeReply() throws {
+        let h = try Harness(), full = Mutex(0), failLive = Mutex(false)
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let session = try h.session(validateContext: { validation in
+            switch validation {
+            case .full:
+                let count = full.withLock { $0 += 1; return $0 }
+                if count <= 2 {
+                    entered.signal()
+                    guard release.wait(timeout: .now() + 15) == .success else { throw Failure.expected }
+                }
+            case .live:
+                if failLive.withLock({ $0 }) { throw Failure.expected }
+            }
+        })
+        defer { session.close() }
+        let progress = try W.Progress(requestID: Self.request().requestID).bytes
+        let done = DispatchGroup(), replies = Mutex<[Data?]>([])
+        for _ in 0..<2 {
+            DispatchQueue.global().async(group: done) {
+                let reply = session.progress(progress)
+                replies.withLock { $0.append(reply) }
+            }
+        }
+        XCTAssertEqual(entered.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(entered.wait(timeout: .now() + 10), .success)
+        release.signal()
+        release.signal()
+        guard done.wait(timeout: .now() + 15) == .success else { return XCTFail("Progress calls did not finish") }
+        XCTAssertEqual(full.withLock { $0 }, 2)
+        XCTAssertEqual(replies.withLock { $0.compactMap { $0 }.count }, 2)
+
+        failLive.withLock { $0 = true }
+        XCTAssertNil(session.progress(progress))
+        XCTAssertEqual(full.withLock { $0 }, 3)
+        failLive.withLock { $0 = false }
+        XCTAssertNil(session.progress(progress))
     }
     func testInvalidProgressDoesNotCloseTheSession() throws {
         let h = try Harness(), s = try h.session(), r = try Self.request(); defer { s.close() }
