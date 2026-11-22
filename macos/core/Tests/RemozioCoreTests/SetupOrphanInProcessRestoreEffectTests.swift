@@ -423,9 +423,11 @@ final class SetupOrphanInProcessRestoreEffectTests: XCTestCase, @unchecked Senda
             let interrupted = try XCTUnwrap(f.h.frame().window)
             XCTAssertEqual(interrupted.phase, .reopenPending); XCTAssertNotNil(interrupted.unboundRelease)
             XCTAssertFalse(returned.withLock { $0 }); f.retained.assertHeld()
-            await shutdown.joinRecoverySessions(); await actual.value
-            XCTAssertTrue(returned.withLock { $0 }); XCTAssertFalse(succeeded.withLock { $0 })
-            XCTAssertTrue(context.driverClosed.withLock { $0 })
+            await shutdown.joinRecoverySessions()
+            XCTAssertTrue(returned.withLock { $0 }, "Shutdown returned before the restoration task finished")
+            XCTAssertTrue(context.driverClosed.withLock { $0 }, "Shutdown returned before the restoration driver closed")
+            await actual.value
+            XCTAssertFalse(succeeded.withLock { $0 })
             XCTAssertEqual(context.releases.withLock { $0 }, 0)
             XCTAssertFalse(context.writes.withLock { $0.contains(.restored) })
             let afterCleanup = try XCTUnwrap(f.h.frame().window)
