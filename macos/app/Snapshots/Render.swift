@@ -105,10 +105,24 @@ struct RenderSetupPreview {
                     canCheckProgress: attempt == .pending || attempt == .unconfirmed,
                     canStopTracking: attempt == .unconfirmed,
                     onRefresh: {}, onRestore: {}, onProgress: {}, onStopTracking: {}, onClose: {})
-                let renderer = ImageRenderer(content: view.frame(width: 500).background(.background)
+                // The panel's native group box requires an AppKit view hierarchy for capture.
+                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let host = NSHostingView(rootView: view.background(.background)
                     .environment(\.colorScheme, dark ? .dark : .light))
-                guard let image = renderer.nsImage, let bytes = image.tiffRepresentation,
-                      let bitmap = NSBitmapImageRep(data: bytes), let png = bitmap.representation(using: .png, properties: [:]) else {
+                host.appearance = appearance
+                host.frame = NSRect(x: 0, y: 0, width: 500, height: 320)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = appearance
+                window.contentView = host
+                defer { window.contentView = nil }
+                host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                host.displayIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
                     throw CocoaError(.fileWriteUnknown)
                 }
                 let filename = "recovery-" + name + (dark ? "-dark.png" : "-light.png")
