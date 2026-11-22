@@ -93,7 +93,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         // Installation and configuration drift are checked when status is selected, then at most every
         // `checkInterval` on this connection, so repeated status calls cannot keep mutations waiting on the owner lock.
         let versioned = try? SetupRetainedStatusV3Wire.Request.decode(request)
-        guard versioned == nil ? checkInstallation() : statusV3 != nil else { close(); reply(nil); return }
+        guard checkInstallation(), versioned == nil || statusV3 != nil else { close(); reply(nil); return }
         let admitted = lock.withLock { () -> Bool in
             guard !statusInFlight else { return false }
             switch current {
@@ -112,7 +112,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         do {
             let bytes: Data
             if let versioned, let statusV3 {
-                // The new lane reads already verified owner evidence. It never enters the legacy installation check.
+                // Both versions share the installation check. The projection itself only reads published evidence.
                 bytes = try SetupRetainedStatusV3Wire.reply(versioned, statusV3(peer))
             } else {
                 bytes = try SetupRetainedStatusWire.reply(SetupRetainedStatusWire.Request.decode(request), status(peer))

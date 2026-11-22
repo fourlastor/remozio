@@ -119,7 +119,11 @@ final class SetupRetainedOrphanClaimTests: XCTestCase, @unchecked Sendable {
             self.candidate = candidate; installer = try activity.open(); policy = accepted; connection = actualConnection; guardValue = exported
             binding = captured; capture = try .openOwned(binding: captured, inputs: inputs)
             owner = try .init(machine: machine, expectedReleaseDigest: InstallationInventory.digest(candidate),
-                resume: { _, value in value }, releaseActivity: activity.open())
+                resume: { _, value in value }, lookupAccount: { uid in
+                    if uid == captured.authorityOwner.uid { return captured.authorityOwner }
+                    if uid == captured.targetOwner.uid { return captured.targetOwner }
+                    return try LocalAccountDirectory.lookup(uid: uid)
+                }, releaseActivity: activity.open())
         }
         func invocation(captured: Bool = true, closeRights: @escaping () -> Void = {}) throws -> Invocation {
             let binding = self.binding, capture = self.capture

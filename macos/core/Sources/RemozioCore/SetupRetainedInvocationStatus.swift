@@ -127,24 +127,44 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
             let row: RuntimeMaintenanceWindowRecord
         }
         private var restore: RestoreObservation?
+        private var restoreAccount: RuntimeMaintenanceWindowRecord.Account?
+        private var restoreGeneration: UInt64 = 0
 
         func invalidateApplicability() {
+            lock.withLock { invalidateRestore() }
+        }
+
+        private func invalidateRestore() {
+            restore = nil
+            restoreGeneration &+= 1
+            generation &+= 1
+        }
+
+        func applicabilityGeneration(for reservation: SetupRetainedInvocationReservation,
+            account: RuntimeMaintenanceWindowRecord.Account? = nil) -> UInt64? {
             lock.withLock {
-                restore = nil
-                generation &+= 1
+                guard !closed, record === reservation else { return nil }
+                if account != nil, let recordOwner, restart[recordOwner] != nil { return nil }
+                if let account, restoreAccount != account {
+                    invalidateRestore()
+                    restoreAccount = account
+                }
+                return restoreGeneration
             }
         }
 
-        func applicabilityGeneration(for reservation: SetupRetainedInvocationReservation) -> UInt64? {
-            lock.withLock { closed || record !== reservation ? nil : generation }
-        }
+        enum RestorePublication { case accepted, retry, unavailable }
 
         func publishRestore(for reservation: SetupRetainedInvocationReservation, identity: Identity,
-            row: RuntimeMaintenanceWindowRecord, expectedGeneration: UInt64) {
+            row: RuntimeMaintenanceWindowRecord, expectedGeneration: UInt64) -> RestorePublication {
             lock.withLock {
-                guard !closed, record === reservation, generation == expectedGeneration else { return }
+                guard !closed, record === reservation, restoreAccount == row.scope.authority else { return .unavailable }
+                guard restoreGeneration == expectedGeneration else { return .retry }
+                if let recordOwner, restart[recordOwner] != nil { return .unavailable }
+                if let cached = recovery[row.scope.authority.accountID], cached.superseded || cached.row != row { return .unavailable }
                 restore = .init(identity: identity, row: row)
                 generation &+= 1
+                return .accepted
             }
         }
         private struct RecoverySnapshot {
@@ -167,7 +187,7 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                 guard !closed else { return (nil, nil) }
                 let key = owner.map(RestartOwner.init)
                 let old = (record, key.flatMap { restart.removeValue(forKey: $0) })
-                record = value; recordOwner = key; restore = nil; generation &+= 1; return old
+                record = value; recordOwner = key; restoreAccount = nil; invalidateRestore(); return old
             }
             withExtendedLifetime(retired) {}
         }
@@ -179,7 +199,7 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                 guard !closed else { return (false, nil) }
                 if restart[key] != nil || restart.count < 64 { return (true, nil) }
                 let retired = recordOwner == key ? record : nil
-                if recordOwner == key { record = nil; recordOwner = nil; restore = nil }
+                if recordOwner == key { record = nil; recordOwner = nil; restoreAccount = nil; invalidateRestore() }
                 for (id, snapshot) in recovery where Binding(snapshot.row.scope).matches(owner) {
                     recovery[id] = .init(row: snapshot.row, status: .unavailable, superseded: true)
                 }
@@ -196,7 +216,9 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
             return lock.withLock {
                 let key = RestartOwner(value.owner)
                 guard !closed, restart[key] != nil || restart.count < 64 else { return false }
-                restart[key] = value; restore = nil; generation &+= 1; return true
+                restart[key] = value
+                if recordOwner == key { invalidateRestore() } else { generation &+= 1 }
+                return true
             }
         }
         /// Metadata-only capacity fixture. Root cannot inject a status origin.
@@ -210,24 +232,25 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
             lock.withLock {
                 guard !closed, recovery[row.scope.authority.accountID] != nil || recovery.count < 64 else { return }
                 recovery[row.scope.authority.accountID] = .init(row: row, status: .unavailable, superseded: true)
-                restore = nil; generation &+= 1
+                if restoreAccount == row.scope.authority { invalidateRestore() } else { generation &+= 1 }
             }
         }
-        func publishRecovery(_ row: RuntimeMaintenanceWindowRecord) {
-            guard getpid() == process, getuid() == user, geteuid() == user else { return }
-            lock.withLock {
+        @discardableResult
+        func publishRecovery(_ row: RuntimeMaintenanceWindowRecord) -> Bool {
+            guard getpid() == process, getuid() == user, geteuid() == user else { return false }
+            return lock.withLock {
                 guard !closed, recovery[row.scope.authority.accountID] != nil || recovery.count < 64,
-                      !recovery.values.contains(where: { $0.superseded && $0.row.scope.authority == row.scope.authority }) else { return }
-                if recovery[row.scope.authority.accountID]?.row != row {
-                    if restore?.row != row { restore = nil }
-                    generation &+= 1
-                }
+                      !recovery.values.contains(where: { $0.superseded && $0.row.scope.authority == row.scope.authority }) else { return false }
+                let refresh = restoreAccount == row.scope.authority
+                    && recovery[row.scope.authority.accountID]?.row != row && restore?.row != row
+                if refresh { invalidateRestore() }
                 var status = SetupRetainedInvocationStatus.recovery(row)
                 if let previous = recovery[row.scope.authority.accountID], previous.row.id == row.id,
                    previous.row.scope == row.scope, case .observed(let observation) = previous.status.supervisor {
                     status = status.observing(supervisor: observation)
                 }
                 recovery[row.scope.authority.accountID] = .init(row: row, status: status)
+                return refresh
             }
         }
         func publishRecovery(request: SetupMaintenanceRecoverySupervisor.Request,
@@ -307,6 +330,7 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                 } else if retained == .unavailable { result = captured.status }
                 else { result = retained }
             } else { result = retained }
+            let mayOfferRestore = restoreObservation.map { current?.mayOfferRestore(identity: $0.identity) == true } ?? false
             afterSnapshot?()
             if let restartSnapshot, observedRestart?.isCurrent(restartSnapshot) != true { return .unavailable }
             guard lock.try() else { return .unavailable }
@@ -316,8 +340,9 @@ struct SetupRetainedInvocationStatus: Equatable, Sendable, CustomStringConvertib
                 guard let latest = recovery[captured.row.scope.authority.accountID], latest.row == captured.row,
                       latest.status == captured.status else { return .unavailable }
             }
-            if let restoreObservation, !selectedRestart, retained.identity == .observed(restoreObservation.identity),
-               retained.reservation == .observed(.orphan), retained.worker == .observed(.idle),
+            if let restoreObservation, mayOfferRestore, !selectedRestart, retained.identity == .observed(restoreObservation.identity),
+               retained.reservation == .observed(.orphan) || retained.reservation == .observed(.recovering),
+               retained.worker == .observed(.idle),
                retained.cleanup == .observed(.joined) {
                 let observation = retained.observing(restoreObservation.row)
                 if observation.window == .observed(.init(restoreObservation.row)) {

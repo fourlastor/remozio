@@ -306,25 +306,36 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         let identity: SetupRetainedInvocationStatus.Identity
         let window: SetupRetainedInvocationStatus.Window
         let joined: Task<Void, any Error>
+        let retiredJoin: Task<Void, any Error>?
+        let restoration: RestorationWork?
     }
 
     /// The owner calls this after invocation cleanup. The explicit claim shares the same retained join task.
     func beginQuiescence() throws -> Quiescence? {
         try lock.withLock {
-            guard phase == .orphan, !worker, !settling, recoverySeal == nil, restorationWork == nil,
+            guard (phase == .orphan || phase == .recovering), !recoveryClaimLive, !worker, !settling,
                   capturedBinding != nil, let capturedWindow else { return nil }
-            try recovery.sealForCleanup()
+            let retired = try recovery.sealForCleanup()
             return .init(identity: .init(reservationID: statusID, incarnation: incarnation), window: capturedWindow,
-                joined: try recovery.joinSealed())
+                joined: try recovery.joinSealed(), retiredJoin: retired, restoration: restorationWork)
         }
+    }
+
+    func mayOfferRestore(identity: SetupRetainedInvocationStatus.Identity) -> Bool {
+        guard lock.try() else { return false }
+        defer { lock.unlock() }
+        return identity == .init(reservationID: statusID, incarnation: incarnation)
+            && (phase == .orphan || phase == .recovering) && !recoveryClaimLive
     }
 
     func confirmsQuiescence(_ evidence: Quiescence, for row: RuntimeMaintenanceWindowRecord) throws -> Bool {
         try lock.withLock {
-            guard phase == .orphan, !worker, !settling, recoverySeal == nil, restorationWork == nil,
-                  capturedWindow == evidence.window, evidence.window.identifies(row),
+            guard (phase == .orphan || phase == .recovering), !recoveryClaimLive, !worker, !settling,
+                  restorationWork === evidence.restoration, capturedWindow == evidence.window, evidence.window.identifies(row),
                   capturedBinding?.matches(row.scope) == true else { return false }
+            if let restorationWork, !restorationWork.actualReturnObserved || restorationWork.holdsUnsettledCompletion { return false }
             _ = try recovery.requireJoined()
+            restorationJoined = true
             return true
         }
     }
@@ -773,9 +784,12 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
         func releaseWindowFree() throws -> Bool { try record.releaseWindowFree(seal: seal, claim: claim) }
         func ownerDropped() {
             guard getpid() == record.process else { return }
-            record.lock.withLock {
-                if record.recoverySeal == seal, record.recoveryClaimID == claim { record.recoveryClaimLive = false }
+            let changed = record.lock.withLock {
+                guard record.recoverySeal == seal, record.recoveryClaimID == claim, record.recoveryClaimLive else { return false }
+                record.recoveryClaimLive = false
+                return record.phase == .recovering
             }
+            if changed { record.quiescenceSignal?(record) }
         }
         deinit { ownerDropped() }
     }

@@ -64,6 +64,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let retainedStatus = SetupRetainedInvocationStatus.Reader()
     private var retainedApplicabilityRelease: SignedReleaseEvidence?
     private var retainedQuiescenceTask: Task<Void, Never>?
+    private var retainedQuiescenceRefresh = false
+    private var ownedStatusAccessCounts: OwnedStatusAccessCounts?
     private var retainedInvocationReservation: SetupRetainedInvocationReservation?
     private var restartRecovery: SetupRestartRecovery?
     /// The holder that took the current admission tokens. A restart claim waits only while it is an executor run.
@@ -183,16 +185,19 @@ public final class SetupAccountOwner: @unchecked Sendable {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(50)) { continuation.resume() }
         }
     }
-    // Invalidate before entering either token set. A token can close outside the owner lock,
-    // so an idle check here cannot predict which attempt will acquire admission.
+    // On success, invalidate while the owner lock still prevents work from using the new token.
     private func admitSetupMutation() throws -> SetupOwnerAsyncWork.Token {
+        let token = try asynchronousWork.admit()
         retainedStatus.invalidateApplicability()
-        return try asynchronousWork.admit()
+        ownedStatusAccessCounts?.admittedTokens += 1
+        return token
     }
 
     private func admitSetupReply() throws -> SetupOwnerAsyncWork.Token {
+        let token = try setupReplyWork.admit()
         retainedStatus.invalidateApplicability()
-        return try setupReplyWork.admit()
+        ownedStatusAccessCounts?.admittedTokens += 1
+        return token
     }
 
     func acquireSetupReplyAdmission() throws -> SetupOwnerAsyncWork.Token {
@@ -289,7 +294,11 @@ public final class SetupAccountOwner: @unchecked Sendable {
             }
         }
     }
-    func publishMaintenanceRecovery(_ row: RuntimeMaintenanceWindowRecord) { retainedStatus.publishRecovery(row) }
+    func publishMaintenanceRecovery(_ row: RuntimeMaintenanceWindowRecord) {
+        guard retainedStatus.publishRecovery(row),
+              let reservation = lock.withLock({ retainedInvocationReservation }) else { return }
+        publishRetainedQuiescence(reservation)
+    }
     func publishMaintenanceRecovery(request: SetupMaintenanceRecoverySupervisor.Request,
         observation: SetupMaintenanceRecoverySupervisor.Observation) {
         retainedStatus.publishRecovery(request: request, observation: observation)
@@ -644,6 +653,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard getpid() == processID else { throw JournalLeaseError.unsafeMetadata }
             let activity = try releaseActivity?.acquireShared()
             defer { activity?.close() }
+            ownedStatusAccessCounts?.storeReads += 1
             let result = try machines.use(body)
             try activity?.validate()
             return result
@@ -680,6 +690,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard asynchronousWork.isIdle else { try releaseActivity?.validate(); return .pinned }
             let activity = try releaseActivity?.acquireShared()
             defer { activity?.close() }
+            ownedStatusAccessCounts?.storeReads += 1
             _ = try machines.use { try currentInventory($0) }
             try activity?.validate()
             return .verified
@@ -708,6 +719,47 @@ public final class SetupAccountOwner: @unchecked Sendable {
         retainedStatus.readApplicability(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
     }
 
+    struct OwnedStatusAccessCounts: Equatable {
+        var storeReads = 0
+        var admittedTokens = 0
+    }
+
+    func statusAccessCountsOwned() throws -> OwnedStatusAccessCounts {
+        try RuntimeMaintenanceOwnedControl.require()
+        return lock.withLock {
+            if let ownedStatusAccessCounts { return ownedStatusAccessCounts }
+            let initial = OwnedStatusAccessCounts()
+            ownedStatusAccessCounts = initial
+            return initial
+        }
+    }
+
+    func occupyRetainedExecutorOwned(_ body: @escaping @Sendable () throws -> Void) async throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        let hold = try lock.withLock {
+            guard let record = retainedInvocationReservation else { throw AdministrativeSetupError.unavailable }
+            return record.hold
+        }
+        try await hold.run(on: auditUpgradeExecutor) { _ in try body() }
+    }
+
+    /// Exercises the owner admission boundary with a seeded hint. Root cannot release a record through this fixture.
+    func admitMutationAfterReleasingRetainedHoldOwned() throws -> SetupOwnerAsyncWork.Token {
+        try RuntimeMaintenanceOwnedControl.require()
+        return try lock.withLock {
+            guard let record = retainedInvocationReservation else { throw AdministrativeSetupError.unavailable }
+            record.hold.releaseRecord()
+            return try admitSetupMutation()
+        }
+    }
+
+    func republishRestartStatusOwned(accountID: Data, owner: LocalAccountIdentity) throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        guard try retainedStatus.publishRestartOwned(.init(accountID: accountID, owner: owner)) else {
+            throw AdministrativeSetupError.unavailable
+        }
+    }
+
     func applicabilityGenerationOwned(for reservation: SetupRetainedInvocationReservation) throws -> UInt64? {
         try RuntimeMaintenanceOwnedControl.require()
         return retainedStatus.applicabilityGeneration(for: reservation)
@@ -716,59 +768,104 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func waitForRetainedQuiescenceOwned() async throws {
         try RuntimeMaintenanceOwnedControl.require()
         let task = lock.withLock { retainedQuiescenceTask }
-        guard let task else { throw AdministrativeSetupError.unavailable }
-        await task.value
+        await task?.value
     }
 
     /// Native startup supplies the checked release. Owned tests can supply their installed fixture release.
     func installRetainedApplicabilityRelease(_ candidate: SignedReleaseEvidence) throws {
         try lock.withLock {
-            guard getpid() == processID, !closed, !closing, retainedApplicabilityRelease == nil,
+            guard getpid() == processID, !closed, !closing,
                   try InstallationInventory.digest(candidate) == expectedReleaseDigest else {
                 throw AdministrativeSetupError.unavailable
             }
-            retainedApplicabilityRelease = candidate
+            if retainedApplicabilityRelease == nil { retainedApplicabilityRelease = candidate }
         }
     }
 
+    private enum QuiescenceStep: Equatable { case complete, retryBusy, retryJoin }
+
     private func publishRetainedQuiescence(_ record: SetupRetainedInvocationReservation) {
+        lock.withLock {
+            guard !closed, !closing, retainedInvocationReservation === record,
+                  retainedApplicabilityRelease != nil else { return }
+            if retainedQuiescenceTask != nil {
+                retainedQuiescenceRefresh = true
+                return
+            }
+            retainedQuiescenceTask = Task { [weak self] in
+                while let step = await self?.sampleRetainedQuiescence(record) {
+                    switch step {
+                    case .complete:
+                        guard self?.continueRetainedQuiescence(record) == true else { return }
+                    case .retryBusy, .retryJoin:
+                        let delay: Duration = step == .retryBusy ? .milliseconds(25) : .seconds(1)
+                        do { try await Task.sleep(for: delay) } catch { return }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A request that races the current sample gets another pass before the slot is retired.
+    private func continueRetainedQuiescence(_ record: SetupRetainedInvocationReservation) -> Bool {
+        lock.withLock {
+            guard retainedInvocationReservation === record else { return false }
+            if !closed, !closing, retainedQuiescenceRefresh {
+                retainedQuiescenceRefresh = false
+                return true
+            }
+            retainedQuiescenceTask = nil
+            return false
+        }
+    }
+
+    private func sampleRetainedQuiescence(_ record: SetupRetainedInvocationReservation) async -> QuiescenceStep {
         let pending: (SignedReleaseEvidence, UInt64, SetupRetainedInvocationReservation.Quiescence)? = try? lock.withLock {
             guard !closed, !closing, retainedInvocationReservation === record,
                   asynchronousWork.permits(record.admission), let release = retainedApplicabilityRelease,
-                  let generation = retainedStatus.applicabilityGeneration(for: record),
-                  let evidence = try record.beginQuiescence() else { return nil }
+                  let evidence = try record.beginQuiescence(),
+                  let generation = retainedStatus.applicabilityGeneration(for: record, account: evidence.window.scope.authority) else {
+                return nil
+            }
             return (release, generation, evidence)
         }
-        guard let (release, generation, evidence) = pending else { return }
-        let task = Task {
-            do {
-                try await evidence.joined.value
-                let row = try await record.hold.run(on: auditUpgradeExecutor) { _ in
-                    try self.withMachine(admission: record.admission) { machine in
-                        _ = try self.currentInventory(machine)
-                        let frame = try machine.runtimeMaintenanceStartupFrame(
-                            accountID: evidence.window.scope.authority.accountID, candidate: release)
-                        guard let row = frame.window, row.phase == .needsOwnerRecovery,
-                              row.purpose == .retainedRuntime, row.shutdownBinding != nil,
-                              try record.confirmsQuiescence(evidence, for: row) else {
-                            throw AdministrativeSetupError.unavailable
-                        }
-                        return row
-                    }
-                }
-                try lock.withLock {
-                    guard !closed, !closing, retainedInvocationReservation === record,
-                          asynchronousWork.permits(record.admission),
-                          try record.confirmsQuiescence(evidence, for: row) else { return }
-                    retainedStatus.publishRestore(for: record, identity: evidence.identity, row: row,
-                        expectedGeneration: generation)
-                }
-            } catch {
-                // Status remains unavailable. The explicit recovery path still owns claim and retry policy.
-            }
+        guard let (release, generation, evidence) = pending else { return .complete }
+        withExtendedLifetime(evidence.retiredJoin) {}
+        do { try await evidence.joined.value } catch { return .retryJoin }
+        // After abandonment, observe actual return. A successful unsettled restoration is never another Restore hint.
+        if let restoration = evidence.restoration {
+            _ = try? await restoration.value()
         }
-        lock.withLock {
-            if retainedInvocationReservation === record { retainedQuiescenceTask = task }
+        do {
+            let row = try await record.hold.runRestorationPhase(on: auditUpgradeExecutor) { _ in
+                try self.withMachine(admission: record.admission) { machine in
+                    _ = try self.currentInventory(machine)
+                    let frame = try machine.runtimeMaintenanceStartupFrame(
+                        accountID: evidence.window.scope.authority.accountID, candidate: release)
+                    guard let row = frame.window, row.phase == .needsOwnerRecovery,
+                          row.purpose == .retainedRuntime, row.shutdownBinding != nil,
+                          try record.confirmsQuiescence(evidence, for: row) else {
+                        throw AdministrativeSetupError.unavailable
+                    }
+                    return row
+                }
+            }
+            return try lock.withLock {
+                guard !closed, !closing, retainedInvocationReservation === record,
+                      asynchronousWork.permits(record.admission),
+                      try record.confirmsQuiescence(evidence, for: row) else { return .complete }
+                switch retainedStatus.publishRestore(for: record, identity: evidence.identity, row: row,
+                    expectedGeneration: generation) {
+                case .accepted, .unavailable: return .complete
+                case .retry: return .retryBusy
+                }
+            }
+        } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
+            return .retryBusy
+        } catch JournalLeaseError.busy {
+            return .retryBusy
+        } catch {
+            return .complete
         }
     }
 
@@ -792,7 +889,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                     hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver),
                     recoverySignal: { [weak self] in self?.signalMaintenanceRecovery() },
                     quiescenceSignal: { [weak self] record in self?.publishRetainedQuiescence(record) })
-                retainedInvocationReservation = record; retainedQuiescenceTask = nil
+                retainedInvocationReservation = record; retainedQuiescenceTask = nil; retainedQuiescenceRefresh = false
                 admissionHolder = record.hold; retainedStatus.publish(record, owner: authenticatedOwner)
                 return (record, {
                     try self.lock.withLock {
@@ -1002,12 +1099,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func claimRetainedOrphan(target: SetupRetainedOrphanClaim.Target,
         authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedInvocationReservation.RecoveryToken {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
-        retainedStatus.invalidateApplicability()
         try authorization.takeForClaim()
         let claimed = try lock.withLock {
             guard !closed, let record = retainedInvocationReservation, record === target.record,
                   asynchronousWork.permits(record.admission) else { throw AdministrativeSetupError.unavailable }
-            return try record.claim(target, authorization: authorization)
+            let claimed = try record.claim(target, authorization: authorization)
+            retainedStatus.invalidateApplicability()
+            return claimed
         }
         // A failed task can retain an error that owns a claim. Drop it only after both locks are released.
         withExtendedLifetime(claimed.retiredTask) {}

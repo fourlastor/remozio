@@ -88,23 +88,27 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
         }
     }
     /// Owner-side cleanup may seal a dropped invocation without issuing a claim.
-    func sealForCleanup() throws {
+    func sealForCleanup() throws -> Task<Void, any Error>? {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
-        try lock.withLock {
-            guard !sealed, deinitReturned else { throw JournalLeaseError.invalidated }
-            sealed = true
+        return try lock.withLock {
+            guard deinitReturned else { throw JournalLeaseError.invalidated }
+            return sealForJoin()
         }
     }
 
     func sealForClaim() throws -> Task<Void, any Error>? {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
-        let completed = lock.withLock { () -> Task<Void, any Error>? in
-            sealed = true
-            guard joinFailed else { return nil }
-            joinFailed = false; let old = joinTask; joinTask = nil; return old
-        }
-        // The caller must retain this task until both owner and record locks have been released.
-        return completed
+        return lock.withLock { sealForJoin() }
+    }
+
+    // The caller must retain a retired task until both owner and record locks have been released.
+    private func sealForJoin() -> Task<Void, any Error>? {
+        sealed = true
+        guard joinFailed else { return nil }
+        joinFailed = false
+        let old = joinTask
+        joinTask = nil
+        return old
     }
     func joinWorkers() async throws {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
