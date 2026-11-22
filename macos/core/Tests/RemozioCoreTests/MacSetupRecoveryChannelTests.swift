@@ -188,11 +188,27 @@ final class MacSetupRecoveryChannelTests: XCTestCase {
     }
 
     func testRecoveryFormatRequiresTheVerifiedReleaseToDeclareBothSides() throws {
-        let withoutRecovery = try XCTUnwrap(RuntimeActivationFixture(nativeConsumerHosts: true).nativeRelease)
-        XCTAssertNoThrow(try MacSetupRecoveryChannel.requireFormats(lane: .status, release: withoutRecovery))
-        XCTAssertThrowsError(try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: withoutRecovery))
-        let withRecovery = try XCTUnwrap(RuntimeActivationFixture(nativeConsumerHosts: true, auditDelivery: true).nativeRelease)
-        XCTAssertNoThrow(try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: withRecovery))
+        let roles: [AuthorityCodeRole] = [.app, .setupController]
+        let hash = Data(repeating: 1, count: 20)
+        let version = Fixture.Wire.ipcVersion
+        func release(readOnlyRole: AuthorityCodeRole? = nil) throws -> SignedReleaseEvidence {
+            let components = try roles.map { role in
+                let format = try ReleaseFormat(name: "setup.local-ipc", readers: [version],
+                    writers: role == readOnlyRole ? [] : [version])
+                return try ReleaseComponent(role: role, identifier: "dev.remozio.role-\(role.rawValue)", generation: 1,
+                    relativePath: "Contents/Helpers/role-\(role.rawValue)", codeDirectoryHash: role == .app ? nil : hash,
+                    build: "1", teamID: "ABCDEFGHIJ", formats: [format])
+            }
+            return SignedReleaseEvidence(manifest: try .init(release: "0.1.0", build: "1", components: components),
+                codeDirectoryHashes: [.app: hash, .setupController: hash])
+        }
+        for role in roles {
+            let readOnly = try release(readOnlyRole: role)
+            XCTAssertNoThrow(try MacSetupRecoveryChannel.requireFormats(lane: .status, release: readOnly))
+            XCTAssertThrowsError(try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: readOnly))
+        }
+        let readWrite = try release()
+        XCTAssertNoThrow(try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: readWrite))
     }
 
 }
