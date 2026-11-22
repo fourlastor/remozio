@@ -348,6 +348,48 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
         }
     }
 
+    func testQuiescenceRefreshDuringFifthFailedJoinPublishesRestore() throws {
+        let joins = Mutex(0)
+        let finishFifthJoin = DispatchSemaphore(value: 0)
+        let window = Mutex<RuntimeMaintenanceWindowRecord?>(nil)
+        defer { finishFifthJoin.signal() }
+
+        try withFixture(seed: .stopped, prepare: { f in
+            try window.withLock { $0 = try XCTUnwrap(f.h.frame().window) }
+            try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+            try XCTUnwrap(f.invocation).retainCleanup {
+                let join = joins.withLock { $0 += 1; return $0 }
+                if join == 5 {
+                    guard finishFifthJoin.wait(timeout: .now() + 15) == .success else {
+                        XCTFail("The refresh did not arrive during the fifth join")
+                        throw Failure.expected
+                    }
+                }
+                if join <= 5 { throw Failure.expected }
+            }
+        }) { f in
+            let owner = f.retained.owner, binding = f.retained.binding
+            let task = try XCTUnwrap(owner.retainedQuiescenceTaskOwned())
+            let deadline = ContinuousClock.now.advanced(by: .seconds(45))
+            while joins.withLock({ $0 }) < 5 {
+                guard ContinuousClock.now < deadline else {
+                    finishFifthJoin.signal()
+                    throw Failure.expected
+                }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let row = try XCTUnwrap(window.withLock { $0 })
+            owner.publishMaintenanceRecovery(row)
+            finishFifthJoin.signal()
+
+            await task.value
+            XCTAssertEqual(joins.withLock { $0 }, 6)
+            XCTAssertNil(try owner.retainedQuiescenceTaskOwned())
+            XCTAssertEqual(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                currentOwner: binding.authorityOwner).applicability, .restore)
+        }
+    }
+
     func testOwnerCloseAndAdmissionClosingCancelTheRetainedQuiescenceTask() throws {
         for closeImmediately in [true, false] {
             let cleanupEntered = Mutex(false), finishCleanup = DispatchSemaphore(value: 0)
