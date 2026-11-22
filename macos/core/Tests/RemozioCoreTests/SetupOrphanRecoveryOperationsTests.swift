@@ -305,6 +305,81 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
         }
     }
 
+    func testOwnerQuiescenceBackoffCapsBusyAndCountsOnlyConsecutiveFailedJoins() {
+        var backoff = SetupAccountOwner.QuiescenceBackoff()
+        let busy: [Duration] = [25, 50, 100, 200, 400, 800, 1600, 2000, 2000].map { .milliseconds($0) }
+        for expected in busy {
+            XCTAssertEqual(backoff.delay(for: .retryBusy(joinCompleted: false)), expected)
+        }
+        let joins: [Duration] = [1, 2, 4, 8].map { .seconds($0) }
+        for expected in joins {
+            XCTAssertEqual(backoff.delay(for: .retryJoin), expected)
+        }
+        XCTAssertEqual(backoff.delay(for: .retryBusy(joinCompleted: false)), .milliseconds(25))
+        XCTAssertNil(backoff.delay(for: .retryJoin))
+        XCTAssertEqual(backoff.delay(for: .retryBusy(joinCompleted: true)), .milliseconds(25))
+        XCTAssertEqual(backoff.delay(for: .retryJoin), .seconds(1))
+    }
+
+    func testFiveOwnerCleanupFailuresWaitForANewQuiescenceEvent() throws {
+        let failures = Mutex(0), allow = Mutex(false)
+        try withFixture(seed: .stopped, prepare: { f in
+            try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+            try XCTUnwrap(f.invocation).retainCleanup {
+                if !allow.withLock({ $0 }) {
+                    failures.withLock { $0 += 1 }
+                    throw Failure.expected
+                }
+            }
+        }) { f in
+            let owner = f.retained.owner, binding = f.retained.binding
+            try await owner.waitForRetainedQuiescenceOwned()
+            XCTAssertEqual(failures.withLock { $0 }, 5)
+            XCTAssertNil(try owner.retainedQuiescenceTaskOwned())
+            XCTAssertNil(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                currentOwner: binding.authorityOwner).applicability)
+
+            allow.withLock { $0 = true }
+            owner.publishMaintenanceRecovery(try XCTUnwrap(f.h.frame().window))
+            try await owner.waitForRetainedQuiescenceOwned()
+            XCTAssertEqual(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                currentOwner: binding.authorityOwner).applicability, .restore)
+            XCTAssertEqual(failures.withLock { $0 }, 5)
+        }
+    }
+
+    func testOwnerCloseAndAdmissionClosingCancelTheRetainedQuiescenceTask() throws {
+        for closeImmediately in [true, false] {
+            let cleanupEntered = Mutex(false), finishCleanup = DispatchSemaphore(value: 0)
+            defer { finishCleanup.signal() }
+            try withFixture(seed: .stopped, prepare: { f in
+                try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+                try XCTUnwrap(f.invocation).retainCleanup {
+                    cleanupEntered.withLock { $0 = true }
+                    _ = finishCleanup.wait(timeout: .now() + 5)
+                    throw Failure.expected
+                }
+            }) { f in
+                let owner = f.retained.owner
+                let task = try XCTUnwrap(owner.retainedQuiescenceTaskOwned())
+                let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+                while !cleanupEntered.withLock({ $0 }) {
+                    guard ContinuousClock.now < deadline else {
+                        finishCleanup.signal()
+                        throw Failure.expected
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+                if closeImmediately { XCTAssertThrowsError(try owner.close()) }
+                else { owner.closeMaintenanceRecoveryAdmission() }
+                XCTAssertTrue(task.isCancelled)
+                finishCleanup.signal()
+                await task.value
+                XCTAssertNil(try owner.retainedQuiescenceTaskOwned())
+            }
+        }
+    }
+
     func testOwnerRepublishesAfterBusyExecutorAndFailedCleanup() throws {
         let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
         let cleanup = Mutex(0), probe = Mutex<SetupAuditUpgradeWorkExecutor.OwnedAttempts?>(nil)

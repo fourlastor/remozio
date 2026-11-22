@@ -162,15 +162,15 @@ public final class SetupAccountOwner: @unchecked Sendable {
     }
     deinit { try? close() }
     public func close() throws {
+        beginClosing()
         try lock.withLock {
             guard !closed else { return }
-            closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission()
             guard asynchronousWork.isIdle, setupReplyWork.isIdle else { throw AdministrativeSetupError.unavailable }
             try machines.close(); closed = true; retainedStatus.close()
         }
     }
     func closeWhenIdle() async throws {
-        lock.withLock { closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission() }
+        beginClosing()
         // A retained maintenance invocation keeps both admissions. Its cleanup needs no rights and no new connection,
         // so shutdown retries it here until it settles. No other path releases that admission.
         while !(auditUpgradeCleanup.retry() && asynchronousWork.isIdle && setupReplyWork.isIdle) {
@@ -180,6 +180,16 @@ public final class SetupAccountOwner: @unchecked Sendable {
         await asynchronousWork.waitUntilIdle()
         try close()
     }
+    private func beginClosing() {
+        let task = lock.withLock {
+            closing = true
+            asynchronousWork.closeAdmission()
+            setupReplyWork.closeAdmission()
+            return retainedQuiescenceTask
+        }
+        task?.cancel()
+    }
+
     private static func pauseBeforeCleanupRetry() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(50)) { continuation.resume() }
@@ -328,10 +338,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
     func closeMaintenanceRecoveryAdmission() {
-        lock.withLock {
-            guard getpid() == processID else { return }
-            closing = true; asynchronousWork.closeAdmission(); setupReplyWork.closeAdmission()
-        }
+        guard getpid() == processID else { return }
+        beginClosing()
     }
 
     /// The two Setup admission tokens of one holder, its shared release activity, and the holds that keep them open.
@@ -765,10 +773,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
         return retainedStatus.applicabilityGeneration(for: reservation)
     }
 
-    func waitForRetainedQuiescenceOwned() async throws {
+    func retainedQuiescenceTaskOwned() throws -> Task<Void, Never>? {
         try RuntimeMaintenanceOwnedControl.require()
-        let task = lock.withLock { retainedQuiescenceTask }
-        await task?.value
+        return lock.withLock { retainedQuiescenceTask }
+    }
+
+    func waitForRetainedQuiescenceOwned() async throws {
+        await (try retainedQuiescenceTaskOwned())?.value
     }
 
     /// Native startup supplies the checked release. Owned tests can supply their installed fixture release.
@@ -782,7 +793,34 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
-    private enum QuiescenceStep: Equatable { case complete, retryBusy, retryJoin }
+    enum QuiescenceStep { case complete, retryBusy(joinCompleted: Bool), retryJoin }
+
+    struct QuiescenceBackoff {
+        private var busyDelay: Duration = .milliseconds(25)
+        private var joinDelay: Duration = .seconds(1)
+        private var consecutiveJoinFailures = 0
+
+        mutating func delay(for step: QuiescenceStep) -> Duration? {
+            switch step {
+            case .complete: return nil
+            case .retryBusy(let joinCompleted):
+                if joinCompleted {
+                    consecutiveJoinFailures = 0
+                    joinDelay = .seconds(1)
+                }
+                let delay = busyDelay
+                busyDelay = min(busyDelay * 2, .seconds(2))
+                return delay
+            case .retryJoin:
+                busyDelay = .milliseconds(25)
+                consecutiveJoinFailures += 1
+                guard consecutiveJoinFailures < 5 else { return nil }
+                let delay = joinDelay
+                joinDelay = min(joinDelay * 2, .seconds(30))
+                return delay
+            }
+        }
+    }
 
     private func publishRetainedQuiescence(_ record: SetupRetainedInvocationReservation) {
         lock.withLock {
@@ -793,16 +831,30 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 return
             }
             retainedQuiescenceTask = Task { [weak self] in
-                while let step = await self?.sampleRetainedQuiescence(record) {
+                var backoff = QuiescenceBackoff()
+                while !Task.isCancelled, let step = await self?.sampleRetainedQuiescence(record) {
                     switch step {
                     case .complete:
                         guard self?.continueRetainedQuiescence(record) == true else { return }
+                        backoff = QuiescenceBackoff()
                     case .retryBusy, .retryJoin:
-                        let delay: Duration = step == .retryBusy ? .milliseconds(25) : .seconds(1)
-                        do { try await Task.sleep(for: delay) } catch { return }
+                        guard let delay = backoff.delay(for: step) else {
+                            self?.stopRetainedQuiescence(record)
+                            return
+                        }
+                        do { try await Task.sleep(for: delay) } catch { break }
                     }
                 }
+                self?.stopRetainedQuiescence(record)
             }
+        }
+    }
+
+    private func stopRetainedQuiescence(_ record: SetupRetainedInvocationReservation) {
+        lock.withLock {
+            guard retainedInvocationReservation === record else { return }
+            retainedQuiescenceTask = nil
+            retainedQuiescenceRefresh = false
         }
     }
 
@@ -831,11 +883,15 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
         guard let (release, generation, evidence) = pending else { return .complete }
         withExtendedLifetime(evidence.retiredJoin) {}
-        do { try await evidence.joined.value } catch { return .retryJoin }
+        do { try await evidence.joined.value }
+        catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody { return .retryBusy(joinCompleted: false) }
+        catch { return .retryJoin }
+        guard !Task.isCancelled else { return .complete }
         // After abandonment, observe actual return. A successful unsettled restoration is never another Restore hint.
         if let restoration = evidence.restoration {
             _ = try? await restoration.value()
         }
+        guard !Task.isCancelled else { return .complete }
         do {
             let row = try await record.hold.runRestorationPhase(on: auditUpgradeExecutor) { _ in
                 try self.withMachine(admission: record.admission) { machine in
@@ -857,13 +913,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 switch retainedStatus.publishRestore(for: record, identity: evidence.identity, row: row,
                     expectedGeneration: generation) {
                 case .accepted, .unavailable: return .complete
-                case .retry: return .retryBusy
+                case .retry: return .retryBusy(joinCompleted: true)
                 }
             }
         } catch is SetupAuditUpgradeWorkExecutor.BusyBeforeBody {
-            return .retryBusy
+            return .retryBusy(joinCompleted: true)
         } catch JournalLeaseError.busy {
-            return .retryBusy
+            return .retryBusy(joinCompleted: true)
         } catch {
             return .complete
         }

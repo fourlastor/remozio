@@ -153,7 +153,7 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
                 try await ledger.joinWorkers()
                 // No executor body runs without the reservation's admission.
                 guard let executor = ledger.executor, let hold = ledger.hold else { throw AdministrativeSetupError.unavailable }
-                do { try await hold.run(on: executor) { _ in try ledger.closeSynchronousCleanup() } }
+                do { try await hold.runRestorationPhase(on: executor) { _ in try ledger.closeSynchronousCleanup() } }
                 catch is SetupAccountOwner.ExecutorAdmission.Released { throw JournalLeaseError.invalidated }
                 try ledger.lock.withLock {
                     guard ledger.activeLoans.isEmpty, ledger.deinitReturned,
