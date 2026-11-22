@@ -50,6 +50,8 @@ def declarations(role):
     }
     values = [format_declaration(name, versions, {1: 2} if name == 'authority.installation-inventory' else None)
               for name, versions in names[role]]
+    if role in (1, 8):
+        values.append(format_declaration('setup.retained-status', [3]))
     if role in (2, 8):
         values.append(format_declaration('authority.update-scheduling-candidate', [1]))
         values.append(format_declaration('authority.update-admission-registration', [1]))

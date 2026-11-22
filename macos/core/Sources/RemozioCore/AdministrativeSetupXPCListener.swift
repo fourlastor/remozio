@@ -84,6 +84,12 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
             } catch { registry.remove(id); connection.invalidate(); return false }
         }
     }
+    static func statusApplicabilityReader(available: Bool, routing: AdministrativeSetupLifecycle.Routing)
+        -> ((XPCPeerCredentials) -> SetupRetainedStatusProjection)? {
+        guard available else { return nil }
+        return { routing.statusApplicability($0) }
+    }
+
     /// Accept-time work: real credentials, the lifetime observer and the facade only. No owner access, no store, no admission.
     private static func facade(connection: NSXPCConnection, policy: XPCPeerPolicy, routing: AdministrativeSetupLifecycle.Routing,
                                registry: SetupConnectionSlots, id: UUID,
@@ -98,6 +104,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                     onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
             },
             status: { routing.status($0) },
+            statusV3: statusApplicabilityReader(available: nativeRecoveryContext?.supportsStatusApplicability == true, routing: routing),
             check: { routing.checkStatus() },
             touch: { [weak registry] in registry?.touch(id) },
             normalAllowed: { routing.allowsNormal },

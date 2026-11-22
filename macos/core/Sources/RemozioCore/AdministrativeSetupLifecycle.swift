@@ -59,6 +59,16 @@ actor AdministrativeSetupLifecycle {
             let owner = current == .closed ? nil : self.owner; lock.unlock()
             return owner?.retainedInvocationStatus(authenticatedPeer: peer) ?? .unavailable
         }
+        func statusApplicability(_ peer: XPCPeerCredentials) -> SetupRetainedStatusProjection {
+            guard getpid() == process, lock.try() else { return .unavailable }
+            let state = current
+            let owner = state == .closed ? nil : self.owner
+            lock.unlock()
+            guard let owner else { return .unavailable }
+            if state == .serving { return owner.retainedStatusApplicability(authenticatedPeer: peer) }
+            return .init(retained: owner.retainedInvocationStatus(authenticatedPeer: peer), restart: nil)
+        }
+
         static func verifiedOwner(_ owner: SetupAccountOwner) throws -> Routing {
             try owner.verifyCurrent()
             let routing = Routing(validateStartup: { try owner.verifyCurrent() })
@@ -89,9 +99,14 @@ actor AdministrativeSetupLifecycle {
             self.confirmServing = confirmServing; self.publish = publish; self.availability = availability
             self.ownedSchedulingResult = ownedSchedulingResult
         }
+        static func configureRetainedStatus(owner: SetupAccountOwner, candidate: SignedReleaseEvidence) throws {
+            if SetupRetainedStatusV3Wire.supports(candidate) { try owner.installRetainedApplicabilityRelease(candidate) }
+        }
+
         static func native(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown,
             candidate: SignedReleaseEvidence) throws -> Runtime {
             guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            try configureRetainedStatus(owner: owner, candidate: candidate)
             let supervisor = try Supervisor.openNative(owner: owner, shutdown: shutdown)
             return .init(owner: owner, supervisor: supervisor,
                 discover: { try await owner.discoverMaintenanceRecovery(custody: shutdown, candidate: candidate, checkedHost: $0) },

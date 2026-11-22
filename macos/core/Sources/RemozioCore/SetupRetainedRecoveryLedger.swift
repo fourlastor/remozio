@@ -87,15 +87,28 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
             if ready { continuation.resume() }
         }
     }
+    /// Owner-side cleanup may seal a dropped invocation without issuing a claim.
+    func sealForCleanup() throws -> Task<Void, any Error>? {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        return try lock.withLock {
+            guard deinitReturned else { throw JournalLeaseError.invalidated }
+            return sealForJoin()
+        }
+    }
+
     func sealForClaim() throws -> Task<Void, any Error>? {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
-        let completed = lock.withLock { () -> Task<Void, any Error>? in
-            sealed = true
-            guard joinFailed else { return nil }
-            joinFailed = false; let old = joinTask; joinTask = nil; return old
-        }
-        // The caller must retain this task until both owner and record locks have been released.
-        return completed
+        return lock.withLock { sealForJoin() }
+    }
+
+    // The caller must retain a retired task until both owner and record locks have been released.
+    private func sealForJoin() -> Task<Void, any Error>? {
+        sealed = true
+        guard joinFailed else { return nil }
+        joinFailed = false
+        let old = joinTask
+        joinTask = nil
+        return old
     }
     func joinWorkers() async throws {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
@@ -140,7 +153,7 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
                 try await ledger.joinWorkers()
                 // No executor body runs without the reservation's admission.
                 guard let executor = ledger.executor, let hold = ledger.hold else { throw AdministrativeSetupError.unavailable }
-                do { try await hold.run(on: executor) { _ in try ledger.closeSynchronousCleanup() } }
+                do { try await hold.runRestorationPhase(on: executor) { _ in try ledger.closeSynchronousCleanup() } }
                 catch is SetupAccountOwner.ExecutorAdmission.Released { throw JournalLeaseError.invalidated }
                 try ledger.lock.withLock {
                     guard ledger.activeLoans.isEmpty, ledger.deinitReturned,

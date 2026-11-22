@@ -26,6 +26,7 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     private let onRecoveryHandshake: () -> Void
     private var recoveryEndpoint: (any SetupRecoveryEndpoint)?
     private let status: (XPCPeerCredentials) -> SetupRetainedInvocationStatus
+    private let statusV3: ((XPCPeerCredentials) -> SetupRetainedStatusProjection)?
     private let check: () -> SetupAccountOwner.StatusLaneCheck
     private let touch: () -> Void
     private let invalidate: () -> Void
@@ -41,12 +42,13 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
     init(verify: @escaping () throws -> XPCPeerCredentials, select: @escaping (SetupConnectionSlots.Mode) -> Bool,
          openNormal: @escaping (_ close: @escaping @Sendable () -> Void) throws -> any SetupNormalEndpoint,
          status: @escaping (XPCPeerCredentials) -> SetupRetainedInvocationStatus,
+         statusV3: ((XPCPeerCredentials) -> SetupRetainedStatusProjection)? = nil,
          check: @escaping () -> SetupAccountOwner.StatusLaneCheck = { .verified }, touch: @escaping () -> Void = {},
          now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, normalAllowed: @escaping () -> Bool = { true },
          openRecovery: ((_ close: @escaping @Sendable () -> Void) throws -> any SetupRecoveryEndpoint)? = nil,
          recoveryAllowed: @escaping () -> Bool = { false }, onRecoveryHandshake: @escaping () -> Void = {},
          invalidate: @escaping () -> Void) {
-        self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status
+        self.verify = verify; self.select = select; self.openNormal = openNormal; self.status = status; self.statusV3 = statusV3
         self.openRecovery = openRecovery; self.recoveryAllowed = recoveryAllowed; self.onRecoveryHandshake = onRecoveryHandshake
         self.check = check; self.touch = touch; self.now = now; self.normalAllowed = normalAllowed; self.invalidate = invalidate
     }
@@ -90,7 +92,8 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         }
         // Installation and configuration drift are checked when status is selected, then at most every
         // `checkInterval` on this connection, so repeated status calls cannot keep mutations waiting on the owner lock.
-        guard checkInstallation() else { close(); reply(nil); return }
+        let versioned = try? SetupRetainedStatusV3Wire.Request.decode(request)
+        guard checkInstallation(), versioned == nil || statusV3 != nil else { close(); reply(nil); return }
         let admitted = lock.withLock { () -> Bool in
             guard !statusInFlight else { return false }
             switch current {
@@ -107,9 +110,13 @@ final class AdministrativeSetupConnectionFacade: NSObject, AdministrativeSetupSe
         touch()
         defer { lock.withLock { statusInFlight = false }; touch() }
         do {
-            let decoded = try SetupRetainedStatusWire.Request.decode(request)
-            // Every check result answers with the in-memory projection only; nothing store-derived is reported.
-            let bytes = try SetupRetainedStatusWire.reply(decoded, status(peer))
+            let bytes: Data
+            if let versioned, let statusV3 {
+                // Both versions share the installation check. The projection itself only reads published evidence.
+                bytes = try SetupRetainedStatusV3Wire.reply(versioned, statusV3(peer))
+            } else {
+                bytes = try SetupRetainedStatusWire.reply(SetupRetainedStatusWire.Request.decode(request), status(peer))
+            }
             // Recheck the same peer and connection lifetime before the reply leaves.
             guard (try? verify()) == peer, lock.withLock({ current == .statusOnly }) else { close(); reply(nil); return }
             reply(bytes)
