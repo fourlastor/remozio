@@ -9,7 +9,8 @@ public enum SetupAdministratorAuthorizationError: Error, Equatable {
 
 /// One local setup session. Use it off the UI executor and close it when the operation ends.
 /// External forms are bearer credentials. Send them only after authenticating the Root setup endpoint.
-public final class SetupAdministratorSession: CustomStringConvertible {
+// The lock serializes reference access across executors. Process and user IDs are immutable.
+public final class SetupAdministratorSession: CustomStringConvertible, @unchecked Sendable {
     private let processID = getpid()
     private let owner = getuid()
     private let lock = NSLock()

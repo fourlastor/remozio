@@ -4,6 +4,7 @@ import SwiftUI
 
 @main
 struct RemozioApp: App {
+    @NSApplicationDelegateAdaptor(RemozioApplicationDelegate.self) private var applicationDelegate
     @State private var presence = PresenceControls()
     @State private var login = MacLoginItemControls()
     @State private var setup = MacSetupServiceControls()
@@ -11,7 +12,7 @@ struct RemozioApp: App {
 
     var body: some Scene {
         Window("Remozio", id: "main") {
-            SetupOverview(presence: presence, setup: setup)
+            SetupOverview(presence: presence, setup: setup, recovery: applicationDelegate.recovery)
                 .task { presence.start() }
         }
         .defaultSize(width: 600, height: 440)
@@ -38,6 +39,22 @@ struct RemozioApp: App {
             .formStyle(.grouped)
             .frame(minWidth: 440, idealWidth: 500, minHeight: 240)
         }
+    }
+}
+
+@MainActor
+final class RemozioApplicationDelegate: NSObject, NSApplicationDelegate {
+    let recovery = MacSetupRecoveryControls()
+    private var terminating = false
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminating else { return .terminateLater }
+        terminating = true
+        Task {
+            await recovery.close()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 
@@ -95,7 +112,9 @@ private struct SetupOverview: View {
     let setup: MacSetupServiceControls
     @State private var showingSetupPreview = false
     @State private var showingPairing = false
+    let recovery: MacSetupRecoveryControls
     @State private var showingAuditUpgrade = false
+    @State private var showingSetupRecovery = false
     @State private var showingAccountSetup = {
         #if DEBUG
         CommandLine.arguments.contains("--preview-account-setup")
@@ -120,6 +139,7 @@ private struct SetupOverview: View {
                         if setup.state == .enabled {
                             Button("Set up command approvals…") { showingAccountSetup = true }
                             Button("Audit history setup…") { showingAuditUpgrade = true }
+                            Button("Setup recovery…") { showingSetupRecovery = true }
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -146,6 +166,7 @@ private struct SetupOverview: View {
         }
         .sheet(isPresented: $showingAccountSetup) { AccountSetupSheet() }
         .sheet(isPresented: $showingAuditUpgrade) { AuditUpgradeSheet() }
+        .sheet(isPresented: $showingSetupRecovery) { SetupRecoverySheet(controls: recovery) }
     }
 }
 

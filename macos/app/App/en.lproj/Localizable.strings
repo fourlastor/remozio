@@ -268,3 +268,31 @@
 "Audit upgrade status is unavailable." = "Audit upgrade status is unavailable.";
 "Another audit upgrade may still be running. Refresh to check its saved progress." = "Another audit upgrade may still be running. Refresh to check its saved progress.";
 "New changes stay disabled until a fresh read succeeds." = "New changes stay disabled until a fresh read succeeds.";
+
+/* Setup recovery */
+"Restore saved setup?" = "Restore saved setup?";
+"Restore saved setup" = "Restore saved setup";
+"Restore uses this Mac’s saved setup. macOS asks for administrator approval before the request is sent." = "Restore uses this Mac’s saved setup. macOS asks for administrator approval before the request is sent.";
+"Setup recovery" = "Setup recovery";
+"Stopping tracking closes this connection. It cannot undo the request." = "Stopping tracking closes this connection. It cannot undo the request.";
+"Refresh status" = "Refresh status";
+"Check recovery progress" = "Check recovery progress";
+"Stop tracking" = "Stop tracking";
+"Restore…" = "Restore…";
+"Read the saved setup to check for recovery." = "Read the saved setup to check for recovery.";
+"Could not read saved setup. Refresh to try again." = "Could not read saved setup. Refresh to try again.";
+"There is no saved setup that needs recovery." = "There is no saved setup that needs recovery.";
+"Setup is busy. Refresh after the current operation finishes." = "Setup is busy. Refresh after the current operation finishes.";
+"Remozio cannot confirm that Restore is available for this setup." = "Remozio cannot confirm that Restore is available for this setup.";
+"The saved setup currently offers no recovery action." = "The saved setup currently offers no recovery action.";
+"The saved setup is available for Restore." = "The saved setup is available for Restore.";
+"Waiting for administrator approval…" = "Waiting for administrator approval…";
+"Sending the Restore request…" = "Sending the Restore request…";
+"Setup recorded the request. Check recovery progress for the result." = "Setup recorded the request. Check recovery progress for the result.";
+"Remozio did not send the Restore request. Refresh before trying again." = "Remozio did not send the Restore request. Refresh before trying again.";
+"Remozio could not confirm the result. The request may still be running." = "Remozio could not confirm the result. The request may still be running.";
+"Setup reported that the saved setup was restored. Service health is still unconfirmed." = "Setup reported that the saved setup was restored. Service health is still unconfirmed.";
+"Setup refused the Restore request. Refresh for the current status." = "Setup refused the Restore request. Refresh for the current status.";
+"Setup reported that repair is required. Refresh for the current status." = "Setup reported that repair is required. Refresh for the current status.";
+"Setup reported that Restore did not finish. Refresh for the current status." = "Setup reported that Restore did not finish. Refresh for the current status.";
+"Setup recovery…" = "Setup recovery…";
