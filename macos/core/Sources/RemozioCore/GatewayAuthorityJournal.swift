@@ -209,6 +209,8 @@ final class GatewayAuthorityJournal {
             submissionCredentials = Set(try submissionEntries(identity).map { $0.receipt.control.credentialID })
         }
         var candidates: [Data?] = []
+        var firstRevocations = Set<RevokedEpoch>()
+        var retainedHistoryCount = 0
         for record in missing {
             if let recovered = try recoveredRevocation(operation: record.operationID, identity: identity) {
                 guard case .recipient(let receipt) = record, case .revocation(let value) = receipt.control,
@@ -232,13 +234,18 @@ final class GatewayAuthorityJournal {
                 case .activation(let activation): binding = activation.binding
                 case .revocation(let revocation):
                     let phone = revocation.binding.phoneID, epoch = revocation.binding.enrollmentEpoch
-                    guard !enrollments.contains(where: { $0.approval.phoneID == phone && $0.epoch == epoch && $0.approval.active }),
-                          try latestRevocation(phone: phone, epoch: epoch, identity: identity) != nil ||
-                              recoveredRevocation(phone: phone, epoch: epoch, identity: identity) != nil else {
+                    let enrollment = enrollments.first { $0.approval.phoneID == phone && $0.epoch == epoch }
+                    guard enrollment?.approval.active != true else { return result(.requiresTrustRecovery) }
+                    let signed = try latestRevocation(phone: phone, epoch: epoch, identity: identity)
+                    guard try signed != nil || recoveredRevocation(phone: phone, epoch: epoch, identity: identity) != nil else {
                         return result(.requiresTrustRecovery)
                     }
                     guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
                     guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
+                    let pair = RevokedEpoch(phone: phone, epoch: epoch)
+                    if enrollment == nil || signed != nil || !firstRevocations.insert(pair).inserted {
+                        retainedHistoryCount += 1
+                    }
                     candidates.append(nil)
                     continue
                 }
@@ -251,7 +258,10 @@ final class GatewayAuthorityJournal {
             guard record.canonicalPayload.count <= policy.payloadLimits.maxBytes else { throw GatewayAuthorityError.capacityExceeded }
             candidates.append(binding.candidateID)
         }
-        try capacity(additional: missing.count)
+        let deliveryCount = missing.count - firstRevocations.count - retainedHistoryCount
+        if deliveryCount > 0 { try requireCapacity(.delivery, additional: deliveryCount) }
+        if !firstRevocations.isEmpty { try requireCapacity(.firstRevocation, additional: firstRevocations.count) }
+        if retainedHistoryCount > 0 { try requireCapacity(.revocationHistory, additional: retainedHistoryCount) }
         for (record, candidate) in zip(missing, candidates) {
             if let candidate {
                 let kind: UInt64
@@ -338,10 +348,7 @@ final class GatewayAuthorityJournal {
         if enrollments.contains(where: { $0.approval.phoneID == phone && $0.epoch == binding.enrollmentEpoch && $0.notificationTag == binding.enrollmentTag }) {
             return (phone, .knownHistory)
         }
-        try capacity()
-        try statement("SELECT count(*) FROM main.gateway_trust_restrictions_v1", []) {
-            guard sqlite3_step($0) == SQLITE_ROW, sqlite3_column_int64($0, 0) < 1024 else { throw GatewayAuthorityError.capacityExceeded }
-        }
+        try requireCapacity(.trustRestriction)
         try statement("INSERT INTO main.gateway_trust_restrictions_v1 VALUES(?,\(kind.rawValue),?,?,?)",
             [phone, operation, payload, signature]) { try done($0) }
         try statement("UPDATE main.gateway_root_candidates_v1 SET run=zeroblob(16) WHERE phone=?", [phone]) { try done($0) }
@@ -372,7 +379,8 @@ final class GatewayAuthorityJournal {
         var changed = false
         if try latestRevocation(phone: phone, epoch: epoch, identity: identity) == nil,
            try recoveredRevocation(phone: phone, epoch: epoch, identity: identity) == nil {
-            try capacity()
+            let retained = try hasRetainedEnrollment(phone: phone, epoch: epoch)
+            try requireCapacity(retained ? .firstRecoveredRevocation : .otherRecoveredRevocation)
             try statement("INSERT INTO main.gateway_recovered_revocations_v1 VALUES(?,?,?,?,?)",
                 [phone, epoch, value.operationID, payload, signature]) { try done($0) }
             changed = true
@@ -637,7 +645,7 @@ final class GatewayAuthorityJournal {
     func revoke(trust: GatewayAuthorityTrust, expectedHead: UInt64, wall: UInt64, now: AuthorityMoment,
                 sign: (GatewayPhoneRevocation) throws -> Data) throws -> GatewayAuthorityEnvelope {
         try scope(trust.registration); try clock(now); try requireHead(expectedHead, identity: trust.registration)
-        _ = try latestRevocation(trust: trust)
+        let previous = try latestRevocation(trust: trust)
         let (expiry, overflow) = wall.addingReportingOverflow(policy.candidateLifetimeMillis)
         let (deadline, monoOverflow) = now.milliseconds.addingReportingOverflow(policy.candidateLifetimeMillis)
         guard !overflow, !monoOverflow else { throw GatewayAuthorityError.invalidClock }
@@ -651,7 +659,8 @@ final class GatewayAuthorityJournal {
             kind: .phoneRevocation, canonicalPayload: payload, payloadLimits: policy.payloadLimits, inputLimits: policy.signingLimits) else {
             throw GatewayAuthorityError.invalidSignature
         }
-        try capacity()
+        let first = try previous == nil && hasRetainedEnrollment(phone: e.phoneID, epoch: e.epoch)
+        try requireCapacity(first ? .firstRevocation : .revocationHistory)
         try statement("INSERT INTO main.gateway_revocations_v1 VALUES(?,?,?,?,?,?,?,?,?)",
             [value.operationID, uint(value.revision), e.phoneID, e.epoch, payload, signature, uuid(run), uint(now.milliseconds), uint(deadline)]) { try done($0) }
         try statement("""
@@ -833,15 +842,75 @@ final class GatewayAuthorityJournal {
         catch { throw GatewayAuthorityError.corruptData }
     }
 
-    private func capacity(additional: Int = 1) throws {
-        let extra = try submissionCountSQL()
-        let count = try statement("SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_revocations_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)+(SELECT count(*) FROM main.gateway_recovered_revocations_v1)+(SELECT count(*) FROM main.gateway_trust_restrictions_v1)" + extra, []) { stmt in
-            guard sqlite3_step(stmt) == SQLITE_ROW else { throw GatewayAuthorityError.corruptData }; return sqlite3_column_int64(stmt, 0)
-        }
-        guard additional > 0, count <= policy.maximumControls, additional <= policy.maximumControls - Int(count) else { throw GatewayAuthorityError.capacityExceeded }
+    private struct RevokedEpoch: Hashable {
+        let phone: Data
+        let epoch: Data
     }
+
+    enum CapacityClass: CaseIterable {
+        case delivery, firstRevocation, firstRecoveredRevocation
+        case revocationHistory, otherRecoveredRevocation, trustRestriction
+    }
+
+    private static let firstRevocationCount = """
+        SELECT count(*) FROM main.approval_enrollments_v1 AS e
+        WHERE EXISTS (SELECT 1 FROM main.gateway_revocations_v1 AS r
+                      WHERE r.phone=e.phone AND r.enrollment=e.epoch)
+        """
+    private static let firstRecoveredRevocationCount = """
+        SELECT count(*) FROM main.approval_enrollments_v1 AS e
+        WHERE EXISTS (SELECT 1 FROM main.gateway_recovered_revocations_v1 AS r
+                      WHERE r.phone=e.phone AND r.enrollment=e.epoch)
+        """
+
+    private func hasRetainedEnrollment(phone: Data, epoch: Data) throws -> Bool {
+        try statement("SELECT 1 FROM main.approval_enrollments_v1 WHERE phone=? AND epoch=?", [phone, epoch]) {
+            switch sqlite3_step($0) {
+            case SQLITE_ROW: return true
+            case SQLITE_DONE: return false
+            default: throw GatewayAuthorityError.corruptData
+            }
+        }
+    }
+
+    // Count only the class that will grow. Legacy excess in another class cannot use this class's slots.
+    func requireCapacity(_ capacity: CapacityClass, additional: Int = 1) throws {
+        let query: String
+        let maximum: Int
+        switch capacity {
+        case .delivery:
+            query = "SELECT (SELECT count(*) FROM main.gateway_outbox_v1)+(SELECT count(*) FROM main.gateway_reconciled_controls_v1)" + (try submissionCountSQL())
+            maximum = policy.maximumControls
+        case .firstRevocation:
+            query = Self.firstRevocationCount
+            maximum = EnrollmentJournal.maximumRows
+        case .firstRecoveredRevocation:
+            query = Self.firstRecoveredRevocationCount
+            maximum = EnrollmentJournal.maximumRows
+        case .revocationHistory:
+            query = "SELECT (SELECT count(*) FROM main.gateway_revocations_v1)-(\(Self.firstRevocationCount))"
+            maximum = 4096
+        case .otherRecoveredRevocation:
+            query = "SELECT (SELECT count(*) FROM main.gateway_recovered_revocations_v1)-(\(Self.firstRecoveredRevocationCount))"
+            maximum = 1024
+        case .trustRestriction:
+            query = "SELECT count(*) FROM main.gateway_trust_restrictions_v1"
+            maximum = 1024
+        }
+        let count = try statement(query, []) {
+            guard sqlite3_step($0) == SQLITE_ROW,
+                  let count = Int(exactly: sqlite3_column_int64($0, 0)), count >= 0 else {
+                throw GatewayAuthorityError.corruptData
+            }
+            return count
+        }
+        guard additional > 0, count <= maximum, additional <= maximum - count else {
+            throw GatewayAuthorityError.capacityExceeded
+        }
+    }
+
     private func insert(_ entry: GatewayAuthorityEnvelope, candidate: Data) throws {
-        try capacity()
+        try requireCapacity(.delivery)
         try statement("INSERT INTO main.gateway_outbox_v1 VALUES(?,?,\(entry.kind),?,?,?,?)",
             [entry.operationID, uint(entry.revision), candidate, entry.canonicalPayload, entry.signature, entry.registrationToken.map { Data($0.utf8) }]) { try done($0) }
     }
@@ -915,7 +984,7 @@ final class GatewayAuthorityJournal {
         let entries = try submissionEntries(identity)
         if kind == .rotation, entries.contains(where: { $0.receipt.control.credentialID == credential }) { throw GatewayAuthorityError.superseded }
         guard try envelope(value.operationID, identity: identity) == nil else { throw GatewayAuthorityError.corruptData }
-        try capacity()
+        try requireCapacity(.delivery)
         try statement("INSERT INTO main.gateway_submission_outbox_v1 VALUES(?,?,\(kind.rawValue),?,?,?,?,?,?)",
             [value.operationID, uint(value.revision), credential, payload, signature, uuid(run), uint(now.milliseconds), uint(deadline)]) { try done($0) }
         try advance(from: expectedHead, to: value.revision)

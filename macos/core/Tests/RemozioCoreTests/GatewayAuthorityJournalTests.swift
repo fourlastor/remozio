@@ -460,22 +460,92 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.page(epoch: id(40), after: 0, maximumRecords: 10, maximumBytes: 16384).canonicalRecords }, [event])
     }
 
-    func testRevocationSignatureCapacityScopeAndIndependentDeadlines() throws {
+    func testRevocationSignatureScopeAndDeadlinesWithFullDeliveryCapacity() throws {
         let fixture = try Fixture(), db = try setup(fixture, maximum: 2)
         XCTAssertThrowsError(try db.write {
             try $0.revokeGatewayEnrollment(trust: trust(), expectedHead: 0, nowUnixMillis: 1010, now: moment(110), sign: { _ in id(0, count: 64) })
         }) { XCTAssertEqual($0 as? GatewayAuthorityError, .invalidSignature) }
         XCTAssertFalse(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
-        let removal = try revoke(db, head: 0)
+        _ = try prepare(db, now: 110)
+        _ = try prepare(db, head: 1, now: 110)
+        let removal = try revoke(db, head: 2)
         for (wall, now): (UInt64, UInt64) in [(2010, 110), (1009, 110), (1010, 1110)] {
             XCTAssertThrowsError(try db.read { try $0.pendingGatewayRevocation(operationID: removal.operationID, trust: trust(),
                 nowUnixMillis: wall, now: moment(now)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .expired) }
         }
-        _ = try revoke(db, head: 1, now: 1110)
-        XCTAssertThrowsError(try revoke(db, head: 2, now: 1110)) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
+        _ = try revoke(db, head: 3, now: 1110)
+        XCTAssertThrowsError(try prepare(db, head: 4, now: 1110, trusted: trust(phone: 8), peer: 8)) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded)
+        }
         XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
         XCTAssertThrowsError(try db.read { try $0.pendingGatewayRevocation(operationID: removal.operationID, trust: trust(phone: 9),
             nowUnixMillis: 1010, now: moment(1110)) }) { XCTAssertEqual($0 as? GatewayAuthorityError, .wrongScope) }
+    }
+
+    func testAllCapacityClassesHaveIndependentBoundsAtFullSize() throws {
+        var connection: OpaquePointer?
+        let opened = sqlite3_open(":memory:", &connection)
+        let db = try XCTUnwrap(connection)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(opened, SQLITE_OK)
+        func execute(_ sql: String) throws {
+            let result = sqlite3_exec(db, sql, nil, nil, nil)
+            guard result == SQLITE_OK else { throw JournalDatabaseError.storage(result) }
+        }
+        try execute("BEGIN IMMEDIATE")
+        defer { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+        try EnrollmentJournal.createSchema(db)
+        try GatewayAuthorityJournal.createSchema(db)
+        try GatewayAuthorityJournal.createRevocationSchema(db)
+        try GatewayAuthorityJournal.createReconciledSchema(db)
+        try GatewayAuthorityJournal.createRecoveredRevocationsSchema(db)
+        try GatewayAuthorityJournal.createTrustRestrictionsSchema(db)
+        // This fixture exercises accounting only. Signed evidence is checked in the journal integration tests.
+        try execute("""
+            CREATE TEMP TABLE numbers(i INTEGER PRIMARY KEY);
+            WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<5120)
+                INSERT INTO numbers SELECT i FROM n;
+            INSERT INTO approval_enrollments_v1
+                SELECT CAST(printf('%016d',i) AS BLOB),zeroblob(16),0,zeroblob(512) FROM numbers WHERE i<=1024;
+            INSERT INTO gateway_outbox_v1
+                SELECT CAST(printf('%016d',i) AS BLOB),CAST(printf('%08d',i) AS BLOB),1,
+                       zeroblob(16),zeroblob(512),zeroblob(64),NULL FROM numbers WHERE i<=4096;
+            INSERT INTO gateway_revocations_v1
+                SELECT CAST(printf('%016d',i) AS BLOB),CAST(printf('%08d',i) AS BLOB),
+                       CAST(printf('%016d',CASE WHEN i<=1024 THEN i ELSE 1 END) AS BLOB),
+                       zeroblob(16),zeroblob(512),zeroblob(64),zeroblob(16),zeroblob(8),zeroblob(8) FROM numbers;
+            INSERT INTO gateway_recovered_revocations_v1
+                SELECT CAST(printf('%016d',i) AS BLOB),zeroblob(16),CAST(printf('%016d',i) AS BLOB),
+                       zeroblob(512),zeroblob(64) FROM numbers WHERE i<=2048;
+            INSERT INTO gateway_trust_restrictions_v1
+                SELECT CAST(printf('%016d',i+3000) AS BLOB),1,CAST(printf('%016d',i) AS BLOB),
+                       zeroblob(512),zeroblob(64) FROM numbers WHERE i<=1024;
+            """)
+        let journal = GatewayAuthorityJournal(connection: db, macID: id(2), accountID: id(3), policy: try livePolicy(maximum: 4096))
+        func requireFull(_ limits: [GatewayAuthorityJournal.CapacityClass]) throws {
+            for limit in limits {
+                do {
+                    try journal.requireCapacity(limit)
+                    XCTFail("Expected the limit to refuse another row: \(limit)")
+                } catch GatewayAuthorityError.capacityExceeded {}
+            }
+        }
+        try requireFull(GatewayAuthorityJournal.CapacityClass.allCases)
+        var durations = [Double]()
+        for _ in 0..<50 {
+            let start = DispatchTime.now().uptimeNanoseconds
+            try requireFull(GatewayAuthorityJournal.CapacityClass.allCases)
+            durations.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+        }
+        let sorted = durations.sorted()
+        print("Gateway capacity at 12288 controls and 1024 enrollments, all six checks combined, milliseconds: median \(sorted[25]), p95 \(sorted[47]), max \(sorted[49])")
+
+        try execute("DELETE FROM gateway_revocations_v1 WHERE operation=CAST(printf('%016d',2) AS BLOB)")
+        try journal.requireCapacity(.firstRevocation)
+        try requireFull([.delivery, .firstRecoveredRevocation, .revocationHistory, .otherRecoveredRevocation, .trustRestriction])
+        try execute("DELETE FROM gateway_recovered_revocations_v1 WHERE phone=CAST(printf('%016d',1025) AS BLOB)")
+        try journal.requireCapacity(.otherRecoveredRevocation)
+        try requireFull([.firstRecoveredRevocation])
     }
 
     func testRevocationCorruptionRetiresOwner() throws {
@@ -738,22 +808,17 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         }
     }
 
-    func testRestrictedRemovalHistoryCapacityAndUnknownTagStillRefuseAdoption() throws {
+    func testRestrictedRemovalHistoryUsesSeparateCapacityAndRejectsUnknownTag() throws {
         let sourceFixture = try Fixture(), source = try setup(sourceFixture), first = try prepare(source), removal = try revoke(source, head: 1)
         let history = try XCTUnwrap(gatewayEvidence([first, removal], after: 0).1)
-        for capacity in [true, false] {
-            let f = try Fixture(), db = try setup(f, maximum: capacity ? 2 : 20)
+        for tag: UInt8 in [6, 99] {
+            let f = try Fixture(), db = try setup(f, maximum: 2)
             var writer: AuditEpochWriter?
-            let before = try enrollForRecovery(db, tag: capacity ? 6 : 99, onWriter: { writer = $0 })
+            let before = try enrollForRecovery(db, tag: tag, onWriter: { writer = $0 })
             let revision = try recoverRemoval(db, removal, revision: before, writer: XCTUnwrap(writer))
-            if capacity {
-                XCTAssertThrowsError(try recover(db, history, revision: revision, local: 0)) {
-                    XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded)
-                }
-            } else {
-                XCTAssertEqual(try recover(db, history, revision: revision, local: 0).disposition, .requiresTrustRecovery)
-            }
-            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 0)
+            let disposition = try recover(db, history, revision: revision, local: 0).disposition
+            XCTAssertEqual(disposition, tag == 6 ? .reconciled : .requiresTrustRecovery)
+            XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, tag == 6 ? 2 : 0)
             XCTAssertTrue(try db.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
         }
     }
@@ -986,6 +1051,27 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, installed)
         XCTAssertEqual(try reopened.read { try $0.codePolicy() }?.policy.entries.count, 1)
         XCTAssertNil(try reopened.read { try $0.historyRecovery(epoch: id(9)) })
+    }
+
+    func testFullStoreWithSubmissionHistoryKeepsExistingDigestAndAcceptsRevocation() throws {
+        let fixture = try Fixture(), db = try setup(fixture, maximum: 2)
+        try installSubmissionFeatures(db)
+        let first = try prepare(db), rotation = try rotateSubmission(db, head: 1)
+        let digest = try db.read { try $0.continuityDigests() }
+        let version = try db.read { try $0.storageSchemaVersion }
+        try db.close()
+
+        let reopened = try open(fixture, maximum: 2)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.storageSchemaVersion }, version)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, digest)
+        let removed = try revoke(reopened, head: 2)
+        XCTAssertEqual(removed.revision, 3)
+        XCTAssertTrue(try reopened.read { try $0.gatewayEnrollmentRevoked(trust: trust()) })
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
+        XCTAssertEqual(try fixture.scalar("SELECT count(*) FROM gateway_submission_outbox_v1"), "1")
+        let (head, _) = try gatewayEvidence([first, rotation, removed])
+        XCTAssertEqual(try reopened.write { try $0.acknowledgeGatewayHead(head) }.disposition, .recorded)
     }
 
     func testRootSubmissionControlsShareHeadCapacityAndAcknowledgment() throws {
