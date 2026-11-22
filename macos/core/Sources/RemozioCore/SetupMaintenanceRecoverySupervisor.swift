@@ -103,7 +103,7 @@ actor SetupMaintenanceRecoverySupervisor {
     private(set) var closureResult: AdministrativeSetupShutdown.RecoveryCloseResult?
     private var accepting = true, retired = false, joined = false
     private var closing: Task<Void, Never>?
-    private var retryingClosure = false
+    private var closureRetry: Task<Void, Never>?
 
     static func openOwned(custody: any SetupMaintenanceRecoveryProcessCustody,
                           driver: Driver, timing: Timing = .continuous) throws -> SetupMaintenanceRecoverySupervisor {
@@ -215,24 +215,31 @@ actor SetupMaintenanceRecoverySupervisor {
     /// Explicit service shutdown. A pending close retains custody and can be retried by this caller.
     func close() async {
         guard currentProcess else { return }
-        let retry = joined
-        startClosing()
-        await closing?.value
-        if retry { await retryClosure() }
+        await closeOrJoin()
     }
     /// Retirement closes admission immediately. Exit becomes eligible only after every actual join.
     func retire() async {
         guard currentProcess else { return }
-        let retry = joined
-        retired = true; startClosing()
-        await closing?.value
-        if retry { await retryClosure() }
+        retired = true
+        await closeOrJoin()
     }
-    private func retryClosure() async {
-        guard joined, closureResult != .closed, !retryingClosure else { return }
-        retryingClosure = true
-        defer { retryingClosure = false }
-        closureResult = await finalClose.retryCloseAfterJoiningResult()
+    private func closeOrJoin() async {
+        guard joined else {
+            startClosing()
+            await closing?.value
+            return
+        }
+        if let closureRetry {
+            await closureRetry.value
+            return
+        }
+        guard closureResult != .closed else { return }
+        let retry = Task {
+            closureResult = await finalClose.retryCloseAfterJoiningResult()
+            closureRetry = nil
+        }
+        closureRetry = retry
+        await retry.value
     }
     private func observe(_ key: Key, _ observation: Observation) {
         entries[key]?.observation = observation
