@@ -78,6 +78,7 @@ actor MacSetupRecoveryChannel {
     private var submission: Wire.Request?
     private var pending: (id: UUID, continuation: CheckedContinuation<SetupClientReply, any Error>)?
     private var timer: Task<Void, Never>?
+    private var onClose: (@Sendable () -> Void)?
 
     /// Only the installed Setup factory supplies the verified release.
     init(lane: MacSetupRecoveryLane, verifiedRelease: SignedReleaseEvidence) throws {
@@ -133,8 +134,9 @@ actor MacSetupRecoveryChannel {
         return try SetupRetainedStatusWire.decodeReply(data, matching: request)
     }
 
-    func open() async throws {
+    func open(onClose: (@Sendable () -> Void)? = nil) async throws {
         guard lane == .recovery, state == .new else { throw AdministrativeSetupChannelError.closed }
+        self.onClose = onClose
         state = .opening
         do {
             guard case .version(let version) = try await invoke(.hello, opening: true), version == Wire.ipcVersion else {
@@ -172,6 +174,7 @@ actor MacSetupRecoveryChannel {
     }
 
     var didDispatchStart: Bool { submission != nil }
+    var isOpen: Bool { state == .open && lifetime.ifOpen({}) }
 
     func readProgress() async throws -> Wire.Code {
         guard lane == .recovery, state == .open, let submission else { throw AdministrativeSetupChannelError.closed }
@@ -259,6 +262,9 @@ actor MacSetupRecoveryChannel {
         lifetime.close()
         driver.close()
         resolve(.failure(error))
+        let notify = onClose
+        onClose = nil
+        notify?()
     }
 
     private func resolve(_ result: Result<SetupClientReply, any Error>) {

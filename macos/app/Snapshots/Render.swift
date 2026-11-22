@@ -92,15 +92,64 @@ struct RenderSetupPreview {
             }
         }
     }
+    @MainActor static func renderRecovery(output: URL) throws {
+        typealias Status = MacSetupRecoveryControls.StatusSummary
+        typealias Attempt = MacSetupRecoveryControls.AttemptSummary
+        let cases: [(String, Status, Attempt)] = [
+            ("unavailable", .unavailable, .idle), ("no-action", .noAction, .idle), ("busy", .busy, .idle),
+            ("restore", .restoreAvailable, .idle), ("pending", .busy, .pending), ("unconfirmed", .unread, .unconfirmed)
+        ]
+        for (name, status, attempt) in cases {
+            for dark in [false, true] {
+                let view = SetupRecoveryContent(status: status, attempt: attempt, canRestore: name == "restore",
+                    canCheckProgress: attempt == .pending || attempt == .unconfirmed,
+                    canStopTracking: attempt == .unconfirmed,
+                    onRefresh: {}, onRestore: {}, onProgress: {}, onStopTracking: {}, onClose: {})
+                // The panel's native group box requires an AppKit view hierarchy for capture.
+                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let host = NSHostingView(rootView: view.background(.background)
+                    .environment(\.colorScheme, dark ? .dark : .light))
+                host.appearance = appearance
+                host.frame = NSRect(x: 0, y: 0, width: 500, height: 320)
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.appearance = appearance
+                window.contentView = host
+                defer { window.contentView = nil }
+                host.layoutSubtreeIfNeeded()
+                RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+                host.displayIfNeeded()
+                guard let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                let filename = "recovery-" + name + (dark ? "-dark.png" : "-light.png")
+                try png.write(to: output.appendingPathComponent(filename))
+                print(filename + " rendered from an inert recovery state")
+            }
+        }
+    }
+
     @MainActor static func main() throws {
-        guard CommandLine.arguments.count == 2 || (CommandLine.arguments.count == 3 && CommandLine.arguments[2] == "--audit-only") else {
-            fatalError("Supply a snapshot output directory and optional --audit-only")
+        let mode = CommandLine.arguments.dropFirst(2)
+        guard CommandLine.arguments.count >= 2, mode.isEmpty || mode.elementsEqual(["--audit-only"])
+            || mode.elementsEqual(["--recovery-only"]) else {
+            fatalError("Supply a snapshot output directory and optional --audit-only or --recovery-only")
         }
         let output = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
-        if CommandLine.arguments.count == 3 { try renderAudit(output: output, app: app); try renderAuditSizing(output: output, app: app); try renderAuditWaits(output: output, app: app); return }
+        if mode.first == "--audit-only" {
+            try renderAudit(output: output, app: app)
+            try renderAuditSizing(output: output, app: app)
+            try renderAuditWaits(output: output, app: app)
+            return
+        }
+        try renderRecovery(output: output)
+        if mode.first == "--recovery-only" { return }
         let defaults = try SharedSetupDefaults(
             presence: PresenceConfiguration(observationLifetimeMilliseconds: 5000, unavailableGraceMilliseconds: 1000),
             wake: GatewayWakePolicy(maximumEntries: 8, maximumAttempts: 2, minimumEnrollmentIntervalMillis: 1000, maximumLifetimeMillis: 60_000, maximumTTLSeconds: 60),
