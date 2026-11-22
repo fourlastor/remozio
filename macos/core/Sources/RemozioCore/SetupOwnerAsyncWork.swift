@@ -43,6 +43,14 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
         }
     }
     var isIdle: Bool { lock.withLock { active == nil } }
+    /// True when no operation is active, or when `token` owns the active one. One read under this set's lock:
+    /// separate `isIdle` and `permits` reads can fall on both sides of a release and see neither.
+    func isIdleOrPermits(_ token: Token?) -> Bool {
+        lock.withLock {
+            guard let active else { return true }
+            return token?.belongs(to: self, id: active) == true
+        }
+    }
     func closeAdmission() { lock.withLock { accepting = false } }
     func waitUntilIdle() async {
         await withCheckedContinuation { continuation in
@@ -73,9 +81,13 @@ final class SetupOwnerAsyncWork: @unchecked Sendable {
             let source = lock.withLock { owner }
             guard let source, source.ownedFixture, source.permits(self) else { throw AdministrativeSetupError.unavailable }
         }
+        /// Ends the operation before the token forgets its owner. While the set still has this operation active,
+        /// `belongs` stays true, so `isIdleOrPermits(self)` never reads `false` during a release. This method never
+        /// holds the token's lock while it calls `finish`: `permits` takes the set's lock and then the token's lock.
         func close() {
-            let previous = lock.withLock { let previous = owner; owner = nil; return previous }
-            previous?.finish(id)
+            guard let previous = lock.withLock({ owner }) else { return }
+            previous.finish(id)
+            lock.withLock { owner = nil }
         }
         deinit { close() }
     }
