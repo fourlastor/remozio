@@ -833,17 +833,13 @@ public final class SetupAccountOwner: @unchecked Sendable {
             retainedQuiescenceTask = Task { [weak self] in
                 var backoff = QuiescenceBackoff()
                 while !Task.isCancelled, let step = await self?.sampleRetainedQuiescence(record) {
-                    switch step {
-                    case .complete:
-                        guard self?.continueRetainedQuiescence(record) == true else { return }
-                        backoff = QuiescenceBackoff()
-                    case .retryBusy, .retryJoin:
-                        guard let delay = backoff.delay(for: step) else {
-                            self?.stopRetainedQuiescence(record)
-                            return
-                        }
+                    if let delay = backoff.delay(for: step) {
                         do { try await Task.sleep(for: delay) } catch { break }
+                        continue
                     }
+                    guard !Task.isCancelled else { break }
+                    guard self?.continueRetainedQuiescence(record) == true else { return }
+                    backoff = QuiescenceBackoff()
                 }
                 self?.stopRetainedQuiescence(record)
             }
@@ -858,7 +854,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
         }
     }
 
-    /// A request that races the current sample gets another pass before the slot is retired.
+    /// Consume a queued refresh after a completed sample or an exhausted retry budget.
     private func continueRetainedQuiescence(_ record: SetupRetainedInvocationReservation) -> Bool {
         lock.withLock {
             guard retainedInvocationReservation === record else { return false }
@@ -867,6 +863,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                 return true
             }
             retainedQuiescenceTask = nil
+            retainedQuiescenceRefresh = false
             return false
         }
     }
