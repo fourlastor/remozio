@@ -88,7 +88,14 @@ final class SetupRetainedStatusV3WireTests: XCTestCase {
                 components: components, dependencies: manifest.dependencies), codeDirectoryHashes: f.candidate.codeDirectoryHashes)
             let peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
             let account = LocalAccountIdentity(uid: peer.userID, primaryGroupID: getgid(), directoryID: UUID())
-            let owner = try SetupAccountOwner(machine: f.machine(), expectedReleaseDigest: InstallationInventory.digest(release),
+            let machine = try f.machine()
+            let installed = try XCTUnwrap(machine.inventory())
+            let digest = try InstallationInventory.digest(release)
+            let upgraded = try InstallationInventory(macID: installed.macID, installationID: installed.installationID,
+                revision: installed.revision, bundlePath: installed.bundlePath, releaseDigest: digest,
+                accounts: installed.accounts, services: installed.services, formatVersion: installed.formatVersion)
+            try machine.writeInventory(upgraded, expectedRevision: installed.revision)
+            let owner = try SetupAccountOwner(machine: machine, expectedReleaseDigest: digest,
                 resume: { _, value in value }, lookupAccount: { _ in account })
             defer { try? owner.close() }
             let routing = AdministrativeSetupLifecycle.Routing(validateStartup: {})
