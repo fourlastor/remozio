@@ -279,35 +279,90 @@ public final class GatewayDatabase {
         return try transaction(write: false) { try isRevoked(phone: phoneID, enrollment: enrollmentEpoch) }
     }
 
+    private enum RecipientAdmission {
+        case live(GatewayCandidateTrust)
+        case recovery(phoneID: Data, enrollment: GatewayPhoneEnrollment?, expectedHead: UInt64)
+    }
+
     /// Applies a current root claim atomically. Historical retries return the original receipt without restoring state.
     public func applyRecipient(canonicalPayload: Data, signature: Data, wireVersion: UInt64, kind: GatewayRecipientKind,
                                trust: GatewayCandidateTrust, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayRecipientApplication {
+        try applyRecipient(canonicalPayload: canonicalPayload, signature: signature, wireVersion: wireVersion, kind: kind,
+            admission: .live(trust), nowUnixMillis: nowUnixMillis, now: now)
+    }
+
+    func recoverPhoneRevocation(canonicalPayload: Data, signature: Data, registration: GatewayRegistrationIdentity,
+                                phoneID: Data, enrollment: GatewayPhoneEnrollment?, expectedHead: UInt64,
+                                nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayRecipientApplication {
+        guard registration == identity, enrollment == nil || enrollment?.phoneID == phoneID else {
+            throw GatewayDatabaseError.wrongScope
+        }
+        return try applyRecipient(canonicalPayload: canonicalPayload, signature: signature, wireVersion: 1, kind: .phoneRevocation,
+            admission: .recovery(phoneID: phoneID, enrollment: enrollment, expectedHead: expectedHead),
+            nowUnixMillis: nowUnixMillis, now: now)
+    }
+
+    private func applyRecipient(canonicalPayload: Data, signature: Data, wireVersion: UInt64, kind: GatewayRecipientKind,
+                                admission: RecipientAdmission, nowUnixMillis: UInt64, now: AuthorityMoment) throws -> GatewayRecipientApplication {
         try transaction(write: true) {
             try checkClock(now)
-            guard identity.matches(trust), trust.active else { throw GatewayDatabaseError.wrongScope }
-            guard try storedHead() == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            let head: UInt64
+            if case .live(let trust) = admission {
+                guard identity.matches(trust), trust.active else { throw GatewayDatabaseError.wrongScope }
+                head = try storedHead()
+                guard head == trust.appliedControlRevision else { throw GatewayDatabaseError.headMismatch }
+            } else {
+                head = try storedHead()
+            }
             let control = try GatewayStoredRecipient.decode(canonicalPayload, kind: kind, limits: payloadLimits)
-            guard control.matches(identity), control.phoneID == trust.enrollment.phoneID,
-                  control.enrollmentEpoch == trust.enrollment.epoch else { throw GatewayDatabaseError.wrongScope }
+            guard control.matches(identity) else { throw GatewayDatabaseError.wrongScope }
+            let enrollment: GatewayPhoneEnrollment?
+            let recoveryHead: UInt64?
+            switch admission {
+            case .live(let trust):
+                guard control.phoneID == trust.enrollment.phoneID, control.enrollmentEpoch == trust.enrollment.epoch else {
+                    throw GatewayDatabaseError.wrongScope
+                }
+                enrollment = trust.enrollment
+                recoveryHead = nil
+            case .recovery(let phoneID, let currentEnrollment, let expectedHead):
+                // The complete current Root snapshot can omit a revoked phone or name its replacement epoch.
+                // A live authorization for the exact signed epoch prevents recovery.
+                guard control.phoneID == phoneID,
+                      currentEnrollment?.epoch != control.enrollmentEpoch || currentEnrollment?.active == false else {
+                    throw GatewayDatabaseError.wrongScope
+                }
+                enrollment = currentEnrollment
+                recoveryHead = expectedHead
+            }
             guard try GatewayRecipientSignature.verify(signature: signature, publicKey: identity.rootPublicKey, wireVersion: wireVersion,
                 kind: kind, canonicalPayload: canonicalPayload, payloadLimits: payloadLimits, inputLimits: signingLimits) else {
                 throw GatewayCandidateVerificationError.invalidSignature
             }
             if let previous = try storedRecipient(operationID: control.operationID) {
-                guard previous.kind == kind, previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
+                guard previous.kind == kind, previous.canonicalPayload == canonicalPayload,
+                      recoveryHead == nil || previous.signature == signature else { throw GatewayDatabaseError.operationConflict }
                 return GatewayRecipientApplication(receipt: previous, inserted: false)
             }
             guard try storedReceipt(operationID: control.operationID) == nil,
                   try storedSubmission(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
-            guard control.revision > trust.appliedControlRevision else { throw GatewayCandidateVerificationError.staleRevision }
+            guard control.revision > head else { throw GatewayCandidateVerificationError.staleRevision }
             guard control.issued <= nowUnixMillis else { throw GatewayCandidateVerificationError.futureIssue }
-            guard nowUnixMillis < control.expires else { throw GatewayCandidateVerificationError.expired }
+            if let recoveryHead {
+                // The original signed revocation can only restrict the exact epoch it identifies.
+                // Fill the next revision under the current Root lease. Keep expiry for ordinary delivery.
+                guard recoveryHead == head, control.revision - recoveryHead == 1 else {
+                    throw GatewayDatabaseError.headMismatch
+                }
+            } else {
+                guard nowUnixMillis < control.expires else { throw GatewayCandidateVerificationError.expired }
+            }
             guard control.expires - control.issued <= maximumLifetimeMillis else { throw GatewayCandidateVerificationError.excessiveLifetime }
             try requireCapacity()
             let token: Data?
             switch control {
             case .activation(let activation):
-                guard trust.enrollment.active, activation.binding.enrollmentTag == trust.enrollment.tag else {
+                guard let enrollment, enrollment.active, activation.binding.enrollmentTag == enrollment.tag else {
                     throw GatewayCandidateVerificationError.unavailableEnrollment
                 }
                 guard try !isRevoked(phone: control.phoneID, enrollment: control.enrollmentEpoch) else { throw GatewayDatabaseError.revokedEnrollment }
@@ -329,7 +384,7 @@ public final class GatewayDatabase {
                 try statement("UPDATE gateway_candidates_v1 SET token=NULL WHERE phone=? AND enrollment=?", [control.phoneID, control.enrollmentEpoch]) { try done($0) }
                 try statement("DELETE FROM gateway_mappings_v2 WHERE phone=? AND enrollment=?", [control.phoneID, control.enrollmentEpoch]) { try done($0) }
             }
-            try advanceHead(control.revision, from: trust.appliedControlRevision)
+            try advanceHead(control.revision, from: head)
             return GatewayRecipientApplication(receipt: GatewayRecipientReceipt(control: control, canonicalPayload: canonicalPayload, signature: signature), inserted: true)
         }
     }

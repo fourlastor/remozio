@@ -143,6 +143,22 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testRevocationRecoveryCommandPreservesOriginalBytesAndExactBounds() throws {
+        let payload = Data([1, 6]), signature = Data(repeating: 4, count: 64), phone = Data(repeating: 5, count: 16)
+        let command = GatewayRootCommand.recoverPhoneRevocation(payload: payload, signature: signature, phoneID: phone, expectedHead: 8)
+        guard case .recoverPhoneRevocation(let original, let proof, let target, let head) = try GatewayRootCommand.decode(command.encode()) else {
+            return XCTFail("Wrong command")
+        }
+        XCTAssertEqual(command.protocolVersion, 1)
+        XCTAssertEqual(original, payload); XCTAssertEqual(proof, signature); XCTAssertEqual(target, phone); XCTAssertEqual(head, 8)
+        XCTAssertThrowsError(try GatewayRootCommand.recoverPhoneRevocation(payload: Data(count: 4097),
+            signature: signature, phoneID: phone, expectedHead: 8).encode())
+        XCTAssertThrowsError(try GatewayRootCommand.recoverPhoneRevocation(payload: payload,
+            signature: Data(count: 63), phoneID: phone, expectedHead: 8).encode())
+        XCTAssertThrowsError(try GatewayRootCommand.recoverPhoneRevocation(payload: payload,
+            signature: signature, phoneID: Data(count: 15), expectedHead: 8).encode())
+    }
+
     func testRootDeliveryRegistrationRequiresVersionThree() throws {
         let delivery = PhoneRequestDelivery(id: UUID(), recipient: DeliveryRecipient(phoneID: Data(repeating: 1, count: 16),
             enrollmentEpoch: Data(repeating: 2, count: 16)), requestID: Data(repeating: 3, count: 16),

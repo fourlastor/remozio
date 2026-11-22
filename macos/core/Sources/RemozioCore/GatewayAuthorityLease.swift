@@ -32,8 +32,14 @@ final class GatewayAuthorityLease: @unchecked Sendable {
             self.rootEpoch = rootEpoch; self.sequence = sequence; self.deadline = deadline
         }
     }
-    func validate() throws {
-        try lock.withLock { guard try current() < deadline, rootEpoch != nil else { throw GatewayServiceError.unavailable } }
+    func validate() throws { try withCurrentLease {} }
+
+    /// Serialize a synchronous recovery commit with retirement of its Root connection.
+    func withCurrentLease<Value>(_ body: () throws -> Value) throws -> Value {
+        try lock.withLock {
+            guard try current() < deadline, rootEpoch != nil else { throw GatewayServiceError.unavailable }
+            return try body()
+        }
     }
     func retire() { lock.withLock { closed = true; deadline = 0 } }
 

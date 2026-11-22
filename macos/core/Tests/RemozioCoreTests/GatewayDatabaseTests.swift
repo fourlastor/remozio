@@ -340,6 +340,116 @@ final class GatewayDatabaseTests: XCTestCase {
             nowUnixMillis: wall, now: AuthorityMoment(epoch: epoch, milliseconds: monotonic))
     }
 
+    private func delayedRevocation(revision: UInt64 = 3, operation: UInt8 = 60,
+                                   owner: UInt8 = 1, issued: UInt64 = 1000, expires: UInt64 = 2000) throws -> (Data, Data) {
+        let binding = try GatewayPhoneEpochBinding(ownerID: id(owner), macID: id(2), accountID: id(3),
+            gatewayID: id(4), lifecycleEpoch: id(5), phoneID: id(6), enrollmentEpoch: id(7))
+        let value = try GatewayPhoneRevocation(binding: binding, revision: revision, operationID: id(operation),
+            issuedAtUnixMillis: issued, expiresAtUnixMillis: expires)
+        let payload = try value.encode(limits: limits)
+        let input = try GatewayRecipientSigningInput.make(wireVersion: 1, kind: .phoneRevocation,
+            canonicalPayload: payload, payloadLimits: limits, inputLimits: limits)
+        return (payload, try key.signature(for: input).rawRepresentation)
+    }
+
+    private func recover(_ db: GatewayDatabase, _ control: (Data, Data), head: UInt64,
+                         expectedHead: UInt64? = nil, active: Bool = false, phoneEpoch: UInt8 = 7,
+                         phone: UInt8 = 6, wall: UInt64 = 2500) throws -> GatewayRecipientApplication {
+        try db.recoverPhoneRevocation(canonicalPayload: control.0, signature: control.1, registration: identity(),
+            phoneID: id(phone), enrollment: GatewayPhoneEnrollment(phoneID: id(phone), epoch: id(phoneEpoch), tag: id(phone, 32), active: active),
+            expectedHead: expectedHead ?? head, nowUnixMillis: wall, now: AuthorityMoment(epoch: epoch, milliseconds: 100))
+    }
+
+    func testDelayedRecoveryKeepsOriginalReceiptAfterAnotherPhoneAdvancesHead() throws {
+        let fixture = try Fixture(), db = try open(fixture, initialize: true), first = try candidate()
+        _ = try admit(db, first)
+        _ = try activate(db, activation(first), head: 1)
+        let original = try delayedRevocation()
+        XCTAssertThrowsError(try revoke(db, wall: 2500)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .expired)
+        }
+        let inserted = try recover(db, original, head: 2)
+        XCTAssertTrue(inserted.inserted)
+        XCTAssertEqual(inserted.receipt.canonicalPayload, original.0)
+        XCTAssertEqual(inserted.receipt.signature, original.1)
+        XCTAssertNil(try db.activeMapping(trust: trust(head: 3)))
+        XCTAssertTrue(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+        let second = try candidate(2, revision: 4, phone: 8, issued: 2500, expires: 3500)
+        _ = try admit(db, second, head: 3, wall: 2500)
+        _ = try activate(db, activation(second, revision: 5, operation: 51, issued: 2500, expires: 3500), head: 4, wall: 2500)
+        let replay = try recover(db, original, head: 5, expectedHead: 2)
+        XCTAssertFalse(replay.inserted)
+        XCTAssertEqual(replay.receipt.operationID, id(60))
+        XCTAssertEqual(replay.receipt.signature, original.1)
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 5, phone: 8)))
+        XCTAssertEqual(try db.controlHistory(afterRevision: 0, throughRevision: 5, maximumRecords: 5).records.map(\.revision),
+            [1, 2, 3, 4, 5])
+    }
+
+    func testDelayedRecoveryRejectsChangedHeadAndUnresolvedPredecessor() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        _ = try admit(db)
+        let delayed = try delayedRevocation()
+        fails(.headMismatch) { try recover(db, delayed, head: 1) }
+        let next = try delayedRevocation(revision: 2)
+        fails(.headMismatch) { try recover(db, next, head: 1, expectedHead: 0) }
+        _ = try admit(db, candidate(3, revision: 4, phone: 8), head: 1)
+        XCTAssertThrowsError(try recover(db, delayed, head: 4)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .staleRevision)
+        }
+        XCTAssertEqual(try db.head(), 4)
+        XCTAssertNil(try db.recipientReceipt(operationID: id(60)))
+    }
+
+    func testDelayedRecoveryRejectsActiveSignedEpochAndWrongPhoneOrSignature() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        let signed = try delayedRevocation(revision: 1)
+        fails(.wrongScope) { try recover(db, signed, head: 0, active: true) }
+        fails(.wrongScope) { try recover(db, signed, head: 0, phone: 8) }
+        fails(.wrongScope) { try recover(db, delayedRevocation(revision: 1, owner: 9), head: 0) }
+        XCTAssertThrowsError(try recover(db, (signed.0, id(0, 64)), head: 0)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .invalidSignature)
+        }
+        XCTAssertThrowsError(try recover(db, signed, head: 0, wall: 999)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .futureIssue)
+        }
+        XCTAssertThrowsError(try recover(db, delayedRevocation(revision: 1, expires: 2001), head: 0)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .excessiveLifetime)
+        }
+        XCTAssertEqual(try db.head(), 0)
+    }
+
+    func testDelayedRecoveryLeavesTheOrdinaryExpiryAndCapacityChecksInForce() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 2)
+        let first = try candidate(); _ = try admit(db, first)
+        XCTAssertThrowsError(try admit(db, candidate(2, revision: 2, phone: 8), head: 1, wall: 2500)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .expired)
+        }
+        XCTAssertThrowsError(try activate(db, activation(first), head: 1, wall: 2500)) {
+            XCTAssertEqual($0 as? GatewayCandidateVerificationError, .expired)
+        }
+        XCTAssertThrowsError(try applySubmission(db, submission(revision: 2), head: 1, wall: 2500))
+        _ = try activate(db, activation(first), head: 1)
+        fails(.capacityExceeded) { try recover(db, delayedRevocation(), head: 2) }
+        XCTAssertEqual(try db.head(), 2)
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 2)))
+    }
+
+    func testDelayedRecoveryRollsBackHeadMappingAndReceiptTogether() throws {
+        let f = try Fixture(), db = try open(f, initialize: true), first = try candidate()
+        _ = try admit(db, first)
+        _ = try activate(db, activation(first), head: 1)
+        let signed = try delayedRevocation()
+        try f.sql("CREATE TRIGGER refuse_delayed_head BEFORE UPDATE ON gateway_identity_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try recover(db, signed, head: 2))
+        XCTAssertEqual(try db.head(), 2)
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 2)))
+        XCTAssertFalse(try db.isPhoneRevoked(phoneID: id(6), enrollmentEpoch: id(7)))
+        XCTAssertNil(try db.recipientReceipt(operationID: id(60)))
+        try f.sql("DROP TRIGGER refuse_delayed_head")
+        XCTAssertTrue(try recover(db, signed, head: 2).inserted)
+    }
+
     func testActivationConsumesCandidateAndMappingSurvivesRestartWithHistoricalReceipt() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true), candidate = try candidate()
         _ = try admit(db, candidate)

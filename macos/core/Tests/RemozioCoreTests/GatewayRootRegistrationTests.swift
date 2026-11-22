@@ -67,6 +67,40 @@ final class GatewayRootRegistrationTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(driver.state.withLock { $0.calls.count }, 3)
         await channel.close()
     }
+    func testOldGatewayRejectsRecoveryProbeAndKeepsOrdinaryDeliveryAvailable() async throws {
+        let f = Fixture(), driver = Driver(), channel = GatewayRootChannel(driver: driver)
+        let registration = try f.registration
+        try await channel.start()
+        try await channel.synchronize(GatewayHostSnapshot(registration: registration, rootEpoch: UUID(),
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200, enrollments: [],
+            active: true, phoneRouting: true))
+        let supported = try await channel.supportsPhoneRevocationRecovery(registration: registration)
+        XCTAssertFalse(supported)
+        do { try await channel.requirePhoneRevocationRecovery(registration: registration); XCTFail("Missing capability accepted") }
+        catch { XCTAssertEqual(error as? GatewayRootChannelError, .unsupportedVersion) }
+        XCTAssertFalse(driver.state.withLock { $0.closed })
+        driver.state.withLock { $0.response = try? GatewayRootCommand.reply([.boolean(true)], version: 3) }
+        try await channel.registerWake(PhoneRequestDelivery(id: UUID(),
+            recipient: .init(phoneID: f.id(6), enrollmentEpoch: f.id(7)), requestID: f.id(10),
+            admittedAt: .init(epoch: UUID(), milliseconds: 100), deadlineMilliseconds: 200))
+        XCTAssertEqual(driver.state.withLock { $0.calls.count }, 4)
+        await channel.close()
+    }
+
+    func testRecoveryCapabilityRejectsOtherRegistrationOnTheSameConnection() async throws {
+        let f = Fixture(), other = Fixture(), driver = Driver(), channel = GatewayRootChannel(driver: driver)
+        let registration = try f.registration, wrong = try other.registration
+        try await channel.start()
+        try await channel.synchronize(GatewayHostSnapshot(registration: registration, rootEpoch: UUID(),
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200, enrollments: [],
+            active: true, phoneRouting: true))
+        driver.state.withLock { $0.response = try? GatewayRootCommand.reply([.unsigned(1), .bytes(wrong.encode())]) }
+        do { _ = try await channel.supportsPhoneRevocationRecovery(registration: registration); XCTFail("Wrong registration accepted") }
+        catch { XCTAssertEqual(error as? GatewayRootChannelError, .invalidMessage) }
+        XCTAssertTrue(driver.state.withLock { $0.closed })
+        await channel.close()
+    }
+
     func testExactOriginalReceiptAndDuplicateAdmissionForBothControls() async throws {
         let f = Fixture()
         for activation in [false, true] {
