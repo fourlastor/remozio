@@ -48,6 +48,39 @@ private final class RecoveryScopeGate: Sendable {
     let resume = DispatchSemaphore(value: 0)
 }
 
+private final class RecoveryCleanupClock: Sendable {
+    private let instant = Mutex(ContinuousClock.now)
+    func now() -> ContinuousClock.Instant { instant.withLock { $0 } }
+    func advance(_ delay: Duration) { instant.withLock { $0 = $0.advanced(by: delay) } }
+}
+
+private final class RecoveryCleanupOwner: SetupMaintenanceRecoveryOwnerCleanup, Sendable {
+    let id = UUID()
+    let runs = Mutex(0), attempts = Mutex(0)
+    private let scope: SetupAccountOwner.MaintenanceRecoveryScope
+    private let cleanup: @Sendable (Int) async -> Bool
+    private let didJoin: @Sendable () -> Void
+    private let didFailCleanup: @Sendable () -> Void
+
+    init(scope: SetupAccountOwner.MaintenanceRecoveryScope, custody: SetupMaintenanceRecoveryNativeAdapter.Custody,
+         cleanup: @escaping @Sendable (Int) async -> Bool) {
+        let id = self.id
+        self.scope = scope; self.cleanup = cleanup
+        didJoin = { [weak custody] in custody?.joined(id) }
+        didFailCleanup = { [weak custody] in custody?.cleanupFailed(id) }
+    }
+    func run() -> SetupMaintenanceRecoverySupervisor.Observation {
+        runs.withLock { $0 += 1 }
+        return .noWindow
+    }
+    func join() async {
+        let attempt = attempts.withLock { $0 += 1; return $0 }
+        guard await cleanup(attempt) else { didFailCleanup(); return }
+        scope.close(); didJoin()
+    }
+    func releaseFixture() { scope.close(); didJoin() }
+}
+
 final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
     private func runAsync(_ body: @escaping @Sendable () async throws -> Void) throws {
         let done = DispatchSemaphore(value: 0), result = RecoveryScopeCompletion()
@@ -198,6 +231,138 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
             let replacement = try h.acquireProcess(); replacement.close()
         }
     }
+    private static func scheduleCleanupFailure(_ h: RecoveryScopeHarness, clock: RecoveryCleanupClock,
+        closeWait: SetupMaintenanceRecoveryNativeAdapter.OwnedCloseWait? = nil,
+        cleanup: @escaping @Sendable (Int) async -> Bool
+    ) async throws -> (SetupMaintenanceRecoverySupervisor, SetupMaintenanceRecoveryNativeAdapter.Custody, RecoveryCleanupOwner) {
+        let custody = try SetupMaintenanceRecoveryNativeAdapter.Custody(owner: h.owner, shutdown: h.shutdown,
+            ownedCloseWait: closeWait, ownedRetryNow: { clock.now() })
+        let scope = try h.owner.acquireMaintenanceRecoveryScope(custody: h.shutdown)
+        let owner = RecoveryCleanupOwner(scope: scope, custody: custody, cleanup: cleanup)
+        custody.retain(owner, id: owner.id)
+        let supervisor = try SetupMaintenanceRecoverySupervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in
+            .owner(.init(run: { _ in owner.run() }, join: { await owner.join() }))
+        }))
+        let request = try retryRequest()
+        let scheduled = await supervisor.schedule(request)
+        XCTAssertTrue(scheduled)
+        await supervisor.waitForInitialAttempt(request.key)
+        XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+        XCTAssertEqual(owner.attempts.withLock { $0 }, 1)
+        await supervisor.retire()
+        let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+        XCTAssertEqual(result, .failed)
+        XCTAssertFalse(exit)
+        XCTAssertNoThrow(try h.processLease.validate())
+        XCTAssertNoThrow(try h.placement.validate())
+        return (supervisor, custody, owner)
+    }
+
+    func testLaterRetirementRetriesNativeOwnerCleanupAndReleasesBothLeases() throws {
+        try withScope { h in
+            let clock = RecoveryCleanupClock()
+            let (supervisor, custody, owner) = try await Self.scheduleCleanupFailure(h, clock: clock) { $0 == 2 }
+            defer { owner.releaseFixture(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
+            XCTAssertThrowsError(try h.acquireProcess()) { XCTAssertEqual($0 as? JournalLeaseError, .busy) }
+            clock.advance(.seconds(1))
+            await supervisor.retire()
+            let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+            XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+            XCTAssertEqual(owner.attempts.withLock { $0 }, 2)
+            XCTAssertEqual(result, .closed)
+            XCTAssertTrue(exit)
+            XCTAssertThrowsError(try h.processLease.validate())
+            XCTAssertThrowsError(try h.placement.validate())
+            if exit {
+                let replacement = try h.acquireProcess(); replacement.close()
+            }
+        }
+    }
+
+    func testCleanupRetryCoalescesRetirementCallsInsideBackoff() throws {
+        try withScope { h in
+            let clock = RecoveryCleanupClock()
+            let (supervisor, custody, owner) = try await Self.scheduleCleanupFailure(h, clock: clock) { _ in false }
+            defer { owner.releaseFixture(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
+            clock.advance(.seconds(1))
+            await supervisor.retire()
+            await supervisor.retire()
+            XCTAssertEqual(owner.attempts.withLock { $0 }, 2)
+            XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+            let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+            XCTAssertEqual(result, .failed)
+            XCTAssertFalse(exit)
+            XCTAssertNoThrow(try h.processLease.validate())
+            XCTAssertNoThrow(try h.placement.validate())
+        }
+    }
+
+    func testPersistentOwnerCleanupUsesBackoffCappedAtThirtySeconds() throws {
+        try withScope { h in
+            let clock = RecoveryCleanupClock()
+            let (supervisor, custody, owner) = try await Self.scheduleCleanupFailure(h, clock: clock) { _ in false }
+            defer { owner.releaseFixture(); custody.releaseAfterJoining(); h.placement.close(); h.processLease.close() }
+            for (index, delay) in [1, 2, 4, 8, 16, 30, 30].enumerated() {
+                clock.advance(.seconds(delay) - .milliseconds(1))
+                await supervisor.close()
+                XCTAssertEqual(owner.attempts.withLock { $0 }, index + 1)
+                clock.advance(.milliseconds(1))
+                await supervisor.close()
+                XCTAssertEqual(owner.attempts.withLock { $0 }, index + 2)
+                let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+                XCTAssertEqual(result, .failed)
+                XCTAssertFalse(exit)
+                XCTAssertNoThrow(try h.processLease.validate())
+                XCTAssertNoThrow(try h.placement.validate())
+            }
+            XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+        }
+    }
+
+    func testCancelledAndTimedOutCloseWaitersKeepTheSameCleanupAttempt() throws {
+        try withScope { h in
+            let clock = RecoveryCleanupClock()
+            let gate = AsyncStream<Void>.makeStream()
+            let (supervisor, custody, owner) = try await Self.scheduleCleanupFailure(h, clock: clock,
+                closeWait: .init(shorteningTo: .seconds(1))) { attempt in
+                guard attempt == 2 else { return false }
+                for await _ in gate.stream {}
+                return true
+            }
+            defer {
+                gate.continuation.finish(); owner.releaseFixture(); custody.releaseAfterJoining()
+                h.placement.close(); h.processLease.close()
+            }
+            clock.advance(.seconds(1))
+            let retire = Task { await supervisor.retire() }
+            try await Self.eventually { owner.attempts.withLock { $0 } == 2 }
+            let identity = try XCTUnwrap(custody.closeAttemptIDOwned())
+            retire.cancel(); await retire.value
+            let cancelled = await supervisor.closureResult
+            XCTAssertEqual(cancelled, .timedOut)
+            XCTAssertEqual(try custody.closeAttemptIDOwned(), identity)
+
+            clock.advance(.seconds(30))
+            await supervisor.close()
+            let timedOut = await supervisor.closureResult
+            XCTAssertEqual(timedOut, .timedOut)
+            XCTAssertEqual(try custody.closeAttemptIDOwned(), identity)
+            XCTAssertEqual(owner.attempts.withLock { $0 }, 2)
+            XCTAssertNoThrow(try h.processLease.validate())
+            XCTAssertNoThrow(try h.placement.validate())
+
+            gate.continuation.finish()
+            await supervisor.close()
+            let result = await supervisor.closureResult, exit = await supervisor.shouldExit
+            XCTAssertEqual(result, .closed)
+            XCTAssertTrue(exit)
+            XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+            XCTAssertEqual(owner.attempts.withLock { $0 }, 2)
+            XCTAssertThrowsError(try h.processLease.validate())
+            XCTAssertThrowsError(try h.placement.validate())
+        }
+    }
+
     func testNativeFactoryRefusesTheOrdinaryCallerBeforeBindingShutdown() throws {
         try withScope { h in
             XCTAssertThrowsError(try SetupMaintenanceRecoverySupervisor.openNative(owner: h.owner, shutdown: h.shutdown)) {
