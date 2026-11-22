@@ -13,7 +13,13 @@ protocol SetupMaintenanceRecoveryFinalClose: AnyObject, Sendable {
     func closeAfterJoining() async
     func closeAdmission()
     func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult
+    func retryCloseAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult
     func releaseAfterJoining()
+}
+extension SetupMaintenanceRecoveryFinalClose {
+    func retryCloseAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+        await closeAfterJoiningResult()
+    }
 }
 /// The combined interface remains an Owned fixture adapter. Native work receives the separate work interface.
 protocol SetupMaintenanceRecoveryProcessCustody: SetupMaintenanceRecoveryWorkCustody, SetupMaintenanceRecoveryFinalClose {}
@@ -212,11 +218,7 @@ actor SetupMaintenanceRecoverySupervisor {
         let retry = joined
         startClosing()
         await closing?.value
-        if retry, joined, closureResult != .closed, !retryingClosure {
-            retryingClosure = true
-            closureResult = await finalClose.closeAfterJoiningResult()
-            retryingClosure = false
-        }
+        if retry { await retryClosure() }
     }
     /// Retirement closes admission immediately. Exit becomes eligible only after every actual join.
     func retire() async {
@@ -224,11 +226,13 @@ actor SetupMaintenanceRecoverySupervisor {
         let retry = joined
         retired = true; startClosing()
         await closing?.value
-        if retry, joined, closureResult != .closed, !retryingClosure {
-            retryingClosure = true
-            closureResult = await finalClose.closeAfterJoiningResult()
-            retryingClosure = false
-        }
+        if retry { await retryClosure() }
+    }
+    private func retryClosure() async {
+        guard joined, closureResult != .closed, !retryingClosure else { return }
+        retryingClosure = true
+        defer { retryingClosure = false }
+        closureResult = await finalClose.retryCloseAfterJoiningResult()
     }
     private func observe(_ key: Key, _ observation: Observation) {
         entries[key]?.observation = observation

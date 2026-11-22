@@ -1,6 +1,11 @@
 import Darwin
 import Foundation
 
+/// A retained owner can retry cleanup without acquiring a new scope or running again.
+protocol SetupMaintenanceRecoveryOwnerCleanup: Sendable {
+    func join() async
+}
+
 /// Fixed native construction only. It adds no startup caller and never replays an acquired owner.
 enum SetupMaintenanceRecoveryNativeAdapter {
     typealias Supervisor = SetupMaintenanceRecoverySupervisor
@@ -17,19 +22,30 @@ enum SetupMaintenanceRecoveryNativeAdapter {
     final class Custody: SetupMaintenanceRecoveryProcessCustody, CustomReflectable, @unchecked Sendable {
         var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
         let shutdown: AdministrativeSetupShutdown
+        private typealias CloseResult = AdministrativeSetupShutdown.RecoveryCloseResult
         private struct PendingOwner: Sendable {
             let owner: any Sendable
-            var cleanupFailed = false
+            var retryAfter: ContinuousClock.Instant?
+            var retryDelay: Duration = .seconds(1)
         }
+        private typealias CloseAttempt = (id: UUID, task: Task<CloseResult, Never>)
+        private enum CloseStart {
+            case result(CloseResult)
+            case attempt(CloseAttempt)
+        }
+
         private let lock = NSLock()
         private let closeWait: Duration
+        private let retryNow: @Sendable () -> ContinuousClock.Instant
         private let closeBody: @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult
         private let releaseBody: @Sendable () -> Void
         private var pendingOwners: [UUID: PendingOwner] = [:]
-        private var closing: (id: UUID, task: Task<AdministrativeSetupShutdown.RecoveryCloseResult, Never>)?
-        convenience init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, ownedCloseWait: OwnedCloseWait? = nil) throws {
+        private var closing: CloseAttempt?
+        convenience init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, ownedCloseWait: OwnedCloseWait? = nil,
+                         ownedRetryNow: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) throws {
             try RuntimeMaintenanceOwnedControl.require()
-            try self.init(owner: owner, shutdown: shutdown, closeWait: ownedCloseWait?.maximum ?? .seconds(5), expectsPublication: false,
+            try self.init(owner: owner, shutdown: shutdown, closeWait: ownedCloseWait?.maximum ?? .seconds(5),
+                retryNow: ownedRetryNow, expectsPublication: false,
                 closeBody: { (try? shutdown.closeAfterRecoveryJoinedOwned()) ?? .failed },
                 releaseBody: { try? shutdown.releaseRecoverySupervisorOwned() })
         }
@@ -37,12 +53,14 @@ enum SetupMaintenanceRecoveryNativeAdapter {
             closeBody: @escaping @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult,
             releaseBody: @escaping @Sendable () -> Void) throws {
             guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
-            try self.init(owner: nativeOwner, shutdown: shutdown, closeWait: .seconds(5), expectsPublication: true, closeBody: closeBody, releaseBody: releaseBody)
+            try self.init(owner: nativeOwner, shutdown: shutdown, closeWait: .seconds(5), retryNow: { .now },
+                expectsPublication: true, closeBody: closeBody, releaseBody: releaseBody)
         }
-        private init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, closeWait: Duration, expectsPublication: Bool,
+        private init(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown, closeWait: Duration,
+            retryNow: @escaping @Sendable () -> ContinuousClock.Instant, expectsPublication: Bool,
             closeBody: @escaping @Sendable () -> AdministrativeSetupShutdown.RecoveryCloseResult,
             releaseBody: @escaping @Sendable () -> Void) throws {
-            self.closeWait = closeWait; self.closeBody = closeBody; self.releaseBody = releaseBody
+            self.closeWait = closeWait; self.retryNow = retryNow; self.closeBody = closeBody; self.releaseBody = releaseBody
             guard shutdown.belongs(to: owner) else { throw RuntimePreparationError.changedScope }
             try shutdown.validateRecoveryCustody()
             try shutdown.reserveRecoverySupervisor(expectsPublication: expectsPublication)
@@ -51,7 +69,14 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
         func retain(_ owner: any Sendable, id: UUID) { lock.withLock { pendingOwners[id] = .init(owner: owner) } }
         func joined(_ id: UUID) { _ = lock.withLock { pendingOwners.removeValue(forKey: id) } }
-        func cleanupFailed(_ id: UUID) { lock.withLock { pendingOwners[id]?.cleanupFailed = true } }
+        func cleanupFailed(_ id: UUID) {
+            lock.withLock {
+                guard var pending = pendingOwners[id] else { return }
+                pending.retryAfter = retryNow().advanced(by: pending.retryDelay)
+                pending.retryDelay = min(pending.retryDelay * 2, .seconds(30))
+                pendingOwners[id] = pending
+            }
+        }
         func validate() throws { try shutdown.validateRecoveryCustody() }
         /// One fixed lease inspection, with no executor admission or retry wait.
         func validateForRecovery() async -> Bool {
@@ -64,25 +89,54 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         func closeAdmission() { shutdown.closeRecoveryAdmission() }
         func closeAfterJoining() async { _ = await closeAfterJoiningResult() }
         func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+            await closeAfterJoining(retryCleanup: false)
+        }
+        func retryCloseAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+            await closeAfterJoining(retryCleanup: true)
+        }
+        private func closeAfterJoining(retryCleanup: Bool) async -> CloseResult {
             await shutdown.joinRecoverySessions()
-            let held = lock.withLock { (pendingOwners.isEmpty, pendingOwners.values.contains { $0.cleanupFailed }) }
-            if held.1 { return .failed }
-            guard held.0 else { return .pending }
-            // Admission is already closed. Final shutdown runs here only after every join and keeps its actual task.
-            // It cannot use the work executor without taking admission from the closing owner.
-            let attempt = lock.withLock {
-                if let closing { return closing }
-                let closeBody = self.closeBody, id = UUID()
-                // Final close may overlap a cancelled startup host check. A live recovery scope makes owner.close refuse;
-                // after closure, the host check observes an invalid lease. Neither path can reopen dispatch.
-                let task = Task { closeBody() }
-                let attempt = (id: id, task: task); closing = attempt; return attempt
+            switch beginClose(retryCleanup: retryCleanup) {
+            case .result(let result):
+                return result
+            case .attempt(let attempt):
+                let result = await Self.boundedClose(attempt.task, until: .now.advanced(by: closeWait))
+                if result != .timedOut {
+                    lock.withLock { if closing?.id == attempt.id { closing = nil } }
+                }
+                return result
             }
-            let result = await Self.boundedClose(attempt.task, until: .now.advanced(by: closeWait))
-            if result != .timedOut {
-                lock.withLock { if closing?.id == attempt.id { closing = nil } }
+        }
+        private func beginClose(retryCleanup: Bool) -> CloseStart {
+            lock.withLock {
+                if let closing { return .attempt(closing) }
+                let retryOwners: [any SetupMaintenanceRecoveryOwnerCleanup]
+                if retryCleanup, !pendingOwners.isEmpty {
+                    let now = retryNow()
+                    retryOwners = pendingOwners.values.compactMap { pending in
+                        guard let retryAfter = pending.retryAfter, now >= retryAfter else { return nil }
+                        return pending.owner as? any SetupMaintenanceRecoveryOwnerCleanup
+                    }
+                } else {
+                    retryOwners = []
+                }
+                if retryOwners.isEmpty, let result = pendingCloseResult() { return .result(result) }
+
+                // The original owner retries cleanup through its held scope. Final close waits for every actual join.
+                let task = Task {
+                    for owner in retryOwners { await owner.join() }
+                    if let result = self.lock.withLock({ self.pendingCloseResult() }) { return result }
+                    return self.closeBody()
+                }
+                let attempt = (id: UUID(), task: task)
+                closing = attempt
+                return .attempt(attempt)
             }
-            return result
+        }
+        /// The caller holds the custody lock.
+        private func pendingCloseResult() -> CloseResult? {
+            guard !pendingOwners.isEmpty else { return nil }
+            return pendingOwners.values.contains { $0.retryAfter != nil } ? .failed : .pending
         }
         func closeAttemptIDOwned() throws -> UUID? {
             try RuntimeMaintenanceOwnedControl.require(); return lock.withLock { closing?.id }
@@ -141,6 +195,9 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         func closeAfterJoining() async { await custody.closeAfterJoining() }
         func closeAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
             await custody.closeAfterJoiningResult()
+        }
+        func retryCloseAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+            await custody.retryCloseAfterJoiningResult()
         }
         func releaseAfterJoining() { custody.releaseAfterJoining() }
     }
@@ -224,7 +281,7 @@ enum SetupMaintenanceRecoveryNativeAdapter {
         }
         return .phase(row.phase)
     }
-    private final class NativeOwner: @unchecked Sendable {
+    private final class NativeOwner: SetupMaintenanceRecoveryOwnerCleanup, @unchecked Sendable {
         private let lock = NSLock()
         private let recovery: RuntimeMaintenanceStartupRecovery
         private let scope: SetupAccountOwner.MaintenanceRecoveryScope
