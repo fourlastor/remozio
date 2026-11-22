@@ -596,7 +596,9 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
     }
     func testAJobWithoutALivePidDoesNotRegisterAReplacement() throws {
         try withAsyncStartup(.restoring) { h, driver in
-            h.inspected = .matching(nil); _ = await Self.failed(h, driver)
+            // The wait for a live pid ends only at the deadline. Preparation alone takes about 3.4 seconds
+            // locally, so a 5-second deadline could expire before the wait starts on a slower runner.
+            h.inspected = .matching(nil); _ = await Self.failed(h, driver, timeoutSeconds: 15)
             XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.writes, [.needsOwnerRecovery])
             XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable); XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
         }
@@ -604,7 +606,7 @@ final class RuntimeMaintenanceStartupRecoveryTests: XCTestCase {
     func testWrongCodeDuringAdoptionStopsBeforeRegistration() throws {
         try withAsyncStartup(.restoring) { h, driver in
             h.inspected = .matching(h.witness.processID); h.rejectCode = true
-            _ = await Self.failed(h, driver)
+            _ = await Self.failed(h, driver, timeoutSeconds: 20)
             XCTAssertEqual(h.registrations, 0); XCTAssertEqual(h.writes, [.needsOwnerRecovery])
             XCTAssertEqual(try h.frame().window?.failure, .serviceUnavailable); XCTAssertEqual(driver.metrics.hellos.withLock { $0 }, 0)
         }
