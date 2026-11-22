@@ -112,7 +112,7 @@ final class EnrollmentJournal {
     private let db: OpaquePointer
     private let mac: Data
     private let account: Data
-    private let maximumRows = 1024
+    static let maximumRows = 1024
     init(connection: OpaquePointer, macID: Data, accountID: Data) { db = connection; mac = macID; account = accountID }
 
     static func createSchema(_ db: OpaquePointer) throws {
@@ -265,7 +265,7 @@ final class EnrollmentJournal {
             while true {
                 let result = sqlite3_step($0)
                 if result == SQLITE_DONE { return phones }
-                guard result == SQLITE_ROW, phones.count < maximumRows else { throw EnrollmentJournalError.corruptData }
+                guard result == SQLITE_ROW, phones.count < Self.maximumRows else { throw EnrollmentJournalError.corruptData }
                 let phone = try blob($0, 0)
                 guard phone.count == 16, phones.insert(phone).inserted else { throw EnrollmentJournalError.corruptData }
             }
@@ -280,7 +280,7 @@ final class EnrollmentJournal {
                 let result = sqlite3_step($0)
                 if result == SQLITE_DONE { return values }
                 guard result == SQLITE_ROW else { throw JournalDatabaseError.storage(result) }
-                guard values.count < maximumRows else { throw EnrollmentJournalError.corruptData }
+                guard values.count < Self.maximumRows else { throw EnrollmentJournalError.corruptData }
                 let active = sqlite3_column_int64($0, 2)
                 guard active == 0 || active == 1 else { throw EnrollmentJournalError.corruptData }
                 let value = try EnrollmentEncoding.phone(blob($0, 3), active: active == 1)
@@ -295,7 +295,7 @@ final class EnrollmentJournal {
         guard try !restrictedPhones().contains(enrollment.approval.phoneID) else { throw EnrollmentJournalError.recoveryRequired }
         guard enrollment.approval.active else { throw EnrollmentJournalError.invalidState }
         let previous = try all()
-        guard previous.count < maximumRows else { throw EnrollmentJournalError.capacityExceeded }
+        guard previous.count < Self.maximumRows else { throw EnrollmentJournalError.capacityExceeded }
         for old in previous {
             guard !(old.approval.phoneID == enrollment.approval.phoneID && (old.approval.active || old.epoch == enrollment.epoch)),
                   old.epoch != enrollment.epoch,

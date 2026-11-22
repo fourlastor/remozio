@@ -938,6 +938,82 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
     }
 
+    func testFullDeliveryStoreReopensAndCommitsFirstRevocationAtomically() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
+        let revision = try add(db, writer: writer, revision: empty)
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        _ = try tokenCandidate(db, revision: revision)
+        _ = try tokenCandidate(db, revision: revision, head: 1)
+        let version = try db.read { try $0.storageSchemaVersion }
+        let continuity = try db.read { try $0.continuityDigests() }
+        try db.close()
+
+        let reopened = try open(f, maximum: 2)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.storageSchemaVersion }, version)
+        XCTAssertEqual(try reopened.read { try $0.continuityDigests() }, continuity)
+        XCTAssertThrowsError(try tokenCandidate(reopened, revision: revision, head: 2)) {
+            XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded)
+        }
+        let reopenedWriter = try reopened.write { try $0.createEpoch(descriptor(epoch: 4)) }
+        let removal = try reopened.write {
+            try $0.revokeApprovalEnrollment(phoneID: id(5), epoch: id(9), expectedTrustRevision: revision,
+                eventID: id(55), receiptTimeMs: 1000, writer: reopenedWriter, expectedAuditHead: 0,
+                gateway: gatewayRemoval(head: 2))
+        }
+        let control = try XCTUnwrap(removal.gatewayControl)
+        XCTAssertEqual(control.revision, 3)
+        XCTAssertTrue(try reopened.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertEqual(try reopened.read { try $0.epoch(id(3))?.head }, 1)
+        XCTAssertEqual(try reopened.read { try $0.epoch(id(4))?.head }, 1)
+        XCTAssertEqual(try reopened.read { try $0.gatewayAuthorityHead(identity()) }, 3)
+        let trust = try GatewayAuthorityTrust(registration: identity(),
+            enrollment: GatewayPhoneEnrollment(phoneID: id(5), epoch: id(9), tag: id(5, count: 32), active: false), active: true)
+        XCTAssertEqual(try reopened.read {
+            try $0.pendingGatewayRevocation(operationID: control.operationID, trust: trust, nowUnixMillis: 1000, now: moment())
+        }?.canonicalPayload, control.canonicalPayload)
+        XCTAssertNil(try reopened.read { try $0.gatewayAcknowledgment(identity()) })
+    }
+
+    func testFullDeliveryStoreRollsBackRevocationIfTheControlWriteFails() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
+        let revision = try add(db, writer: writer, revision: empty)
+        defer { try? db.close() }
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        _ = try tokenCandidate(db, revision: revision)
+        _ = try tokenCandidate(db, revision: revision, head: 1)
+        let before = try db.read { try $0.continuityDigests() }
+        try f.sql("CREATE TRIGGER reject_revocation BEFORE INSERT ON gateway_revocations_v1 BEGIN SELECT RAISE(ABORT,'fixture'); END")
+        XCTAssertThrowsError(try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval(head: 2))) {
+            XCTAssertNotEqual($0 as? GatewayAuthorityError, .capacityExceeded)
+        }
+        XCTAssertEqual(try db.read { try $0.continuityDigests() }, before)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, revision)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().enrollments.count }, 1)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 2)
+        try f.sql("DROP TRIGGER reject_revocation")
+        _ = try remove(db, writer: writer, revision: revision, gateway: gatewayRemoval(head: 2))
+    }
+
+    func testFullDeliveryStoreStillAcceptsVerifiedTrustRestrictionsAndRecoveredRevocation() throws {
+        let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
+        let revision = try add(db, writer: writer, revision: empty)
+        defer { try? db.close() }
+        try db.write { try $0.configureGatewayAuthority(identity()) }
+        _ = try tokenCandidate(db, revision: revision)
+        _ = try tokenCandidate(db, revision: revision, head: 1)
+
+        let restricted = try restrictTrust(db, writer: writer, revision: revision, head: 1,
+            evidence: trustEvidence(phone: 8, operation: 94))
+        XCTAssertEqual(restricted.disposition, .restricted)
+        let recovered = try recoverRemoval(db, writer: writer, revision: restricted.trustRevision, head: 2)
+        XCTAssertNotEqual(recovered, restricted.trustRevision)
+        XCTAssertTrue(try db.read { try $0.approvalTrustSnapshot().enrollments.isEmpty })
+        XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(8)])
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 3)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 2)
+    }
+
     func testRecoveryReusesNormalRevocationAtFullCapacityWithoutAuditOrRevisionChanges() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
         let revision = try add(db, writer: writer, revision: empty)
@@ -1054,19 +1130,18 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertThrowsError(try db.read { _ in }) { XCTAssertEqual($0 as? JournalDatabaseError, .unavailable) }
     }
 
-    func testRecoveredRevocationsShareTheControlStorageBoundAndKeepIdempotentRetryAvailable() throws {
+    func testRecoveredRevocationsUseSeparateCapacityAndKeepIdempotentRetryAvailable() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
         try db.write { try $0.configureGatewayAuthority(identity()) }
         let first = try recoverRemoval(db, writer: writer, revision: empty, head: 0)
         let second = try recoverRemoval(db, writer: writer, revision: first, head: 1,
             evidence: recoveredRemoval(phone: 6, epoch: 10, operation: 71))
-        XCTAssertThrowsError(try recoverRemoval(db, writer: writer, revision: second, head: 2,
-            evidence: recoveredRemoval(phone: 7, epoch: 11, operation: 72))) {
-            XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded)
-        }
-        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, second)
-        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
-        XCTAssertEqual(try recoverRemoval(db, writer: writer, revision: second, head: 2), second)
+        let third = try recoverRemoval(db, writer: writer, revision: second, head: 2,
+            evidence: recoveredRemoval(phone: 7, epoch: 11, operation: 72))
+        XCTAssertNotEqual(third, second)
+        XCTAssertEqual(try db.read { try $0.approvalTrustSnapshot().revision }, third)
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 3)
+        XCTAssertEqual(try recoverRemoval(db, writer: writer, revision: third, head: 3), third)
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
     }
 
@@ -1208,20 +1283,21 @@ final class EnrollmentJournalTests: XCTestCase {
         XCTAssertEqual(try db.read { try $0.approvalTrustRestrictions() }, [id(5)])
     }
 
-    func testUnknownPhoneEvidenceCannotEnrollOrConsumeAuthorityAndRetryWorksAtCapacity() throws {
+    func testUnknownPhoneEvidenceUsesSeparateCapacityAndCannotEnrollOrConsumeAuthority() throws {
         let f = try Fixture(), (db, writer, empty) = try setup(f, maximum: 2)
         try db.write { try $0.configureGatewayAuthority(identity()) }
         let first = try restrictTrust(db, writer: writer, revision: empty, head: 0)
         let second = try restrictTrust(db, writer: writer, revision: first.trustRevision, head: 1,
             evidence: trustEvidence(phone: 8, operation: 94))
-        XCTAssertThrowsError(try restrictTrust(db, writer: writer, revision: second.trustRevision, head: 2,
-            evidence: trustEvidence(phone: 9, operation: 95))) { XCTAssertEqual($0 as? GatewayAuthorityError, .capacityExceeded) }
-        XCTAssertEqual(try restrictTrust(db, writer: writer, revision: second.trustRevision, head: 2).disposition, .alreadyRestricted)
-        XCTAssertThrowsError(try add(db, writer: writer, revision: second.trustRevision, head: 2)) {
+        let third = try restrictTrust(db, writer: writer, revision: second.trustRevision, head: 2,
+            evidence: trustEvidence(phone: 9, operation: 95))
+        XCTAssertEqual(third.disposition, .restricted)
+        XCTAssertEqual(try restrictTrust(db, writer: writer, revision: third.trustRevision, head: 3).disposition, .alreadyRestricted)
+        XCTAssertThrowsError(try add(db, writer: writer, revision: third.trustRevision, head: 3)) {
             XCTAssertEqual($0 as? EnrollmentJournalError, .recoveryRequired)
         }
         XCTAssertTrue(try db.read { try $0.approvalEnrollments().isEmpty })
-        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 2)
+        XCTAssertEqual(try db.read { try $0.epoch(id(3))?.head }, 3)
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(identity()) }, 0)
     }
 
