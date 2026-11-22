@@ -29,7 +29,7 @@ class ReleaseManifestBuildTests(unittest.TestCase):
                  'routing.away-control', 'routing.status-response', 'authority.audit-ipc',
                  'phone.audit-frame', 'audit.history-status', 'audit.batch', 'runtime.audit-upgrade-record',
                  'runtime.audit-upgrade-graph', 'runtime.audit-upgrade-graph-record', 'runtime.audit-upgrade-cutover-record',
-                 'runtime.audit-upgrade-startup-fence', 'command.monitor-activity', 'setup.audit-upgrade-progress',
+                 'runtime.audit-upgrade-startup-fence', 'command.monitor-activity', 'setup.audit-upgrade-progress', 'setup.retained-status',
                  'authority.update-scheduling-candidate', 'authority.update-admission-registration',
                  'authority.machine-update-activation', 'authority.machine-update-replacement',
                  'authority.machine-update-completion-intent', 'authority.machine-update-policy-intent',
@@ -70,6 +70,15 @@ class ReleaseManifestBuildTests(unittest.TestCase):
             for configuration, digest in expected.items():
                 info = MANIFEST.generate(self.environment(configuration))
                 self.assertEqual(hashlib.sha256(info['RemozioReleaseManifest']).hexdigest(), digest)
+
+    def test_retained_status_v3_is_declared_only_by_app_and_setup(self):
+        name = 'setup.retained-status'
+        for role, *_ in MANIFEST.COMPONENTS:
+            formats = {value[0]: value for value in MANIFEST.declarations(role)}
+            if role in (1, 8):
+                self.assertEqual(formats[name], {0: name, 1: [3], 2: [3], 3: {}})
+            else:
+                self.assertNotIn(name, formats)
 
     def test_audit_upgrade_startup_fence_declares_all_native_participants(self):
         for role, *_ in MANIFEST.COMPONENTS:

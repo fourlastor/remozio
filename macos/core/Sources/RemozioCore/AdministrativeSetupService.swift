@@ -125,6 +125,7 @@ public final class AdministrativeSetupService: @unchecked Sendable {
         }
         var maximumConnections: Int { binding.maximumConnections }
         var processLease: SetupProcessLease { binding.processLease }
+        var supportsStatusApplicability: Bool { SetupRetainedStatusV3Wire.supports(host.release) }
         var state: AdministrativeSetupLifecycle.State { routing.state }
         func validate() throws { try host.validateStartup(); try binding.validate() }
         func currentOwner() throws -> SetupAccountOwner {

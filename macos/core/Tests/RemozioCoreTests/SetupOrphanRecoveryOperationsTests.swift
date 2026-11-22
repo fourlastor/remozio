@@ -147,6 +147,96 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
             }
         }
     }
+    func testFirstBoundOrphanOffersRestoreWithoutAClaimAndRunsOnlyTheRequestedAction() throws {
+        let cleanup = Mutex(0)
+        try withFixture(seed: .stopped, prepare: { f in
+            try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+            try XCTUnwrap(f.invocation).retainCleanup { cleanup.withLock { $0 += 1 } }
+        }) { f in
+            let h = Context(f)
+            let owner = f.retained.owner
+            let peer = h.peer
+            try await owner.waitForRetainedQuiescenceOwned()
+            XCTAssertEqual(cleanup.withLock { $0 }, 1)
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+            let checkCount = Mutex(0)
+            let facade = AdministrativeSetupConnectionFacade(verify: { peer.credentials }, select: { $0 == .statusOnly },
+                openNormal: { _ in throw Failure.expected }, status: { _ in .unavailable },
+                statusV3: { owner.retainedStatusApplicability(authenticatedPeer: $0, currentOwner: peer.owner) },
+                check: { checkCount.withLock { $0 += 1 }; return .refused }, invalidate: {})
+            defer { facade.close() }
+            let request = try SetupRetainedStatusV3Wire.Request(legacy: .init(requestID: Data(repeating: 2, count: 16)))
+            let replies = Mutex<[Data?]>([])
+            facade.retainedInvocationStatus(try request.bytes) { bytes in replies.withLock { $0.append(bytes) } }
+            XCTAssertEqual(replies.withLock { $0.count }, 1)
+            let bytes = try XCTUnwrap(replies.withLock { $0.first ?? nil })
+            let observation = try SetupRetainedStatusV3Wire.decodeReply(bytes, matching: request)
+            XCTAssertEqual(observation.applicability, .restore)
+            XCTAssertEqual(observation.window?.revision, try f.h.frame().window?.revision)
+            XCTAssertEqual(checkCount.withLock { $0 }, 0)
+            XCTAssertEqual(h.imports.withLock { $0 }, 0)
+            XCTAssertTrue(h.effects.withLock { $0.isEmpty })
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+
+            let session = try h.session(maximum: 3)
+            defer { session.close() }
+            let restore = try E.request(.restore, identity: XCTUnwrap(observation.identity))
+            try E.start(session, restore)
+            XCTAssertNil(owner.retainedStatusApplicability(authenticatedPeer: peer.credentials, currentOwner: peer.owner).applicability)
+            await session.waitForWork()
+            XCTAssertEqual(try E.code(session, restore), .restored)
+            XCTAssertEqual(h.effects.withLock { $0 }, ["restore"])
+            XCTAssertEqual(cleanup.withLock { $0 }, 1)
+            try f.retained.assertReleased()
+        }
+    }
+
+    func testChangedProtectedRowInvalidatesFirstOrphanRestore() throws {
+        try withFixture(seed: .stopped, prepare: { f in
+            try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+        }) { f in
+            let owner = f.retained.owner, binding = f.retained.binding
+            try await owner.waitForRetainedQuiescenceOwned()
+            let first = owner.retainedStatusApplicability(authenticatedPeer: binding.peer, currentOwner: binding.authorityOwner)
+            XCTAssertEqual(first.applicability, .restore)
+            let old = try XCTUnwrap(f.h.frame().window)
+            let other = try RuntimeMaintenanceStartupPolicy.row(old, phase: .needsOwnerRecovery,
+                service: old.service, failure: .healthFailed)
+            XCTAssertNotEqual(other.revision, old.revision)
+            owner.publishMaintenanceRecovery(other)
+            let next = owner.retainedStatusApplicability(authenticatedPeer: binding.peer, currentOwner: binding.authorityOwner)
+            XCTAssertNil(next.applicability)
+            XCTAssertEqual(try owner.retainedInvocationState(), .orphan)
+        }
+    }
+
+    func testActualClaimInvalidatesFirstOrphanRestore() throws {
+        try withFixture(seed: .stopped, prepare: { f in
+            try f.retained.owner.installRetainedApplicabilityRelease(f.retained.candidate)
+        }) { f in
+            let owner = f.retained.owner, binding = f.retained.binding
+            try await owner.waitForRetainedQuiescenceOwned()
+            let claiming = Mutex(false), checkedWhileClaiming = Mutex(false)
+            let rights = try f.retained.authorize(verify: {
+                if claiming.withLock({ $0 }) {
+                    XCTAssertNil(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                        currentOwner: binding.authorityOwner).applicability)
+                    checkedWhileClaiming.withLock { $0 = true }
+                }
+            })
+            let target = try SetupRetainedOrphanClaim.Target.capture(owner: owner, authorization: rights)
+            XCTAssertEqual(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                currentOwner: binding.authorityOwner).applicability, .restore)
+            claiming.withLock { $0 = true }
+            let claim = try f.retained.claim(rights, target: target)
+            defer { claim.abandon() }
+            XCTAssertTrue(checkedWhileClaiming.withLock { $0 })
+            XCTAssertNil(owner.retainedStatusApplicability(authenticatedPeer: binding.peer,
+                currentOwner: binding.authorityOwner).applicability)
+            XCTAssertEqual(try owner.retainedInvocationState(), .recovering)
+        }
+    }
+
     func testTotalThreeRestoresThroughTheExistingEntryAndOriginalHold() throws {
         try withFixture(seed: .stopped) { f in
             let h = Context(f), s = try h.session(maximum: 3), r = try h.request(.restore); defer { s.close() }

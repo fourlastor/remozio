@@ -28,6 +28,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             try MachineUpdateStableReleaseRecord.requireFormats(evidence)
             try AuthorityMaintenanceUnboundRequest.requireFormats(evidence)
             try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: evidence)
+            XCTAssertTrue(SetupRetainedStatusV3Wire.supports(evidence))
             XCTAssertEqual(evidence.manifest.components.count, 8)
             XCTAssertEqual(evidence.codeDirectoryHashes.count, 8)
             XCTAssertFalse(evidence.manifest.absentRoles.contains(.setupController))

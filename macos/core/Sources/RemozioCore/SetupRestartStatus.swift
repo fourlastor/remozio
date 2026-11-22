@@ -60,6 +60,14 @@ enum SetupRestartStatus {
 struct SetupRetainedStatusProjection: Equatable, Sendable {
     let retained: SetupRetainedInvocationStatus
     let restart: SetupRestartStatus.Snapshot?
+    let applicability: SetupRetainedStatusV3Wire.Applicability?
+    init(retained: SetupRetainedInvocationStatus, restart: SetupRestartStatus.Snapshot?,
+         applicability: SetupRetainedStatusV3Wire.Applicability? = nil) {
+        self.retained = retained
+        self.restart = restart
+        self.applicability = restart == nil ? applicability : nil
+    }
+
     static let unavailable = Self(retained: .unavailable, restart: nil)
     var v1: SetupRetainedInvocationStatus { restart == nil ? retained : .unavailable }
 }

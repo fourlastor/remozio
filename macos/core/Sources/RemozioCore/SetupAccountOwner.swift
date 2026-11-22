@@ -62,6 +62,8 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private let asynchronousWork = SetupOwnerAsyncWork()
     private let setupReplyWork = SetupOwnerAsyncWork()
     private let retainedStatus = SetupRetainedInvocationStatus.Reader()
+    private var retainedApplicabilityRelease: SignedReleaseEvidence?
+    private var retainedQuiescenceTask: Task<Void, Never>?
     private var retainedInvocationReservation: SetupRetainedInvocationReservation?
     private var restartRecovery: SetupRestartRecovery?
     /// The holder that took the current admission tokens. A restart claim waits only while it is an executor run.
@@ -181,10 +183,22 @@ public final class SetupAccountOwner: @unchecked Sendable {
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(50)) { continuation.resume() }
         }
     }
+    // Invalidate before entering either token set. A token can close outside the owner lock,
+    // so an idle check here cannot predict which attempt will acquire admission.
+    private func admitSetupMutation() throws -> SetupOwnerAsyncWork.Token {
+        retainedStatus.invalidateApplicability()
+        return try asynchronousWork.admit()
+    }
+
+    private func admitSetupReply() throws -> SetupOwnerAsyncWork.Token {
+        retainedStatus.invalidateApplicability()
+        return try setupReplyWork.admit()
+    }
+
     func acquireSetupReplyAdmission() throws -> SetupOwnerAsyncWork.Token {
         try lock.withLock {
             guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
-            return try setupReplyWork.admit()
+            return try admitSetupReply()
         }
     }
     /// The native endpoint retains this reference through response encoding and the reply callback.
@@ -231,9 +245,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
                   asynchronousWork.isIdle, setupReplyWork.isIdle else {
                 throw MaintenanceRecoveryAdmissionError.busyBeforeOwner
             }
-            let reply = try setupReplyWork.admit()
+            let reply = try admitSetupReply()
             do {
-                let admission = try asynchronousWork.admit()
+                let admission = try admitSetupMutation()
                 do {
                     let held = ExecutorAdmission.durable(admission: admission, reply: reply,
                         activity: try releaseActivity?.acquireShared(), endObserver: ownedHoldEndObserver)
@@ -482,9 +496,9 @@ public final class SetupAccountOwner: @unchecked Sendable {
     private func admitExecutorWork() throws -> (held: ExecutorAdmission, endWorker: @Sendable () -> Void) {
         try lock.withLock {
             guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
-            let reply = try setupReplyWork.admit()
+            let reply = try admitSetupReply()
             let admission: SetupOwnerAsyncWork.Token
-            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            do { admission = try admitSetupMutation() } catch { reply.close(); throw error }
             let held = ExecutorAdmission.forExecutorRun(admission: admission, reply: reply, endObserver: ownedHoldEndObserver)
             let endWorker = try held.beginWorker()
             admissionHolder = held
@@ -684,6 +698,80 @@ public final class SetupAccountOwner: @unchecked Sendable {
         let reservation = lock.withLock { retainedInvocationReservation }
         return try reservation?.state()
     }
+    func retainedStatusApplicability(authenticatedPeer: XPCPeerCredentials) -> SetupRetainedStatusProjection {
+        guard getpid() == processID, let currentOwner = try? lookupAccount(authenticatedPeer.userID) else { return .unavailable }
+        return retainedStatusApplicability(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
+
+    func retainedStatusApplicability(authenticatedPeer: XPCPeerCredentials,
+        currentOwner: LocalAccountIdentity) -> SetupRetainedStatusProjection {
+        retainedStatus.readApplicability(authenticatedPeer: authenticatedPeer, currentOwner: currentOwner)
+    }
+
+    func applicabilityGenerationOwned(for reservation: SetupRetainedInvocationReservation) throws -> UInt64? {
+        try RuntimeMaintenanceOwnedControl.require()
+        return retainedStatus.applicabilityGeneration(for: reservation)
+    }
+
+    func waitForRetainedQuiescenceOwned() async throws {
+        try RuntimeMaintenanceOwnedControl.require()
+        let task = lock.withLock { retainedQuiescenceTask }
+        guard let task else { throw AdministrativeSetupError.unavailable }
+        await task.value
+    }
+
+    /// Native startup supplies the checked release. Owned tests can supply their installed fixture release.
+    func installRetainedApplicabilityRelease(_ candidate: SignedReleaseEvidence) throws {
+        try lock.withLock {
+            guard getpid() == processID, !closed, !closing, retainedApplicabilityRelease == nil,
+                  try InstallationInventory.digest(candidate) == expectedReleaseDigest else {
+                throw AdministrativeSetupError.unavailable
+            }
+            retainedApplicabilityRelease = candidate
+        }
+    }
+
+    private func publishRetainedQuiescence(_ record: SetupRetainedInvocationReservation) {
+        let pending: (SignedReleaseEvidence, UInt64, SetupRetainedInvocationReservation.Quiescence)? = try? lock.withLock {
+            guard !closed, !closing, retainedInvocationReservation === record,
+                  asynchronousWork.permits(record.admission), let release = retainedApplicabilityRelease,
+                  let generation = retainedStatus.applicabilityGeneration(for: record),
+                  let evidence = try record.beginQuiescence() else { return nil }
+            return (release, generation, evidence)
+        }
+        guard let (release, generation, evidence) = pending else { return }
+        let task = Task {
+            do {
+                try await evidence.joined.value
+                let row = try await record.hold.run(on: auditUpgradeExecutor) { _ in
+                    try self.withMachine(admission: record.admission) { machine in
+                        _ = try self.currentInventory(machine)
+                        let frame = try machine.runtimeMaintenanceStartupFrame(
+                            accountID: evidence.window.scope.authority.accountID, candidate: release)
+                        guard let row = frame.window, row.phase == .needsOwnerRecovery,
+                              row.purpose == .retainedRuntime, row.shutdownBinding != nil,
+                              try record.confirmsQuiescence(evidence, for: row) else {
+                            throw AdministrativeSetupError.unavailable
+                        }
+                        return row
+                    }
+                }
+                try lock.withLock {
+                    guard !closed, !closing, retainedInvocationReservation === record,
+                          asynchronousWork.permits(record.admission),
+                          try record.confirmsQuiescence(evidence, for: row) else { return }
+                    retainedStatus.publishRestore(for: record, identity: evidence.identity, row: row,
+                        expectedGeneration: generation)
+                }
+            } catch {
+                // Status remains unavailable. The explicit recovery path still owns claim and retry policy.
+            }
+        }
+        lock.withLock {
+            if retainedInvocationReservation === record { retainedQuiescenceTask = task }
+        }
+    }
+
     /// Reserves both admissions before construction. The private record retains shared activity through orphaning.
     func reserveRetainedInvocation(authenticatedPeer: XPCPeerCredentials, incarnation: UUID,
         authenticatedOwner: LocalAccountIdentity) throws -> (record: SetupRetainedInvocationReservation,
@@ -694,16 +782,18 @@ public final class SetupAccountOwner: @unchecked Sendable {
                   try retainedInvocationReservation == nil || retainedInvocationReservation?.state() == .settled else {
                 throw AdministrativeSetupError.unavailable
             }
-            let reply = try setupReplyWork.admit()
+            let reply = try admitSetupReply()
             let admission: SetupOwnerAsyncWork.Token
-            do { admission = try asynchronousWork.admit() } catch { reply.close(); throw error }
+            do { admission = try admitSetupMutation() } catch { reply.close(); throw error }
             do {
                 let activity = try releaseActivity?.acquireShared()
                 let record = try SetupRetainedInvocationReservation(authenticatedPeer: authenticatedPeer, incarnation: incarnation, admission: admission, reply: reply,
                     activity: activity, authenticatedOwner: authenticatedOwner, recoveryExecutor: auditUpgradeExecutor,
                     hold: .durable(admission: admission, reply: reply, activity: activity, endObserver: ownedHoldEndObserver),
-                    recoverySignal: { [weak self] in self?.signalMaintenanceRecovery() })
-                retainedInvocationReservation = record; admissionHolder = record.hold; retainedStatus.publish(record, owner: authenticatedOwner)
+                    recoverySignal: { [weak self] in self?.signalMaintenanceRecovery() },
+                    quiescenceSignal: { [weak self] record in self?.publishRetainedQuiescence(record) })
+                retainedInvocationReservation = record; retainedQuiescenceTask = nil
+                admissionHolder = record.hold; retainedStatus.publish(record, owner: authenticatedOwner)
                 return (record, {
                     try self.lock.withLock {
                         guard self.retainedInvocationReservation === record, !self.closed, !self.closing,
@@ -912,6 +1002,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
     func claimRetainedOrphan(target: SetupRetainedOrphanClaim.Target,
         authorization: SetupRetainedRecoveryAuthorization) throws -> SetupRetainedInvocationReservation.RecoveryToken {
         guard getpid() == processID else { throw JournalLeaseError.invalidated }
+        retainedStatus.invalidateApplicability()
         try authorization.takeForClaim()
         let claimed = try lock.withLock {
             guard !closed, let record = retainedInvocationReservation, record === target.record,
@@ -1185,7 +1276,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed, !closing, getpid() == processID, let operation = gatewayJournalOperation else {
                 throw AdministrativeSetupError.unavailable
             }
-            let admission = try asynchronousWork.admit()
+            let admission = try admitSetupMutation()
             do { return (admission, try releaseActivity?.acquireShared(), operation) }
             catch { admission.close(); throw error }
         }
@@ -1244,7 +1335,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed, !closing, getpid() == processID, let operation = gatewayActivationOperation else {
                 throw AdministrativeSetupError.unavailable
             }
-            let admission = try asynchronousWork.admit()
+            let admission = try admitSetupMutation()
             do { return (admission, try releaseActivity?.acquireShared(), operation) }
             catch { admission.close(); throw error }
         }
@@ -1364,7 +1455,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed, !closing, getpid() == processID, let operation = importedGatewayOperation else {
                 throw AdministrativeSetupError.unavailable
             }
-            let admission = try asynchronousWork.admit()
+            let admission = try admitSetupMutation()
             do { return (admission, try releaseActivity?.acquireShared(), operation) }
             catch { admission.close(); throw error }
         }
@@ -2203,7 +2294,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
                                 inspect: @escaping @Sendable (SetupCloudflareConfiguration, ImportedRelayInspectionBinding) async throws -> Value) async throws -> Value {
         let context = try lock.withLock {
             guard !closed, !closing, getpid() == processID else { throw AdministrativeSetupError.unavailable }
-            let admission = try asynchronousWork.admit()
+            let admission = try admitSetupMutation()
             do { return (admission, try releaseActivity?.acquireShared()) }
             catch { admission.close(); throw error }
         }
@@ -2555,7 +2646,7 @@ public final class SetupAccountOwner: @unchecked Sendable {
             guard !closed, !closing, getpid() == processID, expected.supportsSettingsChanges, let operation = gatewaySettingsOperation else {
                 throw AdministrativeSetupError.unavailable
             }
-            let admission = try asynchronousWork.admit()
+            let admission = try admitSetupMutation()
             do { return (admission, try releaseActivity?.acquireShared(), operation) }
             catch { admission.close(); throw error }
         }

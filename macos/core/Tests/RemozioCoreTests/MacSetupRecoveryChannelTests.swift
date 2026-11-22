@@ -12,6 +12,7 @@ final class MacSetupRecoveryChannelTests: XCTestCase {
             var calls: [String] = []
             var pid: pid_t = 20
             var version = Wire.ipcVersion
+            var statusVersion: UInt64?
             var startCode: Wire.Code = .requestRecorded
             var progressCode: Wire.Code = .pending
             var wrongID = false
@@ -40,7 +41,13 @@ final class MacSetupRecoveryChannelTests: XCTestCase {
                     switch call {
                     case .status(let bytes):
                         state.calls.append("status")
+                        if let request = try? SetupRetainedStatusV3Wire.Request.decode(bytes) {
+                            state.statusVersion = SetupRetainedStatusV3Wire.version
+                            return .progress(try SetupRetainedStatusV3Wire.reply(request,
+                                .init(retained: .unavailable, restart: nil, applicability: .noAction)))
+                        }
                         let request = try SetupRetainedStatusWire.Request.decode(bytes)
+                        state.statusVersion = SetupRetainedStatusWire.version
                         return .progress(try SetupRetainedStatusWire.reply(request, .unavailable))
                     case .hello:
                         state.calls.append("hello")
@@ -73,8 +80,8 @@ final class MacSetupRecoveryChannelTests: XCTestCase {
             if let result { reply(result) }
         }
 
-        func channel(_ lane: MacSetupRecoveryLane = .recovery) -> MacSetupRecoveryChannel {
-            .init(lane: lane, driver: self, scheduleTimeout: { expire in
+        func channel(_ lane: MacSetupRecoveryLane = .recovery, statusV3: Bool = false) -> MacSetupRecoveryChannel {
+            .init(lane: lane, driver: self, statusV3: statusV3, scheduleTimeout: { expire in
                 self.state.withLock { $0.expire = expire }
                 return nil
             })
@@ -99,6 +106,16 @@ final class MacSetupRecoveryChannelTests: XCTestCase {
         try await recovery.channel().open()
         XCTAssertEqual(status.state.withLock { $0.calls }, ["status"])
         XCTAssertEqual(recovery.state.withLock { $0.calls }, ["hello"])
+    }
+
+    func testStatusCodecSelectionMakesOnlyOneStatusCall() async throws {
+        for supportsV3 in [false, true] {
+            let fixture = Fixture()
+            let observation = try await fixture.channel(.status, statusV3: supportsV3).readStatus()
+            XCTAssertEqual(observation.applicability, supportsV3 ? .noAction : nil)
+            XCTAssertEqual(fixture.state.withLock { $0.statusVersion }, supportsV3 ? 3 : 1)
+            XCTAssertEqual(fixture.state.withLock { $0.calls }, ["status"])
+        }
     }
 
     func testUnsupportedVersionsRefuseBeforeSending() async {

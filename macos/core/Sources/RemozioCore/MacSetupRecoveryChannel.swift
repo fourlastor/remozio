@@ -67,6 +67,7 @@ actor MacSetupRecoveryChannel {
     private enum State { case new, opening, open, closed }
 
     private let lane: MacSetupRecoveryLane
+    private let statusV3: Bool
     private let driver: any MacSetupRecoveryChannelDriver
     private let scheduleTimeout: ScheduleTimeout
     private let verifyAccount: @Sendable () throws -> Void
@@ -90,6 +91,7 @@ actor MacSetupRecoveryChannel {
         let policy = try XPCPeerPolicy(teamID: team, componentIdentifier: component.identifier,
             approvedCodeDirectoryHashes: [hash], expectedUserID: 0)
         self.init(lane: lane, driver: NativeMacSetupRecoveryChannelDriver(lane: lane, policy: policy),
+            statusV3: SetupRetainedStatusV3Wire.supports(verifiedRelease),
             verifyAccount: {
                 guard getpid() == pid, getuid() == uid, geteuid() == uid else {
                     throw AdministrativeSetupChannelError.wrongAccount
@@ -101,7 +103,7 @@ actor MacSetupRecoveryChannel {
         if lane == .recovery { try Wire.requireFormats(release) }
     }
 
-    init(lane: MacSetupRecoveryLane, driver: any MacSetupRecoveryChannelDriver,
+    init(lane: MacSetupRecoveryLane, driver: any MacSetupRecoveryChannelDriver, statusV3: Bool = false,
          scheduleTimeout: @escaping ScheduleTimeout = { expire in
              Task {
                  do { try await Task.sleep(for: .seconds(5)) } catch { return }
@@ -109,6 +111,7 @@ actor MacSetupRecoveryChannel {
              }
          }, verifyAccount: @escaping @Sendable () throws -> Void = {}) {
         self.lane = lane
+        self.statusV3 = statusV3
         self.driver = driver
         self.scheduleTimeout = scheduleTimeout
         self.verifyAccount = verifyAccount
@@ -121,9 +124,12 @@ actor MacSetupRecoveryChannel {
         state = .opening
         defer { close() }
         let request = try SetupRetainedStatusWire.Request(requestID: AccountPreparationIntent.randomID())
-        guard case .progress(let data) = try await invoke(.status(request.bytes), opening: true), let data else {
+        let versioned = SetupRetainedStatusV3Wire.Request(legacy: request)
+        let bytes = try statusV3 ? versioned.bytes : request.bytes
+        guard case .progress(let data) = try await invoke(.status(bytes), opening: true), let data else {
             throw AdministrativeSetupChannelError.invalidMessage
         }
+        if statusV3 { return try SetupRetainedStatusV3Wire.decodeReply(data, matching: versioned) }
         return try SetupRetainedStatusWire.decodeReply(data, matching: request)
     }
 

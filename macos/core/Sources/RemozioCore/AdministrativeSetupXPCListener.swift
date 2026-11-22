@@ -98,6 +98,7 @@ public final class AdministrativeSetupXPCListener: NSObject, NSXPCListenerDelega
                     onHandshake: { [weak registry] in registry?.handshake(id) }, close: close)
             },
             status: { routing.status($0) },
+            statusV3: nativeRecoveryContext?.supportsStatusApplicability == true ? { routing.statusApplicability($0) } : nil,
             check: { routing.checkStatus() },
             touch: { [weak registry] in registry?.touch(id) },
             normalAllowed: { routing.allowsNormal },

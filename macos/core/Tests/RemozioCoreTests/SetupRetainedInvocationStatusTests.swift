@@ -395,6 +395,36 @@ final class SetupRetainedInvocationStatusTests: XCTestCase, @unchecked Sendable 
             blocked.withLock { $0 = false }
         }
     }
+    func testNewReplyAdmissionInvalidatesThePublishedGenerationBeforeReturning() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let (binding, _) = try values(f), setup = try owner(f)
+            defer { try? setup.close() }
+            let reservation = try setup.reserveRetainedInvocation(authenticatedPeer: binding.peer,
+                incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner).record
+            reservation.abortConstruction()
+            let generation = try XCTUnwrap(setup.applicabilityGenerationOwned(for: reservation))
+            let reply = try setup.acquireSetupReplyAdmission()
+            defer { reply.close() }
+            XCTAssertNotEqual(try setup.applicabilityGenerationOwned(for: reservation), generation)
+        }
+    }
+
+    func testDifferentIncarnationCannotInheritThePublishedGeneration() throws {
+        try MachineUpdateReplacementTests.withRetainedMaterialWriterFixture { f in
+            let (binding, _) = try values(f), setup = try owner(f)
+            defer { try? setup.close() }
+            let first = try setup.reserveRetainedInvocation(authenticatedPeer: binding.peer,
+                incarnation: binding.incarnation, authenticatedOwner: binding.authorityOwner).record
+            first.abortConstruction()
+            let generation = try XCTUnwrap(setup.applicabilityGenerationOwned(for: first))
+            let second = try setup.reserveRetainedInvocation(authenticatedPeer: binding.peer,
+                incarnation: UUID(), authenticatedOwner: binding.authorityOwner).record
+            defer { second.abortConstruction() }
+            XCTAssertNil(try setup.applicabilityGenerationOwned(for: first))
+            XCTAssertNotEqual(try setup.applicabilityGenerationOwned(for: second), generation)
+        }
+    }
+
     func testClosedReaderAndInvalidPeerReturnUnavailable() throws {
         let reader = Status.Reader(), peer = XPCPeerCredentials(processID: getpid(), userID: getuid(), auditSessionID: 1)
         let owner = LocalAccountIdentity(uid: getuid(), primaryGroupID: getgid(), directoryID: UUID())

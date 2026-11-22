@@ -109,6 +109,7 @@ extension SetupRetainedStatusWire {
         let worker: SetupRetainedInvocationStatus.Worker?
         let cleanup: SetupRetainedInvocationStatus.Cleanup?
         let supervisor: SetupRetainedInvocationStatus.Supervisor?
+        var applicability: SetupRetainedStatusV3Wire.Applicability? = nil
         var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
     }
 

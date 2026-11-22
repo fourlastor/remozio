@@ -59,6 +59,13 @@ actor AdministrativeSetupLifecycle {
             let owner = current == .closed ? nil : self.owner; lock.unlock()
             return owner?.retainedInvocationStatus(authenticatedPeer: peer) ?? .unavailable
         }
+        func statusApplicability(_ peer: XPCPeerCredentials) -> SetupRetainedStatusProjection {
+            guard getpid() == process, lock.try() else { return .unavailable }
+            let owner = current == .serving ? self.owner : nil
+            lock.unlock()
+            return owner?.retainedStatusApplicability(authenticatedPeer: peer) ?? .unavailable
+        }
+
         static func verifiedOwner(_ owner: SetupAccountOwner) throws -> Routing {
             try owner.verifyCurrent()
             let routing = Routing(validateStartup: { try owner.verifyCurrent() })
@@ -92,6 +99,7 @@ actor AdministrativeSetupLifecycle {
         static func native(owner: SetupAccountOwner, shutdown: AdministrativeSetupShutdown,
             candidate: SignedReleaseEvidence) throws -> Runtime {
             guard getuid() == 0, geteuid() == 0 else { throw JournalLeaseError.rootRequired }
+            if SetupRetainedStatusV3Wire.supports(candidate) { try owner.installRetainedApplicabilityRelease(candidate) }
             let supervisor = try Supervisor.openNative(owner: owner, shutdown: shutdown)
             return .init(owner: owner, supervisor: supervisor,
                 discover: { try await owner.discoverMaintenanceRecovery(custody: shutdown, candidate: candidate, checkedHost: $0) },

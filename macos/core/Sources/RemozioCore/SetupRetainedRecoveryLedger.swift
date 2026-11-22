@@ -87,6 +87,15 @@ final class SetupRetainedRecoveryLedger: @unchecked Sendable, CustomStringConver
             if ready { continuation.resume() }
         }
     }
+    /// Owner-side cleanup may seal a dropped invocation without issuing a claim.
+    func sealForCleanup() throws {
+        guard getpid() == process else { throw JournalLeaseError.invalidated }
+        try lock.withLock {
+            guard !sealed, deinitReturned else { throw JournalLeaseError.invalidated }
+            sealed = true
+        }
+    }
+
     func sealForClaim() throws -> Task<Void, any Error>? {
         guard getpid() == process else { throw JournalLeaseError.invalidated }
         let completed = lock.withLock { () -> Task<Void, any Error>? in

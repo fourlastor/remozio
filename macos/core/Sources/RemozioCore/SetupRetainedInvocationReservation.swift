@@ -22,6 +22,7 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     private let recovery: SetupRetainedRecoveryLedger
     private let recoveryExecutor: SetupAuditUpgradeWorkExecutor?
     private let recoverySignal: (@Sendable () -> Void)?
+    private let quiescenceSignal: (@Sendable (SetupRetainedInvocationReservation) -> Void)?
     private var recoverySeal: UUID?, recoveryClaimID: UUID?
     private var recoveryClaimLive = false
     private var restorationWork: RestorationWork?
@@ -44,13 +45,15 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     init(authenticatedPeer: XPCPeerCredentials, incarnation: UUID, admission: SetupOwnerAsyncWork.Token, reply: SetupOwnerAsyncWork.Token,
          activity: ReleaseActivityToken?, ownedStatusLock: NSLock? = nil, authenticatedOwner: LocalAccountIdentity,
          recoveryExecutor: SetupAuditUpgradeWorkExecutor? = nil, hold: SetupAccountOwner.ExecutorAdmission? = nil,
-         recoverySignal: (@Sendable () -> Void)? = nil) throws {
+         recoverySignal: (@Sendable () -> Void)? = nil,
+         quiescenceSignal: (@Sendable (SetupRetainedInvocationReservation) -> Void)? = nil) throws {
         guard authenticatedPeer.processID > 0, authenticatedPeer.userID > 0, authenticatedPeer.userID < UInt32.max else {
             throw XPCPeerPolicyError.wrongPeer
         }
         if ownedStatusLock != nil { try RuntimeMaintenanceOwnedControl.require() }
         guard authenticatedOwner.uid == authenticatedPeer.userID else { throw XPCPeerPolicyError.wrongPeer }
         self.authenticatedOwner = authenticatedOwner; self.recoveryExecutor = recoveryExecutor; self.recoverySignal = recoverySignal
+        self.quiescenceSignal = quiescenceSignal
         // The owner passes the hold it made for these tokens. Without one, only an Owned test can build a record.
         let recordHold: SetupAccountOwner.ExecutorAdmission
         if let hold { recordHold = hold }
@@ -198,7 +201,11 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
     func invocationCleanupReturned(_ id: ObjectIdentifier, incarnation: UUID) {
         guard getpid() == process else { return }
         let exact = lock.withLock { invocationID == id && self.incarnation == incarnation && (phase == .orphan || phase == .recovering) }
-        if exact { recovery.invocationCleanupReturned(); recoverySignal?() }
+        if exact {
+            recovery.invocationCleanupReturned()
+            quiescenceSignal?(self)
+            recoverySignal?()
+        }
     }
     func attach(_ value: SetupRetainedInvocation) throws {
         defer { withExtendedLifetime(value) {} }
@@ -295,6 +302,33 @@ final class SetupRetainedInvocationReservation: @unchecked Sendable, CustomStrin
                 binding: capturedBinding, window: capturedWindow)
         }
     }
+    struct Quiescence: Sendable {
+        let identity: SetupRetainedInvocationStatus.Identity
+        let window: SetupRetainedInvocationStatus.Window
+        let joined: Task<Void, any Error>
+    }
+
+    /// The owner calls this after invocation cleanup. The explicit claim shares the same retained join task.
+    func beginQuiescence() throws -> Quiescence? {
+        try lock.withLock {
+            guard phase == .orphan, !worker, !settling, recoverySeal == nil, restorationWork == nil,
+                  capturedBinding != nil, let capturedWindow else { return nil }
+            try recovery.sealForCleanup()
+            return .init(identity: .init(reservationID: statusID, incarnation: incarnation), window: capturedWindow,
+                joined: try recovery.joinSealed())
+        }
+    }
+
+    func confirmsQuiescence(_ evidence: Quiescence, for row: RuntimeMaintenanceWindowRecord) throws -> Bool {
+        try lock.withLock {
+            guard phase == .orphan, !worker, !settling, recoverySeal == nil, restorationWork == nil,
+                  capturedWindow == evidence.window, evidence.window.identifies(row),
+                  capturedBinding?.matches(row.scope) == true else { return false }
+            _ = try recovery.requireJoined()
+            return true
+        }
+    }
+
     private func requireRecoveryOwner(_ authorization: SetupRetainedRecoveryAuthorization) throws {
         guard getpid() == process, getuid() == ownerUID, geteuid() == ownerUID,
               authorization.peer.processID > 0,
