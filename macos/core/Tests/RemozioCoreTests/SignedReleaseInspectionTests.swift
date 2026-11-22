@@ -27,7 +27,7 @@ final class SignedReleaseInspectionTests: XCTestCase {
             let evidence = try inspect(app, identifier: identifier)
             try MachineUpdateStableReleaseRecord.requireFormats(evidence)
             try AuthorityMaintenanceUnboundRequest.requireFormats(evidence)
-            try SetupOrphanRecoveryWire.requireFormats(evidence)
+            try MacSetupRecoveryChannel.requireFormats(lane: .recovery, release: evidence)
             XCTAssertEqual(evidence.manifest.components.count, 8)
             XCTAssertEqual(evidence.codeDirectoryHashes.count, 8)
             XCTAssertFalse(evidence.manifest.absentRoles.contains(.setupController))

@@ -98,7 +98,7 @@ private final class NativeSetupClientDriver: SetupClientDriver, @unchecked Senda
     func close() { connection.invalidate() }
     deinit { connection.invalidate() }
 }
-private final class SetupClientLifetime: @unchecked Sendable {
+final class SetupClientLifetime: @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private var closed = false
     func close() { lock.withLock { closed = true } }

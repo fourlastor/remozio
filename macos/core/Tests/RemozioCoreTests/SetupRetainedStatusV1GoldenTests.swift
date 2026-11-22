@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import RemozioProtocol
 import XCTest
 @testable import RemozioCore
 
@@ -78,5 +79,75 @@ final class SetupRetainedStatusV1GoldenTests: XCTestCase {
         XCTAssertEqual(expected.baselineCommit, baseline)
         XCTAssertEqual(actual.count, 31)
         XCTAssertEqual(actual, expected.vectors)
+    }
+}
+
+extension SetupRetainedStatusV1GoldenTests {
+    func testDecoderAcceptsAllExistingGoldenReplies() throws {
+        let request = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "retained-setup-status-v1", withExtension: "json", subdirectory: "Fixtures"))
+        let golden = try JSONDecoder().decode(Golden.self, from: Data(contentsOf: url))
+        for (name, hex) in golden.vectors where name != "request" {
+            let digits = Array(hex)
+            let bytes = try Data(stride(from: 0, to: digits.count, by: 2).map { index in
+                try XCTUnwrap(UInt8(String(digits[index...index + 1]), radix: 16))
+            })
+            let observation = try Wire.decodeReply(bytes, matching: request)
+            if name == "captured-row" {
+                XCTAssertEqual(observation.reservation, .attached)
+                XCTAssertEqual(observation.window?.revision, Data(repeating: 0xcd, count: 16))
+                XCTAssertEqual(observation.restoration?.failure, .cleanupPending)
+            }
+        }
+    }
+
+    func testDecoderKeepsUnavailableDistinctFromObservedAbsence() throws {
+        let request = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        let reply = try Wire.reply(request, .unavailable)
+        let unavailable = try Wire.decodeReply(reply, matching: request)
+        XCTAssertNil(unavailable.reservation)
+        XCTAssertNil(unavailable.window)
+        let absent = try Wire.decodeReply(edit(reply) { $0[3] = .unsigned(1) }, matching: request)
+        XCTAssertEqual(absent.reservation, SetupRetainedInvocationStatus.Reservation.absent)
+        XCTAssertNil(absent.window)
+    }
+
+    func testDecoderRejectsAnEarlierResponseID() throws {
+        let current = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        let earlier = try Wire.Request(requestID: Data(repeating: 8, count: 16))
+        XCTAssertThrowsError(try Wire.decodeReply(Wire.reply(earlier, .unavailable), matching: current))
+    }
+
+    func testDecoderRejectsUnsupportedVersionAndMissingFields() throws {
+        let request = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        let reply = try Wire.reply(request, .unavailable)
+        XCTAssertThrowsError(try Wire.decodeReply(edit(reply) { $0[0] = .unsigned(2) }, matching: request))
+        XCTAssertThrowsError(try Wire.decodeReply(edit(reply) { $0[0] = .unsigned(14) }, matching: request))
+        XCTAssertThrowsError(try Wire.decodeReply(edit(reply) { $0.removeValue(forKey: 5) }, matching: request))
+    }
+
+    func testDecoderRejectsNoncanonicalVersionEncoding() throws {
+        let request = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        var reply = try Wire.reply(request, .unavailable)
+        XCTAssertEqual(Array(reply.prefix(3)), [0xab, 0x00, 0x01])
+        reply.replaceSubrange(2..<3, with: [0x18, 0x01])
+        XCTAssertThrowsError(try Wire.decodeReply(reply, matching: request))
+    }
+
+    func testDecoderRejectsMalformedFactsAndOversizedReplies() throws {
+        let request = try Wire.Request(requestID: Data(repeating: 7, count: 16))
+        let reply = try Wire.reply(request, .unavailable)
+        XCTAssertThrowsError(try Wire.decodeReply(edit(reply) { $0[4] = .array([.bytes(request.requestID)]) }, matching: request))
+        XCTAssertThrowsError(try Wire.decodeReply(edit(reply) { $0[8] = .unsigned(99) }, matching: request))
+        XCTAssertThrowsError(try Wire.decodeReply(Data(repeating: 0, count: Wire.maximumReplyBytes + 1), matching: request))
+    }
+
+    private func edit(_ bytes: Data, _ change: (inout [UInt64: CBORValue]) -> Void) throws -> Data {
+        let limits = try CBORLimits(maxBytes: Wire.maximumReplyBytes, maxDepth: 4, maxItems: 64)
+        guard case .map(var fields) = try DeterministicCBOR.decode(bytes, limits: limits) else {
+            throw AdministrativeSetupChannelError.invalidMessage
+        }
+        change(&fields)
+        return try DeterministicCBOR.encode(.map(fields), limits: limits)
     }
 }

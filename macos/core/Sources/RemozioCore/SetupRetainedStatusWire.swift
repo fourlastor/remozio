@@ -91,3 +91,88 @@ enum SetupRetainedStatusWire {
         }
     }
 }
+
+extension SetupRetainedStatusWire {
+    /// Public wire facts cannot reconstruct the protected setup scope.
+    struct Observation: Equatable, Sendable, CustomReflectable {
+        struct Window: Equatable, Sendable {
+            let id: Data
+            let revision: Data
+            let purpose: RuntimeMaintenanceWindowRecord.Purpose
+        }
+
+        let reservation: SetupRetainedInvocationStatus.Reservation?
+        let identity: SetupRetainedInvocationStatus.Identity?
+        let window: Window?
+        let operation: RuntimeMaintenanceWindowRecord.OperationOutcome?
+        let restoration: SetupRetainedInvocationStatus.Restoration?
+        let worker: SetupRetainedInvocationStatus.Worker?
+        let cleanup: SetupRetainedInvocationStatus.Cleanup?
+        let supervisor: SetupRetainedInvocationStatus.Supervisor?
+        var customMirror: Mirror { Mirror(self, children: EmptyCollection<Mirror.Child>()) }
+    }
+
+    static func decodeReply(_ bytes: Data, matching request: Request) throws -> Observation {
+        let invalid = AdministrativeSetupChannelError.invalidMessage
+        guard bytes.count <= maximumReplyBytes,
+              case .map(let fields) = try DeterministicCBOR.decode(bytes, limits: replyLimits),
+              Set(fields.keys) == Set(UInt64(0)...10), fields[0] == .unsigned(version),
+              fields[1] == .text(replyName), fields[2] == .bytes(request.requestID),
+              try DeterministicCBOR.encode(.map(fields), limits: replyLimits) == bytes else { throw invalid }
+
+        func fact<Value>(_ key: UInt64, _ decode: (CBORValue) throws -> Value) throws -> Value? {
+            guard let field = fields[key], field != .null else { return nil }
+            return try decode(field)
+        }
+        func number(_ value: CBORValue) throws -> UInt64 {
+            guard case .unsigned(let raw) = value else { throw invalid }
+            return raw
+        }
+        func coded<Value>(_ value: CBORValue, _ choices: [Value], _ code: (Value) -> UInt64) throws -> Value {
+            let raw = try number(value)
+            guard let result = choices.first(where: { code($0) == raw }) else { throw invalid }
+            return result
+        }
+        func tuple(_ value: CBORValue, count: Int) throws -> [CBORValue] {
+            guard case .array(let items) = value, items.count == count else { throw invalid }
+            return items
+        }
+        func identifier(_ value: CBORValue) throws -> Data {
+            guard case .bytes(let data) = value, data.count == 16 else { throw invalid }
+            return data
+        }
+        func uuid(_ value: CBORValue) throws -> UUID {
+            let data = try identifier(value)
+            return data.withUnsafeBytes { NSUUID(uuidBytes: $0.bindMemory(to: UInt8.self).baseAddress!) as UUID }
+        }
+
+        typealias Status = SetupRetainedInvocationStatus
+        typealias Record = RuntimeMaintenanceWindowRecord
+        let supervisors: [Status.Supervisor] = [.recovering, .joining, .busy, .cancelled, .retired, .noWindow]
+            + Record.Phase.allCases.map(Status.Supervisor.phase) + Record.Failure.allCases.map(Status.Supervisor.failed)
+        return Observation(
+            reservation: try fact(3) { try coded($0, [Status.Reservation.absent, .reserved, .attached, .orphan, .recovering, .settled], code) },
+            identity: try fact(4) { value in
+                let items = try tuple(value, count: 2)
+                return try .init(reservationID: uuid(items[0]), incarnation: uuid(items[1]))
+            },
+            window: try fact(5) { value in
+                let items = try tuple(value, count: 3)
+                return try .init(id: identifier(items[0]), revision: identifier(items[1]),
+                    purpose: coded(items[2], Record.Purpose.allCases, \.rawValue))
+            },
+            operation: try fact(6) { try coded($0, Record.OperationOutcome.allCases, \.rawValue) },
+            restoration: try fact(7) { value in
+                let items = try tuple(value, count: 3)
+                return try .init(phase: coded(items[0], Record.Phase.allCases, \.rawValue),
+                    service: coded(items[1], Record.ServiceOutcome.allCases, \.rawValue),
+                    failure: items[2] == .null ? nil : coded(items[2], Record.Failure.allCases, \.rawValue))
+            },
+            worker: try fact(8) { try coded($0, [Status.Worker.idle, .running, .registered], code) },
+            cleanup: try fact(9) { try coded($0, [Status.Cleanup.noneRegistered, .pending, .joining, .joinFailed, .joined, .settled], code) },
+            supervisor: try fact(10) { value in
+                guard let result = supervisors.first(where: { supervisor($0) == value }) else { throw invalid }
+                return result
+            })
+    }
+}
