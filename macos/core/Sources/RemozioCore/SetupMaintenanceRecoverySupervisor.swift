@@ -269,8 +269,12 @@ actor SetupMaintenanceRecoverySupervisor {
     }
     private func startClosing() {
         guard closing == nil else { return }
-        accepting = false; finalClose.closeAdmission(); wakeSlotWaiters(); wakeInitialWaiters()
-        closing = Self.join(entries.values.map(\.task), custody: finalClose, finished: { [weak self] in
+        accepting = false
+        let tasks = entries.values.map(\.task)
+        // Cancellation handlers only signal. Close admission before awaiting the joins.
+        for task in tasks { task.cancel() }
+        finalClose.closeAdmission(); wakeSlotWaiters(); wakeInitialWaiters()
+        closing = Self.join(tasks, custody: finalClose, finished: { [weak self] in
             await self?.didJoin($0)
         })
     }
@@ -288,7 +292,6 @@ actor SetupMaintenanceRecoverySupervisor {
     private nonisolated static func join(_ tasks: [Task<Void, Never>], custody: any SetupMaintenanceRecoveryFinalClose,
         shutdown: Bool = true,
         finished: @escaping @Sendable (AdministrativeSetupShutdown.RecoveryCloseResult?) async -> Void) -> Task<Void, Never> {
-        for task in tasks { task.cancel() }
         return Task {
             for task in tasks { await task.value }
             if shutdown {
@@ -307,6 +310,7 @@ actor SetupMaintenanceRecoverySupervisor {
         let tasks = entries.values.map(\.task), custody = finalClose
         let actual = Task {
             for await _ in start.stream {}
+            for task in tasks { task.cancel() }
             await Self.join(tasks, custody: custody, shutdown: false, finished: { _ in }).value
         }
         custody.retainSupervisorDisposal(actual)
