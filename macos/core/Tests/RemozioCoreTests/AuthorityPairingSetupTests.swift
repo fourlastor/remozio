@@ -3,25 +3,26 @@ import Darwin
 import Foundation
 import RemozioProtocol
 import Security
+import SQLite3
 import XCTest
 @testable import RemozioCore
 
 final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
     private enum Failure: Error { case denied }
-    private final class Box<Value>: @unchecked Sendable {
+    fileprivate final class Box<Value>: @unchecked Sendable {
         private let lock = NSLock()
         private var stored: Value
         init(_ value: Value) { stored = value }
         var value: Value { get { lock.withLock { stored } } set { lock.withLock { stored = newValue } } }
     }
-    private final class Environment: @unchecked Sendable {
+    fileprivate final class Environment: @unchecked Sendable {
         let epoch = UUID()
         let time = Box<UInt64>(100)
         let denied = Box(false), selfDenied = Box(false), peerDenied = Box(false)
         let authorized = Box(0), invalidated = Box(0), signed = Box(0)
         func now() -> AuthorityMoment { .init(epoch: epoch, milliseconds: time.value) }
     }
-    private final class Fixture: @unchecked Sendable {
+    fileprivate final class Fixture: @unchecked Sendable {
         let root: URL
         let journal: AuthorityJournal
         let continuity: ContinuityStore
@@ -33,8 +34,10 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let writer: AuditEpochWriter
         let limits = try! CBORLimits(maxBytes: 16384, maxDepth: 12, maxItems: 1024)
         var mac: Data { Data(repeating: 1, count: 16) }
-        var account: Data { Data(repeating: 2, count: 16) }
-        init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false) throws {
+        let account: Data
+        init(auditVersions: Set<UInt64> = [1], activity: ReleaseActivityBarrier? = nil, configureGateway: Bool = false,
+             accountByte: UInt8 = 2) throws {
+            self.account = Data(repeating: accountByte, count: 16)
             root = URL(fileURLWithPath: "/private/tmp/remozio-local-pairing-" + UUID().uuidString)
             let ownedRoot = root
             var complete = false
@@ -48,12 +51,14 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
                     guard fd >= 0 else { throw Failure.denied }; Darwin.close(fd)
                 }
             }
-            let mac = Data(repeating: 1, count: 16), account = Data(repeating: 2, count: 16), limits = self.limits
+            let mac = Data(repeating: 1, count: 16), account = Data(repeating: accountByte, count: 16), limits = self.limits
             let db = try JournalDatabase(lease: .init(anchor: root.path, relativeDirectory: "store", owner: getuid()),
                 macID: mac, accountID: account, recordLimits: limits, descriptorLimits: limits, decisionLimits: limits,
                 maximumConsumptions: 20, busyMilliseconds: 100, initialize: true,
                 gatewayPolicy: configureGateway ? GatewayAuthorityPolicy(payloadLimits: limits, signingLimits: limits,
-                    maximumControls: 32, candidateLifetimeMillis: 1000, clockEpoch: environment.epoch) : nil)
+                    maximumControls: 32, candidateLifetimeMillis: 1000, clockEpoch: environment.epoch) : nil,
+                updateSchedulingPolicy: UpdateSchedulingJournalPolicy(clockEpoch: environment.epoch,
+                    challengeLifetimeMillis: 1000, maximumOperations: 32, payloadLimits: limits, signingLimits: limits))
             if configureGateway {
                 let registration = try GatewayRegistrationIdentity(ownerID: Data(repeating: 40, count: 16), macID: mac, accountID: account,
                     gatewayID: Data(repeating: 41, count: 16), lifecycleEpoch: Data(repeating: 42, count: 16),
@@ -99,9 +104,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             try .init(role: .app, teamID: "ABCDEFGHIJ", identifier: "dev.remozio.app", installedGeneration: 1,
                 minimumGeneration: 1, codeDirectoryHash: Data(repeating: 4, count: 20), active: active)
         }
-        func endpoint() throws -> AuthorityPairingXPCEndpoint {
+        func endpoint(budget: AuthorityXPCWorkBudget? = nil) throws -> AuthorityPairingXPCEndpoint {
             let environment = environment
-            return try .init(access: access, budget: .init(maximum: 1), verify: {
+            return try .init(access: access, budget: budget ?? .init(maximum: 1), verify: {
                 if environment.peerDenied.value { throw Failure.denied }
             }, authorize: { _ in
                 environment.authorized.value += 1
@@ -437,6 +442,8 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let oldPredecessor = try firstSelection.predecessor
         let losingProposal = try rePairProposal(f, predecessor: oldPredecessor, biometric: losingKey, epoch: 3, keyBase: 63)
         let losingAttempt = try f.access.stage(losingProposal.encode())
+        f.environment.time.value = 1_100
+        XCTAssertTrue(try f.access.isExpired(losingAttempt))
         let winnerKey = P256.Signing.PrivateKey()
         let winningProposal = try rePairProposal(f, predecessor: oldPredecessor, biometric: winnerKey, epoch: 2)
         let transcript = try await channel.stage(winningProposal, authorization: authorization)
@@ -464,7 +471,7 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         let losingProof = try losingKey.signature(for: loser.signingInput(purpose: .phoneBiometric)).rawRepresentation
         XCTAssertThrowsError(try f.access.commit(losingAttempt, setupID: loser.setupID, confirmedDigest: loser.digest(),
             proof: losingProof, authorize: {})) {
-            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+            XCTAssertEqual($0 as? PairingRecoveryStageError, .noPendingStage)
         }
         let current = try f.access.stage(rePairProposal(f, predecessor: newest.predecessor, biometric: losingKey,
             epoch: 3, keyBase: 63).encode()).transcript
@@ -635,15 +642,18 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
         _ = try await channel.revokePhone(selection, authorization: authorization)
         let firstKey = P256.Signing.PrivateKey(), secondKey = P256.Signing.PrivateKey()
         let first = try f.access.stage(rePairProposal(f, predecessor: predecessor, biometric: firstKey).encode())
-        let second = try f.access.stage(rePairProposal(f, predecessor: predecessor, biometric: secondKey).encode())
+        let second = try rePairProposal(f, predecessor: predecessor, biometric: secondKey)
         func commitAttempt(_ attempt: PairingEnrollmentAttempt, key: P256.Signing.PrivateKey) throws {
             let transcript = attempt.transcript
             _ = try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(),
                 proof: key.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation, authorize: {})
         }
+        XCTAssertThrowsError(try f.access.stage(second.encode())) {
+            XCTAssertEqual($0 as? PairingRecoveryStageError, .pendingForIdentity)
+        }
         try commitAttempt(first, key: firstKey)
-        XCTAssertThrowsError(try commitAttempt(second, key: secondKey)) {
-            XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
+        XCTAssertThrowsError(try commitAttempt(first, key: firstKey)) {
+            XCTAssertEqual($0 as? PairingRecoveryStageError, .noPendingStage)
         }
         let new = try XCTUnwrap(f.journal.read { try $0.approvalEnrollments().first { $0.approval.active } })
         XCTAssertEqual(new.identityPublicKey, first.transcript.transportKey.publicKey)
@@ -1384,5 +1394,681 @@ extension AuthorityPairingSetupTests {
         let connection = try admission.openConnection(attemptID: Data(repeating: 70, count: 16), revision: Data(repeating: 71, count: 16))
         defer { connection.close() }; XCTAssertEqual(connection.binding.incarnation, expected)
         XCTAssertNotEqual(connection.binding.incarnation, Data(repeating: 0, count: 16))
+    }
+}
+
+final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Sendable {
+    private typealias Fixture = AuthorityPairingSetupTests.Fixture
+    private typealias Box<Value> = AuthorityPairingSetupTests.Box<Value>
+    private enum Fault: Error { case injected }
+    private var authorization: Data { Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size) }
+
+    private func open(_ f: Fixture, readOnly: Bool = false) throws -> sending AuthorityStorage {
+        try AuthorityStorage(openJournal: {
+            try JournalDatabase(lease: .init(anchor: f.root.path, relativeDirectory: "store", owner: getuid()),
+                macID: f.mac, accountID: f.account, recordLimits: f.limits, descriptorLimits: f.limits,
+                decisionLimits: f.limits, maximumConsumptions: 20, busyMilliseconds: 100,
+                initialize: false, readOnlyForCutover: readOnly)
+        }, openContinuity: { directory in
+            try ContinuityStore(lease: .init(anchor: f.root.path, relativeDirectory: "continuity",
+                owner: getuid(), excludingDirectory: directory), macID: f.mac, accountID: f.account,
+                initialize: nil, readOnlyForCutover: readOnly)
+        })
+    }
+
+    private func close(_ f: Fixture) throws { try f.journal.close(); f.continuity.close() }
+
+    private func sql(_ f: Fixture, _ statement: String, continuity: Bool = false) throws {
+        let relative = continuity ? "continuity/continuity.sqlite" : "store/journal.sqlite"
+        var connection: OpaquePointer?
+        let result = sqlite3_open_v2(f.root.appendingPathComponent(relative).path, &connection, SQLITE_OPEN_READWRITE, nil)
+        defer { sqlite3_close(connection) }
+        guard result == SQLITE_OK, let connection else { throw JournalDatabaseError.storage(result) }
+        let execute = sqlite3_exec(connection, statement, nil, nil, nil)
+        guard execute == SQLITE_OK else { throw JournalDatabaseError.storage(execute) }
+    }
+
+    private func files(_ f: Fixture) throws -> [String: Data] {
+        var bytes: [String: Data] = [:]
+        for name in ["store", "continuity"] {
+            let directory = f.root.appendingPathComponent(name)
+            for file in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
+                bytes["\(name)/\(file)"] = try Data(contentsOf: directory.appendingPathComponent(file))
+            }
+        }
+        return bytes
+    }
+
+    private func ordinary(_ f: Fixture, phone: UInt8 = 8, key: P256.Signing.PrivateKey = .init()) throws -> PairingTranscript {
+        let attempt = try f.access.stage(f.proposal(phone: phone, biometric: key).encode())
+        _ = try commit(f, attempt, key: key)
+        return attempt.transcript
+    }
+
+    private func commit(_ f: Fixture, _ attempt: PairingEnrollmentAttempt, key: P256.Signing.PrivateKey) throws -> Data {
+        let transcript = attempt.transcript
+        let proof = try key.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        return try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(), proof: proof, authorize: {})
+    }
+
+    private func proposal(_ f: Fixture, phone: UInt8 = 8) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
+        let original = try ordinary(f, phone: phone)
+        let recipient = DeliveryRecipient(phoneID: original.phone.scope.phoneID, enrollmentEpoch: original.phone.scope.enrollmentEpoch)
+        let selection = try XCTUnwrap(f.access.pairedPhones().selection(for: recipient))
+        _ = try f.access.revokePhone(selection, authorize: {})
+        return try replacement(f, selection: selection)
+    }
+
+    private func replacement(_ f: Fixture, selection: PairedPhoneSelection, epoch: UInt8 = 50) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
+        let key = P256.Signing.PrivateKey()
+        let scope = try ChannelScope(macID: f.mac, accountID: f.account, phoneID: selection.phone.phoneID,
+                                    enrollmentEpoch: Data(repeating: epoch, count: 16))
+        let phone = try ChannelOffer(role: .phone, scope: scope, nonce: Data(repeating: epoch, count: 32),
+            envelopeVersions: [1], requests: [.init(kind: 0, wireVersion: 1, schemaVersion: 1, features: [])], auditVersions: [1])
+        return (try PairingPhoneProposal(phone: phone,
+            transportKey: .init(keyID: Data(repeating: 70, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            decisionKey: .init(keyID: Data(repeating: 71, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            biometricKey: .init(keyID: Data(repeating: 72, count: 16), publicKey: key.publicKey.x963Representation),
+            replacement: selection.predecessor), key)
+    }
+
+    private func stage(_ f: Fixture, _ proposal: PairingPhoneProposal) throws -> PairingEnrollmentAttempt {
+        try f.access.stage(proposal.encode())
+    }
+
+    private func retained(_ f: Fixture, _ attempt: PairingEnrollmentAttempt) throws -> PairingRecoveryStage? {
+        let id = attempt.transcript.setupID
+        return try f.journal.read { try $0.recoveryStage(setupID: id) }
+    }
+
+    private func endpoint(_ f: Fixture, budget: AuthorityXPCWorkBudget? = nil) throws -> AuthorityPairingXPCEndpoint {
+        let endpoint = try f.endpoint(budget: budget), hello = Box<UInt64>(0)
+        endpoint.pairingHello { hello.value = $0 }
+        XCTAssertEqual(hello.value, 1)
+        return endpoint
+    }
+
+    private func stageBytes(_ endpoint: AuthorityPairingXPCEndpoint, _ bytes: Data) -> Data? {
+        let reply = Box<Data?>(nil)
+        endpoint.stagePairing(bytes, authorization: authorization) { reply.value = $0 }
+        return reply.value
+    }
+
+    private func writes<Value: Sendable>(_ f: Fixture, _ body: @escaping @Sendable (JournalTransaction) throws -> Value) throws -> Value {
+        try f.journal.withRequests { requests in
+            try CheckpointedJournal(journal: requests.database, continuity: f.continuity)
+                .write(epoch: f.writer.epoch, recoverRejectedBody: true, body)
+        }
+    }
+
+    func testOrdinaryPairingAndStartupKeepTheExistingFormat() throws {
+        let f = try Fixture()
+        let original = try f.continuity.read().committed
+        let transcript = try ordinary(f)
+        XCTAssertNil(transcript.replacement)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 13)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 13)
+        XCTAssertGreaterThan(try f.continuity.read().committed.journalHead, original.journalHead)
+        try close(f)
+        let restarted = try AuthorityJournal(storage: open(f))
+        defer { try? restarted.close() }
+        try restarted.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16_384)
+        XCTAssertEqual(try restarted.read { try $0.storageSchemaVersion }, 13)
+    }
+
+    func testFirstAuthorizedRePairStageCommitsMigrationAndStageOnce() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f)
+        let before = try f.continuity.read().committed
+        let connection = try endpoint(f)
+        defer { connection.close() }
+        let bytes = try XCTUnwrap(stageBytes(connection, proposal.encode()))
+        let transcript = try PairingTranscript.decode(bytes)
+        let stage = try XCTUnwrap(f.journal.read { try $0.recoveryStage(setupID: transcript.setupID) })
+        XCTAssertEqual(stage.state, .pending)
+        XCTAssertEqual(try stage.transcript.encode(), bytes)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 13)
+        let after = try f.continuity.read().committed
+        XCTAssertEqual(after.generation, before.generation + 1)
+        XCTAssertEqual(after.ledgerDigest, before.ledgerDigest)
+        XCTAssertNotEqual(after.authorityDigest, before.authorityDigest)
+        f.environment.time.value += 17
+        let retry = try self.stage(f, proposal)
+        XCTAssertEqual(try retry.transcript.encode(), bytes)
+        XCTAssertEqual(try retry.recoveryStage().deadline, stage.deadline)
+        XCTAssertEqual(try f.continuity.read().committed, after)
+        connection.close()
+        try close(f)
+        let storage = try open(f)
+        defer { try? storage.close() }
+        XCTAssertEqual(try storage.journal.read { try $0.recoveryStage(setupID: transcript.setupID)?.transcriptDigest }, stage.transcriptDigest)
+        XCTAssertEqual(try storage.continuity.read().committed, after)
+    }
+
+    func testRejectedRePairDoesNotMigrateOrReserve() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f)
+        let before = try f.continuity.read()
+        XCTAssertThrowsError(try f.access.stage(proposal.encode()) { throw Fault.injected })
+        let bogus = try PairingPhoneProposal(phone: proposal.phone, transportKey: proposal.transportKey,
+            decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey,
+            replacement: .init(phoneID: proposal.phone.scope.phoneID, epoch: Data(repeating: 99, count: 16)))
+        XCTAssertThrowsError(try f.access.stage(bogus.encode()))
+        let budget = try AuthorityXPCWorkBudget(maximum: 1), connection = try endpoint(f, budget: budget)
+        defer { connection.close() }
+        XCTAssertTrue(budget.acquire())
+        defer { budget.release() }
+        XCTAssertNil(try stageBytes(connection, proposal.encode()))
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 13)
+        XCTAssertEqual(try f.continuity.read(), before)
+    }
+
+    func testConcurrentFirstStagesMigrateAndTransitionOnlyOnce() throws {
+        let f = try Fixture()
+        let first = try proposal(f, phone: 8).0, second = try proposal(f, phone: 10).0
+        let before = try f.continuity.read().committed
+        let resultA = Box<Result<PairingEnrollmentAttempt, any Error>?>(nil)
+        let resultB = Box<Result<PairingEnrollmentAttempt, any Error>?>(nil)
+        DispatchQueue.concurrentPerform(iterations: 2) { index in
+            let result = Result { try self.stage(f, index == 0 ? first : second) }
+            if index == 0 { resultA.value = result } else { resultB.value = result }
+        }
+        let ids = try [resultA.value, resultB.value].map { result in try XCTUnwrap(result).get().transcript.setupID }
+        XCTAssertEqual(Set(ids).count, 2)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        XCTAssertEqual(try f.continuity.read().committed.generation, before.generation + 2)
+        XCTAssertEqual(try f.continuity.read().committed.ledgerDigest, before.ledgerDigest)
+        for id in ids { XCTAssertEqual(try f.journal.read { try $0.recoveryStage(setupID: id)?.state }, .pending) }
+    }
+
+    func testOrdinaryPairingOnSchemaNineteenPreservesTheRecoveryState() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f)
+        let pending = try stage(f, proposal)
+        let before = try f.continuity.read().committed
+        _ = try ordinary(f, phone: 80)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 13)
+        XCTAssertEqual(try retained(f, pending)?.state, .pending)
+        XCTAssertNotEqual(try f.continuity.read().committed.authorityDigest, before.authorityDigest)
+        try f.assertCheckpoint()
+    }
+
+    func testVersionTwoStageSlotIsUniqueForAnIdentity() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f)
+        let first = try stage(f, proposal)
+        let before = try f.continuity.read()
+        let other = try PairingPhoneProposal(phone: proposal.phone, transportKey: proposal.transportKey,
+            decisionKey: proposal.decisionKey, biometricKey: .init(keyID: proposal.biometricKey.keyID, publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+            replacement: proposal.replacement)
+        XCTAssertThrowsError(try stage(f, other)) { XCTAssertEqual($0 as? PairingRecoveryStageError, .pendingForIdentity) }
+        XCTAssertEqual(try stage(f, proposal).transcript.setupID, first.transcript.setupID)
+        XCTAssertEqual(try f.continuity.read(), before)
+    }
+
+    func testVersionTwoStageLimitIsThirtyTwoPerAccount() throws {
+        let f = try Fixture()
+        let proposals = try (0...32).map { try proposal(f, phone: UInt8($0 + 10)).0 }
+        let pending = try proposals.dropLast().map { try stage(f, $0) }
+        let before = try f.continuity.read()
+        let connection = try endpoint(f)
+        defer { connection.close() }
+        XCTAssertNil(try stageBytes(connection, XCTUnwrap(proposals.last).encode()))
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        for attempt in pending { XCTAssertEqual(try retained(f, attempt)?.state, .pending) }
+        let other = try Fixture(accountByte: 6)
+        let own = try proposal(other).0
+        XCTAssertEqual(try retained(other, stage(other, own))?.state, .pending)
+        try close(f)
+        let reopened = try open(f)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.continuity.read(), before)
+        for attempt in pending {
+            XCTAssertEqual(try reopened.journal.read { try $0.recoveryStage(setupID: attempt.transcript.setupID)?.state }, .pending)
+        }
+    }
+
+    func testExpiryUsesOnlyTheRootClockUnderTheCurrentWriterLease() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f), attempt = try stage(f, proposal)
+        let deadline = try XCTUnwrap(retained(f, attempt)).deadline
+        f.environment.time.value = deadline - 1
+        let before = try f.continuity.read()
+        XCTAssertFalse(try f.access.isExpired(attempt))
+        XCTAssertEqual(try f.continuity.read(), before)
+        f.environment.time.value = deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        XCTAssertEqual(try retained(f, attempt)?.state.expiryReason, .deadlineElapsed)
+        let expired = try f.continuity.read()
+        f.environment.time.value += 1
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        XCTAssertEqual(try f.continuity.read(), expired)
+        try close(f)
+        XCTAssertThrowsError(try f.access.isExpired(attempt))
+    }
+
+    func testCommitAndExpirySerializeAndPreserveTheDurableCommit() throws {
+        for expiryWins in [false, true] {
+            let f = try Fixture(), (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
+            let deadline = try XCTUnwrap(retained(f, attempt)).deadline
+            if expiryWins {
+                f.environment.time.value = deadline
+                XCTAssertTrue(try f.access.isExpired(attempt))
+                XCTAssertThrowsError(try commit(f, attempt, key: key))
+                XCTAssertEqual(try retained(f, attempt)?.state, .deadlineElapsed)
+            } else {
+                let receipt = try commit(f, attempt, key: key)
+                XCTAssertTrue(try attempt.transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
+                f.environment.time.value = deadline
+                let committed = try f.continuity.read()
+                XCTAssertTrue(try f.access.isExpired(attempt))
+                XCTAssertEqual(try f.continuity.read(), committed)
+                XCTAssertEqual(try retained(f, attempt)?.state, .committed)
+            }
+        }
+        let f = try Fixture(), (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
+        try sql(f, "CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END", continuity: true)
+        XCTAssertThrowsError(try commit(f, attempt, key: key))
+        XCTAssertNotNil(try f.continuity.read().pending)
+        try close(f)
+        try sql(f, "DROP TRIGGER fail_finalize", continuity: true)
+        let restarted = try AuthorityJournal(storage: open(f))
+        defer { try? restarted.close() }
+        try restarted.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16_384)
+        XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: attempt.transcript.setupID)?.state }, .committed)
+        XCTAssertNotNil(try restarted.read { try $0.committedPairing(setupID: attempt.transcript.setupID,
+            authenticatedPhoneID: attempt.transcript.phone.scope.phoneID,
+            authenticatedEnrollmentEpoch: attempt.transcript.phone.scope.enrollmentEpoch) })
+    }
+
+    func testRevocationOrRemovalDuringStagePreventsEnrollment() throws {
+        let f = try Fixture(), (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
+        let before = try f.continuity.read()
+        let predecessor = try XCTUnwrap(proposal.replacement)
+        let snapshot = try f.access.pairedPhones(includeRePair: true)
+        let selection = try XCTUnwrap(snapshot.rePairSelection(for: .init(phoneID: predecessor.phoneID, enrollmentEpoch: predecessor.epoch)))
+        XCTAssertThrowsError(try f.access.revokePhone(selection) { throw Fault.injected })
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try retained(f, attempt)?.state, .pending)
+        XCTAssertEqual(try f.access.revokePhone(selection, authorize: {}), .revokedOnMac)
+        XCTAssertEqual(try retained(f, attempt)?.state, .invalidated)
+        XCTAssertThrowsError(try commit(f, attempt, key: key))
+        XCTAssertFalse(try f.journal.read { try $0.approvalEnrollments().contains { $0.approval.active } })
+        try close(f)
+        let storage = try open(f)
+        defer { try? storage.close() }
+        XCTAssertEqual(try storage.journal.read { try $0.recoveryStage(setupID: attempt.transcript.setupID)?.state }, .invalidated)
+    }
+
+    func testStageSlotsReleaseOnlyOnAuthorizedTransitions() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f), first = try stage(f, proposal)
+        let digest = try first.transcript.digest()
+        XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {}))
+        f.environment.time.value = try first.recoveryStage().deadline
+        let next = try stage(f, proposal)
+        XCTAssertNotEqual(next.transcript.setupID, first.transcript.setupID)
+        XCTAssertEqual(try retained(f, first)?.state, .deadlineElapsed)
+        XCTAssertEqual(try retained(f, next)?.state, .pending)
+        let before = try f.continuity.read()
+        XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID,
+            digest: Data(repeating: 0, count: 32), authorize: {}))
+        XCTAssertEqual(try f.continuity.read(), before)
+        try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {})
+        XCTAssertNil(try retained(f, first))
+        XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {}))
+        XCTAssertEqual(try retained(f, next)?.state, .pending)
+    }
+
+    func testPairedPhonesDiscardRequiresAnExpiredTerminalStage() throws {
+        let f = try Fixture(), (proposal, _) = try proposal(f), attempt = try stage(f, proposal)
+        var selection = attempt.transcript.setupID
+        selection.append(try attempt.transcript.digest())
+        func discard() throws -> Data? {
+            let connection = try endpoint(f), hello = Box<UInt64>(0), reply = Box<Data?>(nil)
+            defer { connection.close() }
+            connection.pairedPhoneHello { hello.value = $0 }
+            XCTAssertEqual(hello.value, 1)
+            connection.managePairedPhone(PairedPhoneOperation.discardExpiredRePair.rawValue, selection: selection,
+                authorization: authorization) { reply.value = $0 }
+            return reply.value
+        }
+        let before = try f.continuity.read()
+        XCTAssertNil(try discard())
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try retained(f, attempt)?.state, .pending)
+        f.environment.time.value = try attempt.recoveryStage().deadline
+        XCTAssertTrue(try f.access.isExpired(attempt))
+        XCTAssertEqual(try discard(), Data([1]))
+        XCTAssertNil(try retained(f, attempt))
+    }
+
+    func testThirtyThreeFailedOrdinaryPairingsDoNotConsumeRecoverySlots() throws {
+        let f = try Fixture(), before = try f.continuity.read()
+        let bytes = try f.proposal().encode()
+        for _ in 0..<33 {
+            let connection = try endpoint(f)
+            let staged = try PairingTranscript.decode(XCTUnwrap(stageBytes(connection, bytes)))
+            let reply = Box<Data?>(nil)
+            connection.commitPairing(staged.setupID, confirmedDigest: try staged.digest(),
+                biometricProof: Data(repeating: 0, count: 64), authorization: authorization) { reply.value = $0 }
+            XCTAssertNil(reply.value)
+            connection.close()
+        }
+        XCTAssertEqual(try f.continuity.read(), before)
+        _ = try ordinary(f)
+        XCTAssertEqual(try f.records(), 1)
+        XCTAssertEqual(try f.access.maintenanceAdmission.stagedReservations(), 0)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 13)
+    }
+
+    private func syntheticStage(_ f: Fixture, phone: UInt8 = 80, incarnation: UUID? = nil) throws -> PairingRecoveryStage {
+        let seed = try f.proposal(phone: phone, biometric: .init())
+        let scope = seed.phone.scope
+        let transcript = try PairingTranscript(setupID: GatewayHostSnapshot.bytes(UUID()), challenge: seed.challenge,
+            phone: seed.phone, mac: seed.mac, minimumEnvelopeVersion: seed.minimumEnvelopeVersion,
+            selectedEnvelopeVersion: seed.selectedEnvelopeVersion, macAuthorityKey: seed.macAuthorityKey,
+            macTransportKey: seed.macTransportKey, transportKey: seed.transportKey, decisionKey: seed.decisionKey,
+            biometricKey: seed.biometricKey, enrollmentTag: seed.enrollmentTag,
+            replacement: .init(phoneID: scope.phoneID, epoch: Data(repeating: 1, count: 16)),
+            expectedTrustRevision: seed.expectedTrustRevision, issuedAtUnixMillis: 1_000, expiresAtUnixMillis: 2_000)
+        return try PairingRecoveryStage(transcript: transcript, proposalDigest: transcript.digest(),
+            incarnation: incarnation ?? f.environment.epoch, started: 100, deadline: 1_100)
+    }
+
+    private func installHistory(_ f: Fixture) throws {
+        let before = try f.continuity.read()
+        let intent = try HistoryRecoveryIntent(previous: before, authorityDigest: before.committed.authorityDigest,
+            ledgerDigest: before.committed.ledgerDigest, recoveryEpoch: Data(repeating: 97, count: 16))
+        try writes(f) { try $0.recordHistoryRecovery(intent) }
+    }
+
+    private func eligibleGrant(_ f: Fixture) throws -> GatewayControlTombstone {
+        let transcript = try ordinary(f, phone: 90), scope = transcript.phone.scope
+        let registration = try XCTUnwrap(f.gatewayRevocations?.registration)
+        let enrollment = try GatewayPhoneEnrollment(phoneID: scope.phoneID, epoch: scope.enrollmentEpoch,
+            tag: transcript.enrollmentTag, active: true)
+        let trust = GatewayAuthorityTrust(registration: registration, enrollment: enrollment, active: true)
+        return try writes(f) { tx in
+            let grant = try tx.prepareGatewayCandidate(registrationToken: "fixture-stage-grant",
+                authenticatedPhoneID: scope.phoneID, authenticatedEnrollmentEpoch: scope.enrollmentEpoch, trust: trust,
+                expectedHead: 0, nowUnixMillis: 1_000, now: f.environment.now(), sign: { candidate in
+                    try f.authority.signature(for: GatewayTokenCandidateSigningInput.make(wireVersion: 1,
+                        canonicalPayload: candidate.encode(limits: f.limits), payloadLimits: f.limits, inputLimits: f.limits)).rawRepresentation
+                })
+            guard case .eligible(let control) = try tx.gatewayGrantRetirement(at: grant.revision,
+                registration: registration, wall: 2_001) else { throw Fault.injected }
+            return control
+        }
+    }
+
+    private func abandon(_ control: GatewayControlTombstone, _ f: Fixture) throws -> Data {
+        try writes(f) { tx in
+            try tx.stageGatewayGrantAbandonment(control, wall: 2_001)
+            return try tx.finishGatewayGrantAbandonment(control, wall: 2_001) { input in
+                try f.authority.signature(for: input).rawRepresentation
+            }
+        }
+    }
+
+    func testMigrationPreservesTheCatalogAndContinuityAtEachLegacyTier() throws {
+        let template = try Fixture(), raw = try CutoverJournalFixture()
+        let synthetic = try syntheticStage(template)
+        let legacy = try raw.store.read().committed
+        try CheckpointedJournal(journal: raw.journal, continuity: raw.store).write(epoch: raw.epoch) {
+            try $0.reserveRecoveryStage(synthetic, now: .init(epoch: synthetic.incarnation, milliseconds: synthetic.started))
+        }
+        XCTAssertEqual(try raw.journal.read { try $0.featureTier }, 12)
+        XCTAssertEqual(try raw.store.read().committed.ledgerDigest, legacy.ledgerDigest)
+
+        for tier in 13...18 {
+            let f = try Fixture(configureGateway: tier == 16 || tier == 18)
+            if tier == 14 { try installHistory(f) }
+            if tier >= 15 { try writes(f) { try $0.installCommandSubmissionReplay() } }
+            if tier == 16 {
+                let registration = try XCTUnwrap(f.gatewayRevocations?.registration)
+                try writes(f) { try $0.installGatewaySubmissionHistory(registration) }
+            }
+            if tier >= 17 { try writes(f) { try $0.installUpdateSchedulingStorage() } }
+            let control = tier == 18 ? try eligibleGrant(f) : nil
+            let signature = try control.map { try abandon($0, f) }
+            let candidate = try proposal(f).0
+            let before = try f.continuity.read().committed
+            XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, UInt64(tier))
+            let attempt = try stage(f, candidate)
+            XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+            XCTAssertEqual(try f.journal.read { try $0.featureTier }, UInt64(tier))
+            XCTAssertEqual(try retained(f, attempt)?.state, .pending)
+            XCTAssertEqual(try f.continuity.read().committed.ledgerDigest, before.ledgerDigest)
+            XCTAssertNotEqual(try f.continuity.read().committed.authorityDigest, before.authorityDigest)
+            if let control { XCTAssertEqual(try f.journal.read { try $0.signedGatewayGrantAbandonment(control) }, signature) }
+        }
+    }
+
+    func testSchemaNineteenInstallersPromoteTheTierWithoutChangingTheFormat() throws {
+        let f = try Fixture(configureGateway: true), candidate = try proposal(f).0
+        let attempt = try stage(f, candidate), before = try f.continuity.read()
+        XCTAssertThrowsError(try writes(f) { tx in
+            try tx.installCommandSubmissionReplay()
+            throw Fault.injected
+        })
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 13)
+        try installHistory(f)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 14)
+        try writes(f) { try $0.installCommandSubmissionReplay() }
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 15)
+        let registration = try XCTUnwrap(f.gatewayRevocations?.registration)
+        try writes(f) { try $0.installGatewaySubmissionHistory(registration) }
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 16)
+        try writes(f) { try $0.installUpdateSchedulingStorage() }
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 17)
+        _ = try abandon(eligibleGrant(f), f)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 18)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        XCTAssertEqual(try retained(f, attempt)?.state, .pending)
+        try f.assertCheckpoint()
+    }
+
+    func testTierSeventeenAbandonmentPromotesToEighteenAndSurvivesReopen() throws {
+        let f = try Fixture(configureGateway: true), proposal = try proposal(f).0
+        try writes(f) { tx in try tx.installCommandSubmissionReplay(); try tx.installUpdateSchedulingStorage() }
+        let control = try eligibleGrant(f)
+        _ = try stage(f, proposal)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 17)
+        let signature = try abandon(control, f)
+        XCTAssertEqual(try f.journal.read { try $0.featureTier }, 18)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 19)
+        try close(f)
+        let reopened = try JournalDatabase(lease: .init(anchor: f.root.path, relativeDirectory: "store", owner: getuid()),
+            macID: f.mac, accountID: f.account, recordLimits: f.limits, descriptorLimits: f.limits, decisionLimits: f.limits,
+            maximumConsumptions: 20, busyMilliseconds: 100, initialize: false, gatewayPolicy: GatewayAuthorityPolicy(
+                payloadLimits: f.limits, signingLimits: f.limits, maximumControls: 32, candidateLifetimeMillis: 1000,
+                clockEpoch: f.environment.epoch))
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.read { try $0.signedGatewayGrantAbandonment(control) }, signature)
+        XCTAssertEqual(try reopened.read { try $0.gatewayGrantRetirement(at: control.revision, registration: control.registration,
+                                                                         wall: 2_001) }, .eligible(control))
+        XCTAssertEqual(try reopened.read { try $0.firstUnconfirmedGrantAbandonment() }, 2_001)
+    }
+
+    func testStageAndCheckpointPreparationFailuresKeepTheExactOldBoundary() throws {
+        let f = try Fixture(), candidate = try proposal(f).0
+        let before = try f.continuity.read()
+        let specimen = try syntheticStage(f)
+        let bad = try PairingRecoveryStage(transcript: specimen.transcript, proposalDigest: specimen.proposalDigest,
+            incarnation: specimen.incarnation, started: specimen.started, deadline: specimen.deadline, state: .committed)
+        XCTAssertThrowsError(try writes(f) { try $0.reserveRecoveryStage(bad, now: f.environment.now()) })
+        XCTAssertEqual(try f.continuity.read(), before)
+        XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 13)
+        try sql(f, "CREATE TRIGGER fail_prepare BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NOT NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END", continuity: true)
+        let connection = try endpoint(f)
+        defer { connection.close() }
+        XCTAssertNil(try stageBytes(connection, candidate.encode()))
+        XCTAssertEqual(try f.continuity.read(), before)
+        try close(f)
+        try sql(f, "DROP TRIGGER fail_prepare", continuity: true)
+        let storage = try open(f)
+        defer { try? storage.close() }
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity), .unchanged(before.committed))
+        XCTAssertEqual(try storage.journal.read { try $0.storageSchemaVersion }, 13)
+    }
+
+    func testStartupDiscardsNewCheckpointAfterJournalRollback() throws {
+        let f = try Fixture(), stage = try syntheticStage(f), before = try f.continuity.read()
+        XCTAssertThrowsError(try writes(f) { tx in
+            try tx.reserveRecoveryStage(stage, now: f.environment.now())
+            do { try tx.discardExpiredRecoveryStage(setupID: stage.transcript.setupID, digest: stage.transcriptDigest) }
+            catch PairingRecoveryStageError.notExpired { /* Keep the poisoned transaction to exercise recovery. */ }
+        })
+        XCTAssertNotNil(try f.continuity.read().pending)
+        try close(f)
+        let storage = try open(f)
+        defer { try? storage.close() }
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity), .discarded(before.committed))
+        XCTAssertEqual(try storage.continuity.read(), before)
+        XCTAssertEqual(try storage.journal.read { try $0.storageSchemaVersion }, 13)
+        XCTAssertNil(try storage.journal.read { try $0.recoveryStage(setupID: stage.transcript.setupID) })
+    }
+
+    func testStartupFinalizesTheMigratedCheckpointWithoutRestaging() throws {
+        let f = try Fixture(), candidate = try proposal(f).0
+        try sql(f, "CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END", continuity: true)
+        let connection = try endpoint(f)
+        defer { connection.close() }
+        XCTAssertNil(try stageBytes(connection, candidate.encode()))
+        let prepared = try XCTUnwrap(f.continuity.read().pending)
+        try close(f)
+        try sql(f, "DROP TRIGGER fail_finalize", continuity: true)
+        let storage = try open(f)
+        defer { try? storage.close() }
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity), .finalized(prepared))
+        let pending = try XCTUnwrap(storage.journal.read { try $0.pendingRecoveryStage(phoneID: candidate.phone.scope.phoneID) })
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity), .unchanged(prepared))
+        XCTAssertEqual(try storage.journal.read { try $0.pendingRecoveryStage(phoneID: candidate.phone.scope.phoneID)?.transcript.setupID },
+                       pending.transcript.setupID)
+    }
+
+    func testStartupClosesOnlyPendingStagesFromRetiredIncarnations() throws {
+        let f = try Fixture(), (proposal, key) = try proposal(f)
+        let committed = try stage(f, proposal)
+        _ = try commit(f, committed, key: key)
+        let retired = try stage(f, self.proposal(f, phone: 12).0)
+        let fresh = UUID(), current = try syntheticStage(f, incarnation: fresh)
+        try writes(f) { try $0.reserveRecoveryStage(current, now: f.environment.now()) }
+        try close(f)
+        for _ in 0..<2 {
+            let restarted = try AuthorityJournal(storage: open(f))
+            defer { try? restarted.close() }
+            try restarted.prepareRequests(clockEpoch: fresh, maximumPayloadBytes: 16_384)
+            XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: retired.transcript.setupID)?.state.expiryReason }, .retiredIncarnation)
+            XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: committed.transcript.setupID)?.state }, .committed)
+            XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: current.transcript.setupID)?.state }, .pending)
+            try restarted.close()
+        }
+    }
+
+    func testSchemaNineteenRejectsInvalidTierAndCatalogWithoutOpeningAdmission() throws {
+        for mutation in [
+            "DELETE FROM authority_feature_tier_v1",
+            "PRAGMA ignore_check_constraints=ON; UPDATE authority_feature_tier_v1 SET tier=99",
+            "DROP TABLE pairing_recovery_stages_v1",
+            "CREATE TABLE extra_fixture_table(value INTEGER)",
+            "UPDATE authority_feature_tier_v1 SET tier=15",
+            "DELETE FROM pairing_recovery_stages_v1",
+        ] {
+            let f = try Fixture(), p = try proposal(f).0
+            _ = try stage(f, p)
+            try close(f)
+            try sql(f, mutation)
+            let before = try files(f)
+            XCTAssertThrowsError(try AuthorityJournal(storage: open(f)), mutation)
+            XCTAssertEqual(try files(f), before, mutation)
+        }
+    }
+
+    func testOfflineFormatTierAndStageTamperingKeepsAdmissionClosed() throws {
+        let mutations = [
+            "UPDATE authority_feature_tier_v1 SET tier=17",
+            "UPDATE authority_feature_tier_v1 SET tier=17; DROP TABLE gateway_abandoned_grants_v1",
+            "UPDATE pairing_recovery_stages_v1 SET proposal=zeroblob(32) WHERE state=0",
+            "UPDATE pairing_recovery_stages_v1 SET proposal=zeroblob(32) WHERE state=1",
+            "PRAGMA user_version=18",
+        ]
+        for mutation in mutations {
+            let f = try Fixture(configureGateway: true)
+            let (p, key) = try proposal(f)
+            let committed = try stage(f, p)
+            _ = try commit(f, committed, key: key)
+            _ = try stage(f, proposal(f, phone: 12).0)
+            _ = try abandon(eligibleGrant(f), f)
+            XCTAssertEqual(try f.journal.read { try $0.featureTier }, 18)
+            try close(f)
+            try sql(f, mutation)
+            let before = try files(f)
+            XCTAssertThrowsError(try AuthorityJournal(storage: open(f)), mutation)
+            XCTAssertEqual(try files(f), before, mutation)
+        }
+    }
+
+    func testCutoverChecksPhysicalFormatTierAndCheckpoint() throws {
+        for mutation in [
+            "PRAGMA user_version=13",
+            "UPDATE authority_feature_tier_v1 SET tier=14",
+            "DELETE FROM pairing_recovery_stages_v1",
+        ] {
+            let f = try Fixture(), p = try proposal(f).0
+            _ = try stage(f, p)
+            let checkpoint = try f.continuity.read().committed
+            try close(f)
+            let inspection = try AuthorityJournalCutoverInspection(storage: open(f, readOnly: true),
+                expectedPolicy: nil, verifyCurrent: {})
+            defer { try? inspection.close() }
+            XCTAssertEqual(inspection.snapshot.schemaVersion, 19)
+            XCTAssertEqual(inspection.snapshot.featureTier, 13)
+            XCTAssertEqual(inspection.snapshot.checkpoint, checkpoint)
+            try inspection.validate()
+            try sql(f, mutation)
+            let before = try files(f)
+            XCTAssertThrowsError(try inspection.validate(), mutation)
+            XCTAssertEqual(try files(f), before)
+        }
+    }
+
+    func testAuditChainSpansTheAuthorityFormatTransition() throws {
+        let f = try Fixture(), candidate = try proposal(f).0
+        let nextProposal = try f.proposal(phone: 80).encode()
+        let epoch = f.writer.epoch, previousHead = try f.records()
+        let previous = try XCTUnwrap(f.journal.read { try $0.page(epoch: epoch, after: previousHead - 1,
+            maximumRecords: 1, maximumBytes: 16_384).canonicalRecords.last })
+        _ = try stage(f, candidate)
+        XCTAssertEqual(try f.records(), previousHead)
+        try close(f)
+        let clock = UUID(), restarted = try AuthorityJournal(storage: open(f))
+        defer { try? restarted.close() }
+        try restarted.prepareRequests(clockEpoch: clock, maximumPayloadBytes: 16_384)
+        let now: @Sendable () -> AuthorityMoment = { .init(epoch: clock, milliseconds: 100) }
+        let access = try AuthorityPairingSetupAccess(journal: restarted, macID: f.mac, accountID: f.account,
+            authorityPublicKey: f.authority.publicKey.x963Representation, appPolicy: f.policy,
+            configuration: .init(transportPublicKey: f.transport.publicKey.x963Representation, lifetimeMilliseconds: 1_000),
+            minimumEnvelopeVersion: 1, auditVersions: [1], now: now, unixMilliseconds: { 2_000 }, validateSelf: { _ in },
+            commit: { attempt, proof, event, authorize, validate in
+                try restarted.commitPairingFixture(attempt, biometricProof: proof, authorityPublicKey: f.authority.publicKey.x963Representation,
+                    addEventID: event, recheckAdministrator: authorize, now: now, validate: validate,
+                    sign: { try f.authority.signature(for: $0).rawRepresentation })
+            })
+        let attempt = try access.stage(nextProposal), transcript = attempt.transcript
+        _ = try access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(),
+            proof: f.biometric.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation, authorize: {})
+        try restarted.close()
+        let storage = try open(f)
+        defer { try? storage.close() }
+        let checkpointState = try storage.continuity.read().committed
+        let descriptor = try XCTUnwrap(storage.journal.read { try $0.epoch(checkpointState.journalEpoch)?.descriptor })
+        XCTAssertEqual(descriptor.previousEpoch, epoch)
+        XCTAssertEqual(descriptor.previousSequence, previousHead)
+        XCTAssertEqual(descriptor.previousEventDigest, Data(SHA256.hash(data: previous)))
+        XCTAssertEqual(checkpointState.journalHead, 1)
+        XCTAssertEqual(try JournalCheckpointRecovery.reconcile(journal: storage.journal, continuity: storage.continuity), .unchanged(checkpointState))
+        let retained = try storage.journal.read { try $0.page(epoch: epoch, after: previousHead - 1,
+            maximumRecords: 1, maximumBytes: 16_384).canonicalRecords.last }
+        XCTAssertEqual(retained, previous)
     }
 }

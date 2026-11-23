@@ -107,7 +107,12 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     func acquireReleaseActivity() throws -> ReleaseActivityToken? { try journal.acquireReleaseActivity() }
     func isExpired(_ attempt: PairingEnrollmentAttempt) throws -> Bool {
-        try attempt.remainingMilliseconds(at: now()) == 0
+        if attempt.recoveryProposalDigest != nil {
+            let activity = try journal.acquireReleaseActivity()
+            defer { activity?.close() }
+            return try journal.expireRePair(attempt, now: now)
+        }
+        return try attempt.remainingMilliseconds(at: now()) == 0
     }
 
     func verifyCurrent() throws { try journal.read { try self.requireCurrent($0) } }
@@ -121,7 +126,7 @@ final class AuthorityPairingSetupAccess: Sendable {
 
     /// The proposal supplies phone claims only. Root chooses fresh setup identity, challenge, tag, nonce and expiry.
     /// The app and phone must compare the returned transcript before producing the biometric proof.
-    func stage(_ proposalBytes: Data) throws -> PairingEnrollmentAttempt {
+    func stage(_ proposalBytes: Data, authorize: () throws -> Void = {}) throws -> PairingEnrollmentAttempt {
         let proposal: PairingPhoneProposal
         if let legacy = try? PairingTranscript.decode(proposalBytes) {
             guard legacy.replacement == nil else { throw AuthorityPairingSetupError.unsupportedReplacement }
@@ -133,13 +138,26 @@ final class AuthorityPairingSetupAccess: Sendable {
         }
         let scope = proposal.phone.scope
         guard scope.macID == macID, scope.accountID == accountID else { throw AuthorityPairingSetupError.wrongScope }
-        let started = try now(), wall = try unixMilliseconds()
-        let deadline = started.milliseconds.addingReportingOverflow(configuration.lifetimeMilliseconds)
-        let expiry = wall.addingReportingOverflow(configuration.lifetimeMilliseconds)
-        guard !deadline.overflow, !expiry.overflow else { throw AuthorityPairingSetupError.unavailable }
-        return try journal.read { tx in
+        let proposalDigest = proposal.replacement.map { _ in Data(SHA256.hash(data: proposalBytes)) }
+        let prepare: @Sendable (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt = { tx, started, retained in
             try self.requireCurrent(tx)
             let trust = try tx.approvalTrustSnapshot()
+            let replacement = proposal.replacement.map(PairingEnrollmentAttempt.Replacement.requireRevoked) ?? .none
+            if let retained {
+                try proposal.validate(retained.transcript)
+                let attempt = try PairingEnrollmentAttempt(transcript: retained.transcript, trusted: trust, replacement: replacement,
+                    authorityPublicKey: self.authorityPublicKey, transportPublicKey: self.configuration.transportPublicKey,
+                    minimumEnvelopeVersion: self.minimumEnvelopeVersion,
+                    started: .init(epoch: retained.incarnation, milliseconds: retained.started),
+                    startedAtUnixMillis: retained.transcript.issuedAtUnixMillis, deadlineMilliseconds: retained.deadline,
+                    recoveryProposalDigest: proposalDigest)
+                try attempt.validateEnrollmentHistory(tx)
+                return attempt
+            }
+            let wall = try self.unixMilliseconds()
+            let deadline = started.milliseconds.addingReportingOverflow(self.configuration.lifetimeMilliseconds)
+            let expiry = wall.addingReportingOverflow(self.configuration.lifetimeMilliseconds)
+            guard !deadline.overflow, !expiry.overflow else { throw AuthorityPairingSetupError.unavailable }
             let requests = try trust.allowedContracts.sorted {
                 ($0.requestKind.rawValue, $0.wireVersion, $0.schemaVersion) < ($1.requestKind.rawValue, $1.wireVersion, $1.schemaVersion)
             }.map { contract -> ChannelRequestCapability in
@@ -164,14 +182,19 @@ final class AuthorityPairingSetupAccess: Sendable {
                 transportKey: proposal.transportKey, decisionKey: proposal.decisionKey, biometricKey: proposal.biometricKey,
                 enrollmentTag: self.random(32), replacement: proposal.replacement, expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) },
                 issuedAtUnixMillis: wall, expiresAtUnixMillis: expiry.partialValue)
-            let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trust,
-                replacement: proposal.replacement.map(PairingEnrollmentAttempt.Replacement.requireRevoked) ?? .none,
+            let attempt = try PairingEnrollmentAttempt(transcript: transcript, trusted: trust, replacement: replacement,
                 authorityPublicKey: self.authorityPublicKey, transportPublicKey: self.configuration.transportPublicKey,
                 minimumEnvelopeVersion: self.minimumEnvelopeVersion, started: started, startedAtUnixMillis: wall,
-                deadlineMilliseconds: deadline.partialValue)
+                deadlineMilliseconds: deadline.partialValue, recoveryProposalDigest: proposalDigest)
             try attempt.validateEnrollmentHistory(tx)
             return attempt
         }
+        if let proposalDigest {
+            return try journal.stageRePair(phoneID: scope.phoneID, proposalDigest: proposalDigest,
+                                          now: now, authorize: authorize, prepare: prepare)
+        }
+        let started = try now()
+        return try journal.read { try prepare($0, started, nil) }
     }
 
     func commit(_ attempt: PairingEnrollmentAttempt, setupID: Data, confirmedDigest: Data, proof: Data,
@@ -247,6 +270,11 @@ final class AuthorityPairingSetupAccess: Sendable {
         try requireSameScope(selection)
         return try journal.revokePairedPhone(selection, eventID: random(16), recheckAdministrator: authorize,
             validateSetupCode: requireCurrent)
+    }
+
+    func discardExpiredRePair(setupID: Data, digest: Data, authorize: () throws -> Void) throws {
+        guard setupID.count == 16, digest.count == 32 else { throw AuthorityPairingSetupError.invalidConfirmation }
+        try journal.discardExpiredRePair(setupID: setupID, digest: digest, verifyHost: requireCurrent, authorize: authorize)
     }
 
     private func requireSameScope(_ selection: PairedPhoneSelection) throws {

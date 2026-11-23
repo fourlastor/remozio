@@ -139,6 +139,11 @@ public final class AuthorityJournal: @unchecked Sendable {
                 let auditLimits = try CBORLimits(maxBytes: 16_777_216, maxDepth: 32, maxItems: 262_144)
                 let retainedBytes = 67_108_864
                 guard maximumPayloadBytes <= retainedBytes else { throw ApprovalCoordinatorError.invalidConfiguration }
+                let startupCommits = CheckpointedJournal(journal: database, continuity: storage.continuity)
+                if try startupCommits.read({ try $0.hasRetiredRecoveryStages(incarnation: clockEpoch) }) {
+                    let epoch = try storage.continuity.read().committed.journalEpoch
+                    try startupCommits.write(epoch: epoch) { try $0.closeRetiredRecoveryStages(incarnation: clockEpoch) }
+                }
                 let checkpoint = try storage.continuity.read().committed
                 var fresh = Data(count: 16)
                 guard fresh.withUnsafeMutableBytes({ SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }) == errSecSuccess else {
@@ -255,6 +260,27 @@ public final class AuthorityJournal: @unchecked Sendable {
         try withPairingRequestOwner { requests in
             try requests.revokePairedPhone(selection, eventID: eventID, verifyHost: validateSetupCode,
                 recheckAdministrator: recheckAdministrator)
+        }
+    }
+
+    func stageRePair(phoneID: Data, proposalDigest: Data, now: () throws -> AuthorityMoment,
+                     authorize: () throws -> Void,
+                     prepare: (JournalTransaction, AuthorityMoment, PairingRecoveryStage?) throws -> PairingEnrollmentAttempt)
+        throws -> PairingEnrollmentAttempt {
+        try withPairingRequestOwner { requests in
+            try requests.stageRePair(phoneID: phoneID, proposalDigest: proposalDigest, now: now,
+                                    authorize: authorize, prepare: prepare)
+        }
+    }
+
+    func expireRePair(_ attempt: PairingEnrollmentAttempt, now: () throws -> AuthorityMoment) throws -> Bool {
+        try withPairingRequestOwner { try $0.expireRePair(attempt, now: now) }
+    }
+
+    func discardExpiredRePair(setupID: Data, digest: Data, verifyHost: (JournalTransaction) throws -> Void,
+                              authorize: () throws -> Void) throws {
+        try withPairingRequestOwner { requests in
+            try requests.discardExpiredRePair(setupID: setupID, digest: digest, verifyHost: verifyHost, authorize: authorize)
         }
     }
 
