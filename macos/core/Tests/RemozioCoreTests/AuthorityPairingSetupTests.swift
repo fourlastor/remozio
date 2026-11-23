@@ -1730,7 +1730,13 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
                     }
                 }
             }
-            DispatchQueue.global().async(group: completed, execute: expiryWins ? expiryWork : commitWork)
+            let first: @Sendable () -> Void
+            if expiryWins {
+                first = expiryWork
+            } else {
+                first = commitWork
+            }
+            DispatchQueue.global().async(group: completed, execute: first)
             let holder = entered.wait(timeout: .now() + 5)
             DispatchQueue.global().async(group: completed) {
                 if expiryWins { commitWork() } else { expiryWork() }
