@@ -9,11 +9,52 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
     private typealias E = SetupOrphanRecoveryEndpointTests
     private enum Failure: Error { case expected }
     private final class WorkerGate: Sendable {
-        let stream: AsyncStream<Void>, continuation: AsyncStream<Void>.Continuation
-        init() { let pair = AsyncStream<Void>.makeStream(); stream = pair.stream; continuation = pair.continuation }
-        func task() -> Task<Void, Never> { Task { for await _ in stream { break } } }
-        func finish() { continuation.yield(()); continuation.finish() }
-        deinit { finish() }
+        private struct State {
+            var finished = false
+            var cancellationObserved = false
+            var waiter: CheckedContinuation<Void, Never>?
+        }
+        private let state = Mutex(State())
+
+        func task() -> Task<Void, Never> {
+            Task {
+                // Recovery cancels workers before joining them. Only finish() releases this fixture.
+                await withTaskCancellationHandler {
+                    await withCheckedContinuation { continuation in
+                        let finished = state.withLock { state in
+                            guard !state.finished else { return true }
+                            precondition(state.waiter == nil)
+                            state.waiter = continuation
+                            return false
+                        }
+                        if finished { continuation.resume() }
+                    }
+                } onCancel: {
+                    self.state.withLock { $0.cancellationObserved = true }
+                }
+            }
+        }
+
+        func waitForCancellation() async throws {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+            while !state.withLock({ $0.cancellationObserved && $0.waiter != nil }) {
+                guard ContinuousClock.now < deadline else {
+                    XCTFail("Recovery did not cancel the retained worker while its completion was held")
+                    throw Failure.expected
+                }
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+
+        func finish() {
+            let waiter = state.withLock { state in
+                state.finished = true
+                let waiter = state.waiter
+                state.waiter = nil
+                return waiter
+            }
+            waiter?.resume()
+        }
     }
     private final class Context: @unchecked Sendable {
         let f: ExplicitStartupFixture
@@ -814,6 +855,7 @@ final class SetupOrphanRecoveryOperationsTests: XCTestCase, @unchecked Sendable 
             XCTAssertEqual(values.count, 2); XCTAssertTrue(values.allSatisfy { $0 != nil })
             XCTAssertEqual(Set(values.compactMap { $0 }).count, 1)
             XCTAssertEqual(h.imports.withLock { $0 }, 1)
+            try await gate.waitForCancellation()
             XCTAssertEqual(try f.retained.owner.retainedInvocationState(), .recovering)
             XCTAssertThrowsError(try f.retained.claim())
             XCTAssertEqual(try E.code(s, r), .pending)
