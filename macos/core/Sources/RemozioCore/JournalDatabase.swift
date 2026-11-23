@@ -903,12 +903,10 @@ public final class JournalTransaction {
                 gatewayIntent: registration)
             try enrollmentEvent(phone: phone.phoneID, added: false, eventID: eventID, receiptTimeMs: nil,
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
-            try removeRecoveryStageForRevocation(phoneID: phone.phoneID, enrollmentEpoch: phone.enrollmentEpoch, writer: writer)
             return registration == nil ? .revokedOnMac : .gatewayPending
         }
     }
 
-    @discardableResult
     func removeRecoveryStageForRevocation(phoneID: Data, enrollmentEpoch: Data, writer: AuditEpochWriter) throws -> Bool {
         let removed = try withRecoveryStages(write: true) { stages in
             try stages?.removeForRevocation(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch)
@@ -952,7 +950,6 @@ public final class JournalTransaction {
             }
             try enrollmentEvent(phone: phoneID, added: false, eventID: eventID, receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
-            try removeRecoveryStageForRevocation(phoneID: phoneID, enrollmentEpoch: epoch, writer: writer)
             return (next, control)
         }
     }
