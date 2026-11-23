@@ -8,13 +8,13 @@ enum PairingRecoveryStageError: Error, Equatable {
 
 struct PairingRecoveryStage: Sendable {
     enum State: Int64, Sendable {
-        case pending = 0, deadlineElapsed = 2, retiredIncarnation = 3, invalidated = 4
+        case pending = 0, deadlineElapsed = 2, retiredIncarnation = 3
 
         var expiryReason: PairingExpiryReason? {
             switch self {
             case .deadlineElapsed: .deadlineElapsed
             case .retiredIncarnation: .retiredIncarnation
-            case .pending, .invalidated: nil
+            case .pending: nil
             }
         }
     }
@@ -61,7 +61,7 @@ struct PairingRecoveryStageJournal {
                 incarnation BLOB NOT NULL CHECK(length(incarnation)=16),
                 started BLOB NOT NULL CHECK(length(started)=8),
                 deadline BLOB NOT NULL CHECK(length(deadline)=8 AND started < deadline),
-                state INTEGER NOT NULL CHECK(state IN (0,2,3,4))
+                state INTEGER NOT NULL CHECK(state IN (0,2,3))
             ) STRICT, WITHOUT ROWID;
             CREATE \(phoneIndexDefinition);
             """, nil, nil, nil)
@@ -122,15 +122,13 @@ struct PairingRecoveryStageJournal {
              stage.transcriptDigest, GatewayHostSnapshot.bytes(stage.incarnation), bytes(stage.started), bytes(stage.deadline)])
     }
 
-    func finish(_ stage: PairingRecoveryStage, as state: PairingRecoveryStage.State) throws {
-        guard stage.state == .pending, state != .pending else { throw PairingRecoveryStageError.noPendingStage }
-        try mutate("UPDATE main.\(Self.table) SET state=\(state.rawValue) WHERE setup=? AND digest=? AND state=0",
+    func expire(_ stage: PairingRecoveryStage) throws {
+        try mutate("UPDATE main.\(Self.table) SET state=2 WHERE setup=? AND digest=? AND state=0",
                    [stage.transcript.setupID, stage.transcriptDigest])
         guard sqlite3_changes(db) == 1 else { throw PairingRecoveryStageError.noPendingStage }
     }
 
-    /// The enrollment journal retains the receipt as part of the same checkpointed write.
-    func releaseCommitted(_ stage: PairingRecoveryStage) throws {
+    func removePending(_ stage: PairingRecoveryStage) throws {
         try mutate("DELETE FROM main.\(Self.table) WHERE setup=? AND digest=? AND state=0",
                    [stage.transcript.setupID, stage.transcriptDigest])
         guard sqlite3_changes(db) == 1 else { throw PairingRecoveryStageError.noPendingStage }
@@ -145,18 +143,16 @@ struct PairingRecoveryStageJournal {
         try mutate("UPDATE main.\(Self.table) SET state=3 WHERE state=0 AND incarnation<>?", [GatewayHostSnapshot.bytes(incarnation)])
     }
 
-    func invalidate(phoneID: Data, enrollmentEpoch: Data) throws -> Bool {
+    func removeForRevocation(phoneID: Data, enrollmentEpoch: Data) throws -> PairingRecoveryStage.State? {
         guard let stage = try stage(phoneID: phoneID),
-              stage.transcript.replacement?.epoch == enrollmentEpoch else { return false }
+              stage.transcript.replacement?.epoch == enrollmentEpoch else { return nil }
         switch stage.state {
         case .pending:
-            try finish(stage, as: .invalidated)
+            try removePending(stage)
         case .deadlineElapsed, .retiredIncarnation:
             try discardExpired(setupID: stage.transcript.setupID, digest: stage.transcriptDigest)
-        case .invalidated:
-            return false
         }
-        return true
+        return stage.state
     }
 
     @discardableResult

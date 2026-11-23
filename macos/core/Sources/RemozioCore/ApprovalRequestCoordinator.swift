@@ -238,8 +238,8 @@ public final class ApprovalRequestCoordinator {
             try recheckAdministrator()
             if let predecessor = try tx.approvalEnrollments().first(where: { DeliveryRecipient($0) == selection.phone }),
                !predecessor.approval.active,
-               try tx.invalidateRecoveryStage(phoneID: selection.phone.phoneID, enrollmentEpoch: selection.phone.enrollmentEpoch,
-                                               writer: writer, authentication: .localAdministrator) {
+               try tx.removeRecoveryStageForRevocation(phoneID: selection.phone.phoneID,
+                                                        enrollmentEpoch: selection.phone.enrollmentEpoch, writer: writer) {
                 switch predecessor.gatewayRevocation?.progress {
                 case .pending: return .gatewayPending
                 case .applied: return .gatewayApplied
@@ -289,9 +289,11 @@ public final class ApprovalRequestCoordinator {
     func expireRePair(_ attempt: PairingEnrollmentAttempt, now: () throws -> AuthorityMoment) throws -> Bool {
         let identity = try attempt.recoveryStage()
         let status = try read { tx -> (terminal: Bool, due: PairingRecoveryStage?) in
-            guard let stage = try tx.recoveryStage(setupID: identity.transcript.setupID),
-                  stage.state == .pending else { return (true, nil) }
+            guard let stage = try tx.recoveryStage(setupID: identity.transcript.setupID) else {
+                throw PairingRecoveryStageError.noPendingStage
+            }
             try requireSameStage(stage, as: identity)
+            guard stage.state == .pending else { return (true, nil) }
             let moment = try now()
             try checkClock(moment)
             return (false, try isDue(stage, at: moment) ? stage : nil)
@@ -301,7 +303,7 @@ public final class ApprovalRequestCoordinator {
             let moment = try now()
             try checkClock(moment)
             guard try isDue(due, at: moment) else { throw PairingEnrollmentError.expired }
-            try tx.finishRecoveryStage(due, as: .deadlineElapsed)
+            try tx.expireRecoveryStage(due)
             return true
         }
     }
@@ -351,12 +353,12 @@ public final class ApprovalRequestCoordinator {
                 let moment = try now()
                 try checkClock(moment)
                 if try isDue(stage, at: moment) {
-                    try tx.finishRecoveryStage(stage, as: .deadlineElapsed)
+                    try tx.expireRecoveryStage(stage)
                     return .failure(PairingEnrollmentError.expired)
                 }
                 do { try attempt.validateEnrollmentHistory(tx) }
                 catch let error as EnrollmentJournalError where error == .unavailableEnrollment || error == .recoveryRequired || error == .reusedIdentity {
-                    try tx.finishRecoveryStage(stage, as: .invalidated)
+                    try tx.removePendingRecoveryStage(stage)
                     try tx.appendRecoveryStageEvent(phoneID: transcript.phone.scope.phoneID, writer: writer,
                                                     authentication: .system, reason: .bindingMismatch)
                     return .failure(error)
@@ -368,7 +370,7 @@ public final class ApprovalRequestCoordinator {
                 receiptTimeMs: receiptTimeMs, gateway: gateway, now: {
                     let moment = try now(); try checkClock(moment); return moment
                 })
-            if let recoveryStage { try tx.releaseCommittedRecoveryStage(recoveryStage) }
+            if let recoveryStage { try tx.removePendingRecoveryStage(recoveryStage) }
             return .success(committed)
         }
         let committed = try committedResult.get()

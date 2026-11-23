@@ -12,6 +12,7 @@ public final class AuthorityJournal: @unchecked Sendable {
     private var storage: AuthorityStorage?
     private var requests: ApprovalRequestCoordinator?
     private var requestOperationActive = false
+    private var observePairingContention: (@Sendable () -> Void)?
     private var requestStartupAttempted = false
     private(set) var updateHealthOnly = false
     private var updateCompletionOnly = false
@@ -200,6 +201,12 @@ public final class AuthorityJournal: @unchecked Sendable {
         self.requests = requests
     }
 
+    /// Fixture seam for observing a pairing operation that cannot acquire the owner lock.
+    convenience init(requests: sending ApprovalRequestCoordinator, observePairingContention: @escaping @Sendable () -> Void) {
+        self.init(requests: requests)
+        self.observePairingContention = observePairingContention
+    }
+
     /// Attach before listeners start. Existing requests cannot be retroactively covered by this barrier.
     func attachReleaseActivityBarrier(_ barrier: ReleaseActivityBarrier) throws {
         try lock.withLock {
@@ -309,13 +316,21 @@ public final class AuthorityJournal: @unchecked Sendable {
     }
     /// Pairing stays on the exported invocation stack. Native authorization callbacks do not cross executors.
     private func withPairingRequestOwner<Value>(_ body: (ApprovalRequestCoordinator) throws -> Value) throws -> Value {
-        try lock.withLock {
-            try requireNoRequestOperation()
-            guard let requests else { throw ApprovalCoordinatorError.unavailable }
-            try requests.requirePairingCheckpoint()
-            requestOperationActive = true; defer { requestOperationActive = false }
-            return try withStorageFailureCleanup { try body(requests) }
+        if let observePairingContention {
+            if !lock.try() {
+                observePairingContention()
+                lock.lock()
+            }
+        } else {
+            lock.lock()
         }
+        defer { lock.unlock() }
+        try requireNoRequestOperation()
+        guard let requests else { throw ApprovalCoordinatorError.unavailable }
+        try requests.requirePairingCheckpoint()
+        requestOperationActive = true
+        defer { requestOperationActive = false }
+        return try withStorageFailureCleanup { try body(requests) }
     }
 
     /// Enable the optional ledger under the existing foreground owner. No store, key or request owner is replaced.
