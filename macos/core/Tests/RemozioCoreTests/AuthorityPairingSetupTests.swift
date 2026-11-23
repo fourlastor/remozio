@@ -466,9 +466,79 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             proof: losingProof, authorize: {})) {
             XCTAssertEqual($0 as? EnrollmentJournalError, .staleRevision)
         }
-        XCTAssertNoThrow(try f.access.stage(rePairProposal(f, predecessor: newest.predecessor, biometric: losingKey, epoch: 3, keyBase: 63).encode()))
+        let current = try f.access.stage(rePairProposal(f, predecessor: newest.predecessor, biometric: losingKey,
+            epoch: 3, keyBase: 63).encode()).transcript
+        // Build a test-only attempt at the current revision to reach the commit's lineage check.
+        let superseded = try PairingTranscript(setupID: current.setupID, challenge: current.challenge, phone: current.phone, mac: current.mac,
+            minimumEnvelopeVersion: current.minimumEnvelopeVersion, selectedEnvelopeVersion: current.selectedEnvelopeVersion,
+            macAuthorityKey: current.macAuthorityKey, macTransportKey: current.macTransportKey,
+            transportKey: current.transportKey, decisionKey: current.decisionKey, biometricKey: current.biometricKey,
+            enrollmentTag: current.enrollmentTag, replacement: oldPredecessor, expectedTrustRevision: current.expectedTrustRevision,
+            issuedAtUnixMillis: current.issuedAtUnixMillis, expiresAtUnixMillis: current.expiresAtUnixMillis)
+        let trust = try f.journal.read { try $0.approvalTrustSnapshot() }
+        XCTAssertEqual(trust.revision, available.revision)
+        let forgedAttempt = try PairingEnrollmentAttempt(transcript: superseded, trusted: trust, replacement: .requireRevoked(oldPredecessor),
+            authorityPublicKey: f.authority.publicKey.x963Representation, transportPublicKey: f.transport.publicKey.x963Representation,
+            minimumEnvelopeVersion: 1, started: f.environment.now(), startedAtUnixMillis: current.issuedAtUnixMillis,
+            deadlineMilliseconds: f.environment.now().milliseconds + 1000)
+        let currentProof = try losingKey.signature(for: superseded.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        XCTAssertThrowsError(try f.access.commit(forgedAttempt, setupID: superseded.setupID, confirmedDigest: superseded.digest(),
+            proof: currentProof, authorize: {})) {
+            XCTAssertEqual($0 as? EnrollmentJournalError, .unavailableEnrollment)
+        }
         XCTAssertEqual(try f.records(), 4)
         try f.assertCheckpoint()
+        await channel.close()
+    }
+
+    func testUnreadableRePairHistoryLeavesAnotherRevokedPhoneEligible() async throws {
+        let f = try Fixture(), (channel, _) = try await pairForRevocation(f)
+        let before = try await channel.pairedPhones()
+        let original = try XCTUnwrap(before.phones.first)
+        let originalSelection = try XCTUnwrap(before.selection(for: original))
+        _ = try await channel.revokePhone(originalSelection, authorization: authorization)
+
+        let healthyKey = P256.Signing.PrivateKey()
+        let healthySetup = try await channel.stage(f.proposal(phone: 7, epoch: 10, keyBase: 60, biometric: healthyKey),
+            authorization: authorization)
+        let healthyProof = try healthyKey.signature(for: healthySetup.signingInput(purpose: .phoneBiometric)).rawRepresentation
+        _ = try await channel.commit(confirmedDigest: healthySetup.digest(), biometricProof: healthyProof, authorization: authorization)
+        let active = try await channel.pairedPhones()
+        let healthy = try XCTUnwrap(active.phones.first)
+        let healthySelection = try XCTUnwrap(active.selection(for: healthy))
+        _ = try await channel.revokePhone(healthySelection, authorization: authorization)
+        let eligible = try await channel.pairedPhonesForRePair()
+        XCTAssertEqual(Set(eligible.rePairablePhones), [original, healthy])
+
+        let nextKey = P256.Signing.PrivateKey()
+        let successor = try f.access.stage(rePairProposal(f, predecessor: originalSelection.predecessor, biometric: nextKey).encode()).transcript
+        let newEpoch = successor.phone.scope.enrollmentEpoch
+        let row = try StoredApprovalEnrollment(epoch: newEpoch, notificationTag: successor.enrollmentTag,
+            identityPublicKey: successor.transportKey.publicKey,
+            approval: ApprovalEnrollment(phoneID: original.phoneID, active: true, capabilities: PairingEnrollmentAttempt.capabilities(successor), keys: [
+                EnrolledApprovalKey(id: successor.decisionKey.keyID, keyClass: .decision, publicKey: successor.decisionKey.publicKey),
+                EnrolledApprovalKey(id: successor.biometricKey.keyID, keyClass: .biometric, publicKey: successor.biometricKey.publicKey),
+            ]))
+        // Seed one unreadable retained proof in this disposable journal after the checkpointed setup steps.
+        let revision = try f.journal.write { tx in
+            let activeRevision = try tx.addApprovalEnrollment(row, expectedTrustRevision: eligible.revision,
+                eventID: Data(repeating: 100, count: 16), receiptTimeMs: 1000, writer: f.writer, expectedAuditHead: 4)
+            try tx.retainPairing(successor, biometricProof: Data(count: 64), enrollment: row)
+            return try tx.revokeApprovalEnrollment(phoneID: original.phoneID, epoch: newEpoch, expectedTrustRevision: activeRevision,
+                eventID: Data(repeating: 101, count: 16), receiptTimeMs: 1000, writer: f.writer, expectedAuditHead: 5).revision
+        }
+
+        let projected = try await channel.pairedPhonesForRePair()
+        XCTAssertEqual(projected.revision, revision)
+        XCTAssertEqual(projected.rePairablePhones, [healthy])
+        let healthyCandidate = try XCTUnwrap(projected.rePairSelection(for: healthy))
+        let healthyAccepted = try await channel.canRePair(healthyCandidate)
+        XCTAssertTrue(healthyAccepted)
+        for phone in [original, DeliveryRecipient(phoneID: original.phoneID, enrollmentEpoch: newEpoch)] {
+            let candidate = PairedPhoneSelection(macID: f.mac, accountID: f.account, revision: revision, phone: phone)
+            let accepted = try await channel.canRePair(candidate)
+            XCTAssertFalse(accepted)
+        }
         await channel.close()
     }
 

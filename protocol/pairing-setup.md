@@ -84,7 +84,7 @@ exchange authenticates the Mac and authorizes the exact transcript after compari
 
 Root uses verified retained pairing transcripts to identify the latest epoch in the phone's enrollment history.
 Only that epoch can be selected for re-pair, and it must already be revoked. Root checks it at export, staging, and commit.
-An ambiguous history leaves re-pair unavailable.
+An ambiguous or unreadable history blocks re-pair for that phone. Other phones keep their own eligibility.
 
 The Mac binds the listener to its own retained selection. It admits only a proposal for that predecessor
 and a different epoch of the same phone. An ordinary invitation admits only the ordinary proposal.
@@ -92,6 +92,10 @@ A replacement export waits for the helper to drain the prior listener and candid
 Other pairings can open after the old control connection closes. A submitted commit settles before the app
 releases the old generation. If the Root result stays unknown, the app blocks that predecessor for the rest of
 the app process. The signed receipt stays available after the listener closes.
+
+The client can time out while the helper drains an old endpoint. If the old endpoint stays stuck, re-pair for
+that predecessor stays blocked until the helper restarts. The app and helper ship together for the new local
+drain selector. They use the existing handshake.
 
 The re-pair proposal uses version 2 and adds field 4, an array containing the predecessor phone ID and epoch.
 Both are 16-byte strings. The phone offer must retain that phone ID and specify a different epoch.

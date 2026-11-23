@@ -327,27 +327,34 @@ final class EnrollmentJournal {
         return try byPhone.keys.sorted(by: { $0.lexicographicallyPrecedes($1) }).compactMap { phone in
             guard let epochs = byPhone[phone], !restricted.contains(phone),
                   !epochs.contains(where: { $0.approval.active }) else { return nil }
-            if let only = epochs.first, epochs.count == 1 { return DeliveryRecipient(only) }
-
-            let retained = Set(epochs.map(\.epoch))
-            var predecessors: [Data: Data] = [:]
-            for row in epochs {
-                if let previous = try pairing(row)?.replacement, previous.phoneID == phone {
-                    guard retained.contains(previous.epoch), previous.epoch != row.epoch else { return nil }
-                    predecessors[row.epoch] = previous.epoch
-                }
+            do {
+                guard let tip = try latestRePairEpoch(in: epochs, phone: phone) else { return nil }
+                return DeliveryRecipient(phoneID: phone, enrollmentEpoch: tip)
+            } catch EnrollmentJournalError.corruptData {
+                return nil
             }
-            let tips = retained.subtracting(predecessors.values)
-            guard tips.count == 1, let tip = tips.first else { return nil }
-            var visited: Set<Data> = []
-            var current: Data? = tip
-            while let epoch = current {
-                guard visited.insert(epoch).inserted else { return nil }
-                current = predecessors[epoch]
-            }
-            guard visited == retained else { return nil }
-            return DeliveryRecipient(phoneID: phone, enrollmentEpoch: tip)
         }
+    }
+
+    private func latestRePairEpoch(in epochs: [StoredApprovalEnrollment], phone: Data) throws -> Data? {
+        let retained = Set(epochs.map(\.epoch))
+        var predecessors: [Data: Data] = [:]
+        for row in epochs {
+            if let previous = try pairing(row)?.replacement, previous.phoneID == phone {
+                guard retained.contains(previous.epoch), previous.epoch != row.epoch else { return nil }
+                predecessors[row.epoch] = previous.epoch
+            }
+        }
+        let tips = retained.subtracting(predecessors.values)
+        guard tips.count == 1, let tip = tips.first else { return nil }
+        var visited: Set<Data> = []
+        var current: Data? = tip
+        while let epoch = current {
+            guard visited.insert(epoch).inserted else { return nil }
+            current = predecessors[epoch]
+        }
+        guard visited == retained else { return nil }
+        return tip
     }
 
     func add(_ enrollment: StoredApprovalEnrollment, expected: UUID) throws -> UUID {
