@@ -37,6 +37,7 @@ class PairingReceiptChannel private constructor(
         fun bind(record: StoredPhoneEnrollment, channel: NegotiatedTLSChannel): PairingReceiptChannel {
             try {
                 require(record.phase == EnrollmentPhase.PREPARED)
+                require(record.rePair?.proofMayHaveBeenSent != false)
                 val enrollment = record.enrollment
                 val pairing = requireNotNull(record.pairing)
                 val scope = ChannelScope(enrollment.macID.copyBytes(), enrollment.accountID.copyBytes(),

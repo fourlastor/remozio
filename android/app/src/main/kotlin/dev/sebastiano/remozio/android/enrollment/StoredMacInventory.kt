@@ -3,6 +3,7 @@ package dev.sebastiano.remozio.android.enrollment
 import dev.remozio.phone.enrollment.EncryptedEnrollmentStore
 import dev.remozio.phone.enrollment.EnrollmentPhase
 import dev.remozio.phone.enrollment.EnrollmentSnapshot
+import dev.remozio.phone.enrollment.canAbandonAmbiguousRePair
 import dev.remozio.protocol.CborValue
 import java.util.Collections
 import kotlinx.coroutines.CancellationException
@@ -13,7 +14,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /** Display metadata only. A stored phase establishes neither current peer trust nor presence. */
-internal class StoredMac(val recordID: CborValue.Bytes, val label: String, val setupIncomplete: Boolean) {
+internal class StoredMac(
+    val recordID: CborValue.Bytes,
+    val label: String,
+    val setupIncomplete: Boolean,
+    val revision: ULong,
+    val rePair: Boolean,
+    val canAbandonRePair: Boolean,
+) {
     override fun toString() = "StoredMac(redacted)"
 }
 
@@ -27,21 +35,27 @@ internal sealed interface MacInventoryState {
 }
 
 internal fun storedMacs(snapshot: EnrollmentSnapshot): MacInventoryState.Ready = MacInventoryState.Ready(
-    snapshot.entries.filter { it.phase != EnrollmentPhase.REMOVED }.map {
-        StoredMac(it.enrollment.recordID, it.enrollment.label, it.phase == EnrollmentPhase.PREPARED)
+    snapshot.entries.filter {
+        it.phase != EnrollmentPhase.REMOVED &&
+            (it.phase != EnrollmentPhase.PREPARED || it.rePair?.proofMayHaveBeenSent != false)
+    }.map {
+        StoredMac(it.enrollment.recordID, it.enrollment.label, it.phase == EnrollmentPhase.PREPARED, snapshot.revision,
+            it.rePair != null, snapshot.canAbandonAmbiguousRePair(it))
     },
 )
 
-/** Serializes readers across activities and closes the archive before exposing metadata to Compose. */
+/** Reconciles setup state, then closes the archive before exposing inventory metadata to Compose. */
 internal class StoredMacReader(
     private val open: () -> EncryptedEnrollmentStore?,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val enrollmentAccess: Mutex = Mutex(),
+    private val reconcile: suspend () -> Unit = {},
 ) {
     private val mutex = Mutex()
     suspend fun read(): MacInventoryState = mutex.withLock {
         try {
             withContext(dispatcher) {
+                reconcile()
                 enrollmentAccess.withLock {
                     open()?.use { storedMacs(it.snapshot()) } ?: MacInventoryState.Ready(emptyList())
                 }

@@ -7,6 +7,7 @@ import java.security.Signature
 import java.security.spec.ECGenParameterSpec
 import javax.crypto.KeyGenerator
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -81,6 +82,248 @@ class StoredPairingHostTest {
         override suspend fun recover(): ByteArray? { queries++; return read() }
         override fun close() = Unit
         override suspend fun closeAndJoin() { joins++; joining() }
+    }
+
+    private class RePairKeys : RePairKeyCleanup {
+        val allocated = mutableSetOf<String>()
+        val retired = mutableListOf<String>()
+        override fun contains(alias: String) = alias in allocated
+
+        override fun retire(alias: String, expectedPublicKey: CborValue.Bytes?) {
+            if (allocated.remove(alias)) retired.add(alias)
+        }
+    }
+
+    private fun rePairHost(keys: RePairKeys, onChanged: () -> Unit = {}) = StoredPairingHost(
+        ::open, ::open, mutex, { invalidated.add(it) }, {}, Dispatchers.Unconfined, rePairKeys = keys, onChanged = onChanged,
+    )
+
+    private fun envelope(old: PhoneEnrollment, transport: ByteArray = old.transportPublicKey.copyBytes().takeLast(65).toByteArray()) =
+        RePairInvitation(PairingInvitation(old.macID.copyBytes(), old.accountID.copyBytes(), old.label,
+            old.authorityPublicKey.copyBytes(), transport, 1u),
+            PairingReplacement(old.phoneID.copyBytes(), old.epoch.copyBytes()))
+
+    private suspend fun activatePredecessor(h: StoredPairingHost, old: PhoneEnrollment) {
+        val t = transcript(old)
+        h.prepare(old, t, 0u, 1u)
+        h.activate(old.recordID, receipt(t))
+    }
+
+    private fun proposalFor(reservation: RePairReservation): Pair<RePairProposalMaterial, PairingTranscript> {
+        val invitation = reservation.invitation
+        val keys = EnrollmentKeyRole.entries.map { role ->
+            val spki = key().public.encoded
+            EnrollmentKeyReference(role, reservation.keyIDs[role.ordinal].copyBytes(), reservation.alias(role),
+                if (role == EnrollmentKeyRole.TRANSPORT) spki else spki.takeLast(65).toByteArray())
+        }
+        val scope = ChannelScope(invitation.invitation.macID.copyBytes(), invitation.invitation.accountID.copyBytes(),
+            invitation.predecessor.phoneID.copyBytes(), reservation.epoch.copyBytes())
+        fun offer(role: ChannelRole, nonce: Int) =
+            ChannelOffer(role, scope, ByteArray(32) { nonce.toByte() }, setOf(1u), emptyList(), emptySet())
+        fun claim(key: EnrollmentKeyReference) =
+            PairingKey(key.keyID.copyBytes(), key.publicKey.copyBytes().takeLast(65).toByteArray())
+        val proposal = PairingPhoneProposal(offer(ChannelRole.PHONE, 82), claim(keys[0]), claim(keys[1]), claim(keys[2]),
+            invitation.predecessor)
+        val transcript = PairingTranscript(id(80), ByteArray(32) { 81 }, proposal.phone, offer(ChannelRole.MAC, 83),
+            1u, 1u, invitation.invitation.authorityPublicKey.copyBytes(), invitation.invitation.transportPublicKey.copyBytes(),
+            proposal.transportKey, proposal.decisionKey, proposal.biometricKey, ByteArray(32) { 84 },
+            invitation.predecessor, id(85), 1000u, 2000u)
+        return RePairProposalMaterial(proposal, keys) to transcript
+    }
+
+    @Test fun rePairRequiresExactRetainedPinsAndSerializesBeforeKeyAllocation() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        assertFails { h.inspectRePair(envelope(old, key().public.encoded.takeLast(65).toByteArray())) }
+        assertEquals(old.recordID, h.inspectRePair(envelope(old)).enrollment.recordID)
+        val outcomes = (0..1).map { n ->
+            async { runCatching { h.reserveRePair(envelope(old), id(30 + n), id(60 + n),
+                List(3) { CborValue.Bytes(id(92 + n * 3 + it)) }) } }
+        }.map { it.await() }
+        assertEquals(1, outcomes.count { it.isSuccess })
+        assertIs<RePairAlreadyPending>(outcomes.single { it.isFailure }.exceptionOrNull())
+        open().use { assertEquals(1, it.snapshot().rePairReservations.size) }
+        assertTrue(keys.allocated.isEmpty())
+    }
+
+    @Test fun androidAttemptReservesTheDurableSlotBeforeItsFirstHardwareKeyRequest() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        val invited = envelope(old).exportText()
+        var allocations = 0
+        val providerFailure = IllegalStateException("Stop at the first hardware allocation")
+        val parent = CoroutineScope(checkNotNull(currentCoroutineContext()[Job]))
+        fun attempt() = AndroidPairingAttempt(parent, h, { error("Unexpected Android context access") }) { _, keyID ->
+            allocations++
+            open().use {
+                val pending = it.snapshot().rePairReservations.single()
+                assertEquals(old.recordID, pending.predecessorRecordID)
+                assertContentEquals(pending.keyIDs[EnrollmentKeyRole.TRANSPORT.ordinal].copyBytes(), keyID)
+                assertNull(pending.material)
+            }
+            throw providerFailure
+        }
+        val first = attempt()
+        val second = attempt()
+        try {
+            val failure = assertFailsWith<IllegalStateException> { first.connect(invited) }
+            assertEquals(providerFailure.message, failure.message)
+            assertFailsWith<RePairAlreadyPending> { second.connect(invited) }
+            assertEquals(1, allocations)
+        } finally {
+            second.closeAndJoin()
+            first.closeAndJoin()
+        }
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+        val bytes = cipher.decrypt(checkNotNull(storage.bytes))
+        val encoded = assertIs<CborValue.Fields>(DeterministicCbor.decode(bytes, CborLimits(65_536, 8, 1_016)))
+        assertEquals(CborValue.Unsigned(3u), encoded.values[0u])
+    }
+
+    @Test fun rePairAllocationRecoveryReleasesOnlyItsAliasesAndDoesNotRecoverAReceipt() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        val reservation = h.reserveRePair(envelope(old), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val unrelated = old.transportKey.alias
+        keys.allocated.add(unrelated)
+        keys.allocated.add(reservation.alias(EnrollmentKeyRole.TRANSPORT))
+        assertFails { h.recoverable(reservation.recordID) }
+        assertFailsWith<RePairAlreadyPending> { h.inspectRePair(envelope(old)) }
+        val reopened = rePairHost(keys)
+        reopened.reconcileRePair()
+        assertEquals(listOf(reservation.alias(EnrollmentKeyRole.TRANSPORT)), keys.retired)
+        assertEquals(setOf(unrelated), keys.allocated)
+        assertEquals(old.recordID, reopened.inspectRePair(envelope(old)).enrollment.recordID)
+        open().use { assertTrue(it.snapshot().rePairReservations.isEmpty()) }
+    }
+
+    @Test fun rePairCheckpointFailureRetainsProposalAndRestartDrainsUnsubmittedKeys() = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        val reservation = h.reserveRePair(envelope(old), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, t) = proposalFor(reservation)
+        keys.allocated.addAll(material.keys.map { it.alias })
+        h.prepareRePairProposal(reservation.recordID, material)
+        assertFails { h.checkpointRePair(reservation.recordID, transcript(old)) }
+        storage.fail = true
+        assertFailsWith<EnrollmentStoreUnavailable> { h.checkpointRePair(reservation.recordID, t) }
+        storage.fail = false
+        open().use {
+            val pending = it.snapshot().rePairReservations.single()
+            assertContentEquals(material.proposal.encode(), pending.material?.proposal?.encode())
+            assertEquals(reservation.keyIDs, pending.keyIDs)
+            assertEquals(old.recordID, it.snapshot().entries.single().enrollment.recordID)
+        }
+        rePairHost(keys).reconcileRePair()
+        assertEquals(material.keys.map { it.alias }.toSet(), keys.retired.toSet())
+    }
+
+    @Test fun rePairProofMarkerSurvivesRestartAndReceiptRetiresTheExactRemovedPredecessor(): Unit = runBlocking {
+        val keys = RePairKeys()
+        val h = rePairHost(keys)
+        val old = record(1)
+        activatePredecessor(h, old)
+        h.remove(old.recordID, 2u)
+        val invitation = envelope(old)
+        val reservation = h.reserveRePair(invitation, id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, t) = proposalFor(reservation)
+        keys.allocated.addAll(material.keys.map { it.alias })
+        h.prepareRePairProposal(reservation.recordID, material)
+        h.checkpointRePair(reservation.recordID, t)
+        val access = h.prepared(reservation.recordID, t)
+        assertFalse(checkNotNull(access.record.rePair).proofMayHaveBeenSent)
+        h.markRePairProof(access)
+        h.release(reservation.recordID, access.lease)
+        val reopened = rePairHost(keys)
+        reopened.reconcileRePair()
+        assertTrue(keys.retired.isEmpty())
+        assertFailsWith<RePairAlreadyPending> { reopened.inspectRePair(invitation) }
+        val emptyReceipt = PairingReceiptRecovery(reopened, { _, _ -> RecoveryWire({ null }) }, Dispatchers.Unconfined)
+        assertFalse(emptyReceipt.recover(reservation.recordID))
+        val refusedWire = PairingReceiptRecovery(reopened, { _, _ -> error("Receipt transport refused") }, Dispatchers.Unconfined)
+        assertFails { refusedWire.recover(reservation.recordID) }
+        val wrongReceipt = PairingReceiptRecovery(reopened, { _, _ ->
+            RecoveryWire({ receipt(transcript(old)).copyBytes() })
+        }, Dispatchers.Unconfined)
+        assertFails { wrongReceipt.recover(reservation.recordID) }
+        val wire = RecoveryWire({ receipt(t).copyBytes() })
+        val recovered = PairingReceiptRecovery(reopened, { _, row ->
+            assertContentEquals(t.encode(), checkNotNull(row.pairing).transcript.encode())
+            assertEquals(material.keys[0].alias, row.enrollment.transportKey.alias)
+            wire
+        }, Dispatchers.Unconfined)
+        assertTrue(recovered.recover(reservation.recordID))
+        assertTrue(recovered.recover(reservation.recordID))
+        assertEquals(1, wire.queries)
+        open().use { store ->
+            val snapshot = store.snapshot()
+            assertEquals(reservation.recordID, snapshot.entries.single { it.enrollment.recordID == old.recordID }.successorRecordID)
+            assertEquals(old.phoneID, snapshot.entries.single { it.phase == EnrollmentPhase.ACTIVE }.enrollment.phoneID)
+            store.remove(reservation.recordID.copyBytes(), snapshot.revision)
+        }
+        assertFails { reopened.inspectRePair(invitation) }
+    }
+
+    @Test fun ordinaryPairingAllowsExplicitLocalAbandonmentWithoutReplayingThePendingSetup() = runBlocking {
+        val keys = RePairKeys()
+        var changeCount = 0
+        val h = rePairHost(keys) { changeCount++ }
+        val old = record(1)
+        activatePredecessor(h, old)
+        h.remove(old.recordID, 2u)
+        val reservation = h.reserveRePair(envelope(old), id(30), id(60), List(3) { CborValue.Bytes(id(92 + it)) })
+        val (material, t) = proposalFor(reservation)
+        val pendingAliases = material.keys.map { it.alias }.toSet()
+        keys.allocated.addAll(pendingAliases)
+        h.prepareRePairProposal(reservation.recordID, material)
+        h.checkpointRePair(reservation.recordID, t)
+        val access = h.prepared(reservation.recordID, t)
+        h.markRePairProof(access)
+        h.release(reservation.recordID, access.lease)
+        h.finishRePair(reservation.recordID)
+        val pendingRevision = open().use { it.snapshot().revision }
+        assertFails { h.abandonAmbiguousRePair(reservation.recordID, pendingRevision) }
+        assertTrue(keys.retired.isEmpty())
+
+        val ordinary = record(2)
+        val ordinaryTranscript = transcript(ordinary)
+        keys.allocated.add(ordinary.transportKey.alias)
+        h.prepare(ordinary, ordinaryTranscript, pendingRevision, 1u)
+        val paired = h.activate(ordinary.recordID, receipt(ordinaryTranscript))
+        assertNotEquals(old.phoneID, ordinary.phoneID)
+        assertTrue(storedMacs(paired).macs.single { it.recordID == reservation.recordID }.canAbandonRePair)
+        assertFails { h.abandonAmbiguousRePair(reservation.recordID, pendingRevision) }
+        val recovering = h.recoverable(reservation.recordID)
+        try {
+            assertFails { h.abandonAmbiguousRePair(reservation.recordID, paired.revision) }
+            assertTrue(keys.retired.isEmpty())
+        } finally { h.release(reservation.recordID, recovering.lease) }
+
+        invalidated.clear()
+        val notificationsBeforeAbandonment = changeCount
+        val abandoned = h.abandonAmbiguousRePair(reservation.recordID, paired.revision)
+        assertEquals(listOf(setOf(reservation.recordID)), invalidated)
+        assertEquals(notificationsBeforeAbandonment + 1, changeCount)
+        assertEquals(ordinary.recordID, abandoned.entries.single { it.phase == EnrollmentPhase.ACTIVE }.enrollment.recordID)
+        val retained = abandoned.entries.single { it.enrollment.recordID == reservation.recordID }
+        assertEquals(EnrollmentPhase.REMOVED, retained.phase)
+        assertTrue(checkNotNull(retained.rePair).proofMayHaveBeenSent)
+        assertNull(abandoned.entries.first().successorRecordID)
+        assertEquals(pendingAliases, keys.retired.toSet())
+        assertEquals(setOf(ordinary.transportKey.alias), keys.allocated)
+        val recovery = PairingReceiptRecovery(h, { _, _ -> fail("Abandoned setup opened receipt transport") }, Dispatchers.Unconfined)
+        assertFailsWith<IllegalArgumentException> { recovery.recover(reservation.recordID) }
+        val next = h.reserveRePair(envelope(ordinary), id(31), id(61), List(3) { CborValue.Bytes(id(96 + it)) })
+        assertEquals(ordinary.recordID, next.predecessorRecordID)
+        h.finishRePair(next.recordID)
     }
 
     @Test fun recoveryActivatesOnlyTheRetainedTranscriptAndPreservesKeys() = runBlocking<Unit> {

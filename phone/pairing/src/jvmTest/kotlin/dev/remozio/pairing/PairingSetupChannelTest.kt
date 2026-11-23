@@ -46,10 +46,12 @@ class PairingSetupChannelTest {
         val suspended = CompletableDeferred<Unit>()
         val ended = CompletableDeferred<ByteArray?>()
         var proofSubmissions = 0; var proposalSubmissions = 0; var closes = 0
+        var sentBytes = 0
         init { queue(initial ?: wire(PairingSetupFrame.Hello)) }
         fun queue(bytes: ByteArray) { bytes.toList().chunked(fragment).forEach { input.add(it.toByteArray()) } }
         override suspend fun awaitOpen() {}
         override suspend fun send(bytes: ByteArray) {
+            sentBytes += bytes.size
             output.write(bytes); val all = output.toByteArray()
             if (all.size < 4) return
             val n = ByteBuffer.wrap(all).int
@@ -100,6 +102,31 @@ class PairingSetupChannelTest {
             } finally { channel.closeAndJoin(); parent.cancelAndJoin() }
         }
     }
+    @Test fun failedBeforeProofCallbackSendsZeroProofBytes(): Unit = runBlocking {
+        val fixture = Fixture()
+        val stream = Stream(fixture)
+        val parent = SupervisorJob()
+        val channel = PairingSetupChannel.connect(CoroutineScope(parent), stream, fixture.invitation, fixture.proposal)
+        try {
+            val before = stream.sentBytes
+            var checkpointCalls = 0
+            assertFailsWith<IOException> {
+                channel.submitProof(fixture.transcript.digest(), fixture.proof()) {
+                    checkpointCalls++
+                    throw IOException("Synthetic archive write failure")
+                }
+            }
+            assertEquals(1, checkpointCalls)
+            assertEquals(before, stream.sentBytes)
+            assertEquals(0, stream.proofSubmissions)
+            assertFails { channel.submitProof(fixture.transcript.digest(), fixture.proof()) }
+            assertEquals(before, stream.sentBytes)
+        } finally {
+            channel.closeAndJoin()
+            parent.cancelAndJoin()
+        }
+    }
+
     @Test fun invalidConfirmationAndProofSendNothing(): Unit = runBlocking {
         for (wrongDigest in listOf(true,false)) {
             val f = Fixture(); val stream = Stream(f); val parent = SupervisorJob()

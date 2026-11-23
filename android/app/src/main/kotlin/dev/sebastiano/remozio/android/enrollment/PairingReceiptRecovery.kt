@@ -24,6 +24,7 @@ internal class PairingReceiptRecovery(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     suspend fun recover(recordID: CborValue.Bytes): Boolean = withContext(dispatcher) {
+        if (store.hasActivatedRePair(recordID)) return@withContext true
         coroutineScope {
             val access = withContext(NonCancellable) { store.recoverable(recordID) }
             var wire: PairingReceiptWire? = null
@@ -38,6 +39,10 @@ internal class PairingReceiptRecovery(
                 currentCoroutineContext().ensureActive()
                 check(access.lease.isCurrent())
                 if (proof == null) false else withContext(NonCancellable) {
+                    if (access.record.rePair != null) {
+                        wire?.closeAndJoin()
+                        wire = null
+                    }
                     store.activate(recordID, CborValue.Bytes(proof), expected = access)
                     true
                 }

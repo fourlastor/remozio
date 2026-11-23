@@ -32,8 +32,14 @@ object AndroidTransportKeyCreation {
     private val random = SecureRandom()
 
     @WorkerThread
+    fun create(context: Context, certificateNotBefore: Instant, certificateNotAfter: Instant): CreatedTransportIdentity =
+        createForEnrollment(context, certificateNotBefore, certificateNotAfter, ByteArray(16).also(random::nextBytes))
+
+    @WorkerThread
     @Synchronized
-    fun create(context: Context, certificateNotBefore: Instant, certificateNotAfter: Instant): CreatedTransportIdentity {
+    internal fun createForEnrollment(context: Context, certificateNotBefore: Instant, certificateNotAfter: Instant,
+        id: ByteArray): CreatedTransportIdentity {
+        require(id.size == 16)
         try {
             val validity = TransportCertificateValidity(certificateNotBefore.toEpochMilli(), certificateNotAfter.toEpochMilli())
             validity.validateAt(System.currentTimeMillis())
@@ -42,7 +48,7 @@ object AndroidTransportKeyCreation {
             RandomAccessFile(File(directory, "creation.lock"), "rw").use { lockFile ->
                 val lock = lockFile.channel.tryLock() ?: throw TransportIdentityUnavailable()
                 lock.use {
-                    val alias = "remozio.transport.v1." + ByteArray(16).also(random::nextBytes).joinToString("") { "%02x".format(it) }
+                    val alias = "remozio.transport.v1." + id.joinToString("") { "%02x".format(it) }
                     val publicKey = createTransportKey(PlatformTransportKeys, alias, validity)
                     val identity = AndroidTransportIdentities.load(alias, publicKey)
                     try {

@@ -42,8 +42,9 @@ class PairingSetupChannel private constructor(
     }
 
     /** Start the sole proposal only after selecting an authenticated route. Human setup has its own longer deadline. */
-    suspend fun awaitTranscript(): PairingTranscript = operation {
+    suspend fun awaitTranscript(beforeProposal: suspend () -> Unit = {}): PairingTranscript = operation {
         check(state == State.AUTHENTICATED)
+        beforeProposal()
         state = State.PROPOSAL_SENT
         write(PairingSetupFrame.Proposal(proposal))
         val frame = read() as? PairingSetupFrame.Transcript ?: throw IOException("Missing pairing transcript")
@@ -55,11 +56,13 @@ class PairingSetupChannel private constructor(
 
     /** Call once after human confirmation, durable PREPARED storage and a fresh hardware biometric proof.
      * A lost reply is ambiguous. This method never repeats the submission or activates an enrollment. */
-    suspend fun submitProof(confirmedDigest: ByteArray, biometricProof: ByteArray): ByteArray = operation {
+    suspend fun submitProof(confirmedDigest: ByteArray, biometricProof: ByteArray,
+        beforeProof: suspend () -> Unit = {}): ByteArray = operation {
         check(state == State.STAGED)
         val transcript = checkNotNull(staged)
         require(confirmedDigest.contentEquals(transcript.digest()))
         require(transcript.verify(biometricProof, transcript.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
+        beforeProof()
         state = State.PROOF_SUBMITTED
         write(PairingSetupFrame.Proof(transcript.setupID.copyBytes(), transcript.digest(), biometricProof))
         val receipt = read() as? PairingSetupFrame.Receipt ?: throw IOException("Missing pairing receipt")

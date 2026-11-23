@@ -5,7 +5,9 @@ import dev.remozio.phone.transport.RelayEndpoint
 import dev.remozio.phone.transport.p256SpkiPrefix
 import dev.remozio.phone.transport.p256TransportPin
 import dev.remozio.protocol.CborValue
+import dev.remozio.protocol.PairingPhoneProposal
 import dev.remozio.protocol.PairingTranscript
+import dev.remozio.protocol.RePairInvitation
 
 /** Local references only. Private keys never enter an enrollment archive. */
 enum class EnrollmentKeyRole(val aliasPart: String) { TRANSPORT("transport"), DECISION("decision"), BIOMETRIC("biometric") }
@@ -51,7 +53,27 @@ class PreparedPairing(val transcript: PairingTranscript, replacingRecordID: Byte
     override fun toString() = "PreparedPairing(redacted)"
 }
 
-class StoredPhoneEnrollment(val enrollment: PhoneEnrollment, val phase: EnrollmentPhase, val pairing: PreparedPairing? = null) {
+class StoredPhoneEnrollment(
+    val enrollment: PhoneEnrollment,
+    val phase: EnrollmentPhase,
+    val pairing: PreparedPairing? = null,
+    val rePair: PreparedRePair? = null,
+    val successorRecordID: CborValue.Bytes? = null,
+) {
+    init {
+        successorRecordID?.let {
+            require(phase == EnrollmentPhase.REMOVED && it != enrollment.recordID && it.copyBytes().size == 16)
+        }
+        rePair?.let {
+            val setup = requireNotNull(pairing)
+            require(setup.replacingRecordID != null)
+            it.validate(setup.transcript)
+        }
+    }
+
+    internal fun withPhase(value: EnrollmentPhase, successor: CborValue.Bytes? = successorRecordID) =
+        StoredPhoneEnrollment(enrollment, value, pairing, rePair, successor)
+
     /** Compares all connection material without exposing relay credentials. A display rename is not a trust change. */
     fun sameConnectionAs(other: StoredPhoneEnrollment): Boolean =
         (EnrollmentEncoding.encode(this) as CborValue.Fields).values.filterKeys { it != 5uL } ==
@@ -68,24 +90,46 @@ private fun point(bytes: ByteArray): ByteArray {
 }
 
 internal object EnrollmentEncoding {
-    fun encode(row: StoredPhoneEnrollment): CborValue {
+    private fun encodeKey(key: EnrollmentKeyReference) = CborValue.Fields(mapOf(
+        0uL to key.keyID, 1uL to CborValue.Text(key.alias), 2uL to key.publicKey,
+    ))
+
+    private fun decodeKey(value: CborValue, role: EnrollmentKeyRole): EnrollmentKeyReference {
+        val key = fields(value, 2)
+        return EnrollmentKeyReference(role, bytes(key, 0u), text(key, 1u), bytes(key, 2u))
+    }
+
+    fun encode(row: StoredPhoneEnrollment, schema: ULong = if (row.rePair != null || row.successorRecordID != null) 3u else 2u): CborValue {
         val e = row.enrollment
-        fun key(k: EnrollmentKeyReference) = CborValue.Fields(mapOf(0uL to k.keyID, 1uL to CborValue.Text(k.alias), 2uL to k.publicKey))
         val relay = e.relayCredential?.let { c -> CborValue.Fields(mapOf(
             0uL to CborValue.Text(c.endpoint.host), 1uL to CborValue.Unsigned(c.endpoint.port.toULong()),
             2uL to CborValue.Text(c.endpoint.path), 3uL to CborValue.Text(c.clientId), 4uL to CborValue.Text(c.clientSecret))) } ?: CborValue.Null
         val pairing = row.pairing?.let { CborValue.ArrayValue(listOf(CborValue.Bytes(it.transcript.encode()),
             it.replacingRecordID ?: CborValue.Null, CborValue.Unsigned(it.minimumEnvelopeVersion))) } ?: CborValue.Null
-        return CborValue.Fields(mapOf(
+        val values = mutableMapOf<ULong, CborValue>(
             14uL to pairing,
             0uL to e.recordID, 1uL to e.macID, 2uL to e.accountID, 3uL to e.phoneID, 4uL to e.epoch,
             5uL to CborValue.Text(e.label), 6uL to e.authorityPublicKey, 7uL to e.transportPublicKey,
-            8uL to key(e.transportKey), 9uL to key(e.decisionKey), 10uL to key(e.biometricKey),
+            8uL to encodeKey(e.transportKey), 9uL to encodeKey(e.decisionKey), 10uL to encodeKey(e.biometricKey),
             11uL to e.enrollmentTag, 12uL to relay, 13uL to CborValue.Unsigned(when (row.phase) { EnrollmentPhase.PREPARED -> 0uL; EnrollmentPhase.ACTIVE -> 1uL; EnrollmentPhase.REMOVED -> 2uL }),
-        ))
+        )
+        if (schema == 3uL) {
+            values[15u] = row.rePair?.let { CborValue.ArrayValue(listOf(
+                CborValue.Bytes(it.invitation.encode()), CborValue.Bytes(it.proposal.encode()),
+                CborValue.Unsigned(if (it.proofMayHaveBeenSent) 1u else 0u),
+            )) } ?: CborValue.Null
+            values[16u] = row.successorRecordID ?: CborValue.Null
+        }
+        return CborValue.Fields(values)
     }
+
     fun decode(value: CborValue, schema: ULong = 2u): StoredPhoneEnrollment {
-        val f = fields(value, if (schema == 1uL) 13 else 14)
+        val f = fields(value, when (schema) {
+            1uL -> 13
+            2uL -> 14
+            3uL -> 16
+            else -> error("Unknown enrollment schema")
+        })
         val pairing = if (schema == 1uL || f[14u] == CborValue.Null) null else {
             val row = (f[14u] as? CborValue.ArrayValue)?.values ?: throw IllegalArgumentException()
             require(row.size == 3)
@@ -93,10 +137,15 @@ internal object EnrollmentEncoding {
                 if (row[1] == CborValue.Null) null else (row[1] as CborValue.Bytes).copyBytes(),
                 (row[2] as CborValue.Unsigned).value)
         }
-        fun key(index: ULong, role: EnrollmentKeyRole): EnrollmentKeyReference {
-            val k = fields(f.getValue(index), 2)
-            return EnrollmentKeyReference(role, bytes(k, 0u), text(k, 1u), bytes(k, 2u))
+        val rePair = if (schema != 3uL || f[15u] == CborValue.Null) null else {
+            val values = (f[15u] as CborValue.ArrayValue).values
+            require(values.size == 3)
+            val marker = (values[2] as CborValue.Unsigned).value
+            require(marker <= 1uL)
+            PreparedRePair(RePairInvitation.decode((values[0] as CborValue.Bytes).copyBytes()),
+                PairingPhoneProposal.decode((values[1] as CborValue.Bytes).copyBytes()), marker == 1uL)
         }
+        val successor = if (schema != 3uL || f[16u] == CborValue.Null) null else id(bytes(f, 16u))
         val relay = if (f[12u] == CborValue.Null) null else {
             val r = fields(f.getValue(12u), 4)
             val port = uint(r, 1u); require(port in 1u..65_535u)
@@ -104,9 +153,33 @@ internal object EnrollmentEncoding {
         }
         val phase = when (uint(f, 13u)) { 0uL -> EnrollmentPhase.PREPARED; 1uL -> EnrollmentPhase.ACTIVE; 2uL -> EnrollmentPhase.REMOVED; else -> throw IllegalArgumentException() }
         return StoredPhoneEnrollment(PhoneEnrollment(bytes(f, 0u), bytes(f, 1u), bytes(f, 2u), bytes(f, 3u), bytes(f, 4u),
-            text(f, 5u), bytes(f, 6u), bytes(f, 7u), key(8u, EnrollmentKeyRole.TRANSPORT), key(9u, EnrollmentKeyRole.DECISION),
-            key(10u, EnrollmentKeyRole.BIOMETRIC), bytes(f, 11u), relay), phase, pairing)
+            text(f, 5u), bytes(f, 6u), bytes(f, 7u), decodeKey(f.getValue(8u), EnrollmentKeyRole.TRANSPORT),
+            decodeKey(f.getValue(9u), EnrollmentKeyRole.DECISION), decodeKey(f.getValue(10u), EnrollmentKeyRole.BIOMETRIC),
+            bytes(f, 11u), relay), phase, pairing, rePair, successor)
     }
+    fun encodeReservation(reservation: RePairReservation): CborValue = CborValue.Fields(mapOf(
+        0uL to reservation.recordID, 1uL to reservation.predecessorRecordID, 2uL to reservation.epoch,
+        3uL to CborValue.Bytes(reservation.invitation.encode()), 4uL to CborValue.ArrayValue(reservation.keyIDs),
+        5uL to (reservation.material?.let {
+            CborValue.ArrayValue(listOf(CborValue.Bytes(it.proposal.encode()), CborValue.ArrayValue(it.keys.map(::encodeKey))))
+        } ?: CborValue.Null),
+    ))
+
+    fun decodeReservation(value: CborValue): RePairReservation {
+        val fields = fields(value, 5)
+        val keyIDs = (fields.getValue(4u) as CborValue.ArrayValue).values.map { it as CborValue.Bytes }
+        val material = if (fields[5u] == CborValue.Null) null else {
+            val values = (fields.getValue(5u) as CborValue.ArrayValue).values
+            require(values.size == 2)
+            val keys = (values[1] as CborValue.ArrayValue).values
+            require(keys.size == EnrollmentKeyRole.entries.size)
+            RePairProposalMaterial(PairingPhoneProposal.decode((values[0] as CborValue.Bytes).copyBytes()),
+                EnrollmentKeyRole.entries.map { decodeKey(keys[it.ordinal], it) })
+        }
+        return RePairReservation(bytes(fields, 0u), bytes(fields, 1u), bytes(fields, 2u),
+            RePairInvitation.decode(bytes(fields, 3u)), keyIDs, material)
+    }
+
     internal fun fields(value: CborValue, last: Int): Map<ULong, CborValue> {
         val fields = (value as? CborValue.Fields)?.values ?: throw IllegalArgumentException()
         require(fields.keys == (0..last).map { it.toULong() }.toSet())

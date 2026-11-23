@@ -32,6 +32,7 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import dev.remozio.protocol.PairingInvitation
+import dev.remozio.protocol.RePairInvitation
 import dev.sebastiano.remozio.android.R
 import dev.sebastiano.remozio.android.biometrics.PairingBiometricPrompt
 import kotlinx.coroutines.delay
@@ -58,25 +59,26 @@ internal fun PairingSetupSheet(model: PairingViewModel, activity: ComponentActiv
             onDispose { prompt.close() }
         }
     }
-    PairingSetupSurface(state, model::connect, model::confirmComparison, model::expire, model::close)
+    PairingSetupSurface(state, model::connect, model::confirmComparison, model::expire, model::close, inspectRePair = model::inspectRePair)
 }
 
 /** Display-only surface. Callback ownership remains with the retained setup host. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun PairingSetupSurface(state: PairingScreenState, onConnect: (String) -> Unit, onCompare: () -> Unit,
-    onExpire: () -> Unit, onClose: () -> Unit, preview: Boolean = false) {
+    onExpire: () -> Unit, onClose: () -> Unit, preview: Boolean = false,
+    inspectRePair: (suspend (String) -> RePairAvailability)? = null) {
     BoxWithConstraints {
         if (maxWidth >= 600.dp) {
             Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
                 Surface(Modifier.widthIn(max = 560.dp).fillMaxWidth().padding(24.dp), shape = MaterialTheme.shapes.extraLarge) {
-                    PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(24.dp))
+                    PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(24.dp), inspectRePair)
                 }
             }
         } else {
             ModalBottomSheet(onDismissRequest = onClose,
                 sheetState = rememberBottomSheetState(initialValue = SheetValue.Hidden, enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded))) {
-                PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp))
+                PairingSetupContent(state, onConnect, onCompare, onExpire, onClose, preview, Modifier.padding(horizontal = 24.dp).padding(bottom = 24.dp), inspectRePair)
             }
         }
     }
@@ -84,9 +86,21 @@ internal fun PairingSetupSurface(state: PairingScreenState, onConnect: (String) 
 
 @Composable
 private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -> Unit, onCompare: () -> Unit,
-    onExpire: () -> Unit, onClose: () -> Unit, preview: Boolean, modifier: Modifier) {
+    onExpire: () -> Unit, onClose: () -> Unit, preview: Boolean, modifier: Modifier,
+    inspectRePair: (suspend (String) -> RePairAvailability)?) {
     val context = LocalContext.current
     var invitation by rememberSaveable { mutableStateOf("") }
+    val input = invitation.trim()
+    val rePairInput = input.startsWith("remozio-repair:")
+    var checkedInvitation by remember { mutableStateOf<Pair<String, RePairAvailability>?>(null) }
+    val availability = checkedInvitation?.takeIf { it.first == input }?.second
+    val canConnect = input.isNotBlank() && (!rePairInput || availability == RePairAvailability.ELIGIBLE)
+    LaunchedEffect(input, state.phase, preview, inspectRePair) {
+        if (rePairInput && state.phase == PairingPhase.INPUT && !preview && inspectRePair != null) {
+            delay(250)
+            checkedInvitation = input to inspectRePair(input)
+        }
+    }
     var denied by remember { mutableStateOf(false) }
     var scannerBusy by remember { mutableStateOf(false) }
     var scannerFailed by remember { mutableStateOf(false) }
@@ -94,7 +108,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
     DisposableEffect(Unit) { onDispose { scannerLive.set(false) } }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         denied = !granted
-        if (granted) onConnect(invitation)
+        if (granted && canConnect) onConnect(invitation)
     }
     var seconds by remember(state.transcript) { mutableLongStateOf(0) }
     LaunchedEffect(state.expiresElapsedMillis, state.phase) {
@@ -120,7 +134,10 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                         .addOnSuccessListener { barcode ->
                             if (scannerLive.get()) {
                                 val text = barcode.rawValue
-                                if (text != null && runCatching { PairingInvitation.importText(text) }.isSuccess) invitation = text
+                                if (text != null && runCatching {
+                                    if (text.startsWith("remozio-repair:")) RePairInvitation.importText(text)
+                                    else PairingInvitation.importText(text)
+                                }.isSuccess) invitation = text
                                 else scannerFailed = true
                             }
                         }
@@ -133,10 +150,17 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
             OutlinedTextField(value = invitation, onValueChange = { if (it.length <= 16_384) invitation = it },
                 label = { Text(stringResource(R.string.pairing_setup_invitation)) }, modifier = Modifier.fillMaxWidth(), maxLines = 5)
             if (denied) Text(stringResource(R.string.pairing_setup_lan_denied), color = MaterialTheme.colorScheme.error)
-            Button(onClick = {
+            when (availability) {
+                RePairAvailability.PENDING -> Text(stringResource(R.string.pairing_repair_pending))
+                RePairAvailability.UNAVAILABLE -> Text(stringResource(R.string.pairing_repair_unavailable))
+                else -> Unit
+            }
+            if (!rePairInput || availability == RePairAvailability.ELIGIBLE) Button(onClick = {
                 if (context.checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED) onConnect(invitation)
                 else permission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
-            }, enabled = !preview && invitation.isNotBlank(), modifier = Modifier.fillMaxWidth()) { Text(stringResource(R.string.pairing_setup_connect)) }
+            }, enabled = !preview && canConnect, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(if (rePairInput) R.string.pairing_repair_connect else R.string.pairing_setup_connect))
+            }
         } else {
             val status = when (state.phase) {
                 PairingPhase.CONNECTING -> R.string.pairing_setup_waiting
@@ -144,6 +168,7 @@ private fun PairingSetupContent(state: PairingScreenState, onConnect: (String) -
                 PairingPhase.PREPARING, PairingPhase.BIOMETRIC -> R.string.pairing_setup_preparing
                 PairingPhase.SUBMITTING -> R.string.pairing_setup_submitting
                 PairingPhase.COMPLETE -> R.string.pairing_setup_complete
+                PairingPhase.RECOVERY_PENDING -> R.string.pairing_repair_pending
                 PairingPhase.EXPIRED -> R.string.pairing_setup_expired
                 PairingPhase.CLOSING -> R.string.pairing_setup_closing
                 else -> if (state.mayHaveSavedSetup) R.string.pairing_setup_incomplete else R.string.pairing_setup_failed

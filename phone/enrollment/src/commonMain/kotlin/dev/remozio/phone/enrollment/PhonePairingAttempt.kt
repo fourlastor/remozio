@@ -12,13 +12,15 @@ class PhonePairingAttempt(
     authorizedReplacement: StoredPhoneEnrollment?,
     minimumEnvelopeVersion: ULong,
 ) {
-    private val expected = EnrollmentEncoding.encode(prepared)
+    private val expected = prepared
     private val enrollment = prepared.enrollment
-    private val replacement = authorizedReplacement?.let(EnrollmentEncoding::encode)
+    private val rePair = prepared.rePair
+    private val replacement = authorizedReplacement?.let { EnrollmentEncoding.encode(it) }
     private val replacementID = authorizedReplacement?.enrollment?.recordID
 
     init {
-        require(prepared.phase == EnrollmentPhase.PREPARED)
+        require(prepared.phase == EnrollmentPhase.PREPARED ||
+            (rePair != null && prepared.phase == EnrollmentPhase.ACTIVE))
         val retained = requireNotNull(prepared.pairing)
         require(retained.transcript.encode().contentEquals(transcript.encode()))
         require(retained.minimumEnvelopeVersion == minimumEnvelopeVersion)
@@ -35,7 +37,8 @@ class PhonePairingAttempt(
         require(transcript.replacement?.phoneID == authorizedReplacement?.enrollment?.phoneID)
         require(transcript.replacement?.epoch == authorizedReplacement?.enrollment?.epoch)
         authorizedReplacement?.let {
-            require(it.phase == EnrollmentPhase.ACTIVE && it.enrollment.scope == enrollment.scope)
+            require(it.phase != EnrollmentPhase.PREPARED && it.enrollment.scope == enrollment.scope)
+            if (rePair == null) require(it.phase == EnrollmentPhase.ACTIVE)
             require(it.enrollment.recordID != enrollment.recordID)
         }
     }
@@ -45,9 +48,18 @@ class PhonePairingAttempt(
         require(transcript.verify(signature, enrollment.authorityPublicKey.copyBytes(), PairingProofPurpose.MAC_COMMIT))
         val snapshot = store.snapshot()
         val current = snapshot.entries.single { it.enrollment.recordID == enrollment.recordID }
-        require(EnrollmentEncoding.encode(current) == expected)
+        if (rePair != null) {
+            require(current.phase == EnrollmentPhase.PREPARED || current.phase == EnrollmentPhase.ACTIVE)
+            require(EnrollmentEncoding.encode(current.withPhase(expected.phase)) == EnrollmentEncoding.encode(expected))
+            val previous = snapshot.entries.single { it.enrollment.recordID == replacementID }
+            if (current.phase == EnrollmentPhase.PREPARED) {
+                require(EnrollmentEncoding.encode(previous) == replacement)
+            }
+            return store.activateRePair(enrollment.recordID, snapshot.revision)
+        }
+        require(EnrollmentEncoding.encode(current) == EnrollmentEncoding.encode(expected))
         val active = snapshot.entries.singleOrNull { it.enrollment.scope == enrollment.scope && it.phase == EnrollmentPhase.ACTIVE }
-        require(active?.let(EnrollmentEncoding::encode) == replacement)
+        require(active?.let { EnrollmentEncoding.encode(it) } == replacement)
         return store.activate(enrollment.recordID.copyBytes(), snapshot.revision, replacementID?.copyBytes())
     }
 

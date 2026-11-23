@@ -24,11 +24,17 @@ import kotlinx.coroutines.sync.withLock
 
 /** One explicit setup owner. No network input can select a retained record or activate it without its Root receipt. */
 internal class AndroidPairingAttempt(
-    context: Context,
     parent: CoroutineScope,
     private val store: StoredPairingHost,
+    private val application: () -> Context,
+    private val createTransportKey: (Instant, ByteArray) -> CreatedTransportIdentity,
 ) : AutoCloseable {
-    private val app = context.applicationContext
+    constructor(context: Context, parent: CoroutineScope, store: StoredPairingHost) : this(
+        parent, store, { context.applicationContext }, { now, keyID ->
+            AndroidTransportKeyCreation.createForEnrollment(context.applicationContext,
+                now.minusSeconds(300), now.plusSeconds(31_536_000), keyID)
+        },
+    )
     private val job = SupervisorJob(requireNotNull(parent.coroutineContext[Job]))
     private val scope = CoroutineScope(job + Dispatchers.IO)
     private val closed = AtomicBoolean(false)
@@ -47,47 +53,80 @@ internal class AndroidPairingAttempt(
     private var preparedAccess: PreparedPairingAccess? = null
     private var biometric: AndroidPairingBiometrics? = null
     private var proofSubmitted = false
-    private val phoneID = randomID()
+    private var rePairRecordID: CborValue.Bytes? = null
+    private var phoneID = randomID()
     private val epoch = randomID()
-    val phoneSuffix: String = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
+    val phoneSuffix: String get() = phoneID.takeLast(4).joinToString("") { "%02X".format(it.toInt() and 255) }
     val transcript: PairingTranscript get() = checkNotNull(channel).transcript
 
     suspend fun connect(text: String): PairingTranscript = operation {
         check(invitation == null)
-        val selected = PairingInvitation.importText(text.trim())
-        val snapshot = store.setupSnapshot()
-        require(snapshot.entries.size < 1024)
-        require(snapshot.entries.none { it.phase != EnrollmentPhase.REMOVED &&
-            it.enrollment.macID == selected.macID && it.enrollment.accountID == selected.accountID })
-        invitation = selected; expectedRevision = snapshot.revision
-        // Provider calls cannot be interrupted safely. Retain each successful reference before cancellation can resume.
+        val imported = text.trim()
+        val rePair = if (imported.startsWith("remozio-repair:")) RePairInvitation.importText(imported) else null
+        val selected = rePair?.invitation ?: PairingInvitation.importText(imported)
+        val keyIDs = EnrollmentKeyRole.entries.map { CborValue.Bytes(randomID()) }
+        if (rePair == null) {
+            val snapshot = store.setupSnapshot()
+            require(snapshot.entries.size + snapshot.rePairReservations.size < 1024)
+            require(snapshot.rePairReservations.none { it.macID == selected.macID })
+            require(snapshot.entries.none {
+                it.phase != EnrollmentPhase.REMOVED && it.enrollment.macID == selected.macID &&
+                    it.enrollment.accountID == selected.accountID &&
+                    (it.phase == EnrollmentPhase.ACTIVE || it.rePair?.proofMayHaveBeenSent != true)
+            })
+            expectedRevision = snapshot.revision
+        } else {
+            phoneID = rePair.predecessor.phoneID.copyBytes()
+            val recordID = randomID()
+            withContext(NonCancellable) {
+                val reserved = store.reserveRePair(rePair, recordID, epoch, keyIDs)
+                rePairRecordID = reserved.recordID
+            }
+        }
+        invitation = selected
+        // Provider calls cannot be interrupted safely. Each returned key belongs to the chosen attempt.
         withContext(NonCancellable + Dispatchers.IO) {
             active()
             val now = Instant.now()
-            val made = AndroidTransportKeyCreation.create(app, now.minusSeconds(300), now.plusSeconds(31_536_000))
+            val transportID = keyIDs[EnrollmentKeyRole.TRANSPORT.ordinal].copyBytes()
+            val made = createTransportKey(now, transportID)
             identity = made
-            val transport = EnrollmentKeyReference(EnrollmentKeyRole.TRANSPORT, randomID(), made.alias, made.publicKey())
-            transportKey = transport; ownedKeys.add(transport)
+            val transport = EnrollmentKeyReference(EnrollmentKeyRole.TRANSPORT, transportID, made.alias, made.publicKey())
+            transportKey = transport
+            ownedKeys.add(transport)
             active()
-            val decision = AndroidDecisionKeyCreation.create(app)
-            decisionKey = decision; ownedKeys.add(decision)
+            val decision = AndroidDecisionKeyCreation.createForEnrollment(application(), keyIDs[EnrollmentKeyRole.DECISION.ordinal].copyBytes())
+            decisionKey = decision
+            ownedKeys.add(decision)
             active()
-            val bio = AndroidBiometricKeyCreation.create(app)
-            biometricKey = bio; ownedKeys.add(bio)
+            val bio = AndroidBiometricKeyCreation.createForEnrollment(application(), keyIDs[EnrollmentKeyRole.BIOMETRIC.ordinal].copyBytes())
+            biometricKey = bio
+            ownedKeys.add(bio)
         }
         active()
         val offer = ChannelOffer(ChannelRole.PHONE,
             ChannelScope(selected.macID.copyBytes(), selected.accountID.copyBytes(), phoneID, epoch), randomBytes(32),
             setOf(1uL), commandInspectionCapabilities(), emptySet())
         fun claim(ref: EnrollmentKeyReference) = PairingKey(ref.keyID.copyBytes(), ref.publicKey.copyBytes().takeLast(65).toByteArray())
-        val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)), claim(checkNotNull(biometricKey)))
+        val proposal = PairingPhoneProposal(offer, claim(checkNotNull(transportKey)), claim(checkNotNull(decisionKey)),
+            claim(checkNotNull(biometricKey)), rePair?.predecessor)
+        active()
         val opened = authenticatePairingRoutes(scope,
-            androidPairingRoutes(app, selected.macID.copyBytes(), selected.accountID.copyBytes()),
+            androidPairingRoutes(application(), selected.macID.copyBytes(), selected.accountID.copyBytes()),
             arrayOf(checkNotNull(identity).identity.keyManager), selected, proposal,
-            LocalNetworkSettings(app).timeoutSeconds() * 1000L)
+            LocalNetworkSettings(application()).timeoutSeconds() * 1000L)
         channel = opened; active()
-        val transcript = opened.awaitTranscript()
-        active(); selected.validateMacClaims(transcript); proposal.validate(transcript)
+        val transcript = opened.awaitTranscript {
+            rePairRecordID?.let { store.prepareRePairProposal(it, RePairProposalMaterial(proposal, ownedKeys)) }
+        }
+        active()
+        selected.validateMacClaims(transcript)
+        proposal.validate(transcript)
+        rePairRecordID?.let {
+            val checkpoint = store.checkpointRePair(it, transcript)
+            preparedRecord = checkpoint
+            enrollment = checkpoint.enrollment
+        }
         transcript
     }
 
@@ -96,6 +135,11 @@ internal class AndroidPairingAttempt(
         check(!proofSubmitted)
         if (prepared) return@operation loadPreparedSigner()
         val transcript = transcript
+        rePairRecordID?.let {
+            preparedAccess = store.prepared(it, transcript)
+            prepared = true
+            return@operation loadPreparedSigner()
+        }
         val selected = checkNotNull(invitation)
         val row = PhoneEnrollment(randomID(), selected.macID.copyBytes(), selected.accountID.copyBytes(), phoneID, epoch,
             selected.label, transcript.macAuthorityKey.copyBytes(), p256SPKI(transcript.macTransportKey.copyBytes()),
@@ -127,10 +171,14 @@ internal class AndroidPairingAttempt(
         check(prepared && !proofSubmitted && checkNotNull(preparedAccess).lease.isCurrent())
         val current = transcript
         require(current.verify(proof, current.biometricKey.publicKey.copyBytes(), PairingProofPurpose.PHONE_BIOMETRIC))
-        proofSubmitted = true
-        val receipt = checkNotNull(channel).submitProof(current.digest(), proof)
+        val receipt = checkNotNull(channel).submitProof(current.digest(), proof) {
+            if (rePairRecordID != null) preparedAccess = store.markRePairProof(checkNotNull(preparedAccess))
+            active()
+            proofSubmitted = true
+        }
         active()
-        store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt))
+        store.activate(checkNotNull(enrollment).recordID, CborValue.Bytes(receipt),
+            expected = if (rePairRecordID != null) preparedAccess else null)
     }
 
     override fun close() {
@@ -144,15 +192,24 @@ internal class AndroidPairingAttempt(
         withContext(NonCancellable + Dispatchers.IO) {
             channel?.closeAndJoin(); job.join()
             operations.withLock {
-                biometric?.close(); identity?.close()
-                preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
-                if (!prepared) retireOwnedKeys()
-                else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
-                ownedKeys.clear()
+                val rePairID = rePairRecordID
+                try {
+                    biometric?.close()
+                    identity?.close()
+                    preparedAccess?.let { access -> enrollment?.let { store.release(it.recordID, access.lease) } }
+                    if (rePairID == null) {
+                        if (!prepared) retireOwnedKeys()
+                        else if (!proofSubmitted) store.abandonUnsubmitted(checkNotNull(preparedRecord), ::retireOwnedKeys)
+                    }
+                } finally {
+                    if (rePairID != null) store.finishRePair(rePairID)
+                    ownedKeys.clear()
+                }
             }
         }
     }
     private fun retireOwnedKeys() {
+        if (ownedKeys.isEmpty()) return
         val keystore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
         for (ref in ownedKeys) {
             val point = keystore.getCertificate(ref.alias)?.publicKey?.encoded?.takeLast(65)?.toByteArray()
