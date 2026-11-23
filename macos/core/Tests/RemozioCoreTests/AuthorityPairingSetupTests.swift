@@ -114,7 +114,12 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             }, invalidate: { environment.invalidated.value += 1 })
         }
         func proposal(phone: UInt8 = 8, epoch: UInt8 = 9, keyBase: UInt8 = 32,
-                      biometric: P256.Signing.PrivateKey? = nil) throws -> PairingTranscript {
+                      biometric: P256.Signing.PrivateKey? = nil, keyNamespace: UInt8? = nil) throws -> PairingTranscript {
+            func keyID(_ offset: UInt8) -> Data {
+                var id = Data(repeating: keyBase + offset, count: 16)
+                if let keyNamespace { id[0] = keyNamespace }
+                return id
+            }
             let trust = try journal.read { try $0.approvalTrustSnapshot() }, scope = try ChannelScope(macID: mac,
                 accountID: account, phoneID: Data(repeating: phone, count: 16), enrollmentEpoch: Data(repeating: epoch, count: 16))
             let offers = try [ChannelRole.phone, .mac].enumerated().map { index, role in
@@ -125,9 +130,9 @@ final class AuthorityPairingSetupTests: XCTestCase, @unchecked Sendable {
             return try .init(setupID: Data(repeating: 30, count: 16), challenge: Data(repeating: 31, count: 32), phone: offers[0], mac: offers[1],
                 minimumEnvelopeVersion: 1, selectedEnvelopeVersion: 1, macAuthorityKey: authority.publicKey.x963Representation,
                 macTransportKey: transport.publicKey.x963Representation,
-                transportKey: .init(keyID: Data(repeating: keyBase, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-                decisionKey: .init(keyID: Data(repeating: keyBase + 1, count: 16), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
-                biometricKey: .init(keyID: Data(repeating: keyBase + 2, count: 16), publicKey: (biometric ?? self.biometric).publicKey.x963Representation),
+                transportKey: .init(keyID: keyID(0), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                decisionKey: .init(keyID: keyID(1), publicKey: P256.Signing.PrivateKey().publicKey.x963Representation),
+                biometricKey: .init(keyID: keyID(2), publicKey: (biometric ?? self.biometric).publicKey.x963Representation),
                 enrollmentTag: Data(repeating: 35, count: 32), replacement: nil,
                 expectedTrustRevision: withUnsafeBytes(of: &revision) { Data($0) }, issuedAtUnixMillis: 1, expiresAtUnixMillis: 2)
         }
@@ -1440,7 +1445,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
     }
 
     private func ordinary(_ f: Fixture, phone: UInt8 = 8, key: P256.Signing.PrivateKey = .init()) throws -> PairingTranscript {
-        let attempt = try f.access.stage(f.proposal(phone: phone, biometric: key).encode())
+        let attempt = try f.access.stage(f.proposal(phone: phone, epoch: phone, biometric: key, keyNamespace: phone).encode())
         _ = try commit(f, attempt, key: key)
         return attempt.transcript
     }
@@ -2259,9 +2264,10 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             let f = try Fixture(), p = try proposal(f).0
             _ = try stage(f, p)
             let checkpoint = try f.continuity.read().committed
+            let policy = try XCTUnwrap(f.journal.read { try $0.codePolicy()?.policy })
             try close(f)
             let inspection = try AuthorityJournalCutoverInspection(storage: open(f, readOnly: true),
-                expectedPolicy: nil, verifyCurrent: {})
+                expectedPolicy: policy, verifyCurrent: {})
             defer { try? inspection.close() }
             XCTAssertEqual(inspection.snapshot.schemaVersion, 19)
             XCTAssertEqual(inspection.snapshot.featureTier, 13)
@@ -2276,7 +2282,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
 
     func testAuditChainSpansTheAuthorityFormatTransition() throws {
         let f = try Fixture(), candidate = try proposal(f).0
-        let nextProposal = try f.proposal(phone: 80).encode()
+        let nextProposal = try f.proposal(phone: 80, epoch: 80, keyNamespace: 80).encode()
         let epoch = f.writer.epoch, previousHead = try f.records()
         let previous = try XCTUnwrap(f.journal.read { try $0.page(epoch: epoch, after: previousHead - 1,
             maximumRecords: 1, maximumBytes: 16_384).canonicalRecords.last })
