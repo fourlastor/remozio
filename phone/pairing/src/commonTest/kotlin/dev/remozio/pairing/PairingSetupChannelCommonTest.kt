@@ -55,7 +55,7 @@ class PairingSetupChannelCommonTest {
         assertEquals(1, stream.closes)
     }
 
-    @Test fun rePairDoesNotWriteAProposalWhenTheDurableCheckpointFails() = runBlocking {
+    @Test fun rePairDoesNotWriteAProposalWhenTheDurableCheckpointFails(): Unit = runBlocking {
         val stream = Stream(listOf(wire(frame("hello"))))
         val parent = SupervisorJob()
         val predecessor = phoneScope[3].copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
