@@ -53,9 +53,10 @@ class EnrollmentCipherJvmTest {
     }
 
     @Test fun activationStaysHiddenFromJava() {
-        val activate = EncryptedEnrollmentStore::class.java.declaredMethods
-            .single { it.name.startsWith("activate") && !it.name.endsWith("\$default") }
-        assertTrue(activate.isSynthetic)
+        val activations = EncryptedEnrollmentStore::class.java.declaredMethods
+            .filter { it.name.startsWith("activate") && !it.name.endsWith("\$default") }
+        assertEquals(setOf("activate", "activateRePair"), activations.map { it.name.substringBefore('$') }.toSet())
+        assertTrue(activations.all { it.isSynthetic })
     }
 
     @Test fun eachEncryptionUsesAFreshNonce() {
