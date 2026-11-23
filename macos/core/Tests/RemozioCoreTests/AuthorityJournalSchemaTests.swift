@@ -9,7 +9,7 @@ final class AuthorityJournalSchemaTests: XCTestCase {
             for tier in Int64(12)...18 {
                 try execute("BEGIN IMMEDIATE", on: db)
                 try AuthorityJournalSchema.setFeatureTier(tier, on: db)
-                XCTAssertEqual(try AuthorityJournalSchema.featureTier(on: db), tier)
+                XCTAssertEqual(try AuthorityJournalSchema.featureTierInTransaction(on: db), tier)
                 try execute("COMMIT", on: db)
                 XCTAssertEqual(try AuthorityJournalSchema.formatVersion(on: db), tier)
             }
@@ -22,7 +22,7 @@ final class AuthorityJournalSchemaTests: XCTestCase {
 
     func testFeatureTierRequiresATransactionAndRejectsUninstalledFormats() throws {
         try withDatabase { db in
-            XCTAssertThrowsError(try AuthorityJournalSchema.featureTier(on: db)) {
+            XCTAssertThrowsError(try AuthorityJournalSchema.featureTierInTransaction(on: db)) {
                 XCTAssertEqual($0 as? JournalDatabaseError, .expiredTransaction)
             }
             XCTAssertThrowsError(try AuthorityJournalSchema.setFeatureTier(12, on: db)) {
@@ -33,7 +33,7 @@ final class AuthorityJournalSchemaTests: XCTestCase {
             XCTAssertThrowsError(try AuthorityJournalSchema.setFeatureTier(19, on: db)) {
                 XCTAssertEqual($0 as? JournalDatabaseError, .incompatibleStore)
             }
-            XCTAssertEqual(try AuthorityJournalSchema.featureTier(on: db), 13)
+            XCTAssertEqual(try AuthorityJournalSchema.featureTierInTransaction(on: db), 13)
             try execute("COMMIT", on: db)
         }
     }

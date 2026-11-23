@@ -14,14 +14,14 @@ final class HistoryRecoveryJournal {
 
     func read(epoch: Data) throws -> HistoryRecoveryIntent? {
         guard epoch.count == 16 else { throw ContinuityStoreError.invalidCheckpoint }
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version < 14 { return nil }
         return try adapt { try tables.read(epoch: epoch) }
     }
 
     func prepareSchema() throws {
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (13...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         if version == 13 {

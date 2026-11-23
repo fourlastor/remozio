@@ -7,7 +7,7 @@ final class CodePolicyJournal {
     init(connection: OpaquePointer) { db = connection }
 
     func read() throws -> AuthorityCodePolicySnapshot? {
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         if version == 12 { return nil }
         return try statement("SELECT id,revision,policy FROM main.authority_code_policy_v1") { row in

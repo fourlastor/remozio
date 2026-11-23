@@ -14,8 +14,12 @@ enum AuthorityJournalSchema {
     }
 
     static func featureTier(on db: OpaquePointer) throws -> Int64 {
+        try formatVersion(on: db)
+    }
+
+    static func featureTierInTransaction(on db: OpaquePointer) throws -> Int64 {
         guard sqlite3_get_autocommit(db) == 0 else { throw JournalDatabaseError.expiredTransaction }
-        return try formatVersion(on: db)
+        return try featureTier(on: db)
     }
 
     static func setFeatureTier(_ tier: Int64, on db: OpaquePointer) throws {

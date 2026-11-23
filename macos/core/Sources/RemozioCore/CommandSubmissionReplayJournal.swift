@@ -18,7 +18,7 @@ final class CommandSubmissionReplayJournal {
     }
 
     func install() throws {
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (13...18).contains(version) else { throw CommandSubmissionReplayError.unavailable }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw CommandSubmissionReplayError.unavailable }
@@ -44,7 +44,7 @@ final class CommandSubmissionReplayJournal {
     }
 
     private func requireInstalled() throws {
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (12...18).contains(version) else { throw JournalDatabaseError.incompatibleStore }
         guard version >= 15 else { throw CommandSubmissionReplayError.unavailable }
     }

@@ -422,11 +422,12 @@ public final class JournalDatabase {
     }
 
     private func validateIdentity(macID: Data, accountID: Data, version expectedVersion: Int64? = nil) throws {
-        let version = try formatVersion()
+        let format = try formatVersion()
         guard try integer("PRAGMA application_id") == Self.applicationID,
-              expectedVersion.map({ version == $0 }) ?? (12...18).contains(version) else {
+              expectedVersion.map({ format == $0 }) ?? (12...18).contains(format), let db else {
             throw JournalDatabaseError.incompatibleStore
         }
+        let version = try expectedVersion ?? AuthorityJournalSchema.featureTier(on: db)
         try statement("SELECT id,mac,account FROM main.journal_identity_v1") { stmt in
             guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int64(stmt, 0) == 1 else { throw JournalDatabaseError.incompatibleStore }
             for (column, value) in [(Int32(1), macID), (Int32(2), accountID)] {

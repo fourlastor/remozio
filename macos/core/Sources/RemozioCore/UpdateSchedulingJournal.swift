@@ -44,7 +44,7 @@ final class UpdateSchedulingJournal {
     }
 
     func install() throws {
-        let version = try AuthorityJournalSchema.featureTier(on: db)
+        let version = try AuthorityJournalSchema.featureTierInTransaction(on: db)
         guard (15...18).contains(version) else { throw UpdateSchedulingJournalError.unavailableSchema }
         guard sqlite3_txn_state(db, "main") == SQLITE_TXN_WRITE else { throw JournalDatabaseError.readOnly }
         guard try CodePolicyJournal(connection: db).read() != nil else { throw UpdateSchedulingJournalError.invalidConfiguration }
@@ -256,7 +256,7 @@ final class UpdateSchedulingJournal {
         }
     }
     private func installed() throws {
-        guard try (17...18).contains(AuthorityJournalSchema.featureTier(on: db)) else {
+        guard try (17...18).contains(AuthorityJournalSchema.featureTierInTransaction(on: db)) else {
             throw UpdateSchedulingJournalError.unavailableSchema
         }
     }
