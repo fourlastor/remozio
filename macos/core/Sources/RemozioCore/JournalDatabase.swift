@@ -597,6 +597,17 @@ public final class JournalTransaction {
         }
     }
 
+    func releaseCommittedRecoveryStage(_ stage: PairingRecoveryStage) throws {
+        try withRecoveryStages(write: true) { storage in
+            guard let storage else { throw PairingRecoveryStageError.noPendingStage }
+            try storage.releaseCommitted(stage)
+        }
+    }
+
+    func expireDueRecoveryStages(now: AuthorityMoment) throws {
+        try withRecoveryStages(write: true) { try $0?.expireDueStages(now: now) }
+    }
+
     func hasRetiredRecoveryStages(incarnation: UUID) throws -> Bool {
         try withRecoveryStages { try $0?.hasRetiredStages(incarnation: incarnation) ?? false }
     }
@@ -605,10 +616,11 @@ public final class JournalTransaction {
         try withRecoveryStages(write: true) { try $0?.closeRetiredStages(incarnation: incarnation) }
     }
 
-    func discardExpiredRecoveryStage(setupID: Data, digest: Data) throws {
+    @discardableResult
+    func discardExpiredRecoveryStage(setupID: Data, digest: Data) throws -> Data {
         try withRecoveryStages(write: true) { storage in
             guard let storage else { throw PairingRecoveryStageError.notExpired }
-            try storage.discardExpired(setupID: setupID, digest: digest)
+            return try storage.discardExpired(setupID: setupID, digest: digest)
         }
     }
 
@@ -889,11 +901,37 @@ public final class JournalTransaction {
             let registration = try ledger.gatewayRegistration()
             _ = try ledger.revoke(phone: phone.phoneID, epoch: phone.enrollmentEpoch, expected: expectedTrustRevision,
                 gatewayIntent: registration)
-            try withRecoveryStages(write: true) { try $0?.invalidate(phoneID: phone.phoneID) }
             try enrollmentEvent(phone: phone.phoneID, added: false, eventID: eventID, receiptTimeMs: nil,
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
+            try invalidateRecoveryStage(phoneID: phone.phoneID, enrollmentEpoch: phone.enrollmentEpoch,
+                                        writer: writer, authentication: .localAdministrator)
             return registration == nil ? .revokedOnMac : .gatewayPending
         }
+    }
+
+    @discardableResult
+    func invalidateRecoveryStage(phoneID: Data, enrollmentEpoch: Data, writer: AuditEpochWriter,
+                                 authentication: AuditAuthentication) throws -> Bool {
+        let changed = try withRecoveryStages(write: true) { stages in
+            try stages?.invalidate(phoneID: phoneID, enrollmentEpoch: enrollmentEpoch) ?? false
+        }
+        if changed {
+            try appendRecoveryStageEvent(phoneID: phoneID, writer: writer, authentication: authentication, reason: .revoked)
+        }
+        return changed
+    }
+
+    func appendRecoveryStageEvent(phoneID: Data, writer: AuditEpochWriter, authentication: AuditAuthentication,
+                                  reason: AuditReason) throws {
+        let scope = try approvalTrustSnapshot()
+        guard let current = try epoch(writer.epoch), current.head < UInt64.max else { throw AuditJournalError.headMismatch }
+        let event = try AuditEventMetadata(eventID: GatewayHostSnapshot.bytes(UUID()), macID: scope.macID,
+            accountID: scope.accountID, journalEpoch: writer.epoch, sequence: current.head + 1,
+            requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: nil, kind: .recovery, category: .enrollment,
+            action: nil, decisionPhoneID: nil, authentication: authentication, outcome: .accepted, reason: reason,
+            droppedEventCount: nil, peerDeviceID: phoneID)
+        guard let owner else { throw JournalDatabaseError.expiredTransaction }
+        try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: current.head)
     }
 
     func recordGatewayRevocation(_ phone: DeliveryRecipient, registration: GatewayRegistrationIdentity,
@@ -908,7 +946,6 @@ public final class JournalTransaction {
         try withEnrollment(write: true) { ledger in
             if try ledger.hasGateway(), gateway == nil { throw EnrollmentJournalError.gatewayRequired }
             let (old, next) = try ledger.revoke(phone: phoneID, epoch: epoch, expected: expectedTrustRevision)
-            try withRecoveryStages(write: true) { try $0?.invalidate(phoneID: phoneID) }
             var control: GatewayAuthorityEnvelope?
             if let gateway {
                 let enrollment = try GatewayPhoneEnrollment(phoneID: phoneID, epoch: epoch, tag: old.notificationTag, active: false)
@@ -917,6 +954,8 @@ public final class JournalTransaction {
             }
             try enrollmentEvent(phone: phoneID, added: false, eventID: eventID, receiptTimeMs: receiptTimeMs,
                 writer: writer, expectedHead: expectedAuditHead, snapshot: ledger.snapshot())
+            try invalidateRecoveryStage(phoneID: phoneID, enrollmentEpoch: epoch,
+                                        writer: writer, authentication: .localAdministrator)
             return (next, control)
         }
     }
@@ -937,7 +976,6 @@ public final class JournalTransaction {
             let next = try ledger.restrictRecovered(phone: revocation.binding.phoneID, epoch: revocation.binding.enrollmentEpoch,
                 expected: expectedTrustRevision, evidenceChanged: changed)
             if next != expectedTrustRevision {
-                try withRecoveryStages(write: true) { try $0?.invalidate(phoneID: revocation.binding.phoneID) }
                 guard expectedAuditHead < UInt64.max else { throw AuditJournalError.headMismatch }
                 let event = try AuditEventMetadata(eventID: eventID, macID: snapshot.macID, accountID: snapshot.accountID,
                     journalEpoch: writer.epoch, sequence: expectedAuditHead + 1, requestID: nil, eventTimeMs: nil, authorityReceiptTimeMs: receiptTimeMs,
@@ -945,6 +983,8 @@ public final class JournalTransaction {
                     outcome: .accepted, reason: .revoked, droppedEventCount: nil, peerDeviceID: revocation.binding.phoneID)
                 guard let owner else { throw JournalDatabaseError.expiredTransaction }
                 try owner.appendEnrollmentEvent(event, token: token, writer: writer, expectedHead: expectedAuditHead)
+                try invalidateRecoveryStage(phoneID: revocation.binding.phoneID, enrollmentEpoch: revocation.binding.enrollmentEpoch,
+                                            writer: writer, authentication: .system)
             }
             return next
         }

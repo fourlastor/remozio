@@ -1445,10 +1445,11 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         return attempt.transcript
     }
 
-    private func commit(_ f: Fixture, _ attempt: PairingEnrollmentAttempt, key: P256.Signing.PrivateKey) throws -> Data {
+    private func commit(_ f: Fixture, _ attempt: PairingEnrollmentAttempt, key: P256.Signing.PrivateKey,
+                        authorize: @escaping () throws -> Void = {}) throws -> Data {
         let transcript = attempt.transcript
         let proof = try key.signature(for: transcript.signingInput(purpose: .phoneBiometric)).rawRepresentation
-        return try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(), proof: proof, authorize: {})
+        return try f.access.commit(attempt, setupID: transcript.setupID, confirmedDigest: transcript.digest(), proof: proof, authorize: authorize)
     }
 
     private func proposal(_ f: Fixture, phone: UInt8 = 8) throws -> (PairingPhoneProposal, P256.Signing.PrivateKey) {
@@ -1607,7 +1608,11 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
     func testVersionTwoStageLimitIsThirtyTwoPerAccount() throws {
         let f = try Fixture()
         let proposals = try (0...32).map { try proposal(f, phone: UInt8($0 + 10)).0 }
-        let pending = try proposals.dropLast().map { try stage(f, $0) }
+        let first = try stage(f, XCTUnwrap(proposals.first))
+        f.environment.time.value += 1
+        let pending = try proposals.dropFirst().dropLast().map { try stage(f, $0) }
+        f.environment.time.value = try first.recoveryStage().deadline
+        XCTAssertTrue(try f.access.isExpired(first))
         let before = try f.continuity.read()
         let connection = try endpoint(f)
         defer { connection.close() }
@@ -1622,6 +1627,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let reopened = try open(f)
         defer { try? reopened.close() }
         XCTAssertEqual(try reopened.continuity.read(), before)
+        XCTAssertEqual(try reopened.journal.read { try $0.recoveryStage(setupID: first.transcript.setupID)?.state }, .deadlineElapsed)
         for attempt in pending {
             XCTAssertEqual(try reopened.journal.read { try $0.recoveryStage(setupID: attempt.transcript.setupID)?.state }, .pending)
         }
@@ -1645,24 +1651,102 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertThrowsError(try f.access.isExpired(attempt))
     }
 
+    func testOwnerMaintenanceExpiresDisconnectedStage() throws {
+        let f = try Fixture(), candidate = try proposal(f).0
+        let connection = try endpoint(f)
+        let transcript = try PairingTranscript.decode(XCTUnwrap(stageBytes(connection, candidate.encode())))
+        let setupID = transcript.setupID
+        connection.close()
+        let stage = try XCTUnwrap(f.journal.read { try $0.recoveryStage(setupID: setupID) })
+        XCTAssertEqual(stage.state, .pending)
+        f.environment.time.value = stage.deadline - 1
+        let before = try f.continuity.read().committed
+        let tick = DispatchSemaphore(value: 0), error = Box<(any Error)?>(nil)
+        let maintenance = try AuthorityMaintenanceLoop(intervalMilliseconds: 100, work: {
+            do {
+                try f.journal.withRequests { owner in
+                    _ = try owner.expirePending(now: f.environment.now(), receiptTimeMs: nil)
+                }
+                tick.signal()
+            } catch let failure {
+                error.value = failure
+                tick.signal()
+                throw failure
+            }
+        }, failed: {})
+        defer { maintenance.close() }
+        try maintenance.start()
+        XCTAssertEqual(tick.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(try f.journal.read { try $0.recoveryStage(setupID: setupID)?.state }, .pending)
+        XCTAssertEqual(try f.continuity.read().committed.authorityDigest, before.authorityDigest)
+        f.environment.time.value = stage.deadline
+        let timeout = DispatchTime.now() + 3
+        while try f.journal.read({ try $0.recoveryStage(setupID: setupID)?.state }) == .pending {
+            guard tick.wait(timeout: timeout) == .success, error.value == nil else {
+                return XCTFail("Authority maintenance did not expire the disconnected stage")
+            }
+        }
+        maintenance.close()
+        XCTAssertNil(error.value)
+        XCTAssertEqual(try f.journal.read { try $0.recoveryStage(setupID: setupID)?.state }, .deadlineElapsed)
+        try f.assertCheckpoint()
+        try close(f)
+        let reopened = try open(f)
+        defer { try? reopened.close() }
+        XCTAssertEqual(try reopened.journal.read { try $0.recoveryStage(setupID: setupID)?.state }, .deadlineElapsed)
+    }
+
     func testCommitAndExpirySerializeAndPreserveTheDurableCommit() throws {
         for expiryWins in [false, true] {
             let f = try Fixture(), (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
             let deadline = try XCTUnwrap(retained(f, attempt)).deadline
+            let entered = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+            let contender = DispatchSemaphore(value: 0), completed = DispatchGroup()
+            let commitResult = Box<Result<Data, any Error>?>(nil)
+            let expiryResult = Box<Result<Bool, any Error>?>(nil)
+            let serialize: @Sendable () throws -> Void = {
+                entered.signal()
+                guard proceed.wait(timeout: .now() + 5) == .success else { throw Fault.injected }
+            }
+            let commitWork: @Sendable () -> Void = {
+                commitResult.value = Result {
+                    try self.commit(f, attempt, key: key) { if !expiryWins { try serialize() } }
+                }
+            }
+            let expiryWork: @Sendable () -> Void = {
+                expiryResult.value = Result {
+                    var sampledClock = false
+                    return try f.journal.expireRePair(attempt) {
+                        if expiryWins && !sampledClock { try serialize() }
+                        sampledClock = true
+                        return AuthorityMoment(epoch: f.environment.epoch, milliseconds: deadline)
+                    }
+                }
+            }
+            DispatchQueue.global().async(group: completed, execute: expiryWins ? expiryWork : commitWork)
+            let holder = entered.wait(timeout: .now() + 5)
+            DispatchQueue.global().async(group: completed) {
+                contender.signal()
+                if expiryWins { commitWork() } else { expiryWork() }
+            }
+            let waiting = contender.wait(timeout: .now() + 5)
+            proceed.signal()
+            XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+            XCTAssertEqual(holder, .success)
+            XCTAssertEqual(waiting, .success)
+            XCTAssertTrue(try XCTUnwrap(expiryResult.value).get())
             if expiryWins {
-                f.environment.time.value = deadline
-                XCTAssertTrue(try f.access.isExpired(attempt))
-                XCTAssertThrowsError(try commit(f, attempt, key: key))
+                XCTAssertThrowsError(try XCTUnwrap(commitResult.value).get())
                 XCTAssertEqual(try retained(f, attempt)?.state, .deadlineElapsed)
             } else {
-                let receipt = try commit(f, attempt, key: key)
+                let receipt = try XCTUnwrap(commitResult.value).get()
                 XCTAssertTrue(try attempt.transcript.verify(signature: receipt, publicKey: f.authority.publicKey.x963Representation, purpose: .macCommit))
-                f.environment.time.value = deadline
-                let committed = try f.continuity.read()
-                XCTAssertTrue(try f.access.isExpired(attempt))
-                XCTAssertEqual(try f.continuity.read(), committed)
-                XCTAssertEqual(try retained(f, attempt)?.state, .committed)
+                XCTAssertNil(try retained(f, attempt))
+                XCTAssertNotNil(try f.journal.read { try $0.committedPairing(setupID: attempt.transcript.setupID,
+                    authenticatedPhoneID: attempt.transcript.phone.scope.phoneID,
+                    authenticatedEnrollmentEpoch: attempt.transcript.phone.scope.enrollmentEpoch) })
             }
+            try f.assertCheckpoint()
         }
         let f = try Fixture(), (proposal, key) = try proposal(f), attempt = try stage(f, proposal)
         try sql(f, "CREATE TRIGGER fail_finalize BEFORE UPDATE ON continuity_v1 WHEN NEW.pending IS NULL BEGIN SELECT RAISE(ABORT, 'fixture'); END", continuity: true)
@@ -1673,7 +1757,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let restarted = try AuthorityJournal(storage: open(f))
         defer { try? restarted.close() }
         try restarted.prepareRequests(clockEpoch: UUID(), maximumPayloadBytes: 16_384)
-        XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: attempt.transcript.setupID)?.state }, .committed)
+        XCTAssertNil(try restarted.read { try $0.recoveryStage(setupID: attempt.transcript.setupID) })
         XCTAssertNotNil(try restarted.read { try $0.committedPairing(setupID: attempt.transcript.setupID,
             authenticatedPhoneID: attempt.transcript.phone.scope.phoneID,
             authenticatedEnrollmentEpoch: attempt.transcript.phone.scope.enrollmentEpoch) })
@@ -1688,7 +1772,16 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertThrowsError(try f.access.revokePhone(selection) { throw Fault.injected })
         XCTAssertEqual(try f.continuity.read(), before)
         XCTAssertEqual(try retained(f, attempt)?.state, .pending)
+        let oldHead = try f.records()
         XCTAssertEqual(try f.access.revokePhone(selection, authorize: {}), .revokedOnMac)
+        let events = try f.journal.read {
+            try $0.page(epoch: f.writer.epoch, after: oldHead, maximumRecords: 2, maximumBytes: f.limits.maxBytes).canonicalRecords
+        }
+        let event = try AuditEventMetadata.decode(XCTUnwrap(events.first), limits: f.limits)
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(event.kind, .recovery)
+        XCTAssertEqual(event.reason, .revoked)
+        XCTAssertEqual(event.peerDeviceID, predecessor.phoneID)
         XCTAssertEqual(try retained(f, attempt)?.state, .invalidated)
         XCTAssertThrowsError(try commit(f, attempt, key: key))
         XCTAssertFalse(try f.journal.read { try $0.approvalEnrollments().contains { $0.approval.active } })
@@ -1699,22 +1792,35 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
     }
 
     func testStageSlotsReleaseOnlyOnAuthorizedTransitions() throws {
-        let f = try Fixture(), (proposal, _) = try proposal(f), first = try stage(f, proposal)
+        let f = try Fixture(), (proposal, key) = try proposal(f), first = try stage(f, proposal)
+        let other = try stage(f, self.proposal(f, phone: 12).0)
         let digest = try first.transcript.digest()
         XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {}))
         f.environment.time.value = try first.recoveryStage().deadline
-        let next = try stage(f, proposal)
-        XCTAssertNotEqual(next.transcript.setupID, first.transcript.setupID)
-        XCTAssertEqual(try retained(f, first)?.state, .deadlineElapsed)
-        XCTAssertEqual(try retained(f, next)?.state, .pending)
+        XCTAssertTrue(try f.access.isExpired(first))
         let before = try f.continuity.read()
+        XCTAssertThrowsError(try f.access.stage(proposal.encode()) { throw Fault.injected })
         XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID,
             digest: Data(repeating: 0, count: 32), authorize: {}))
         XCTAssertEqual(try f.continuity.read(), before)
-        try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {})
+        XCTAssertEqual(try retained(f, first)?.state, .deadlineElapsed)
+        let next = try stage(f, proposal)
+        XCTAssertNotEqual(next.transcript.setupID, first.transcript.setupID)
         XCTAssertNil(try retained(f, first))
         XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: first.transcript.setupID, digest: digest, authorize: {}))
         XCTAssertEqual(try retained(f, next)?.state, .pending)
+        _ = try commit(f, next, key: key)
+        XCTAssertNil(try retained(f, next))
+        XCTAssertNotNil(try f.journal.read { try $0.committedPairing(setupID: next.transcript.setupID,
+            authenticatedPhoneID: next.transcript.phone.scope.phoneID, authenticatedEnrollmentEpoch: next.transcript.phone.scope.enrollmentEpoch) })
+        let predecessor = try XCTUnwrap(other.transcript.replacement)
+        let revoked = try XCTUnwrap(f.access.pairedPhones(includeRePair: true).rePairSelection(
+            for: .init(phoneID: predecessor.phoneID, enrollmentEpoch: predecessor.epoch)))
+        XCTAssertEqual(try retained(f, other)?.state, .deadlineElapsed)
+        XCTAssertEqual(try f.access.revokePhone(revoked, authorize: {}), .revokedOnMac)
+        XCTAssertNil(try retained(f, other))
+        XCTAssertThrowsError(try f.access.discardExpiredRePair(setupID: other.transcript.setupID,
+            digest: other.transcript.digest(), authorize: {}))
     }
 
     func testPairedPhonesDiscardRequiresAnExpiredTerminalStage() throws {
@@ -1736,8 +1842,18 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         XCTAssertEqual(try retained(f, attempt)?.state, .pending)
         f.environment.time.value = try attempt.recoveryStage().deadline
         XCTAssertTrue(try f.access.isExpired(attempt))
+        let oldHead = try f.records()
         XCTAssertEqual(try discard(), Data([1]))
         XCTAssertNil(try retained(f, attempt))
+        XCTAssertNil(try discard())
+        let records = try f.journal.read {
+            try $0.page(epoch: f.writer.epoch, after: oldHead, maximumRecords: 2, maximumBytes: f.limits.maxBytes).canonicalRecords
+        }
+        let event = try AuditEventMetadata.decode(XCTUnwrap(records.first), limits: f.limits)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(event.kind, .recovery)
+        XCTAssertEqual(event.reason, .userCancelled)
+        XCTAssertEqual(event.peerDeviceID, attempt.transcript.phone.scope.phoneID)
     }
 
     func testThirtyThreeFailedOrdinaryPairingsDoNotConsumeRecoverySlots() throws {
@@ -1894,7 +2010,7 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
         let before = try f.continuity.read()
         let specimen = try syntheticStage(f)
         let bad = try PairingRecoveryStage(transcript: specimen.transcript, proposalDigest: specimen.proposalDigest,
-            incarnation: specimen.incarnation, started: specimen.started, deadline: specimen.deadline, state: .committed)
+            incarnation: specimen.incarnation, started: specimen.started, deadline: specimen.deadline, state: .deadlineElapsed)
         XCTAssertThrowsError(try writes(f) { try $0.reserveRecoveryStage(bad, now: f.environment.now()) })
         XCTAssertEqual(try f.continuity.read(), before)
         XCTAssertEqual(try f.journal.read { try $0.storageSchemaVersion }, 13)
@@ -1959,7 +2075,10 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             defer { try? restarted.close() }
             try restarted.prepareRequests(clockEpoch: fresh, maximumPayloadBytes: 16_384)
             XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: retired.transcript.setupID)?.state.expiryReason }, .retiredIncarnation)
-            XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: committed.transcript.setupID)?.state }, .committed)
+            XCTAssertNil(try restarted.read { try $0.recoveryStage(setupID: committed.transcript.setupID) })
+            XCTAssertNotNil(try restarted.read { try $0.committedPairing(setupID: committed.transcript.setupID,
+                authenticatedPhoneID: committed.transcript.phone.scope.phoneID,
+                authenticatedEnrollmentEpoch: committed.transcript.phone.scope.enrollmentEpoch) })
             XCTAssertEqual(try restarted.read { try $0.recoveryStage(setupID: current.transcript.setupID)?.state }, .pending)
             try restarted.close()
         }
@@ -1970,6 +2089,8 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             "DELETE FROM authority_feature_tier_v1",
             "PRAGMA ignore_check_constraints=ON; UPDATE authority_feature_tier_v1 SET tier=99",
             "DROP TABLE pairing_recovery_stages_v1",
+            "DROP INDEX pairing_recovery_phone_v1",
+            "DROP INDEX pairing_recovery_phone_v1; CREATE INDEX pairing_recovery_phone_v1 ON pairing_recovery_stages_v1(phone)",
             "CREATE TABLE extra_fixture_table(value INTEGER)",
             "UPDATE authority_feature_tier_v1 SET tier=15",
             "DELETE FROM pairing_recovery_stages_v1",
@@ -1989,14 +2110,15 @@ final class AuthorityJournalSchema19MigrationTests: XCTestCase, @unchecked Senda
             "UPDATE authority_feature_tier_v1 SET tier=17",
             "UPDATE authority_feature_tier_v1 SET tier=17; DROP TABLE gateway_abandoned_grants_v1",
             "UPDATE pairing_recovery_stages_v1 SET proposal=zeroblob(32) WHERE state=0",
-            "UPDATE pairing_recovery_stages_v1 SET proposal=zeroblob(32) WHERE state=1",
+            "UPDATE pairing_recovery_stages_v1 SET proposal=zeroblob(32) WHERE state=2",
             "PRAGMA user_version=18",
         ]
         for mutation in mutations {
             let f = try Fixture(configureGateway: true)
-            let (p, key) = try proposal(f)
-            let committed = try stage(f, p)
-            _ = try commit(f, committed, key: key)
+            let p = try proposal(f).0
+            let expired = try stage(f, p)
+            f.environment.time.value = try expired.recoveryStage().deadline
+            XCTAssertTrue(try f.access.isExpired(expired))
             _ = try stage(f, proposal(f, phone: 12).0)
             _ = try abandon(eligibleGrant(f), f)
             XCTAssertEqual(try f.journal.read { try $0.featureTier }, 18)

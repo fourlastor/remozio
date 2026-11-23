@@ -236,11 +236,10 @@ public final class ApprovalRequestCoordinator {
         return try write { tx in
             try verifyHost(tx)
             try recheckAdministrator()
-            if let stage = try tx.pendingRecoveryStage(phoneID: selection.phone.phoneID),
-               stage.transcript.replacement?.epoch == selection.phone.enrollmentEpoch,
-               let predecessor = try tx.approvalEnrollments().first(where: { DeliveryRecipient($0) == selection.phone }),
-               !predecessor.approval.active {
-                try tx.finishRecoveryStage(stage, as: .invalidated)
+            if let predecessor = try tx.approvalEnrollments().first(where: { DeliveryRecipient($0) == selection.phone }),
+               !predecessor.approval.active,
+               try tx.invalidateRecoveryStage(phoneID: selection.phone.phoneID, enrollmentEpoch: selection.phone.enrollmentEpoch,
+                                               writer: writer, authentication: .localAdministrator) {
                 switch predecessor.gatewayRevocation?.progress {
                 case .pending: return .gatewayPending
                 case .applied: return .gatewayApplied
@@ -312,7 +311,8 @@ public final class ApprovalRequestCoordinator {
         try write { tx in
             try verifyHost(tx)
             try authorize()
-            try tx.discardExpiredRecoveryStage(setupID: setupID, digest: digest)
+            let phoneID = try tx.discardExpiredRecoveryStage(setupID: setupID, digest: digest)
+            try tx.appendRecoveryStageEvent(phoneID: phoneID, writer: writer, authentication: .localAdministrator, reason: .userCancelled)
         }
     }
 
@@ -357,6 +357,8 @@ public final class ApprovalRequestCoordinator {
                 do { try attempt.validateEnrollmentHistory(tx) }
                 catch let error as EnrollmentJournalError where error == .unavailableEnrollment || error == .recoveryRequired || error == .reusedIdentity {
                     try tx.finishRecoveryStage(stage, as: .invalidated)
+                    try tx.appendRecoveryStageEvent(phoneID: transcript.phone.scope.phoneID, writer: writer,
+                                                    authentication: .system, reason: .bindingMismatch)
                     return .failure(error)
                 }
                 recoveryStage = stage
@@ -366,7 +368,7 @@ public final class ApprovalRequestCoordinator {
                 receiptTimeMs: receiptTimeMs, gateway: gateway, now: {
                     let moment = try now(); try checkClock(moment); return moment
                 })
-            if let recoveryStage { try tx.finishRecoveryStage(recoveryStage, as: .committed) }
+            if let recoveryStage { try tx.releaseCommittedRecoveryStage(recoveryStage) }
             return .success(committed)
         }
         let committed = try committedResult.get()
@@ -635,6 +637,7 @@ public final class ApprovalRequestCoordinator {
         }.sorted { $0.lexicographicallyPrecedes($1) }
         try write { tx in
             _ = try head(tx)
+            if checkpointed != nil { try tx.expireDueRecoveryStages(now: now) }
             for id in expired {
                 guard let entry = entries[id] else { throw ApprovalCoordinatorError.unknownRequest }
                 try append(tx, requestID: id, category: entry.category, kind: .expired, outcome: .expired,
