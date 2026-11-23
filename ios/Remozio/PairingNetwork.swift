@@ -38,10 +38,11 @@ final class NativePairingKeys: NSObject, PlatformPairingKeys {
 
     func openTransport(macID: KotlinByteArray, accountID: KotlinByteArray, pin: KotlinByteArray,
                        applicationProtocol: String) -> PairingTransport {
+        guard case .success(let key) = transport else { return FailedPairingTransport() }
         let target = endpoint.map(NetworkPairingTransport.Target.fixed) ?? .service(PairingServiceName.make(
             macID: PairingBytesKt.pairingData(bytes: macID), accountID: PairingBytesKt.pairingData(bytes: accountID)))
         return NetworkPairingTransport(target: target, pin: PairingBytesKt.pairingData(bytes: pin),
-            applicationProtocol: applicationProtocol, identity: { [transport] in try PairingClientIdentity.make(transport.get()) })
+            applicationProtocol: applicationProtocol, identity: { try PairingClientIdentity.make(key) })
     }
 
     override var description: String { "NativePairingKeys(redacted)" }
@@ -137,6 +138,30 @@ enum PairingClientIdentity {
     }
 }
 
+/// The key failed before start. This transport has no queue, TLS identity or network resources.
+private final class FailedPairingTransport: NSObject, PairingTransport {
+    private enum State { case waiting, cancelled, finished }
+    private let lock = NSLock()
+    private var state = State.waiting
+
+    func start(events: PairingTransportEvents) {
+        let error = lock.withLock { () -> String? in
+            switch state {
+            case .waiting: state = .finished; return "identity failed"
+            case .cancelled: state = .finished; return "cancelled"
+            case .finished: return nil
+            }
+        }
+        if let error { events.closed(error: error) }
+    }
+
+    func requestBytes() {}
+    func send(bytes: KotlinByteArray, completion: PairingSendCompletion) { completion.done(error: "closed") }
+    func cancel() {
+        lock.withLock { if state == .waiting { state = .cancelled } }
+    }
+}
+
 /// Network.framework TLS 1.3 client for the pairing channel. See `PairingTransport` in the shared module for the
 /// contract. All state lives on one serial queue.
 final class NetworkPairingTransport: NSObject, PairingTransport {
@@ -183,8 +208,9 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
                 guard let made = sec_identity_create(try identity()) else { throw PairingClientIdentity.Failure.identity }
                 clientIdentity = made
             } catch {
+                finish("identity failed")
                 pairingLog.error("client identity: \(String(reflecting: type(of: error)), privacy: .public) code \((error as NSError).code, privacy: .public)")
-                return finish("identity failed")
+                return
             }
             switch target {
             case .fixed(let endpoint): connect(endpoint)
@@ -326,12 +352,13 @@ final class NetworkPairingTransport: NSObject, PairingTransport {
     private func finish(_ error: String?) {
         guard !finished else { return }
         finished = true
-        if let error { pairingLog.notice("transport closed: \(error, privacy: .public)") }
         browser?.cancel(); browser = nil
         connection?.cancel(); connection = nil
         clientIdentity = nil
-        events?.closed(error: error)
+        let observer = events
         events = nil
+        observer?.closed(error: error)
+        if let error { pairingLog.notice("transport closed: \(error, privacy: .public)") }
     }
 
     /// Exactly one P-256 leaf, valid at [now], whose SubjectPublicKeyInfo equals the pin byte for byte.

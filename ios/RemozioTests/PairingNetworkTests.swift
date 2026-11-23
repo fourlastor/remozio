@@ -166,6 +166,23 @@ final class PairingNetworkTests: XCTestCase {
         XCTAssertEqual(server.connections, 0)
     }
 
+    func testKnownKeyFailureClosesOnStartCallerWithoutStartingNetworkWork() {
+        let keys = NativePairingKeys(endpoint: .hostPort(host: "127.0.0.1", port: 9),
+            makeTransportKey: { throw PairingTransportKey.Failure.refused })
+        let events = Recorder(self, expectOpen: false)
+        let transport = keys.openTransport(macID: Self.bytes(16), accountID: Self.bytes(16),
+            pin: PairingBytesKt.pairingBytes(data: Self.prefix + P256.Signing.PrivateKey().publicKey.x963Representation),
+            applicationProtocol: "remozio-pairing/1")
+
+        let caller = Thread.current
+        transport.start(events: events)
+        XCTAssertTrue(events.didClose(on: caller))
+        transport.cancel()
+        wait(for: [events.closedExpectation, events.openedExpectation], timeout: 0.5)
+        XCTAssertEqual(events.closedError, "identity failed")
+        XCTAssertEqual(events.closedCount, 1)
+    }
+
     func testNoKeyStopsBeforeDiscovery() {
         assertStopsBeforeDiscovery(NativePairingKeys(makeTransportKey: { throw PairingTransportKey.Failure.refused }))
     }
@@ -218,6 +235,9 @@ private final class Recorder: NSObject, PairingTransportEvents {
     private(set) var closedCount = 0
     private(set) var closed = false
     private(set) var closedError: String?
+    private var closingThread: Thread?
+
+    func didClose(on thread: Thread) -> Bool { lock.withLock { closingThread === thread } }
 
     init(_ test: XCTestCase, expectOpen: Bool = true, expectBytes: Bool = false) {
         openedExpectation = test.expectation(description: "opened")
@@ -234,7 +254,12 @@ private final class Recorder: NSObject, PairingTransportEvents {
     }
 
     func closed(error: String?) {
-        lock.withLock { closedCount += 1; closed = true; closedError = error }
+        lock.withLock {
+            closedCount += 1
+            closed = true
+            closedError = error
+            closingThread = Thread.current
+        }
         closedExpectation.fulfill()
     }
 }
