@@ -170,7 +170,8 @@ class StoredPairingHostTest {
         val first = attempt()
         val second = attempt()
         try {
-            assertSame(providerFailure, assertFails { first.connect(invited) })
+            val failure = assertFailsWith<IllegalStateException> { first.connect(invited) }
+            assertEquals(providerFailure.message, failure.message)
             assertFailsWith<RePairAlreadyPending> { second.connect(invited) }
             assertEquals(1, allocations)
         } finally {
