@@ -15,14 +15,36 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         struct Observation: Sendable {
             var clientRefused: Bool?
             var provedUnsent = false
+            var injectedDrop = false
+            var admissionClosed = false
             var entries = 0
             var replies = 0
             var endpointRefused = false
         }
         private let observation = Mutex(Observation())
 
+        private let dropBeforeEndpoint: Bool
+
+        init(dropBeforeEndpoint: Bool) { self.dropBeforeEndpoint = dropBeforeEndpoint }
+
         func recordUnsent() { observation.withLock { $0.provedUnsent = true } }
-        func recordEntry() { observation.withLock { $0.entries += 1 } }
+
+        func admitEndpoint() -> Bool {
+            observation.withLock {
+                guard !$0.admissionClosed else { return false }
+                if dropBeforeEndpoint {
+                    $0.injectedDrop = true
+                    $0.admissionClosed = true
+                    return false
+                }
+                $0.entries += 1
+                return true
+            }
+        }
+
+        func closeAdmission() { observation.withLock { $0.admissionClosed = true } }
+
+        func snapshot() -> Observation { observation.withLock { $0 } }
         func recordReply(_ value: Data?) {
             observation.withLock {
                 $0.replies += 1
@@ -31,14 +53,14 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         }
         func recordClientRefusal(_ refused: Bool) { observation.withLock { $0.clientRefused = refused } }
 
-        func waitForObservation() async throws -> Observation {
+        func waitForObservation() async throws {
             let deadline = ContinuousClock.now.advanced(by: .seconds(5))
             while true {
-                let current = observation.withLock { $0 }
+                let current = snapshot()
                 if current.clientRefused == false ||
-                    (current.clientRefused != nil && (current.provedUnsent || current.replies != 0)) ||
+                    (current.clientRefused == true && (current.provedUnsent || current.injectedDrop || current.replies != 0)) ||
                     ContinuousClock.now >= deadline {
-                    return current
+                    return
                 }
                 try await Task.sleep(for: .milliseconds(5))
             }
@@ -46,13 +68,13 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
     }
 
     private enum RefusalFixtureError: Error, Equatable, CustomStringConvertible {
-        case unsentAfterThreeAttempts(String)
+        case undeliveredAfterThreeAttempts(String)
         case unverifiableRefusal(String, attempt: Int, entries: Int, replies: Int)
 
         var description: String {
             switch self {
-            case .unsentAfterThreeAttempts(let label):
-                return "\(label): no request reached the endpoint after 3 proven pre-send failures"
+            case .undeliveredAfterThreeAttempts(let label):
+                return "\(label): no request reached the endpoint after 3 closed attempts with no endpoint entry"
             case .unverifiableRefusal(let label, let attempt, let entries, let replies):
                 return "\(label): attempt \(attempt) lacked exactly one verified endpoint refusal (entries \(entries), replies \(replies))"
             }
@@ -148,21 +170,24 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         let endpoint: AdministrativeSetupXPCEndpoint
         let gate: WorkGate?
         let deliverBeforeHold: Bool
-        let entered: @Sendable () -> Void
+        let admit: @Sendable () -> Bool
         let produced: @Sendable (Data?) -> Void
         let returned: @Sendable () -> Void
         init(endpoint: AdministrativeSetupXPCEndpoint, gate: WorkGate?, deliverBeforeHold: Bool,
-             entered: @escaping @Sendable () -> Void = {},
+             admit: @escaping @Sendable () -> Bool = { true },
              produced: @escaping @Sendable (Data?) -> Void, returned: @escaping @Sendable () -> Void) {
             self.endpoint = endpoint; self.gate = gate; self.deliverBeforeHold = deliverBeforeHold
-            self.entered = entered; self.produced = produced; self.returned = returned
+            self.admit = admit; self.produced = produced; self.returned = returned
         }
         func portableImportHello(reply: @escaping @Sendable (UInt64) -> Void) { endpoint.portableImportHello(reply: reply) }
         func portableImportRecoveryHello(reply: @escaping @Sendable (UInt64) -> Void) { endpoint.portableImportRecoveryHello(reply: reply) }
         func portableImportProgress(reply: @escaping @Sendable (Data?) -> Void) { endpoint.portableImportProgress(reply: reply) }
         func portableImportRecovery(reply: @escaping @Sendable (Data?) -> Void) { endpoint.portableImportRecovery(reply: reply) }
         func performPortableImport(_ request: Data, authorization: Data, reply: @escaping @Sendable (Data?) -> Void) {
-            entered()
+            guard admit() else {
+                endpoint.close()
+                return
+            }
             endpoint.performPortableImport(request, authorization: authorization) { [self] value in
                 produced(value)
                 if deliverBeforeHold { reply(value) }
@@ -227,7 +252,7 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                             returned: { [weak self] in self?.replyReturned.withLock { $0 = true } })
                     } else if let refusalProbe {
                         connection.exportedObject = ReplyProbe(endpoint: endpoint, gate: nil, deliverBeforeHold: false,
-                            entered: { refusalProbe.recordEntry() }, produced: { refusalProbe.recordReply($0) }, returned: {})
+                            admit: { refusalProbe.admitEndpoint() }, produced: { refusalProbe.recordReply($0) }, returned: {})
                     } else { connection.exportedObject = endpoint }
                     connection.invalidationHandler = { [weak self, weak endpoint] in
                         self?.invalidationEntered.withLock { $0 += 1 }
@@ -239,6 +264,8 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
             }
         }
         func close() {
+            // Close probe admission under the lock that counts entries before inspecting the result.
+            refusalProbe?.closeAdmission()
             let saved = lock.withLock {
                 closed = true; listener.invalidate(); listener.delegate = nil
                 let saved = connections; connections.removeAll(); return saved
@@ -387,11 +414,13 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
 
     private func checkRefusal(owner: SetupAccountOwner, requirement: String, request: SetupPortableImportOperation,
                               before: SetupPortableImportRecovery, recovery: Bool, rightsAllowed: Bool,
-                              preSendFailures: Int = 0) async throws -> Int {
+                              preSendFailures: Int = 0, postDispatchDrop: Bool = false) async throws
+        -> (attempts: Int, observedDrops: Int) {
         let label = "\(request.action) v\(recovery ? 10 : 9) rightsAllowed=\(rightsAllowed)"
         let form = Data(repeating: 0, count: MemoryLayout<AuthorizationExternalForm>.size)
+        var observedDrops = 0
         for attempt in 1...3 {
-            let probe = RefusalProbe()
+            let probe = RefusalProbe(dropBeforeEndpoint: postDispatchDrop && attempt == 1)
             let server = try Server(owner: owner, requirement: requirement, refusalProbe: probe)
             defer { server.close() }
             let driver = Driver(server: server, requirement: requirement,
@@ -419,13 +448,17 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                     probe.recordClientRefusal(true)
                 }
             }
-            let observation = try await probe.waitForObservation()
+            try await probe.waitForObservation()
             await channel.close()
+            server.close()
+            let observation = probe.snapshot()
             let rights = server.rights.withLock { $0 }
             XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
-            if observation.clientRefused == true, observation.provedUnsent,
+            if observation.clientRefused == true, observation.admissionClosed,
                observation.entries == 0, observation.replies == 0, rights == 0 {
-                print("Setup refusal fixture: \(label), attempt \(attempt), request proved unsent")
+                if observation.injectedDrop { observedDrops += 1 }
+                let phase = observation.provedUnsent ? "pre-send" : "after dispatch"
+                print("Setup refusal fixture: \(label), attempt \(attempt), endpoint not entered (\(phase))")
                 continue
             }
             guard observation.clientRefused == true, observation.entries == 1, observation.replies == 1,
@@ -434,9 +467,9 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
                     entries: observation.entries, replies: observation.replies)
             }
             XCTAssertEqual(rights, recovery ? 1 : 0, label)
-            return attempt
+            return (attempt, observedDrops)
         }
-        throw RefusalFixtureError.unsentAfterThreeAttempts(label)
+        throw RefusalFixtureError.undeliveredAfterThreeAttempts(label)
     }
 
     func testLiveAnonymousRefusalRequestsRequireVersionTenRightsAndCurrentRecordDigest() async throws {
@@ -461,7 +494,7 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         try await owner.closeWhenIdle()
     }
 
-    func testLiveRefusalFixtureRetriesProvenPreSendFailuresAndStopsAtLimit() async throws {
+    func testLiveRefusalFixtureRetriesUndeliveredRequestsAndStopsAtLimit() async throws {
         guard getuid() > 0, getuid() == geteuid(), CGSessionCopyCurrentDictionary() != nil else {
             throw XCTSkip("Requires an ordinary Mac GUI session. Installed Root authorization remains a separate gate.")
         }
@@ -471,14 +504,18 @@ final class PortableSetupImportNativeTests: XCTestCase, @unchecked Sendable {
         let before = try XCTUnwrap(owner.portableImportRecovery(callerUID: getuid()))
         let request = try SetupPortableImportOperation(action: .prepareRefusedDNSRetry, expected: before.progress,
             proposal: fixture.base.h.f.proposal(), expectedRejectedRecordDigest: Data(repeating: 0, count: 32))
-        let attempt = try await checkRefusal(owner: owner, requirement: requirement, request: request, before: before,
+        let preSend = try await checkRefusal(owner: owner, requirement: requirement, request: request, before: before,
             recovery: true, rightsAllowed: true, preSendFailures: 2)
-        XCTAssertEqual(attempt, 3)
+        XCTAssertEqual(preSend.attempts, 3)
+        let postDispatch = try await checkRefusal(owner: owner, requirement: requirement, request: request, before: before,
+            recovery: true, rightsAllowed: true, postDispatchDrop: true)
+        XCTAssertEqual(postDispatch.attempts, 2)
+        XCTAssertEqual(postDispatch.observedDrops, 1)
         do {
             _ = try await checkRefusal(owner: owner, requirement: requirement, request: request, before: before,
                 recovery: true, rightsAllowed: true, preSendFailures: 3)
             XCTFail("Three proven pre-send failures must stop the fixture")
-        } catch RefusalFixtureError.unsentAfterThreeAttempts(let label) {
+        } catch RefusalFixtureError.undeliveredAfterThreeAttempts(let label) {
             XCTAssertEqual(label, "prepareRefusedDNSRetry v10 rightsAllowed=true")
         }
         XCTAssertEqual(try owner.portableImportRecovery(callerUID: getuid()), before)
