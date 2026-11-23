@@ -310,7 +310,7 @@ internal class StoredPairingHost(
                     next
                 }
             }
-        }
+        }.also { notifyChange() }
 
     /** Local removal does not claim that the Mac has revoked the phone. */
     suspend fun remove(recordID: CborValue.Bytes, expectedRevision: ULong): EnrollmentSnapshot = withContext(dispatcher) {

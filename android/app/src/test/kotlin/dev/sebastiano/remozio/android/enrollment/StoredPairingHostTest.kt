@@ -310,7 +310,7 @@ class StoredPairingHostTest {
         val notificationsBeforeAbandonment = changeCount
         val abandoned = h.abandonAmbiguousRePair(reservation.recordID, paired.revision)
         assertEquals(listOf(setOf(reservation.recordID)), invalidated)
-        assertEquals(notificationsBeforeAbandonment, changeCount)
+        assertEquals(notificationsBeforeAbandonment + 1, changeCount)
         assertEquals(ordinary.recordID, abandoned.entries.single { it.phase == EnrollmentPhase.ACTIVE }.enrollment.recordID)
         val retained = abandoned.entries.single { it.enrollment.recordID == reservation.recordID }
         assertEquals(EnrollmentPhase.REMOVED, retained.phase)
