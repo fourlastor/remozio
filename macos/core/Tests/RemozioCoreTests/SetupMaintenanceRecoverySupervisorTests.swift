@@ -30,13 +30,15 @@ private final class RecoverySupervisorCustody: SetupMaintenanceRecoveryProcessCu
     let fixture: ReleaseActivityFixture?
     let token: ReleaseActivityToken?
     let releaseGate: RecoverySupervisorGate?
-    init(shared: Bool = false, releaseGate: RecoverySupervisorGate? = nil,
+    private let retryGate: RecoverySupervisorGate?
+    let retriesStarted = Mutex(0)
+    init(shared: Bool = false, releaseGate: RecoverySupervisorGate? = nil, retryGate: RecoverySupervisorGate? = nil,
         closeOutcomes: [AdministrativeSetupShutdown.RecoveryCloseResult] = [],
         validationPhases: SetupRetainedInvocationReservation.RestorationPhases? = nil) throws {
         self.closeOutcomes = .init(closeOutcomes); self.validationPhases = validationPhases
         fixture = shared ? try ReleaseActivityFixture() : nil
         token = try fixture?.open().acquireShared()
-        self.releaseGate = releaseGate
+        self.releaseGate = releaseGate; self.retryGate = retryGate
     }
     func validate() throws {
         validationTaskContexts.withLock { $0.append(withUnsafeCurrentTask { $0 != nil }) }
@@ -57,6 +59,11 @@ private final class RecoverySupervisorCustody: SetupMaintenanceRecoveryProcessCu
         let planned: AdministrativeSetupShutdown.RecoveryCloseResult? = closeOutcomes.withLock { $0.isEmpty ? nil : $0.removeFirst() }
         if let planned, planned != .closed { return planned }
         await closeAfterJoining(); return .closed
+    }
+    func retryCloseAfterJoiningResult() async -> AdministrativeSetupShutdown.RecoveryCloseResult {
+        retriesStarted.withLock { $0 += 1 }
+        await retryGate?.wait()
+        return await closeAfterJoiningResult()
     }
     func closeAfterJoining() async {
         closeStarted.withLock { $0 += 1 }
@@ -118,8 +125,9 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
         try .init(accountID: Data(repeating: byte, count: 16), windowID: Data(repeating: byte + 1, count: 16),
             revision: Data(repeating: revision, count: 16))
     }
-    private static func eventually(_ check: @escaping @Sendable () async -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    private static func eventually(for timeout: Duration = .seconds(3),
+        _ check: @escaping @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while !(await check()) {
             guard ContinuousClock.now < deadline else { throw RecoverySupervisorTestFailure.timeout }
             try await ContinuousClock().sleep(until: .now.advanced(by: .milliseconds(1)))
@@ -629,6 +637,43 @@ final class SetupMaintenanceRecoverySupervisorTests: XCTestCase {
             let exclusive = try installer.acquireExclusive(); exclusive.close()
         }
     }
+    func testCancelledCloseWaiterJoinsTheSamePendingRetry() async throws {
+        let retryGate = RecoverySupervisorGate()
+        let custody = try RecoverySupervisorCustody(retryGate: retryGate, closeOutcomes: [.pending, .pending, .closed])
+        let supervisor = try Supervisor.openOwned(custody: custody, driver: .init(acquire: { _, _ in .terminal(.noWindow) }))
+        defer { Task { await retryGate.open() } }
+        await supervisor.close()
+
+        let retirement = Task { await supervisor.retire() }
+        try await Self.eventually { custody.retriesStarted.withLock { $0 } == 1 }
+        let entered = Mutex(false), returned = Mutex(false)
+        let close = Task {
+            entered.withLock { $0 = true }
+            await supervisor.close()
+            returned.withLock { $0 = true }
+        }
+        try await Self.eventually { entered.withLock { $0 } }
+        close.cancel()
+        do {
+            try await Self.eventually(for: .milliseconds(300)) { returned.withLock { $0 } }
+            XCTFail("The cancelled waiter skipped the shared retry")
+        } catch RecoverySupervisorTestFailure.timeout {}
+
+        await retryGate.open()
+        await retirement.value
+        await close.value
+        let pending = await supervisor.closureResult
+        XCTAssertEqual(pending, .pending)
+        XCTAssertEqual(custody.retriesStarted.withLock { $0 }, 1)
+        XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 2)
+
+        await supervisor.close()
+        let closed = await supervisor.closureResult
+        XCTAssertEqual(closed, .closed)
+        XCTAssertEqual(custody.retriesStarted.withLock { $0 }, 2)
+        XCTAssertEqual(custody.closeAttempts.withLock { $0 }, 3)
+    }
+
     func testCustodyValidationUsesTheSuppliedBlockingPhaseRunner() async throws {
         let phases = try SetupExecutorAdmissionTestPhases.owned(executor: SetupAuditUpgradeWorkExecutor())
         let custody = try RecoverySupervisorCustody(validationPhases: phases)

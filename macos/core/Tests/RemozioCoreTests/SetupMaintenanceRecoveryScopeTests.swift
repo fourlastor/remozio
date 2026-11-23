@@ -366,6 +366,51 @@ final class SetupMaintenanceRecoveryScopeTests: XCTestCase {
         }
     }
 
+    func testDirectCloseWaitsForAnActiveRetirementRetry() throws {
+        try withScope { h in
+            let clock = RecoveryCleanupClock(), releaseCleanup = AsyncStream<Void>.makeStream()
+            let (supervisor, custody, owner) = try await Self.scheduleCleanupFailure(h, clock: clock) { attempt in
+                guard attempt == 2 else { return false }
+                for await _ in releaseCleanup.stream {}
+                return true
+            }
+            defer {
+                releaseCleanup.continuation.finish(); owner.releaseFixture(); custody.releaseAfterJoining()
+                h.placement.close(); h.processLease.close()
+            }
+
+            clock.advance(.seconds(1))
+            let retirement = Task { await supervisor.retire() }
+            try await Self.eventually { owner.attempts.withLock { $0 } == 2 }
+            let closeOutcome = RecoveryScopeCompletion(), closeStarted = RecoveryScopeBoolean()
+            let close = Task {
+                closeStarted.value.withLock { $0 = true }
+                do { try await h.shutdown.close(); closeOutcome.value.withLock { $0 = .success(()) } }
+                catch { closeOutcome.value.withLock { $0 = .failure(error) } }
+            }
+            try await Self.eventually { closeStarted.value.withLock { $0 } }
+            do {
+                try await Self.eventually(for: .milliseconds(300)) { closeOutcome.value.withLock { $0 != nil } }
+                XCTFail("Direct close returned while the retirement retry was held")
+            } catch RecoveryScopeTestFailure.timeout {}
+            XCTAssertNoThrow(try h.processLease.validate())
+            XCTAssertNoThrow(try h.placement.validate())
+
+            releaseCleanup.continuation.finish()
+            await retirement.value
+            await close.value
+            try XCTUnwrap(closeOutcome.value.withLock { $0 }).get()
+            let result = await supervisor.closureResult
+            XCTAssertEqual(result, .closed)
+            XCTAssertEqual(owner.attempts.withLock { $0 }, 2)
+            XCTAssertEqual(owner.runs.withLock { $0 }, 1)
+            XCTAssertThrowsError(try h.processLease.validate())
+            XCTAssertThrowsError(try h.placement.validate())
+            let replacement = try h.acquireProcess()
+            replacement.close()
+        }
+    }
+
     func testCleanupRetryCoalescesRetirementCallsInsideBackoff() throws {
         try withScope { h in
             let clock = RecoveryCleanupClock()
