@@ -80,7 +80,8 @@ public final class GatewayHistoryCollector {
                 throw GatewayHistoryCollectionError.incompleteHistory
             }
             guard kind(terminal) == kind(anchor), terminal.operationID == anchor.operationID,
-                  terminal.canonicalPayload == anchor.canonicalPayload else { throw GatewayHistoryCollectionError.conflictingHead }
+                  terminal.canonicalPayload == anchor.canonicalPayload,
+                  terminal.kind != GatewayControlTombstone.receiptKind || terminal.signature == anchor.signature else { throw GatewayHistoryCollectionError.conflictingHead }
             let result = VerifiedGatewayHistory(head: head, afterRevision: afterRevision, records: records, receivedAt: lastMoment)
             invalidate()
             return result

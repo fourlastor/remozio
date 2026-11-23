@@ -156,12 +156,14 @@ public final class GatewayDatabase {
     public func headEvidence() throws -> GatewayHeadEvidence {
         try transaction(write: false) {
             let head = try storedHead()
+            let tombstones = try tombstoneHistorySQL()
             let latest: [(Int64, Data, UInt64)] = try statement("""
                 SELECT source,operation,revision FROM (
                     SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
                     UNION ALL
                     SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
                     UNION ALL SELECT 3 AS source,operation,revision FROM gateway_submission_controls_v4
+                    \(tombstones)
                 ) ORDER BY revision DESC LIMIT 2
                 """) { stmt in
                 var rows: [(Int64, Data, UInt64)] = []
@@ -191,11 +193,13 @@ public final class GatewayDatabase {
         guard afterRevision < throughRevision, (1...16).contains(maximumRecords) else { throw GatewayDatabaseError.invalidConfiguration }
         return try transaction(write: false) {
             guard try throughRevision <= storedHead() else { throw GatewayDatabaseError.headMismatch }
+            let tombstones = try tombstoneHistorySQL()
             let rows: [(Int64, Data, UInt64)] = try statement("""
                 SELECT source,operation,revision FROM (
                     SELECT 1 AS source,operation,revision FROM gateway_candidates_v1
                     UNION ALL SELECT 2 AS source,operation,revision FROM gateway_recipients_v2
                     UNION ALL SELECT 3 AS source,operation,revision FROM gateway_submission_controls_v4
+                    \(tombstones)
                 ) WHERE revision>? AND revision<=? ORDER BY revision LIMIT \(maximumRecords + 1)
                 """, [uint(afterRevision), uint(throughRevision)]) { stmt in
                 var result: [(Int64, Data, UInt64)] = []
@@ -238,7 +242,8 @@ public final class GatewayDatabase {
                 return GatewayCandidateAdmission(receipt: previous, inserted: false)
             }
             guard try storedRecipient(operationID: candidate.operationID) == nil,
-                  try storedSubmission(operationID: candidate.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+                  try storedSubmission(operationID: candidate.operationID) == nil,
+                  try storedTombstone(operationID: candidate.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
             guard try !isRevoked(phone: candidate.binding.phoneID, enrollment: candidate.binding.enrollmentEpoch) else {
                 throw GatewayDatabaseError.revokedEnrollment
             }
@@ -345,7 +350,8 @@ public final class GatewayDatabase {
                 return GatewayRecipientApplication(receipt: previous, inserted: false)
             }
             guard try storedReceipt(operationID: control.operationID) == nil,
-                  try storedSubmission(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+                  try storedSubmission(operationID: control.operationID) == nil,
+                  try storedTombstone(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
             guard control.revision > head else { throw GatewayCandidateVerificationError.staleRevision }
             guard control.issued <= nowUnixMillis else { throw GatewayCandidateVerificationError.futureIssue }
             if let recoveryHead {
@@ -399,7 +405,8 @@ public final class GatewayDatabase {
             let control = try GatewaySubmissionVerifier.authenticate(canonicalPayload: canonicalPayload, signature: signature,
                 wireVersion: wireVersion, registration: identity, payloadLimits: payloadLimits, signingLimits: signingLimits)
             guard try storedReceipt(operationID: control.operationID) == nil,
-                  try storedRecipient(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+                  try storedRecipient(operationID: control.operationID) == nil,
+                  try storedTombstone(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
             if let previous = try storedSubmission(operationID: control.operationID) {
                 guard previous.canonicalPayload == canonicalPayload else { throw GatewayDatabaseError.operationConflict }
                 return GatewaySubmissionApplication(receipt: previous, inserted: false)
@@ -435,13 +442,76 @@ public final class GatewayDatabase {
         }
     }
 
+    func abandonGrant(canonicalPayload: Data, signature: Data, expectedHead: UInt64,
+                      now: AuthorityMoment) throws -> GatewayControlTombstoneApplication {
+        try transaction(write: true) {
+            try checkClock(now)
+            let control = try GatewayControlTombstone.authenticate(canonicalPayload, signature: signature, registration: identity)
+            let head = try storedHead()
+            guard expectedHead == control.revision - 1 else { throw GatewayDatabaseError.headMismatch }
+            guard try storedReceipt(operationID: control.operationID) == nil,
+                  try storedRecipient(operationID: control.operationID) == nil,
+                  try storedSubmission(operationID: control.operationID) == nil else { throw GatewayDatabaseError.operationConflict }
+            if let previous = try storedTombstone(operationID: control.operationID) {
+                guard previous.canonicalPayload == canonicalPayload, previous.signature == signature else {
+                    throw GatewayDatabaseError.operationConflict
+                }
+                return GatewayControlTombstoneApplication(receipt: previous, inserted: false)
+            }
+            guard head == expectedHead else { throw GatewayDatabaseError.headMismatch }
+            try requireCapacity()
+            if try !hasTombstones() {
+                try createTombstoneTable()
+                try exec("PRAGMA user_version=5")
+            }
+            try statement("INSERT INTO gateway_control_tombstones_v5 VALUES(?,?,?,?)",
+                [control.operationID, uint(control.revision), canonicalPayload, signature]) { try done($0) }
+            try advanceHead(control.revision, from: head)
+            return GatewayControlTombstoneApplication(
+                receipt: GatewayControlTombstoneReceipt(tombstone: control, canonicalPayload: canonicalPayload, signature: signature),
+                inserted: true)
+        }
+    }
+
+    private func hasTombstones() throws -> Bool { try scalar("PRAGMA user_version") == 5 }
+
+    private func createTombstoneTable() throws {
+        try exec("""
+            CREATE TABLE gateway_control_tombstones_v5 (
+                operation BLOB PRIMARY KEY CHECK(length(operation)=16),
+                revision BLOB NOT NULL UNIQUE CHECK(length(revision)=8),
+                payload BLOB NOT NULL CHECK(length(payload)>0 AND length(payload)<=1024),
+                signature BLOB NOT NULL CHECK(length(signature)=64)
+            ) STRICT, WITHOUT ROWID
+            """)
+    }
+
+    private func tombstoneHistorySQL() throws -> String {
+        try hasTombstones() ? "UNION ALL SELECT 4 AS source,operation,revision FROM gateway_control_tombstones_v5" : ""
+    }
+
+    private func storedTombstone(operationID: Data) throws -> GatewayControlTombstoneReceipt? {
+        guard try hasTombstones() else { return nil }
+        return try statement("SELECT revision,payload,signature FROM gateway_control_tombstones_v5 WHERE operation=?", [operationID]) { row in
+            let rc = sqlite3_step(row)
+            if rc == SQLITE_DONE { return nil }
+            guard rc == SQLITE_ROW else { throw GatewayDatabaseError.storage(rc) }
+            let payload = try blob(row, 1, maximum: 1024), signature = try blob(row, 2, maximum: 64)
+            guard let value = try? GatewayControlTombstone.authenticate(payload, signature: signature, registration: identity),
+                  value.operationID == operationID, value.revision == (try unsigned(blob(row, 0, maximum: 8))),
+                  value.revision <= (try storedHead()) else { throw GatewayDatabaseError.corruptData }
+            return GatewayControlTombstoneReceipt(tombstone: value, canonicalPayload: payload, signature: signature)
+        }
+    }
+
     private func storedControl(source: Int64, operationID: Data) throws -> GatewayControlReceipt {
         let candidate = try storedReceipt(operationID: operationID), recipient = try storedRecipient(operationID: operationID)
-        let submission = try storedSubmission(operationID: operationID)
-        switch (source, candidate, recipient, submission) {
-        case (1, let value?, nil, nil): return .candidate(value)
-        case (2, nil, let value?, nil): return .recipient(value)
-        case (3, nil, nil, let value?): return .submission(value)
+        let submission = try storedSubmission(operationID: operationID), tombstone = try storedTombstone(operationID: operationID)
+        switch (source, candidate, recipient, submission, tombstone) {
+        case (1, let value?, nil, nil, nil): return .candidate(value)
+        case (2, nil, let value?, nil, nil): return .recipient(value)
+        case (3, nil, nil, let value?, nil): return .submission(value)
+        case (4, nil, nil, nil, let value?): return .tombstone(value)
         default: throw GatewayDatabaseError.corruptData
         }
     }
@@ -617,8 +687,9 @@ public final class GatewayDatabase {
         return true
     }
     private func operationCount(includeSubmission: Bool = true) throws -> Int64 {
-        let extra = includeSubmission ? "+(SELECT count(*) FROM gateway_submission_controls_v4)" : ""
-        return try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)" + extra)
+        let submission = includeSubmission ? "+(SELECT count(*) FROM gateway_submission_controls_v4)" : ""
+        let tombstones = try hasTombstones() ? "+(SELECT count(*) FROM gateway_control_tombstones_v5)" : ""
+        return try scalar("SELECT (SELECT count(*) FROM gateway_candidates_v1)+(SELECT count(*) FROM gateway_recipients_v2)" + submission + tombstones)
     }
     private func requireCapacity() throws {
         guard try operationCount() < maximumOperations else { throw GatewayDatabaseError.capacityExceeded }
@@ -905,7 +976,7 @@ public final class GatewayDatabase {
     }
     private func validateIdentity(allowLegacy: Bool = false) throws {
         let version = try scalar("PRAGMA user_version")
-        guard try scalar("PRAGMA application_id") == Self.applicationID, version == 4 || (allowLegacy && (1...3).contains(version)) else {
+        guard try scalar("PRAGMA application_id") == Self.applicationID, (4...5).contains(version) || (allowLegacy && (1...3).contains(version)) else {
             throw GatewayDatabaseError.incompatibleStore
         }
         try statement("SELECT id,identity,head FROM gateway_identity_v1") {
@@ -932,6 +1003,11 @@ public final class GatewayDatabase {
             }
             if version >= 4 {
                 try statement("SELECT operation,kind,credential,payload,signature,revision FROM gateway_submission_controls_v4 LIMIT 0") {
+                    guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
+                }
+            }
+            if version == 5 {
+                try statement("SELECT operation,revision,payload,signature FROM gateway_control_tombstones_v5 LIMIT 0") {
                     guard sqlite3_step($0) == SQLITE_DONE else { throw GatewayDatabaseError.incompatibleStore }
                 }
             }

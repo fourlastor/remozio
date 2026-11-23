@@ -973,6 +973,77 @@ final class GatewayDeliveryCoordinatorTests: XCTestCase, @unchecked Sendable {
         try await coordinator.shutdown()
     }
 
+    func testRootChannelAbandonsOneGrantAndReturnsItsSignedHead() async throws {
+        let f = try Fixture(), clock = f.clock, gatewayKey = P256.Signing.PrivateKey()
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(Provider([]), wakePolicy: wakePolicy(), validateAuthority: { try lease.validate() })
+        let limits = try CBORLimits(maxBytes: 4096, maxDepth: 8, maxItems: 128)
+        let receipts = try GatewayReceiptSigner(bytes: DeterministicCBOR.encode(.map([0: .unsigned(1),
+            1: .text("remozio-gateway-receipt-key"), 2: .bytes(gatewayKey.x963Representation)]), limits: limits),
+            expectedPublicKey: gatewayKey.publicKey.x963Representation)
+        let dispatcher = GatewayRootDispatcher(coordinator: coordinator, lease: lease, receipts: receipts, retryInterval: 10)
+        let endpoint = try GatewayXPCEndpoint(verify: {}, budget: AuthorityXPCWorkBudget(), invalidate: { lease.retire() },
+            synchronize: { try await dispatcher.synchronize($0) }, execute: { try await dispatcher.execute($0) })
+        let channel = GatewayRootChannel(driver: RootEndpointDriver(endpoint))
+        let registration = try f.identity(), rootEpoch = UUID()
+        let tombstone = try GatewayControlTombstone(registration: registration, revision: 1, originalKind: .candidate,
+            operationID: id(1), originalDigest: id(7, 32))
+        let payload = try tombstone.encode()
+        let signature = try f.key.signature(for: GatewayControlTombstone.signingInput(payload)).rawRepresentation
+        try await channel.start()
+        do {
+            _ = try await coordinator.abandonGrant(canonicalPayload: payload, signature: signature, expectedHead: 0, lease: lease)
+            XCTFail("Accepted without synchronization")
+        } catch { XCTAssertEqual(error as? GatewayServiceError, .unavailable) }
+        try await channel.synchronize(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch, sequence: 1,
+            observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200, enrollments: [f.enrollment()], active: true, phoneRouting: true))
+        do {
+            _ = try await channel.abandonGrant(tombstone, signature: signature)
+            XCTFail("Accepted before capability negotiation")
+        } catch { XCTAssertEqual(error as? GatewayRootChannelError, .unsupportedVersion) }
+        let supported = try await channel.supportsGrantTombstones(registration: registration)
+        XCTAssertTrue(supported)
+        let application = try await channel.abandonGrant(tombstone, signature: signature)
+        XCTAssertTrue(application.inserted)
+        XCTAssertEqual(application.receipt.signature, signature)
+
+        clock.advance(100)
+        do {
+            _ = try await channel.abandonGrant(tombstone, signature: signature)
+            XCTFail("Accepted after lease expiry")
+        } catch { XCTAssertEqual(error as? GatewayRootChannelError, .rejected) }
+        let now = clock.sample().moment
+        let query = try GatewayHeadQueryOwner(registration: registration, gatewayPublicKey: gatewayKey.publicKey.x963Representation,
+            clockEpoch: clock.epoch)
+        let reply = try await channel.head(query: query.makeQuery(now: now))
+        let head = try query.accept(reply, now: now)
+        guard case .tombstone(let retained) = head.evidence.receipt else { return XCTFail("Missing verified tombstone") }
+        XCTAssertEqual(retained.tombstone, tombstone)
+        XCTAssertEqual(retained.signature, signature)
+        await channel.close()
+        try await coordinator.shutdown()
+    }
+
+    func testRecoveryCapabilityRequiresAnActiveHostEvenUnderAFreshLease() async throws {
+        let f = try Fixture(), clock = f.clock
+        let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })
+        let coordinator = try f.coordinator(Provider([]), validateAuthority: { try lease.validate() })
+        let registration = try f.identity(), rootEpoch = UUID()
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 1, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [], active: false, phoneRouting: false), lease: lease)
+        do {
+            _ = try await coordinator.phoneRevocationRecoveryRegistration(lease: lease)
+            XCTFail("Advertised recovery for an inactive registration")
+        } catch { XCTAssertEqual(error as? GatewayDatabaseError, .wrongScope) }
+        try await coordinator.synchronizeHost(GatewayHostSnapshot(registration: registration, rootEpoch: rootEpoch,
+            sequence: 2, observedAtMilliseconds: 100, leaseDeadlineMilliseconds: 200,
+            enrollments: [], active: true, phoneRouting: false), lease: lease)
+        let current = try await coordinator.phoneRevocationRecoveryRegistration(lease: lease)
+        XCTAssertEqual(current, registration)
+        try await coordinator.shutdown()
+    }
+
     func testRecoveryRejectsUnsynchronizedOrExpiredLeaseAndActiveSignedEpoch() async throws {
         let f = try Fixture(), provider = Provider([]), clock = f.clock
         let lease = try GatewayAuthorityLease(epoch: clock.epoch, maximumLifetime: 1000, sample: { clock.sample().moment })

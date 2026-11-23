@@ -217,6 +217,7 @@ public actor GatewayDeliveryCoordinator {
         try running()
         return try lease.withCurrentLease {
             _ = try current()
+            guard active else { throw GatewayDatabaseError.wrongScope }
             return identity
         }
     }
@@ -235,6 +236,17 @@ public actor GatewayDeliveryCoordinator {
         }
         finishRecipientApplication(result)
         return result
+    }
+
+    func abandonGrant(canonicalPayload: Data, signature: Data, expectedHead: UInt64,
+                      lease: GatewayAuthorityLease) throws -> GatewayControlTombstoneApplication {
+        try running()
+        return try lease.withCurrentLease {
+            let time = try current()
+            guard active else { throw GatewayDatabaseError.wrongScope }
+            return try database.abandonGrant(canonicalPayload: canonicalPayload, signature: signature,
+                expectedHead: expectedHead, now: time.moment)
+        }
     }
 
     private func finishRecipientApplication(_ result: GatewayRecipientApplication) {

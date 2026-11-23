@@ -360,6 +360,115 @@ final class GatewayDatabaseTests: XCTestCase {
             expectedHead: expectedHead ?? head, nowUnixMillis: wall, now: AuthorityMoment(epoch: epoch, milliseconds: 100))
     }
 
+    private func signedTombstone(_ kind: GatewayControlTombstone.GrantKind, revision: UInt64,
+                                 operation: UInt8, registration: GatewayRegistrationIdentity? = nil,
+                                 original: (Data, Data)? = nil) throws -> (Data, Data) {
+        let control = try GatewayControlTombstone(registration: registration ?? identity(), revision: revision,
+            originalKind: kind, operationID: id(operation),
+            originalDigest: original.map { GatewayControlTombstone.digest(payload: $0.0, signature: $0.1) } ?? id(25, 32))
+        let payload = try control.encode()
+        return (payload, try key.signature(for: GatewayControlTombstone.signingInput(payload)).rawRepresentation)
+    }
+
+    private func abandon(_ db: GatewayDatabase, _ control: (Data, Data), after head: UInt64,
+                         at milliseconds: UInt64 = 100) throws -> GatewayControlTombstoneApplication {
+        try db.abandonGrant(canonicalPayload: control.0, signature: control.1, expectedHead: head, now: headMoment(milliseconds))
+    }
+
+    func testTombstonesCompleteSignedHistoryAndNeverApplyTheAbandonedGrants() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+        let candidateRecord = try signedTombstone(.candidate, revision: 1, operation: 1)
+        let activationRecord = try signedTombstone(.activation, revision: 2, operation: 2)
+        XCTAssertTrue(try abandon(db, candidateRecord, after: 0).inserted)
+        XCTAssertTrue(try abandon(db, activationRecord, after: 1).inserted)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 5)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_candidates_v1"), 0)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_recipients_v2"), 0)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_mappings_v2"), 0)
+        let new = try candidate(3, revision: 3, phone: 8)
+        _ = try admit(db, new, head: 2)
+        _ = try activate(db, activation(new, revision: 4), head: 3)
+        XCTAssertNotNil(try db.activeMapping(trust: trust(head: 4, phone: 8)))
+        let retry = try abandon(db, activationRecord, after: 1)
+        XCTAssertFalse(retry.inserted)
+        XCTAssertEqual(retry.receipt.signature, activationRecord.1)
+
+        let gateway = P256.Signing.PrivateKey(), owner = try headOwner(gateway)
+        let collector = try GatewayHistoryCollector(head: collectedHead(db, owner: owner, key: gateway), afterRevision: 0)
+        let page = try owner.acceptHistory(historyReply(db, owner: owner, key: gateway, after: 0, through: 4), now: headMoment(1))
+        let records = try XCTUnwrap(collector.accept(page)).records
+        XCTAssertEqual(records.map(\.revision), [1, 2, 3, 4])
+        XCTAssertEqual(records.map(\.kind), [GatewayControlTombstone.receiptKind, GatewayControlTombstone.receiptKind, 1, 2])
+        XCTAssertEqual(records.first?.canonicalPayload, candidateRecord.0)
+        XCTAssertEqual(records.first?.signature, candidateRecord.1)
+        try db.close()
+        let reopened = try open(f)
+        XCTAssertEqual(try reopened.controlHistory(afterRevision: 0, throughRevision: 2, maximumRecords: 2).records.last?.signature, activationRecord.1)
+        XCTAssertFalse(try abandon(reopened, activationRecord, after: 1).inserted)
+        try reopened.close()
+        let health = try open(f, health: true)
+        XCTAssertEqual(try health.updateHealthEvidence().revision, 4)
+        XCTAssertEqual(try health.controlHistory(afterRevision: 0, throughRevision: 1, maximumRecords: 1).records.first?.signature, candidateRecord.1)
+        fails(.readOnly) { try abandon(health, activationRecord, after: 1) }
+    }
+
+    func testTombstoneRequiresExactPredecessorAndCannotReplaceAnAppliedGrant() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        let ahead = try signedTombstone(.activation, revision: 2, operation: 2)
+        fails(.headMismatch) { try abandon(db, ahead, after: 1) }
+        fails(.headMismatch) { try abandon(db, ahead, after: 0) }
+        XCTAssertEqual(try db.head(), 0)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+        let original = try admit(db)
+        let applied = try signedTombstone(.candidate, revision: 1, operation: 1,
+            original: (original.receipt.canonicalPayload, original.receipt.signature))
+        fails(.operationConflict) { try abandon(db, applied, after: 0) }
+        let alias = try signedTombstone(.candidate, revision: 1, operation: 30)
+        fails(.headMismatch) { try abandon(db, alias, after: 0) }
+        XCTAssertTrue(try abandon(db, ahead, after: 1).inserted)
+        let sameOperationDifferentType = try signedTombstone(.candidate, revision: 2, operation: 2)
+        fails(.operationConflict) { try abandon(db, sameOperationDifferentType, after: 1) }
+        XCTAssertThrowsError(try admit(db, candidate(3, revision: 3, operation: 2), head: 2)) {
+            XCTAssertEqual($0 as? GatewayDatabaseError, .operationConflict)
+        }
+        XCTAssertEqual(try db.head(), 2)
+    }
+
+    func testTombstoneRejectsRevocationSubmissionWrongScopeAndInvalidSignature() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        let candidateRecord = try signedTombstone(.candidate, revision: 1, operation: 1)
+        let foreign = try signedTombstone(.candidate, revision: 1, operation: 1, registration: identity(owner: 9))
+        XCTAssertThrowsError(try abandon(db, foreign, after: 0))
+        XCTAssertThrowsError(try abandon(db, (candidateRecord.0, Data(repeating: 0, count: 64)), after: 0))
+        let wireLimits = try CBORLimits(maxBytes: 1024, maxDepth: 1, maxItems: 8)
+        guard case var .array(fields) = try DeterministicCBOR.decode(candidateRecord.0, limits: wireLimits) else { return XCTFail() }
+        for forbidden: UInt64 in [3, 4, 5, 6] {
+            fields[3] = .unsigned(forbidden)
+            let payload = try DeterministicCBOR.encode(.array(fields), limits: wireLimits)
+            let signature = try key.signature(for: GatewayControlTombstone.signingInput(payload)).rawRepresentation
+            XCTAssertThrowsError(try abandon(db, (payload, signature), after: 0))
+        }
+        XCTAssertEqual(try db.head(), 0)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+    }
+
+    func testTombstoneRollbackLeavesV4ReadableAndPreservesCapacityLimit() throws {
+        let f = try Fixture(), db = try open(f, initialize: true, maximum: 1, pending: 1)
+        let first = try signedTombstone(.candidate, revision: 1, operation: 1)
+        try f.sql("CREATE TRIGGER reject_head BEFORE UPDATE OF head ON gateway_identity_v1 BEGIN SELECT RAISE(ABORT, 'reject'); END")
+        XCTAssertThrowsError(try abandon(db, first, after: 0))
+        XCTAssertEqual(try db.head(), 0)
+        XCTAssertEqual(try f.scalar("PRAGMA user_version"), 4)
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM sqlite_schema WHERE name='gateway_control_tombstones_v5'"), 0)
+        try f.sql("DROP TRIGGER reject_head")
+        XCTAssertTrue(try abandon(db, first, after: 0).inserted)
+        let second = try signedTombstone(.activation, revision: 2, operation: 2)
+        fails(.capacityExceeded) { try abandon(db, second, after: 1) }
+        XCTAssertFalse(try abandon(db, first, after: 0).inserted)
+        XCTAssertEqual(try db.headEvidence().receipt?.signature, first.1)
+    }
+
     func testDelayedRecoveryKeepsOriginalReceiptAfterAnotherPhoneAdvancesHead() throws {
         let fixture = try Fixture(), db = try open(fixture, initialize: true), first = try candidate()
         _ = try admit(db, first)
@@ -384,6 +493,19 @@ final class GatewayDatabaseTests: XCTestCase {
         XCTAssertNotNil(try db.activeMapping(trust: trust(head: 5, phone: 8)))
         XCTAssertEqual(try db.controlHistory(afterRevision: 0, throughRevision: 5, maximumRecords: 5).records.map(\.revision),
             [1, 2, 3, 4, 5])
+    }
+
+    func testDelayedRecoveryRejectsChangedPayloadForAnAcceptedOperation() throws {
+        let f = try Fixture(), db = try open(f, initialize: true)
+        let original = try delayedRevocation(revision: 1)
+        let first = try recover(db, original, head: 0)
+        XCTAssertTrue(first.inserted)
+        let conflicting = try delayedRevocation(revision: 1, expires: 1999)
+        fails(.operationConflict) { try recover(db, conflicting, head: 0) }
+        XCTAssertEqual(try db.head(), 1)
+        XCTAssertFalse(try recover(db, original, head: 0).inserted)
+        XCTAssertEqual(try db.headEvidence().receipt?.canonicalPayload, original.0)
+        XCTAssertEqual(try db.headEvidence().receipt?.signature, original.1)
     }
 
     func testDelayedRecoveryRejectsChangedHeadAndUnresolvedPredecessor() throws {
@@ -910,6 +1032,7 @@ final class GatewayDatabaseTests: XCTestCase {
             case .candidate: XCTAssertEqual(kind, 1)
             case .recipient(let receipt): XCTAssertEqual(receipt.kind.rawValue, kind)
             case .submission(let receipt): XCTAssertEqual(receipt.control.kind.rawValue, kind)
+            case .tombstone: XCTAssertEqual(kind, GatewayControlTombstone.receiptKind)
             case nil: XCTAssertEqual(kind, 0)
             }
             XCTAssertNil(reply.canonicalPayload.range(of: Data(token.utf8)))

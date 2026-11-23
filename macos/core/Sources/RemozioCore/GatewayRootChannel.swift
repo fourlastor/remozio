@@ -60,6 +60,7 @@ public actor GatewayRootChannel {
     private var peerVersion: UInt64?
     private var synchronizedRegistration: GatewayRegistrationIdentity?
     private var revocationRecoveryRegistration: GatewayRegistrationIdentity?
+    private var tombstoneRegistration: GatewayRegistrationIdentity?
     private var pending: (id: UUID, continuation: CheckedContinuation<GatewayRootResponse, any Error>)?
     private var timer: Task<Void, Never>?
     public init(serviceName: String, gatewayPolicy: XPCPeerPolicy, timeoutMilliseconds: UInt64 = 5000) throws {
@@ -100,31 +101,58 @@ public actor GatewayRootChannel {
         guard accepted else {
             synchronizedRegistration = nil
             revocationRecoveryRegistration = nil
+            tombstoneRegistration = nil
             throw GatewayRootChannelError.rejected
         }
         synchronizedRegistration = snapshot.registration
         if revocationRecoveryRegistration != snapshot.registration { revocationRecoveryRegistration = nil }
+        if tombstoneRegistration != snapshot.registration { tombstoneRegistration = nil }
     }
 
     /// The authenticated peer proves the capability for its currently synchronized registration.
     func supportsPhoneRevocationRecovery(registration: GatewayRegistrationIdentity) async throws -> Bool {
-        guard synchronizedRegistration == registration else { throw GatewayRootChannelError.invalidMessage }
         revocationRecoveryRegistration = nil
+        let supported = try await supportsGrantControl(GatewayRootCommand.phoneRevocationRecoveryProbe, registration: registration)
+        if supported { revocationRecoveryRegistration = registration }
+        return supported
+    }
+
+    func supportsGrantTombstones(registration: GatewayRegistrationIdentity) async throws -> Bool {
+        tombstoneRegistration = nil
+        let supported = try await supportsGrantControl(GatewayRootCommand.abandonGrantProbe, registration: registration)
+        if supported { tombstoneRegistration = registration }
+        return supported
+    }
+
+    private func supportsGrantControl(_ probe: Data, registration: GatewayRegistrationIdentity) async throws -> Bool {
+        guard synchronizedRegistration == registration else { throw GatewayRootChannelError.invalidMessage }
         let fields: [CBORValue]
-        do { fields = try await command(.head(GatewayRootCommand.phoneRevocationRecoveryProbe)) }
+        do { fields = try await command(.head(probe)) }
         catch GatewayRootChannelError.rejected { return false }
         guard state == .open, synchronizedRegistration == registration, fields.count == 3,
               fields[1] == .unsigned(1), case .bytes(let encoded) = fields[2],
               (try? GatewayRegistrationIdentity.decode(encoded)) == registration else {
             close(); throw GatewayRootChannelError.invalidMessage
         }
-        revocationRecoveryRegistration = registration
         return true
     }
 
     func requirePhoneRevocationRecovery(registration: GatewayRegistrationIdentity) throws {
         guard state == .open, revocationRecoveryRegistration == registration,
               synchronizedRegistration == registration else { throw GatewayRootChannelError.unsupportedVersion }
+    }
+
+    func abandonGrant(_ control: GatewayControlTombstone, signature: Data) async throws -> GatewayControlTombstoneApplication {
+        guard state == .open, tombstoneRegistration == control.registration,
+              synchronizedRegistration == control.registration else { throw GatewayRootChannelError.unsupportedVersion }
+        let payload = try control.encode()
+        _ = try GatewayControlTombstone.authenticate(payload, signature: signature, registration: control.registration)
+        let fields = try await command(.abandonGrant(payload: payload, signature: signature, expectedHead: control.revision - 1))
+        guard fields.count == 4, fields[1] == .bytes(payload), fields[2] == .bytes(signature), case .boolean(let inserted) = fields[3] else {
+            close(); throw GatewayRootChannelError.invalidMessage
+        }
+        return GatewayControlTombstoneApplication(
+            receipt: GatewayControlTombstoneReceipt(tombstone: control, canonicalPayload: payload, signature: signature), inserted: inserted)
     }
 
     /// Registration creates no provider work. Only a separately authenticated transport wake can start it.

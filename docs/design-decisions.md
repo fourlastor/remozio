@@ -22,9 +22,19 @@ The following protections remain required:
 
 The [journal experiment](experiments/macos-authority-journal.md) still demonstrates a real limitation: a matching old database and checkpoint are indistinguishable locally. The accepted boundary does not turn that observation into successful rollback detection. It also does not authorize an unprivileged caller to restore arbitrary files.
 
+## Abandoned gateway grants
+
+A stale candidate or activation can leave an unrecorded revision. A later grant can advance the gateway beyond that revision. Recovery requires complete signed history, so the missing record prevents reconciliation.
+
+The Root records that a candidate or activation is no longer deliverable before signing a tombstone. This applies to a revoked or replaced enrollment epoch or an expired grant. The Root delivers an earlier revocation first. Submission controls and missing or ambiguous records cannot be abandoned.
+
+A tombstone binds the registration, original revision, kind, operation ID and digest of the original payload and signature. The gateway requires a fresh authenticated Root lease and checks that the stored head is exactly one revision earlier. It records the tombstone and advances the head in one transaction. An identical retry returns the original receipt. No mapping, token, enrollment or delivery changes. Signed recovery history contains the tombstone at the exact revision, so the collector still requires contiguous records. The Root can compare this evidence with its retained grant. A tombstone by itself cannot reconstruct a lost grant.
+
+Local phone revocation takes effect independently of gateway delivery. Root retains the delivery intent and reports its status separately. The Mac publisher uses tombstones to close abandoned grant revisions before delivering a later revocation or grant.
+
 ## Delayed gateway phone revocation
 
-A signed phone revocation can only remove privileges for the enrollment epoch in the control. The gateway can recover that original control after its delivery deadline. It checks the same registration, the unchanged Root signature and a fresh lease on the authenticated Root connection. The authenticated Root connection supplies a complete snapshot for the current lease. Recovery refuses an epoch that the snapshot lists as active. The snapshot can omit a revoked phone or list a replacement epoch. Recovery requires a current snapshot in both cases.
+A signed phone revocation can only remove privileges for the enrollment epoch in the control. The gateway can recover that original control after its delivery deadline. It checks the same registration, the unchanged Root signature and a fresh lease on the authenticated Root connection. The gateway uses the latest complete snapshot accepted from any authenticated Root connection. The requesting connection must still hold a fresh lease. Recovery refuses an epoch that the snapshot lists as active. The snapshot can omit a revoked phone or list a replacement epoch. Recovery requires a current snapshot in both cases. A gateway with an inactive registration also rejects the capability query.
 
 The receiver applies the next revision in one transaction. An exact retry returns its retained receipt. Candidate, activation and submission controls keep their existing expiry rules. Recovering a revocation does not renew a token or affect a replacement enrollment.
 

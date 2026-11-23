@@ -197,8 +197,7 @@ final class GatewayAuthorityJournal {
         if local > 0 {
             guard let boundary = missing.first, boundary.revision == local,
                   let retained = try envelope(boundary.operationID, identity: identity) else { return result(.conflictingLocalHistory) }
-            let kind = boundary.kind
-            guard retained.revision == local, retained.kind == kind, retained.canonicalPayload == boundary.canonicalPayload else {
+            guard retained.revision == local, Self.matchesRetainedControl(boundary, retained: retained) else {
                 return result(.conflictingLocalHistory)
             }
             missing = missing.dropFirst()
@@ -218,6 +217,9 @@ final class GatewayAuthorityJournal {
             }
             let binding: GatewayTokenBinding
             switch record {
+            case .tombstone:
+                // An unknown tombstone never reconstructs a missing grant or grants local authority.
+                return result(.requiresTrustRecovery)
             case .submission(let receipt):
                 guard try envelope(record.operationID, identity: identity) == nil else { return result(.conflictingLocalHistory) }
                 let value = receipt.control
@@ -265,7 +267,7 @@ final class GatewayAuthorityJournal {
         for (record, candidate) in zip(missing, candidates) {
             if let candidate {
                 let kind: UInt64
-                switch record { case .candidate: kind = 1; case .recipient: kind = 2; case .submission: throw GatewayAuthorityError.corruptData }
+                switch record { case .candidate: kind = 1; case .recipient: kind = 2; case .submission, .tombstone: throw GatewayAuthorityError.corruptData }
                 try statement("INSERT INTO main.gateway_reconciled_controls_v1 VALUES(?,?,\(kind),?,?,?)",
                     [record.operationID, uint(record.revision), candidate, record.canonicalPayload, record.signature]) { try done($0) }
             } else {
@@ -282,7 +284,7 @@ final class GatewayAuthorityJournal {
                         [record.operationID, uint(record.revision), value.binding.phoneID, value.binding.enrollmentEpoch,
                          record.canonicalPayload, record.signature, Data(repeating: 0, count: 16), uint(0),
                          uint(value.expiresAtUnixMillis - value.issuedAtUnixMillis)]) { try done($0) }
-                case .candidate: throw GatewayAuthorityError.corruptData
+                case .candidate, .tombstone: throw GatewayAuthorityError.corruptData
                 }
             }
         }
@@ -452,9 +454,7 @@ final class GatewayAuthorityJournal {
             guard let retained = try envelope(receipt.operationID, identity: identity) else {
                 return result(.missingLocalHistory, previous)
             }
-            let kind = receipt.kind
-            guard retained.revision == evidence.revision, retained.kind == kind,
-                  retained.canonicalPayload == receipt.canonicalPayload else {
+            guard retained.revision == evidence.revision, Self.matchesRetainedControl(receipt, retained: retained) else {
                 return result(.conflictingLocalHistory, previous)
             }
         } else if evidence.revision != 0 { throw GatewayAuthorityError.corruptData }
@@ -471,6 +471,16 @@ final class GatewayAuthorityJournal {
             ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,operation=excluded.operation
             """, [uint(value.revision), value.operationID]) { try done($0) }
         return result(.recorded, value)
+    }
+
+    private static func matchesRetainedControl(_ receipt: GatewayControlReceipt, retained: GatewayAuthorityEnvelope) -> Bool {
+        guard receipt.operationID == retained.operationID, receipt.revision == retained.revision else { return false }
+        if case .tombstone(let evidence) = receipt {
+            return evidence.tombstone.originalKind.rawValue == retained.kind
+                && evidence.tombstone.originalDigest == GatewayControlTombstone.digest(
+                    payload: retained.canonicalPayload, signature: retained.signature)
+        }
+        return receipt.kind == retained.kind && receipt.canonicalPayload == retained.canonicalPayload
     }
 
     func configure(_ identity: GatewayRegistrationIdentity) throws {

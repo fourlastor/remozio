@@ -159,6 +159,24 @@ final class GatewayRootIPCTests: XCTestCase, @unchecked Sendable {
             signature: signature, phoneID: Data(count: 15), expectedHead: 8).encode())
     }
 
+    func testAbandonedGrantCommandIsOptionalAndPreservesExactFields() throws {
+        let payload = Data([1, 6]), signature = Data(repeating: 4, count: 64)
+        let command = GatewayRootCommand.abandonGrant(payload: payload, signature: signature, expectedHead: 8)
+        guard case .abandonGrant(let original, let proof, let head) = try GatewayRootCommand.decode(command.encode()) else {
+            return XCTFail("Wrong command")
+        }
+        XCTAssertEqual(command.protocolVersion, 1)
+        XCTAssertEqual(original, payload)
+        XCTAssertEqual(proof, signature)
+        XCTAssertEqual(head, 8)
+        XCTAssertThrowsError(try GatewayRootCommand.abandonGrant(payload: Data(count: 1025),
+            signature: signature, expectedHead: 8).encode())
+        XCTAssertThrowsError(try GatewayRootCommand.abandonGrant(payload: payload,
+            signature: Data(count: 63), expectedHead: 8).encode())
+        let wrongVersion: [CBORValue] = [.unsigned(2), .unsigned(10), .bytes(payload), .bytes(signature), .unsigned(8)]
+        XCTAssertThrowsError(try GatewayRootCommand.decode(DeterministicCBOR.encode(.array(wrongVersion), limits: GatewayRootCommand.limits)))
+    }
+
     func testRootDeliveryRegistrationRequiresVersionThree() throws {
         let delivery = PhoneRequestDelivery(id: UUID(), recipient: DeliveryRecipient(phoneID: Data(repeating: 1, count: 16),
             enrollmentEpoch: Data(repeating: 2, count: 16)), requestID: Data(repeating: 3, count: 16),

@@ -28,7 +28,7 @@ actor GatewayRootDispatcher {
         try Task.checkCancellation(); try verifyRuntime()
         switch command {
         case .head(let query):
-            if query == GatewayRootCommand.phoneRevocationRecoveryProbe {
+            if query == GatewayRootCommand.phoneRevocationRecoveryProbe || query == GatewayRootCommand.abandonGrantProbe {
                 let registration = try await coordinator.phoneRevocationRecoveryRegistration(lease: lease)
                 return try GatewayRootCommand.reply([.unsigned(1), .bytes(registration.encode())])
             }
@@ -52,6 +52,10 @@ actor GatewayRootDispatcher {
         case .recoverPhoneRevocation(let payload, let signature, let phone, let expectedHead):
             let result = try await coordinator.recoverPhoneRevocation(canonicalPayload: payload, signature: signature,
                 phoneID: phone, expectedHead: expectedHead, lease: lease)
+            return try GatewayRootCommand.reply([.bytes(result.receipt.canonicalPayload), .bytes(result.receipt.signature), .boolean(result.inserted)])
+        case .abandonGrant(let payload, let signature, let expectedHead):
+            let result = try await coordinator.abandonGrant(canonicalPayload: payload, signature: signature,
+                expectedHead: expectedHead, lease: lease)
             return try GatewayRootCommand.reply([.bytes(result.receipt.canonicalPayload), .bytes(result.receipt.signature), .boolean(result.inserted)])
         case .submission(let payload, let signature, let version):
             let result = try await coordinator.applySubmission(canonicalPayload: payload, signature: signature, wireVersion: version)

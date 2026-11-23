@@ -870,6 +870,9 @@ public final class JournalTransaction {
                 let eventID = withUnsafeBytes(of: &eventUUID) { Data($0) }
                 let next: UUID, phone: Data
                 switch record {
+                case .tombstone:
+                    // Restrictive history only. A tombstone never changes enrollment or reconstructs a grant.
+                    continue
                 case .submission:
                     guard try withGateway(write: false, { try $0.submissionHistoryInstalled() }) else {
                         throw GatewayAuthorityError.unsupportedSubmissionControl

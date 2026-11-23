@@ -1314,6 +1314,9 @@ final class GatewayAuthorityJournalTests: XCTestCase {
                 _ = try gateway.admitCandidate(canonicalPayload: control.canonicalPayload, signature: control.signature,
                     wireVersion: 1, registrationToken: XCTUnwrap(control.registrationToken), trust: snapshot,
                     nowUnixMillis: 1010, now: moment(110))
+            } else if control.kind == GatewayControlTombstone.receiptKind {
+                _ = try gateway.abandonGrant(canonicalPayload: control.canonicalPayload, signature: control.signature,
+                    expectedHead: control.revision - 1, now: moment(110))
             } else if GatewaySubmissionKind(rawValue: control.kind) != nil {
                 _ = try gateway.applySubmission(canonicalPayload: control.canonicalPayload, signature: control.signature,
                     wireVersion: 1, trust: GatewaySubmissionTrust(registration: r, active: true, revision: UUID(), appliedControlRevision: gateway.head()),
@@ -1967,6 +1970,29 @@ final class GatewayAuthorityJournalTests: XCTestCase {
         }
         XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(trust().registration) }, 1)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_revocations_v1"), "0")
+        XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
+    }
+
+    func testTombstoneHeadMustMatchTheExactRetainedGrant() throws {
+        let f = try Fixture(), db = try setup(f), retained = try prepare(db)
+        let registration = try trust().registration
+        let digest = GatewayControlTombstone.digest(payload: retained.canonicalPayload, signature: retained.signature)
+        func evidence(_ digest: Data) throws -> VerifiedGatewayHead {
+            let record = try GatewayControlTombstone(registration: registration, revision: retained.revision,
+                originalKind: .candidate, operationID: retained.operationID, originalDigest: digest)
+            let payload = try record.encode()
+            let signature = try key.signature(for: GatewayControlTombstone.signingInput(payload)).rawRepresentation
+            let envelope = GatewayAuthorityEnvelope(kind: GatewayControlTombstone.receiptKind, operationID: retained.operationID,
+                revision: retained.revision, canonicalPayload: payload, signature: signature, registrationToken: nil)
+            return try verifiedHead([envelope])
+        }
+        let mismatched = try db.write { try $0.acknowledgeGatewayHead(evidence(id(40, count: 32))) }
+        XCTAssertEqual(mismatched.disposition, .conflictingLocalHistory)
+        XCTAssertNil(try db.read { try $0.gatewayAcknowledgment(registration) })
+        let matched = try db.write { try $0.acknowledgeGatewayHead(evidence(digest)) }
+        XCTAssertEqual(matched.disposition, .recorded)
+        XCTAssertEqual(matched.acknowledged?.operationID, retained.operationID)
+        XCTAssertEqual(try db.read { try $0.gatewayAuthorityHead(registration) }, retained.revision)
         XCTAssertEqual(try f.scalar("SELECT count(*) FROM gateway_outbox_v1"), "1")
     }
 
